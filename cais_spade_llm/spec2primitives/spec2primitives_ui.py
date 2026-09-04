@@ -342,29 +342,22 @@ def _live_pa_response_event(
             "Clarification requested",
             str(payload["clarification_question"]),
         )
-    if isinstance(payload.get("insufficient_evidence"), str):
-        return _timeline_event(
-            "waiting",
-            "Grounding incomplete",
-            str(payload["insufficient_evidence"]),
-        )
     if isinstance(payload.get("target_feature"), Mapping):
         return _timeline_event(
             "running",
             "Target feature returned",
             "The evidence-backed target feature is being validated.",
         )
-    if payload.get("verdict") in {"complete", "incomplete"}:
-        return _timeline_event(
-            "running" if payload.get("verdict") == "complete" else "waiting",
-            "Target feature reviewed",
-            (
-                "The target feature passed semantic review."
-                if payload.get("verdict") == "complete"
-                else str(payload.get("gap") or "The target feature needs revision.")
-            ),
-        )
     return None
+
+
+def _grounding_incomplete_detail(output: Mapping[str, object]) -> str:
+    """Render only controller-coded grounding diagnostics."""
+    code = output.get("grounding_validation_code")
+    message = output.get("insufficient_evidence")
+    if isinstance(code, str) and code and isinstance(message, str) and message:
+        return f"{message} Validation code: {code}."
+    return "Grounding is incomplete; this legacy record has no controller validation code."
 
 
 def _interaction_ref_path(interaction_root: Path, ref: object) -> Path:
@@ -1054,10 +1047,15 @@ def _final_grounding_result(
         interaction_root,
         "products/grounding/product_context/view_*.json",
     )
-    contract = _read_json_object(
-        _interaction_ref_path(
-            interaction_root,
-            completion.get("typed_grounding_contract_ref"),
+    completion_schema = completion.get("schema_version")
+    contract = (
+        {}
+        if completion_schema == 7
+        else _read_json_object(
+            _interaction_ref_path(
+                interaction_root,
+                completion.get("typed_grounding_contract_ref"),
+            )
         )
     )
     selection = _read_json_object(
@@ -1084,15 +1082,16 @@ def _final_grounding_result(
         and isinstance(binding.get("record_ref"), str)
         and isinstance(binding.get("record_sha256"), str)
     }
-    completion_schema = completion.get("schema_version")
     grounding_record_type = (
-        "RobotFrameLocationRecord" if completion_schema in {3, 4, 5, 6} else "RobotFramePoseRecord"
+        "RobotFrameLocationRecord"
+        if completion_schema in {3, 4, 5, 6, 7}
+        else "RobotFramePoseRecord"
     )
     reachability: Mapping[str, object] | None = None
     validation: Mapping[str, object] | None = None
     current_state_evidence: Mapping[str, object] | None = None
     desired_state_evidence: Mapping[str, object] | None = None
-    if completion_schema in {5, 6}:
+    if completion_schema in {5, 6, 7}:
         reachability = _read_json_object(
             _interaction_ref_path(
                 interaction_root,
@@ -1105,8 +1104,31 @@ def _final_grounding_result(
                 completion.get("robot_agent_validation_ref"),
             )
         )
-        current_reach = reachability.get("current_state")
-        desired_reach = reachability.get("desired_state")
+        if completion_schema == 7:
+            state_locations = reachability.get("state_locations")
+            current_locations = (
+                state_locations.get("current_state")
+                if isinstance(state_locations, Mapping)
+                else None
+            )
+            desired_locations = (
+                state_locations.get("desired_state")
+                if isinstance(state_locations, Mapping)
+                else None
+            )
+            current_reach = (
+                current_locations[0]
+                if isinstance(current_locations, list) and current_locations
+                else None
+            )
+            desired_reach = (
+                desired_locations[0]
+                if isinstance(desired_locations, list) and desired_locations
+                else None
+            )
+        else:
+            current_reach = reachability.get("current_state")
+            desired_reach = reachability.get("desired_state")
         if (
             reachability.get("record_type") != "ReachabilityCheckRecord"
             or validation.get("record_type") != "PlanOnlyFeasibilityValidationRecord"
@@ -1142,7 +1164,7 @@ def _final_grounding_result(
 
     target_feature: Mapping[str, object] | None = None
     context_summary = contract.get("context_summary")
-    if completion_schema in {4, 5, 6}:
+    if completion_schema in {4, 5, 6, 7}:
         proposal = _read_json_object(
             _interaction_ref_path(
                 interaction_root,
@@ -1152,7 +1174,7 @@ def _final_grounding_result(
         output = proposal.get("output")
         candidate = output.get("target_feature") if isinstance(output, Mapping) else None
         if (
-            proposal.get("schema_version") not in {6, 7, 8}
+            proposal.get("schema_version") not in {6, 7, 8, 9}
             or proposal.get("status") != "accepted"
             or not isinstance(candidate, Mapping)
         ):
@@ -1171,11 +1193,21 @@ def _final_grounding_result(
                 completion.get("grounding_session_ref"),
             )
         )
-    if completion_schema in {5, 6}:
+    if completion_schema in {5, 6, 7}:
         assert isinstance(target_feature, Mapping)
         assert isinstance(reachability, Mapping)
-        current_reach = reachability["current_state"]
-        desired_reach = reachability["desired_state"]
+        if completion_schema == 7:
+            reach_groups = reachability["state_locations"]
+            assert isinstance(reach_groups, Mapping)
+            current_locations = reach_groups["current_state"]
+            desired_locations = reach_groups["desired_state"]
+            assert isinstance(current_locations, list) and current_locations
+            assert isinstance(desired_locations, list) and desired_locations
+            current_reach = current_locations[0]
+            desired_reach = desired_locations[0]
+        else:
+            current_reach = reachability["current_state"]
+            desired_reach = reachability["desired_state"]
         assert isinstance(current_reach, Mapping)
         assert isinstance(desired_reach, Mapping)
         current_state_evidence = _state_result_evidence(
@@ -1224,6 +1256,7 @@ def _final_grounding_result(
         "selected_resource_jid": selection.get("selected_resource_jid"),
         "execution_mode": selection.get("selected_execution_mode"),
         "allocation_label": completion.get("allocation_label"),
+        "validation_scope": completion.get("validation_scope"),
         "motion_executed": completion.get("motion_executed"),
         "target_context_ref": (
             cad_identity.get("context_ref")
@@ -1251,6 +1284,7 @@ def _final_grounding_result(
                 "process_symbol": reachability.get("process_symbol"),
                 "process_iri": reachability.get("process_iri"),
                 "target_frame": reachability.get("target_frame"),
+                "state_locations": reachability.get("state_locations"),
             }
             if isinstance(reachability, Mapping)
             else None
@@ -1275,6 +1309,7 @@ def _final_grounding_result(
                 "motion_executed": validation.get("motion_executed"),
                 "current_state": validation.get("current_state"),
                 "desired_state": validation.get("desired_state"),
+                "state_locations": validation.get("state_locations"),
                 "live_start_pose": validation.get("live_start_pose"),
                 "ee_to_tcp_transform": validation.get("ee_to_tcp_transform"),
                 "waypoints": validation.get("waypoints"),
@@ -1341,13 +1376,20 @@ def _persisted_pa_timeline(
         resource = final_result.get("selected_resource")
         mode = final_result.get("execution_mode")
         cartesian = final_result.get("validation_scope") == "cartesian_pick_place"
+        state_location = (
+            final_result.get("validation_scope") == "state_location_reachability"
+        )
         events.append(
             _timeline_event(
                 "accepted",
                 (
                     "Cartesian pick-place allocation validated"
                     if cartesian
-                    else "Endpoint-motion allocation validated"
+                    else (
+                        "State-location allocation validated"
+                        if state_location
+                        else "Endpoint-motion allocation validated"
+                    )
                 ),
                 " · ".join(
                     [
@@ -1362,9 +1404,9 @@ def _persisted_pa_timeline(
                 "accepted",
                 "Grounding complete",
                 (
-                    "The validated context and Cartesian resource assignment are available."
+                    "The validated context and historical Cartesian resource assignment are available."
                     if cartesian
-                    else "The validated context and endpoint-motion resource assignment are available."
+                    else "The validated context and state-location resource assignment are available."
                 ),
             )
         )
@@ -1385,10 +1427,22 @@ def _persisted_pa_timeline(
                 _failure_message(terminal_failure),
             )
         )
-    elif isinstance(latest_output, Mapping) and latest_output.get("grounding_status") != "complete":
-        message = latest_output.get("insufficient_evidence") or latest_output.get(
-            "clarification_question"
+    elif isinstance(latest_output, Mapping) and latest_output.get("grounding_status") == "complete":
+        resource_status = latest_output.get("resource_assignment_status")
+        events.append(
+            _timeline_event(
+                "accepted",
+                "Product-state grounding complete",
+                (
+                    "The current and desired states are validated; resource assignment "
+                    f"is {resource_status}."
+                    if resource_status in {"deferred", "incomplete"}
+                    else "The current and desired states and resource assignment are validated."
+                ),
+            )
         )
+    elif isinstance(latest_output, Mapping) and latest_output.get("grounding_status") != "complete":
+        message = latest_output.get("clarification_question")
         title = (
             "Clarification requested"
             if latest_output.get("grounding_status") == "clarification_required"
@@ -1398,7 +1452,11 @@ def _persisted_pa_timeline(
             _timeline_event(
                 "waiting",
                 title,
-                str(message or "More context is required."),
+                (
+                    str(message or "More context is required.")
+                    if latest_output.get("grounding_status") == "clarification_required"
+                    else _grounding_incomplete_detail(latest_output)
+                ),
             )
         )
     return events
@@ -1528,16 +1586,25 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         activity_message = (
             "The validated context and coarse resource assignment are available below."
         )
-    elif grounding_status in {"incomplete", "ontology_gap"}:
-        activity_state, activity_color = "grounding incomplete", "amber"
-        reason = (
-            latest_output.get("insufficient_evidence")
+    elif grounding_status == "complete":
+        resource_status = (
+            latest_output.get("resource_assignment_status")
             if isinstance(latest_output, Mapping)
             else None
         )
+        activity_state, activity_color = "product state grounded", "green"
         activity_message = (
-            f"PA grounding stopped as {grounding_status}. "
-            f"Reason: {reason or 'No safe grounding action remained.'}"
+            "The current and desired states are validated; resource assignment "
+            f"is {resource_status}."
+            if resource_status in {"deferred", "incomplete"}
+            else "The current and desired states are validated."
+        )
+    elif grounding_status in {"incomplete", "ontology_gap"}:
+        activity_state, activity_color = "grounding incomplete", "amber"
+        activity_message = (
+            _grounding_incomplete_detail(latest_output)
+            if isinstance(latest_output, Mapping)
+            else "Grounding is incomplete."
         )
     elif grounding_status in {"waiting_for_evidence", "waiting_for_user"}:
         activity_state, activity_color = "grounding waiting", "amber"

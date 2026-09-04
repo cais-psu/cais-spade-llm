@@ -1,4 +1,4 @@
-"""Associate segmented RGB-D candidates with one approved CAD size."""
+"""Measure segmented RGB-D candidates against one approved CAD size."""
 
 from __future__ import annotations
 
@@ -121,6 +121,15 @@ class CADSizeAssociationResult:
 
 
 @dataclass(frozen=True)
+class CADSizeMeasurementResult:
+    """Return one persisted candidate-size measurement result."""
+
+    record_path: Path
+    measurement: str
+    record: Mapping[str, object]
+
+
+@dataclass(frozen=True)
 class _CADInput:
     record_path: Path
     context_ref: str
@@ -129,6 +138,100 @@ class _CADInput:
     mesh_ref: str
     mesh_sha256: str
     triangles_m: np.ndarray
+
+
+def measure_segmented_candidates_against_cad(
+    *,
+    interaction_root: Path,
+    segmentation_record_path: Path,
+    cad_record_path: Path,
+    correspondence_number: int = 1,
+) -> CADSizeMeasurementResult:
+    """Measure every segmented candidate against one approved CAD size.
+
+    Candidate order is inherited from the observation record. The operation
+    computes no ranking, correspondence decision, or selected candidate.
+    """
+    _validate_positive_integer(correspondence_number, "correspondence_number")
+    root = Path(interaction_root).resolve()
+    cad_input = _load_cad_input(root, cad_record_path)
+    segmentation_path, segmentation_record, candidate_inputs = _load_candidates(
+        root,
+        segmentation_record_path,
+    )
+    destination = root / _GROUNDING_ROOT / f"correspondence_{correspondence_number:04d}"
+    if destination.exists():
+        raise CADSizeAssociationError(
+            f"CAD size correspondence {correspondence_number:04d} already exists."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temporary_root = Path(tempfile.mkdtemp(prefix=".correspondence-", dir=destination.parent))
+    except OSError as exc:
+        raise CADSizeAssociationError(
+            "CAD size correspondence temporary directory could not be created."
+        ) from exc
+
+    try:
+        measurements = _measure_candidates(candidate_inputs, cad_input.dimensions_m)
+        record = {
+            "schema_version": 3,
+            "record_type": "CADSizeCorrespondenceRecord",
+            "producer": _PRODUCER,
+            "correspondence_number": correspondence_number,
+            "method": "two_largest_principal_dimensions",
+            "parameters": {
+                "dimension_error_limit": _DIMENSION_ERROR_LIMIT,
+                "minimum_measured_dimension_m": _MINIMUM_MEASURED_DIMENSION_M,
+            },
+            "CAD": {
+                "context_ref": cad_input.context_ref,
+                "record": {
+                    "ref": _relative_ref(root, cad_input.record_path),
+                    "sha256": _sha256_path(cad_input.record_path),
+                },
+                "source_sha256": cad_input.source_sha256,
+                "mesh": {
+                    "ref": cad_input.mesh_ref,
+                    "sha256": cad_input.mesh_sha256,
+                },
+                "compared_dimensions_m": _float_list(cad_input.dimensions_m),
+            },
+            "segmentation": {
+                "observation_ref": segmentation_record["observation_ref"],
+                "record": {
+                    "ref": _relative_ref(root, segmentation_path),
+                    "sha256": _sha256_path(segmentation_path),
+                },
+            },
+            "candidate_measurements": measurements,
+            "measurement": "accepted",
+            "CAD_correspondence": "not_evaluated",
+            "location": "not_evaluated",
+            "pose": "not_evaluated",
+            "cross_camera_fusion": "not_evaluated",
+        }
+        record["fingerprint"] = _fingerprint(record)
+        _write_json(temporary_root / "correspondence_record.json", record)
+        if destination.exists():
+            raise CADSizeAssociationError(
+                f"CAD size correspondence {correspondence_number:04d} already exists."
+            )
+        temporary_root.rename(destination)
+    except CADSizeAssociationError:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise
+    except (OSError, TypeError, ValueError, np.linalg.LinAlgError) as exc:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise CADSizeAssociationError(
+            f"CAD size measurement failed: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    return CADSizeMeasurementResult(
+        record_path=destination / "correspondence_record.json",
+        measurement="accepted",
+        record=record,
+    )
 
 
 def associate_segmented_candidate_by_size(
@@ -735,7 +838,26 @@ def _rank_candidates(
     candidates: list[dict[str, object]],
     cad_dimensions_m: np.ndarray,
 ) -> list[dict[str, object]]:
-    ranked = []
+    ranked = _measure_candidates(candidates, cad_dimensions_m)
+    ranked.sort(
+        key=lambda item: (
+            item["mean_dimension_error"] is None,
+            math.inf if item["mean_dimension_error"] is None else item["mean_dimension_error"],
+            item["camera_order"],
+            item["candidate_id"],
+        )
+    )
+    for rank, candidate in enumerate(ranked, start=1):
+        candidate["rank"] = rank
+        candidate.pop("camera_order")
+    return ranked
+
+
+def _measure_candidates(
+    candidates: list[dict[str, object]],
+    cad_dimensions_m: np.ndarray,
+) -> list[dict[str, object]]:
+    measurements = []
     for candidate in candidates:
         points_m = candidate["points_m"]
         if not isinstance(points_m, np.ndarray):
@@ -758,7 +880,7 @@ def _rank_candidates(
             measurement_status = "measured"
             within_tolerance = bool(np.all(errors_array <= _DIMENSION_ERROR_LIMIT))
             center = _float_list(center_array)
-        ranked.append(
+        measurements.append(
             {
                 "observation_handle": candidate["observation_handle"],
                 "camera_id": candidate["camera_id"],
@@ -775,18 +897,7 @@ def _rank_candidates(
                 "candidate_center_m": center,
             }
         )
-    ranked.sort(
-        key=lambda item: (
-            item["mean_dimension_error"] is None,
-            math.inf if item["mean_dimension_error"] is None else item["mean_dimension_error"],
-            item["camera_order"],
-            item["candidate_id"],
-        )
-    )
-    for rank, candidate in enumerate(ranked, start=1):
-        candidate["rank"] = rank
-        candidate.pop("camera_order")
-    return ranked
+    return measurements
 
 
 def _measure_candidate(points_m: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
@@ -953,6 +1064,17 @@ def _float_list(values: np.ndarray) -> list[float]:
     if not all(math.isfinite(value) for value in result):
         raise CADSizeAssociationError("Derived size association value is non-finite.")
     return result
+
+
+def _fingerprint(value: object) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:

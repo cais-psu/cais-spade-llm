@@ -7,32 +7,30 @@ shared agent.
 ## Native investigation
 
 `start_pa_context_interaction` records the exact requirement, initializes the
-interaction ABox, and asks the production grounding runtime to conduct one PA
-investigation. The PA call receives:
+interaction ABox, and asks the production grounding runtime to conduct the two
+Phase 4 PA decisions. The first call receives:
 
 - the exact requirement;
 - an allowed PPR schema projection;
-- the current ABox and required-output projection;
-- approved discovery metadata; and
-- controlled `retrieve(evidence_id)` and
-  `compare_cad_size(cad_evidence_id, observation_evidence_id)` tools.
+- the configured process authority;
+- every approved source as a neutral prompt-local handle; and
+- controlled `retrieve`, `query_document`, `compare_cad_size`, and
+  `analyze_candidate_layout` tools.
 
 PA retrieves approved documents, CAD files, and one fresh live observation as
 needed. After retrieving both inputs, PA may request neutral CAD-to-candidate
 measurements. Tool results return to the same conversation as compact typed
 evidence. PA then directly returns a proposal candidate, a clarification
-question, or an insufficient-evidence explanation.
+question, or `unsupported_process`.
 
 The model never supplies paths, provider IDs, hashes, frames, record types, or
 arbitrary source names. Tool calls are resolved and audited by the system. A
 malformed, unauthorized, stale, altered, or unavailable handle fails closed.
 
-Clarification is reserved for requirement meaning that approved evidence cannot
-resolve after relevant approved evidence has been retrieved and considered. The
-runtime rejects premature clarification and questions that delegate a supplied
-required output or approved evidence-category choice to the user, returns
-prompt-only feedback, and keeps the retry inside the bounded investigation. It
-does not supply a requirement interpretation in that feedback.
+Clarification is reserved for genuine ambiguity in the requirement meaning.
+There is no semantic reviewer, readiness contract, expected-revision feedback,
+or outer correction loop. A malformed final response fails once rather than
+being re-prompted toward an expected answer.
 
 An answered clarification is evidence from its persisted append-only
 `interaction_record/clarification_<question_turn>.json` record. The native
@@ -41,33 +39,34 @@ create or accept a separate clarification alias.
 
 ## Evidence processing
 
-`production_grounding.py` exposes source-level retrieval and objective CAD-size
-comparison to PA. The system performs document extraction, STL measurement,
-live capture, segmentation, calibration, frame conversion, and live Cartesian
-resource checks. Those operations are descriptor-driven services, not additional PA
-choices.
+`production_grounding.py` exposes source-level retrieval and neutral evidence
+tools to PA. The system performs document extraction, STL measurement, live
+capture, segmentation, calibration, frame conversion, and location
+reachability. These operations validate PA tool calls; they do not decide which
+source, candidate, state meaning, location, or resource PA should choose.
 
 Document retrieval yields the complete ordered `DocumentOverviewRecord` v3.
 CAD retrieval yields `CADMeshRecord`. Observation retrieval yields typed RGB-D,
 point-cloud, segmentation, stable crop, and `ObservationCandidateReview`
 records. The review describes morphology, dimensions, surfaces, and support
 contacts without assigning a part identity, state, CAD, process, or resource
-meaning. `compare_cad_size` reuses `CADSizeCorrespondenceRecord` and returns
-opaque candidate/value handles, measured dimensions, tolerance results, and the
-comparison ref without selecting a semantic answer. An ambiguous comparison is
-projected as a neutrally ordered plausible set without match ranks or numerical
-error ranking; the canonical record retains the full audit ranking. The PA binds
-exactly one supplied current object and one desired destination/support candidate
-in `state_values`, citing its own comparisons. Deterministic validation requires a
-unique correspondence for both states and runs before the scaffold-free semantic
-consistency review. Ambiguity stops before allocation, and validation feedback
-never substitutes or reveals another candidate. During allocation,
-`check_reachability` accepts only the PA-selected `resource_symbol` and derives
-both locations from those already accepted state bindings. In simulation it
-reloads their CAD/support provenance, derives a loose-gear grasp and a final
-gear center on the installed shaft, and asks only that robot's live MoveIt
-model for strict, collision-aware pick and place Cartesian paths. Static
-workspace boxes do not accept or reject this simulation check.
+meaning. The active `compare_cad_size` implementation persists
+`CADSizeCorrespondenceRecord` v3 and returns every candidate measurement in
+observation order without ranking or selecting a winner.
+`analyze_candidate_layout` accepts any two or more PA-selected same-frame
+candidates and reports raw positions, pairwise displacement vectors, distances,
+and collinearity measurements without a built-in relation verdict. PA may
+include zero, one, or multiple evidence-backed `state_values` from any accepted
+typed record. Those values are semantic evidence links, not mandatory allocation
+geometry.
+
+The second PA call receives all capable resources and all neutral location
+handles available from the retrieved evidence. PA submits one or more handles
+for each state and one capable resource to `check_reachability`. If a selected
+handle is a segmentation candidate, the tool materializes its approved
+robot-frame location on demand. It reports every submitted location
+independently and executes no motion. It does not certify grasping, insertion,
+or manufacturing execution.
 
 Before retrieval, `EvidencePresentationRecord` maps canonical sources to
 randomized opaque handles. Approved CAD names and exact `context_ref` values are
@@ -77,19 +76,13 @@ matches, URLs, and semantic camera roles are absent. After semantic grounding,
 one shared neutral candidate pool. The same stored order drives the prompt,
 tool enums, and response schema; it is audit evidence, not selection priority.
 
-After a proposal, the runtime builds a provisional graph without merging it and
-returns generic deterministic validation feedback without repairing the PA
-result. The active production path supplies only a requirement-neutral readiness
-rule: completion needs one uniquely supported observed current object and one
-uniquely supported observed destination/support; otherwise PA returns
-`insufficient_evidence`. PA may retrieve another approved source in the same
-logical investigation, but provider-descriptor expansion through
-`_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` is not
-connected to this path and remains deferred.
+Presentation order is pinned for audit and has no priority. The controller
+checks handle authority, hashes, ontology structure, configured capability, and
+reachability only. It never ranks semantic candidates or resources.
 
 ## Ontology grounding
 
-`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v8
+`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v9
 candidate containing exactly one model-authored `target_feature`. This
 increment supports one requirement and one feature. The target contains:
 
@@ -100,11 +93,8 @@ increment supports one requirement and one feature. The target contains:
 - zero, one, or multiple `state_values` for each state, each with a unique PA-authored semantic
   name, one accepted typed-record ref, one JSON Pointer, and direct evidence.
 
-The generic proposal schema retains that zero/one/multiple capability. The
-production assembly projection requires exactly one current object candidate
-and exactly one desired destination/support candidate. A desired destination
-identifies where the outcome will be realized; it does not claim the completed
-assembly is already visible.
+State values may reference any accepted typed record and are independent of the
+location-handle lists used by resource allocation.
 
 PA chooses the process, statement text, state-value count and names, record
 refs, field paths, and citations from retrieved evidence. Deterministic code
@@ -119,63 +109,42 @@ The host generates `feature_0001`, `currentstate_0001`, and
 `ppr:hasdesiredstate` links. Rich PA-authored state meaning remains in the
 accepted proposal while RDF records the explicit feature-state structure.
 
-If one PA proposal violates these invariants, the runtime preserves the
-rejected audit record and returns the exact deterministic validation failure as
-prompt-only feedback for a bounded correction round. Distinct feedback remains
-available on later attempts. A single live observation is reused within the run
-and refreshed on clarification resume. At global tool-budget exhaustion, PA
-receives one final no-tools call; exhaustion returns structured `incomplete`
-rather than escaping as a runtime error. The host does not synthesize a missing
-`defines`, `realizes`, or other assertion on PA's behalf.
+If PA's final proposal violates these invariants, the runtime preserves a
+rejected audit record and emits a deterministic stage code. It neither repairs
+the response nor returns the failure to PA. The host does not synthesize a
+missing `defines`, `realizes`, state statement, or state value.
 
-Structural validity alone does not commit the candidate. A separate model call
-produces `TargetFeatureSemanticReview` v2, containing only `verdict` and `gap`.
-It checks whether the statement and included values adequately represent the
-requirement under the evidence retrieved so far. An incomplete review returns
-the concise gap to the bounded PA retrieval/revision loop; it is not persisted
-as accepted missing information and no private reasoning is stored.
-
-The accepted v8 proposal creates explicit `currentstate_0001` and
+The accepted v9 proposal creates explicit `currentstate_0001` and
 `desiredstate_0001` individuals attached to `feature_0001`. The unresolved
-`processExecution` then activates a separate PA allocation call. The call reuses
-the two accepted state bindings; PA chooses one capable resource, invokes
-`check_reachability(resource_symbol)`, and cites the resulting two-state evidence. The exact
-provisional RobotAgent performs live, no-motion Cartesian pick/place validation
-in simulation. The second phase begins from the first phase's terminal robot
-state, and each path must be complete with collision checking enabled.
-Only its `accepted` verdict allows the runtime to commit the assignment;
-rejection returns evidence for another PA choice without host substitution.
-The PA may revise the resource, but allocation cannot revise either state image.
-Semantic feature/state assertions stay fixed during physical-evidence revision.
+`processExecution` then activates the separate PA allocation call. Only the
+unchanged PA resource and location lists cited from an accepted v4 reachability
+record can add four assignment assertions. A rejection ends the stage without
+host substitution or another PA correction round.
 
 `RobotFrameLocationRecord` version 2 is semantically neutral. Its current or
-desired meaning comes from the PA state assignment. The architecture does not
+desired role comes only from PA's allocation request. The architecture does not
 use `TargetFeatureGeometryRecord`; verifier-required numeric geometry is
-derived on demand from the selected evidence and approved calibration.
+derived on demand from selected evidence and approved calibration.
 
 ## Completion and compatibility
 
 New interactions write append-only native tool audits, direct PA turns,
 `EvidencePresentationRecord` v1, `AllocationPresentationRecord` v1,
-simulation `ReachabilityCheckRecord` v3, `ResourceSelectionRecord` v4,
-simulation `PlanOnlyFeasibilityValidationRecord` v3, `TargetFeatureSemanticReview` v2,
-`TypedGroundingContract` v6, and `PAContextGroundingCompletion` v6.
+`OntologyGroundingProposal` v9, `ReachabilityCheckRecord` v4,
+`ResourceSelectionRecord` v5, `PlanOnlyFeasibilityValidationRecord` v4, and
+`PAContextGroundingCompletion` v7.
 Clarification resumes the same conversation context using the exact persisted
 question/reply history. Cancellation invokes no PA call.
 
-The v6 contract and completion pin the selected process, both state IRIs, the
-accepted proposal, semantic review, nested evidence, both presentation records,
-registry/workcell snapshots, referenced typed records, reachability, exact
-RobotAgent plan-only validation, resource selection, assignment delta,
-and final ABox.
-They do not copy `target_feature`; downstream consumers reconstruct it from the
-hash-verified accepted proposal.
+The v7 completion directly pins the accepted proposal, nested evidence, both
+presentation records, registry/workcell snapshots, referenced typed records,
+reachability, exact RobotAgent validation, resource selection, assignment
+delta, and final ABox. It does not create a duplicate new-run
+`TypedGroundingContract` or copy `target_feature`; downstream consumers
+reconstruct it from the hash-verified accepted proposal.
 
-Read-only validation remains for ontology proposal v3-v7, document overview
-v1, resource selection v1-v3, feasibility validation v1, and completion/session
-v2-v5 records. New Phase 5 handoff requires completion v6. New simulation runs
-do not produce or migrate the old records; the physical-mode safety path retains
-v2 reachability and validation.
+Historical completion v4-v6 records remain readable and are not migrated. New
+Phase 5 handoff accepts completion v7 while retaining historical readers.
 
 This boundary performs schema-constrained, evidence-backed instance grounding.
 Multi-feature requirements, primitive parameter binding, motion execution,

@@ -38,9 +38,12 @@ from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
 _BINDING_STATUSES = frozenset({"accepted", "ambiguous", "rejected", "stale", "unavailable"})
 _TYPED_RECORD_SCHEMA_VERSIONS = {
     "DocumentOverviewRecord": frozenset({1, 2, 3}),
+    "DocumentSourceIndexRecord": frozenset({1}),
+    "DocumentQueryRecord": frozenset({1}),
     "ObservationCandidateReview": frozenset({1}),
     "RGBDSegmentationRecord": frozenset({1, 2}),
-    "CADSizeCorrespondenceRecord": frozenset({1, 2}),
+    "CADSizeCorrespondenceRecord": frozenset({1, 2, 3}),
+    "CandidateSpatialRelationRecord": frozenset({1, 2}),
     "CADPoseEstimationRecord": frozenset({2, 3}),
     "RobotFramePoseRecord": frozenset({2, 3}),
     "RobotFrameLocationRecord": frozenset({1, 2}),
@@ -846,7 +849,7 @@ class ProductContextView:
 
 @dataclass(frozen=True)
 class TypedGroundingContract:
-    """Carry one final cited context summary beside the ontology projection."""
+    """Read one historical cited context summary beside the ontology projection."""
 
     requirement_text: str
     session_ref: str
@@ -859,39 +862,6 @@ class TypedGroundingContract:
     source_refs: tuple[Mapping[str, str], ...]
     clarification_refs: tuple[Mapping[str, str], ...]
     fingerprint: str
-
-    @classmethod
-    def create(  # noqa: PLR0913
-        cls,
-        *,
-        requirement_text: str,
-        session_ref: str,
-        session_fingerprint: str,
-        ontology_projection_ref: str,
-        context_summary: str,
-        context_evidence_refs: Sequence[str],
-        missing_information: Sequence[str],
-        typed_record_refs: Sequence[Mapping[str, str]],
-        source_refs: Sequence[Mapping[str, str]],
-        clarification_refs: Sequence[Mapping[str, str]],
-    ) -> TypedGroundingContract:
-        """Create one fingerprinted typed contract from validated completion inputs."""
-        record: dict[str, object] = {
-            "schema_version": 2,
-            "record_type": "TypedGroundingContract",
-            "requirement_text": requirement_text,
-            "session_ref": session_ref,
-            "session_fingerprint": session_fingerprint,
-            "ontology_projection_ref": ontology_projection_ref,
-            "context_summary": context_summary,
-            "context_evidence_refs": list(context_evidence_refs),
-            "missing_information": list(missing_information),
-            "typed_record_refs": [dict(item) for item in typed_record_refs],
-            "source_refs": [dict(item) for item in source_refs],
-            "clarification_refs": [dict(item) for item in clarification_refs],
-        }
-        record["fingerprint"] = _fingerprint(record)
-        return cls.from_mapping(record)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> TypedGroundingContract:
@@ -1160,6 +1130,17 @@ class PAContextGroundingCompletionV6:
 
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe version-6 completion bundle."""
+        return dict(self.record)
+
+
+@dataclass(frozen=True)
+class PAContextGroundingCompletionV7:
+    """Hold one verified two-decision Phase 4 completion record."""
+
+    record: Mapping[str, object]
+
+    def to_record(self) -> dict[str, object]:
+        """Return the JSON-safe version-7 completion bundle."""
         return dict(self.record)
 
 
@@ -2865,7 +2846,7 @@ def _validate_compiled_delta(  # noqa: PLR0913
             raise GroundingContractError("Target-feature compiled assertion is inconsistent.")
 
 
-def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
+def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
     interaction_root: Path,
     *,
     tbox: TBoxSnapshot,
@@ -2879,7 +2860,7 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
     registry: ResourceRegistrySnapshot | None = None,
     workcell: PredefinedWorkcellSnapshot | None = None,
 ) -> Path:
-    """Persist one process-aware, no-motion PA allocation."""
+    """Persist the v9/v5/v4 lineage without a duplicate grounding contract."""
     root = Path(interaction_root).resolve()
     if product_context.product_requirement != product_requirement:
         raise GroundingContractError(
@@ -2905,9 +2886,115 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         resource_selection_ref,
         prefix=_RESOURCE_SELECTION_PREFIX,
     )
-    projection = _read_json_mapping(projection_path, "OntologyGroundingProposal v8")
-    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord v4")
-    process_iri = _required_string(selection.get("process_iri"), "process_iri")
+    projection = _read_json_mapping(projection_path, "OntologyGroundingProposal v9")
+    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord v5")
+    if (
+        set(projection)
+        != {
+            "schema_version",
+            "record_type",
+            "proposal_number",
+            "initialized_specification_iri",
+            "feature_iri",
+            "output",
+            "compiled_delta",
+            "status",
+            "failure",
+        }
+        or projection.get("schema_version") != 9
+        or projection.get("record_type") != "OntologyGroundingProposal"
+        or projection.get("status") != "accepted"
+        or projection.get("failure") is not None
+    ):
+        raise GroundingContractError("OntologyGroundingProposal v9 is invalid.")
+    output = _required_mapping(projection.get("output"), "proposal output")
+    _require_exact_keys(output, {"target_feature"}, "proposal output")
+    target_feature = _required_mapping(output["target_feature"], "target_feature")
+    _require_exact_keys(
+        target_feature,
+        {"required_process", "current_state", "desired_state"},
+        "target_feature",
+    )
+    process = _required_mapping(target_feature["required_process"], "required_process")
+    process_iri = _required_string(process.get("process_iri"), "process_iri")
+    feature_iri = _required_string(projection.get("feature_iri"), "feature_iri")
+    specification_iri = _required_string(
+        projection.get("initialized_specification_iri"),
+        "initialized_specification_iri",
+    )
+    compiled_delta = _required_mapping(projection.get("compiled_delta"), "compiled_delta")
+    compiled_assertions = compiled_delta.get("assertions")
+    if not isinstance(compiled_assertions, list) or len(compiled_assertions) != 7:
+        raise GroundingContractError(
+            "OntologyGroundingProposal v9 must compile exactly seven assertions."
+        )
+
+    selection_payload = dict(selection)
+    selection_fingerprint = selection_payload.pop("fingerprint", None)
+    selection_expected = {
+        "schema_version",
+        "record_type",
+        "selection_number",
+        "authority",
+        "specification_iri",
+        "feature_iri",
+        "process_symbol",
+        "process_iri",
+        "current_state_iri",
+        "desired_state_iri",
+        "candidate_resource_iris",
+        "candidate_resource_symbols",
+        "state_locations",
+        "evidence_presentation_ref",
+        "evidence_presentation_sha256",
+        "evidence_presentation_fingerprint",
+        "allocation_presentation_ref",
+        "allocation_presentation_sha256",
+        "allocation_presentation_fingerprint",
+        "reachability_check_ref",
+        "reachability_check_sha256",
+        "reachability_check_fingerprint",
+        "selected_resource_symbol",
+        "selected_resource_iri",
+        "selected_resource_jid",
+        "selected_execution_mode",
+        "robot_agent_validation_ref",
+        "robot_agent_validation_sha256",
+        "robot_agent_validation_fingerprint",
+        "robot_agent_validation_status",
+        "allocation_status",
+        "tbox_fingerprint",
+        "registry_fingerprint",
+        "workcell_fingerprint",
+        "fingerprint",
+    }
+    state_locations = selection.get("state_locations")
+    if (
+        set(selection) != selection_expected
+        or selection.get("schema_version") != 5
+        or selection.get("record_type") != "ResourceSelectionRecord"
+        or selection.get("authority") != "ProductAgent"
+        or selection.get("allocation_status") != "accepted"
+        or selection.get("robot_agent_validation_status") != "accepted"
+        or selection.get("specification_iri") != specification_iri
+        or selection.get("feature_iri") != feature_iri
+        or selection.get("process_iri") != process_iri
+        or not isinstance(state_locations, Mapping)
+        or set(state_locations) != {"current_state", "desired_state"}
+        or any(
+            not isinstance(state_locations[state_name], list)
+            or not state_locations[state_name]
+            or not all(
+                isinstance(handle, str) and handle
+                for handle in state_locations[state_name]
+            )
+            for state_name in ("current_state", "desired_state")
+        )
+        or not _is_sha256_value(selection_fingerprint)
+        or _fingerprint(selection_payload) != selection_fingerprint
+    ):
+        raise GroundingContractError("ResourceSelectionRecord v5 is invalid.")
+
     registry_record = selected_registry.to_record()
     workcell_record = selected_workcell.to_record()
     allocation_authority = _completion_allocation_authority(
@@ -2915,26 +3002,24 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         workcell_record,
         process_iri=process_iri,
     )
-    _target_feature, evidence_refs, review = _validated_target_feature(
-        root,
-        projection,
-        product_context=product_context,
-        selection=selection,
-        selection_schema_version=4,
-        allocation_authority=allocation_authority,
+    selected_identity = (
+        selection.get("selected_resource_symbol"),
+        selection.get("selected_resource_iri"),
+        selection.get("selected_resource_jid"),
     )
-    process_symbol = allocation_authority.process_symbol
-    feature_iri = _required_string(selection["feature_iri"], "feature_iri")
-    current_state_iri = _required_string(selection["current_state_iri"], "current_state_iri")
-    desired_state_iri = _required_string(selection["desired_state_iri"], "desired_state_iri")
-    review_ref = _required_string(projection.get("semantic_review_ref"), "semantic_review_ref")
-    review_path = _completion_ref_path(
-        root,
-        review_ref,
-        prefix=("products", "grounding", "target_feature_review"),
-    )
+    if (
+        selected_identity not in allocation_authority.candidate_resources
+        or selection.get("process_symbol") != allocation_authority.process_symbol
+        or selection.get("tbox_fingerprint") != tbox.fingerprint
+        or selection.get("registry_fingerprint") != selected_registry.fingerprint
+        or selection.get("workcell_fingerprint") != selected_workcell.fingerprint
+    ):
+        raise GroundingContractError(
+            "ResourceSelectionRecord v5 does not match the pinned authorities."
+        )
+
     reachability_ref = _required_string(
-        selection["reachability_check_ref"],
+        selection.get("reachability_check_ref"),
         "reachability_check_ref",
     )
     reachability_path = _completion_ref_path(
@@ -2942,8 +3027,40 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         reachability_ref,
         prefix=("products", "grounding", "reachability"),
     )
+    reachability = _read_json_mapping(reachability_path, "ReachabilityCheckRecord v4")
+    reach_payload = dict(reachability)
+    reach_fingerprint = reach_payload.pop("fingerprint", None)
+    reach_groups = reachability.get("state_locations")
+    reach_handles = (
+        {
+            state_name: [
+                item.get("evidence_handle") if isinstance(item, Mapping) else None
+                for item in reach_groups.get(state_name, [])
+            ]
+            for state_name in ("current_state", "desired_state")
+        }
+        if isinstance(reach_groups, Mapping)
+        else None
+    )
+    if (
+        reachability.get("schema_version") != 4
+        or reachability.get("record_type") != "ReachabilityCheckRecord"
+        or reachability.get("status") != "accepted"
+        or reachability.get("resource_symbol") != selection.get("selected_resource_symbol")
+        or reachability.get("resource_iri") != selection.get("selected_resource_iri")
+        or reachability.get("resource_jid") != selection.get("selected_resource_jid")
+        or reachability.get("process_iri") != process_iri
+        or reachability.get("feature_iri") != feature_iri
+        or reach_handles != state_locations
+        or not _is_sha256_value(reach_fingerprint)
+        or _fingerprint(reach_payload) != reach_fingerprint
+        or selection.get("reachability_check_sha256") != _sha256_path(reachability_path)
+        or selection.get("reachability_check_fingerprint") != reach_fingerprint
+    ):
+        raise GroundingContractError("ReachabilityCheckRecord v4 is invalid.")
+
     validation_ref = _required_string(
-        selection["robot_agent_validation_ref"],
+        selection.get("robot_agent_validation_ref"),
         "robot_agent_validation_ref",
     )
     validation_path = _completion_ref_path(
@@ -2951,16 +3068,95 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         validation_ref,
         prefix=(
             "resources",
-            _required_string(selection["selected_resource_jid"], "selected_resource_jid"),
+            _required_string(selection.get("selected_resource_jid"), "selected_resource_jid"),
             "validation",
         ),
     )
     validation = _read_json_mapping(
         validation_path,
-        "PlanOnlyFeasibilityValidationRecord",
+        "PlanOnlyFeasibilityValidationRecord v4",
     )
+    validation_payload = dict(validation)
+    validation_fingerprint = validation_payload.pop("fingerprint", None)
+    if (
+        validation.get("schema_version") != 4
+        or validation.get("record_type") != "PlanOnlyFeasibilityValidationRecord"
+        or validation.get("status") != "accepted"
+        or validation.get("validator_authority") != selection.get("selected_resource_jid")
+        or validation.get("request_fingerprint") != reach_fingerprint
+        or not _is_sha256_value(validation_fingerprint)
+        or _fingerprint(validation_payload) != validation_fingerprint
+        or selection.get("robot_agent_validation_sha256") != _sha256_path(validation_path)
+        or selection.get("robot_agent_validation_fingerprint") != validation_fingerprint
+    ):
+        raise GroundingContractError(
+            "PlanOnlyFeasibilityValidationRecord v4 is invalid."
+        )
+
+    assignment_delta_ref = _native_assignment_delta_ref_v5(
+        root,
+        resource_selection_ref=resource_selection_ref,
+        reachability_ref=reachability_ref,
+        validation_ref=validation_ref,
+        selected_resource_iri=_required_string(
+            selection.get("selected_resource_iri"),
+            "selected_resource_iri",
+        ),
+    )
+    assignment_delta_path = _completion_ref_path(
+        root,
+        assignment_delta_ref,
+        prefix=("products", "grounding", "ontology"),
+    )
+    typed_refs = tuple(
+        {"ref": item.record_ref, "sha256": item.record_sha256}
+        for item in product_context.typed_bindings
+    )
+    typed_ref_names = {str(item["ref"]) for item in typed_refs}
+    cited_refs: list[str] = []
+
+    def collect_evidence_refs(value: object) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key == "evidence_refs" and isinstance(item, list):
+                    cited_refs.extend(ref for ref in item if isinstance(ref, str) and ref)
+                else:
+                    collect_evidence_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect_evidence_refs(item)
+
+    collect_evidence_refs(target_feature)
+    source_names = tuple(
+        dict.fromkeys(ref for ref in cited_refs if ref not in typed_ref_names)
+    )
+    source_refs = tuple(
+        {
+            "ref": source_ref,
+            "sha256": _native_source_hash(
+                root,
+                source_ref,
+                product_requirement=product_requirement,
+            ),
+        }
+        for source_ref in source_names
+    )
+    tool_refs = tuple(
+        {
+            "ref": ref,
+            "sha256": _sha256_path(
+                _completion_ref_path(root, ref, prefix=("interaction_record",))
+            ),
+        }
+        for ref in dict.fromkeys(tool_call_refs)
+    )
+    completion_root = root / "products/grounding/completion"
+    registry_path = completion_root / "resource_registry_snapshot_0001.json"
+    workcell_path = completion_root / "predefined_workcell_snapshot_0001.json"
+    _write_json_mapping_exclusive(registry_path, registry_record)
+    _write_json_mapping_exclusive(workcell_path, workcell_record)
     evidence_presentation_ref = _required_string(
-        selection["evidence_presentation_ref"],
+        selection.get("evidence_presentation_ref"),
         "evidence_presentation_ref",
     )
     evidence_presentation_path = _completion_ref_path(
@@ -2969,7 +3165,7 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         prefix=("products", "grounding", "presentation"),
     )
     allocation_presentation_ref = _required_string(
-        selection["allocation_presentation_ref"],
+        selection.get("allocation_presentation_ref"),
         "allocation_presentation_ref",
     )
     allocation_presentation_path = _completion_ref_path(
@@ -2977,770 +3173,65 @@ def persist_pa_context_grounding_completion_v6(  # noqa: PLR0913
         allocation_presentation_ref,
         prefix=("products", "grounding", "presentation"),
     )
-    assignment_delta_ref = _native_assignment_delta_ref_v5(
-        root,
-        resource_selection_ref=resource_selection_ref,
-        reachability_ref=reachability_ref,
-        validation_ref=validation_ref,
-        selected_resource_iri=_required_string(
-            selection["selected_resource_iri"],
-            "selected_resource_iri",
-        ),
-    )
-    assignment_delta_path = _completion_ref_path(
-        root,
-        assignment_delta_ref,
-        prefix=("products", "grounding", "ontology"),
-    )
-    typed_refs = tuple(
-        {"ref": item.record_ref, "sha256": item.record_sha256}
-        for item in product_context.typed_bindings
-    )
-    source_refs = tuple(
-        {
-            "ref": source_ref,
-            "sha256": _native_source_hash(
-                root,
-                source_ref,
-                product_requirement=product_requirement,
-            ),
-        }
-        for source_ref in evidence_refs
-    )
-    tool_refs = tuple(
-        {
-            "ref": ref,
-            "sha256": _sha256_path(_completion_ref_path(root, ref, prefix=("interaction_record",))),
-        }
-        for ref in tool_call_refs
-    )
-    completion_root = root / "products/grounding/completion"
-    registry_path = completion_root / "resource_registry_snapshot_0001.json"
-    workcell_path = completion_root / "predefined_workcell_snapshot_0001.json"
-    _write_json_mapping_exclusive(registry_path, registry_record)
-    _write_json_mapping_exclusive(workcell_path, workcell_record)
-    registry_ref = registry_path.relative_to(root).as_posix()
-    workcell_ref = workcell_path.relative_to(root).as_posix()
-
-    selection_fingerprint = _sha256_string(
-        selection["fingerprint"],
-        "resource_selection_fingerprint",
-    )
-    reachability_fingerprint = _sha256_string(
-        selection["reachability_check_fingerprint"],
-        "reachability_check_fingerprint",
-    )
-    validation_fingerprint = _sha256_string(
-        selection["robot_agent_validation_fingerprint"],
-        "robot_agent_validation_fingerprint",
-    )
-    review_fingerprint = _sha256_string(
-        review["fingerprint"],
-        "semantic_review_fingerprint",
-    )
-    validation_scope = _required_string(
-        validation.get("validation_scope"),
-        "validation_scope",
-    )
-    allocation_label = (
-        "validated Cartesian pick-place allocation"
-        if validation_scope == "cartesian_pick_place"
-        else "validated endpoint-motion allocation"
-    )
-    common: dict[str, object] = {
-        "process_symbol": process_symbol,
+    decision_path = _completion_ref_path(root, decision_ref, prefix=("interaction_record",))
+    final_abox_path = root / "products/grounding/ontology/interaction_abox.ttl"
+    if not final_abox_path.is_file():
+        raise GroundingContractError("Final interaction ABox is unavailable.")
+    payload: dict[str, object] = {
+        "schema_version": 7,
+        "record_type": "PAContextGroundingCompletion",
+        "status": "grounding complete",
+        "product_requirement": product_requirement,
+        "completion_turn": completion_turn,
+        "decision_ref": decision_ref,
+        "decision_sha256": _sha256_path(decision_path),
+        "process_symbol": allocation_authority.process_symbol,
         "process_iri": process_iri,
         "feature_iri": feature_iri,
+        "current_state_iri": selection["current_state_iri"],
+        "desired_state_iri": selection["desired_state_iri"],
         "ontology_projection_ref": ontology_projection_ref,
-        "semantic_review_ref": review_ref,
-        "semantic_review_sha256": _sha256_path(review_path),
-        "semantic_review_fingerprint": review_fingerprint,
-        "current_state_iri": current_state_iri,
-        "desired_state_iri": desired_state_iri,
-        "registry_snapshot_ref": registry_ref,
+        "ontology_projection_sha256": _sha256_path(projection_path),
+        "resource_selection_ref": resource_selection_ref,
+        "resource_selection_sha256": _sha256_path(selection_path),
+        "resource_selection_fingerprint": selection_fingerprint,
+        "reachability_check_ref": reachability_ref,
+        "reachability_check_sha256": _sha256_path(reachability_path),
+        "reachability_check_fingerprint": reach_fingerprint,
+        "robot_agent_validation_ref": validation_ref,
+        "robot_agent_validation_sha256": _sha256_path(validation_path),
+        "robot_agent_validation_fingerprint": validation_fingerprint,
+        "resource_assignment_delta_ref": assignment_delta_ref,
+        "resource_assignment_delta_sha256": _sha256_path(assignment_delta_path),
+        "final_abox_ref": final_abox_path.relative_to(root).as_posix(),
+        "final_abox_sha256": _sha256_path(final_abox_path),
+        "tbox_fingerprint": product_context.tbox_fingerprint,
+        "abox_fingerprint": product_context.abox_fingerprint,
+        "registry_snapshot_ref": registry_path.relative_to(root).as_posix(),
         "registry_snapshot_sha256": _sha256_path(registry_path),
-        "registry_snapshot_fingerprint": allocation_authority.registry_fingerprint,
-        "workcell_snapshot_ref": workcell_ref,
+        "registry_snapshot_fingerprint": selected_registry.fingerprint,
+        "workcell_snapshot_ref": workcell_path.relative_to(root).as_posix(),
         "workcell_snapshot_sha256": _sha256_path(workcell_path),
-        "workcell_snapshot_fingerprint": allocation_authority.workcell_fingerprint,
+        "workcell_snapshot_fingerprint": selected_workcell.fingerprint,
         "evidence_presentation_ref": evidence_presentation_ref,
         "evidence_presentation_sha256": _sha256_path(evidence_presentation_path),
         "evidence_presentation_fingerprint": selection["evidence_presentation_fingerprint"],
         "allocation_presentation_ref": allocation_presentation_ref,
         "allocation_presentation_sha256": _sha256_path(allocation_presentation_path),
         "allocation_presentation_fingerprint": selection["allocation_presentation_fingerprint"],
-        "resource_selection_ref": resource_selection_ref,
-        "resource_selection_sha256": _sha256_path(selection_path),
-        "resource_selection_fingerprint": selection_fingerprint,
-        "reachability_check_ref": reachability_ref,
-        "reachability_check_sha256": _sha256_path(reachability_path),
-        "reachability_check_fingerprint": reachability_fingerprint,
-        "robot_agent_validation_ref": validation_ref,
-        "robot_agent_validation_sha256": _sha256_path(validation_path),
-        "robot_agent_validation_fingerprint": validation_fingerprint,
-        "validation_scope": validation_scope,
+        "typed_context_refs": [dict(item) for item in typed_refs],
+        "source_refs": [dict(item) for item in source_refs],
+        "tool_call_refs": [dict(item) for item in tool_refs],
+        "validation_scope": "state_location_reachability",
         "checked_constraints": validation["checked_constraints"],
         "unvalidated_constraints": validation["unvalidated_constraints"],
-        "allocation_label": allocation_label,
+        "allocation_label": "validated state-location resource allocation",
         "motion_executed": False,
-    }
-    contract: dict[str, object] = {
-        "schema_version": 6,
-        "record_type": "TypedGroundingContract",
-        "requirement_text": product_requirement,
-        **common,
-        "typed_record_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-    }
-    contract["fingerprint"] = _fingerprint(contract)
-    contract_path = completion_root / "typed_grounding_contract_0001.json"
-    _write_json_mapping_exclusive(contract_path, contract)
-    payload: dict[str, object] = {
-        "schema_version": 6,
-        "record_type": "PAContextGroundingCompletion",
-        "status": "grounding complete",
-        "product_requirement": product_requirement,
-        "completion_turn": completion_turn,
-        "decision_ref": decision_ref,
-        **common,
-        "ontology_projection_sha256": _sha256_path(projection_path),
-        "typed_grounding_contract_ref": contract_path.relative_to(root).as_posix(),
-        "typed_grounding_contract_sha256": _sha256_path(contract_path),
-        "typed_grounding_contract_fingerprint": contract["fingerprint"],
-        "resource_assignment_delta_ref": assignment_delta_ref,
-        "resource_assignment_delta_sha256": _sha256_path(assignment_delta_path),
-        "tbox_fingerprint": product_context.tbox_fingerprint,
-        "abox_fingerprint": product_context.abox_fingerprint,
-        "typed_context_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
         "completed_at_ns": product_context.assessed_at_ns,
     }
     payload["fingerprint"] = _fingerprint(payload)
     completion_path = root / "interaction_record/context_completion_0001.json"
     _write_json_mapping_exclusive(completion_path, payload)
-    load_pa_context_grounding_completion(root)
-    return completion_path
-
-
-def persist_pa_context_grounding_completion_v5(  # noqa: PLR0913
-    interaction_root: Path,
-    *,
-    product_requirement: str,
-    completion_turn: int,
-    decision_ref: str,
-    product_context: ProductContextView,
-    ontology_projection_ref: str,
-    resource_selection_ref: str,
-    tool_call_refs: Sequence[str],
-) -> Path:
-    """Persist one accepted PA allocation with two state and verifier lineages."""
-    root = Path(interaction_root).resolve()
-    if product_context.product_requirement != product_requirement:
-        raise GroundingContractError(
-            "Completion requirement does not match the final ProductContextView."
-        )
-    projection_path = _completion_ref_path(
-        root,
-        ontology_projection_ref,
-        prefix=("products", "grounding", "ontology_grounding"),
-    )
-    projection = _read_json_mapping(projection_path, "OntologyGroundingProposal")
-    selection_path = _completion_ref_path(
-        root,
-        resource_selection_ref,
-        prefix=_RESOURCE_SELECTION_PREFIX,
-    )
-    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord")
-    _target_feature, evidence_refs, review = _validated_target_feature(
-        root,
-        projection,
-        product_context=product_context,
-        selection=selection,
-        selection_schema_version=3,
-    )
-    current_state_iri = _required_string(
-        selection["current_state_iri"],
-        "current_state_iri",
-    )
-    desired_state_iri = _required_string(
-        selection["desired_state_iri"],
-        "desired_state_iri",
-    )
-    review_ref = _required_string(
-        projection.get("semantic_review_ref"),
-        "semantic_review_ref",
-    )
-    review_path = _completion_ref_path(
-        root,
-        review_ref,
-        prefix=("products", "grounding", "target_feature_review"),
-    )
-    reachability_ref = _required_string(
-        selection["reachability_check_ref"],
-        "reachability_check_ref",
-    )
-    reachability_path = _completion_ref_path(
-        root,
-        reachability_ref,
-        prefix=("products", "grounding", "reachability"),
-    )
-    validation_ref = _required_string(
-        selection["robot_agent_validation_ref"],
-        "robot_agent_validation_ref",
-    )
-    validation_path = _completion_ref_path(
-        root,
-        validation_ref,
-        prefix=(
-            "resources",
-            _required_string(selection["selected_resource_jid"], "selected_resource_jid"),
-            "validation",
-        ),
-    )
-    assignment_delta_ref = _native_assignment_delta_ref_v5(
-        root,
-        resource_selection_ref=resource_selection_ref,
-        reachability_ref=reachability_ref,
-        validation_ref=validation_ref,
-        selected_resource_iri=_required_string(
-            selection["selected_resource_iri"],
-            "selected_resource_iri",
-        ),
-    )
-    assignment_delta_path = _completion_ref_path(
-        root,
-        assignment_delta_ref,
-        prefix=("products", "grounding", "ontology"),
-    )
-    typed_refs = tuple(
-        {"ref": item.record_ref, "sha256": item.record_sha256}
-        for item in product_context.typed_bindings
-    )
-    source_refs = tuple(
-        {
-            "ref": source_ref,
-            "sha256": _native_source_hash(
-                root,
-                source_ref,
-                product_requirement=product_requirement,
-            ),
-        }
-        for source_ref in evidence_refs
-    )
-    tool_refs = tuple(
-        {
-            "ref": ref,
-            "sha256": _sha256_path(_completion_ref_path(root, ref, prefix=("interaction_record",))),
-        }
-        for ref in tool_call_refs
-    )
-    selection_fingerprint = _sha256_string(
-        selection["fingerprint"],
-        "resource_selection_fingerprint",
-    )
-    reachability_fingerprint = _sha256_string(
-        selection["reachability_check_fingerprint"],
-        "reachability_check_fingerprint",
-    )
-    validation_fingerprint = _sha256_string(
-        selection["robot_agent_validation_fingerprint"],
-        "robot_agent_validation_fingerprint",
-    )
-    review_fingerprint = _sha256_string(
-        review["fingerprint"],
-        "semantic_review_fingerprint",
-    )
-    contract: dict[str, object] = {
-        "schema_version": 5,
-        "record_type": "TypedGroundingContract",
-        "requirement_text": product_requirement,
-        "ontology_projection_ref": ontology_projection_ref,
-        "semantic_review_ref": review_ref,
-        "semantic_review_sha256": _sha256_path(review_path),
-        "semantic_review_fingerprint": review_fingerprint,
-        "current_state_iri": current_state_iri,
-        "desired_state_iri": desired_state_iri,
-        "resource_selection_ref": resource_selection_ref,
-        "resource_selection_sha256": _sha256_path(selection_path),
-        "resource_selection_fingerprint": selection_fingerprint,
-        "reachability_check_ref": reachability_ref,
-        "reachability_check_sha256": _sha256_path(reachability_path),
-        "reachability_check_fingerprint": reachability_fingerprint,
-        "robot_agent_validation_ref": validation_ref,
-        "robot_agent_validation_sha256": _sha256_path(validation_path),
-        "robot_agent_validation_fingerprint": validation_fingerprint,
-        "allocation_label": "validated allocation",
-        "motion_executed": False,
-        "typed_record_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-    }
-    contract["fingerprint"] = _fingerprint(contract)
-    contract_path = root / "products/grounding/completion/typed_grounding_contract_0001.json"
-    _write_json_mapping_exclusive(contract_path, contract)
-    payload: dict[str, object] = {
-        "schema_version": 5,
-        "record_type": "PAContextGroundingCompletion",
-        "status": "grounding complete",
-        "allocation_label": "validated allocation",
-        "motion_executed": False,
-        "product_requirement": product_requirement,
-        "completion_turn": completion_turn,
-        "decision_ref": decision_ref,
-        "ontology_projection_ref": ontology_projection_ref,
-        "ontology_projection_sha256": _sha256_path(projection_path),
-        "semantic_review_ref": review_ref,
-        "semantic_review_sha256": _sha256_path(review_path),
-        "semantic_review_fingerprint": review_fingerprint,
-        "current_state_iri": current_state_iri,
-        "desired_state_iri": desired_state_iri,
-        "typed_grounding_contract_ref": contract_path.relative_to(root).as_posix(),
-        "typed_grounding_contract_sha256": _sha256_path(contract_path),
-        "typed_grounding_contract_fingerprint": contract["fingerprint"],
-        "resource_selection_ref": resource_selection_ref,
-        "resource_selection_sha256": _sha256_path(selection_path),
-        "resource_selection_fingerprint": selection_fingerprint,
-        "reachability_check_ref": reachability_ref,
-        "reachability_check_sha256": _sha256_path(reachability_path),
-        "reachability_check_fingerprint": reachability_fingerprint,
-        "robot_agent_validation_ref": validation_ref,
-        "robot_agent_validation_sha256": _sha256_path(validation_path),
-        "robot_agent_validation_fingerprint": validation_fingerprint,
-        "resource_assignment_delta_ref": assignment_delta_ref,
-        "resource_assignment_delta_sha256": _sha256_path(assignment_delta_path),
-        "tbox_fingerprint": product_context.tbox_fingerprint,
-        "abox_fingerprint": product_context.abox_fingerprint,
-        "typed_context_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-        "completed_at_ns": product_context.assessed_at_ns,
-    }
-    payload["fingerprint"] = _fingerprint(payload)
-    completion_path = root / "interaction_record/context_completion_0001.json"
-    _write_json_mapping_exclusive(completion_path, payload)
-    load_pa_context_grounding_completion(root)
-    return completion_path
-
-
-def persist_pa_context_grounding_completion_v4(  # noqa: PLR0913
-    interaction_root: Path,
-    *,
-    product_requirement: str,
-    completion_turn: int,
-    decision_ref: str,
-    product_context: ProductContextView,
-    ontology_projection_ref: str,
-    resource_selection_ref: str,
-    tool_call_refs: Sequence[str],
-) -> Path:
-    """Persist the reviewed target feature and its exact grounding lineage."""
-    root = Path(interaction_root).resolve()
-    if product_context.product_requirement != product_requirement:
-        raise GroundingContractError(
-            "Completion requirement does not match the final ProductContextView."
-        )
-    projection_path = _completion_ref_path(
-        root,
-        ontology_projection_ref,
-        prefix=("products", "grounding", "ontology_grounding"),
-    )
-    projection = _read_json_mapping(projection_path, "OntologyGroundingProposal")
-    selection_path = _completion_ref_path(
-        root,
-        resource_selection_ref,
-        prefix=_RESOURCE_SELECTION_PREFIX,
-    )
-    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord")
-    target_feature, evidence_refs, review = _validated_target_feature(
-        root,
-        projection,
-        product_context=product_context,
-        selection=selection,
-    )
-    del target_feature
-    review_ref = _required_string(projection.get("semantic_review_ref"), "semantic_review_ref")
-    review_path = _completion_ref_path(
-        root,
-        review_ref,
-        prefix=("products", "grounding", "target_feature_review"),
-    )
-    review_sha256 = _sha256_path(review_path)
-    review_fingerprint = _sha256_string(review["fingerprint"], "semantic_review_fingerprint")
-    assignment_delta_ref = _native_assignment_delta_ref(
-        root,
-        resource_selection_ref=resource_selection_ref,
-        selected_resource_iri=_required_string(
-            selection.get("selected_resource_iri"), "selected_resource_iri"
-        ),
-    )
-    assignment_delta_path = _completion_ref_path(
-        root,
-        assignment_delta_ref,
-        prefix=("products", "grounding", "ontology"),
-    )
-    typed_refs = tuple(
-        {"ref": item.record_ref, "sha256": item.record_sha256}
-        for item in product_context.typed_bindings
-    )
-    source_refs = tuple(
-        {
-            "ref": source_ref,
-            "sha256": _native_source_hash(
-                root,
-                source_ref,
-                product_requirement=product_requirement,
-            ),
-        }
-        for source_ref in evidence_refs
-    )
-    tool_refs = tuple(
-        {
-            "ref": ref,
-            "sha256": _sha256_path(_completion_ref_path(root, ref, prefix=("interaction_record",))),
-        }
-        for ref in tool_call_refs
-    )
-    contract: dict[str, object] = {
-        "schema_version": 4,
-        "record_type": "TypedGroundingContract",
-        "requirement_text": product_requirement,
-        "ontology_projection_ref": ontology_projection_ref,
-        "semantic_review_ref": review_ref,
-        "semantic_review_sha256": review_sha256,
-        "semantic_review_fingerprint": review_fingerprint,
-        "typed_record_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-    }
-    contract["fingerprint"] = _fingerprint(contract)
-    contract_path = root / "products/grounding/completion/typed_grounding_contract_0001.json"
-    _write_json_mapping_exclusive(contract_path, contract)
-    payload: dict[str, object] = {
-        "schema_version": 4,
-        "record_type": "PAContextGroundingCompletion",
-        "status": "grounding complete",
-        "product_requirement": product_requirement,
-        "completion_turn": completion_turn,
-        "decision_ref": decision_ref,
-        "ontology_projection_ref": ontology_projection_ref,
-        "ontology_projection_sha256": _sha256_path(projection_path),
-        "semantic_review_ref": review_ref,
-        "semantic_review_sha256": review_sha256,
-        "semantic_review_fingerprint": review_fingerprint,
-        "typed_grounding_contract_ref": contract_path.relative_to(root).as_posix(),
-        "typed_grounding_contract_sha256": _sha256_path(contract_path),
-        "typed_grounding_contract_fingerprint": contract["fingerprint"],
-        "resource_selection_ref": resource_selection_ref,
-        "resource_selection_sha256": _sha256_path(selection_path),
-        "resource_assignment_delta_ref": assignment_delta_ref,
-        "resource_assignment_delta_sha256": _sha256_path(assignment_delta_path),
-        "tbox_fingerprint": product_context.tbox_fingerprint,
-        "abox_fingerprint": product_context.abox_fingerprint,
-        "typed_context_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-        "completed_at_ns": product_context.assessed_at_ns,
-    }
-    payload["fingerprint"] = _fingerprint(payload)
-    completion_path = root / "interaction_record/context_completion_0001.json"
-    _write_json_mapping_exclusive(completion_path, payload)
-    load_pa_context_grounding_completion(root)
-    return completion_path
-
-
-def persist_pa_context_grounding_completion_v3(  # noqa: PLR0913
-    interaction_root: Path,
-    *,
-    product_requirement: str,
-    completion_turn: int,
-    decision_ref: str,
-    product_context: ProductContextView,
-    ontology_projection_ref: str,
-    resource_selection_ref: str,
-    tool_call_refs: Sequence[str],
-) -> Path:
-    """Persist a session-free, hash-pinned native-tool completion bundle."""
-    root = Path(interaction_root).resolve()
-    projection_path = _completion_ref_path(
-        root,
-        ontology_projection_ref,
-        prefix=("products", "grounding", "ontology_grounding"),
-    )
-    projection = _read_json_mapping(projection_path, "OntologyGroundingProposal")
-    output = projection.get("output")
-    if (
-        projection.get("schema_version") != 5
-        or projection.get("status") != "accepted"
-        or not isinstance(output, Mapping)
-    ):
-        raise GroundingContractError(
-            "Native completion requires one accepted version-5 ontology proposal."
-        )
-    context_summary = output.get("context_summary")
-    context_evidence_refs = output.get("evidence_refs")
-    missing_information = output.get("missing_information")
-    if (
-        not isinstance(context_summary, str)
-        or not context_summary.strip()
-        or not isinstance(context_evidence_refs, list)
-        or not context_evidence_refs
-        or not all(isinstance(item, str) and item for item in context_evidence_refs)
-        or not isinstance(missing_information, list)
-        or not all(isinstance(item, str) and item for item in missing_information)
-    ):
-        raise GroundingContractError("Native ontology proposal context is invalid.")
-    selection_path = _completion_ref_path(
-        root,
-        resource_selection_ref,
-        prefix=_RESOURCE_SELECTION_PREFIX,
-    )
-    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord")
-    if (
-        selection.get("schema_version") != 2
-        or selection.get("record_type") != "ResourceSelectionRecord"
-        or not isinstance(selection.get("selected_resource_iri"), str)
-        or selection.get("required_record_type") != "RobotFrameLocationRecord"
-    ):
-        raise GroundingContractError(
-            "Native completion requires an accepted location-based resource selection."
-        )
-    assignment_delta_ref = _native_assignment_delta_ref(
-        root,
-        resource_selection_ref=resource_selection_ref,
-        selected_resource_iri=str(selection["selected_resource_iri"]),
-    )
-    assignment_delta_path = _completion_ref_path(
-        root,
-        assignment_delta_ref,
-        prefix=("products", "grounding", "ontology"),
-    )
-    typed_refs = tuple(
-        {"ref": item.record_ref, "sha256": item.record_sha256}
-        for item in product_context.typed_bindings
-    )
-    location_binding = next(
-        (
-            item
-            for item in product_context.typed_bindings
-            if item.record_type == "RobotFrameLocationRecord"
-            and item.status == "accepted"
-            and item.record_ref == selection.get("grounding_record_ref")
-            and item.record_sha256 == selection.get("grounding_record_sha256")
-        ),
-        None,
-    )
-    if location_binding is None:
-        raise GroundingContractError(
-            "Native completion resource selection is not pinned to the final location."
-        )
-    source_refs = tuple(
-        {
-            "ref": source_ref,
-            "sha256": _native_source_hash(
-                root,
-                source_ref,
-                product_requirement=product_requirement,
-            ),
-        }
-        for source_ref in sorted(set(context_evidence_refs))
-    )
-    tool_refs = tuple(
-        {
-            "ref": ref,
-            "sha256": _sha256_path(_completion_ref_path(root, ref, prefix=("interaction_record",))),
-        }
-        for ref in tool_call_refs
-    )
-    contract: dict[str, object] = {
-        "schema_version": 3,
-        "record_type": "TypedGroundingContract",
-        "requirement_text": product_requirement,
-        "ontology_projection_ref": ontology_projection_ref,
-        "context_summary": _scoped_native_context_summary(context_summary),
-        "context_evidence_refs": list(context_evidence_refs),
-        "missing_information": list(missing_information),
-        "typed_record_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-    }
-    contract["fingerprint"] = _fingerprint(contract)
-    contract_path = root / "products/grounding/completion/typed_grounding_contract_0001.json"
-    _write_json_mapping_exclusive(contract_path, contract)
-    payload: dict[str, object] = {
-        "schema_version": 3,
-        "record_type": "PAContextGroundingCompletion",
-        "status": "grounding complete",
-        "product_requirement": product_requirement,
-        "completion_turn": completion_turn,
-        "decision_ref": decision_ref,
-        "ontology_projection_ref": ontology_projection_ref,
-        "ontology_projection_sha256": _sha256_path(projection_path),
-        "typed_grounding_contract_ref": contract_path.relative_to(root).as_posix(),
-        "typed_grounding_contract_sha256": _sha256_path(contract_path),
-        "typed_grounding_contract_fingerprint": contract["fingerprint"],
-        "resource_selection_ref": resource_selection_ref,
-        "resource_selection_sha256": _sha256_path(selection_path),
-        "resource_assignment_delta_ref": assignment_delta_ref,
-        "resource_assignment_delta_sha256": _sha256_path(assignment_delta_path),
-        "tbox_fingerprint": product_context.tbox_fingerprint,
-        "abox_fingerprint": product_context.abox_fingerprint,
-        "typed_context_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "tool_call_refs": [dict(item) for item in tool_refs],
-        "completed_at_ns": product_context.assessed_at_ns,
-    }
-    payload["fingerprint"] = _fingerprint(payload)
-    completion_path = root / "interaction_record/context_completion_0001.json"
-    _write_json_mapping_exclusive(completion_path, payload)
-    load_pa_context_grounding_completion(root)
-    return completion_path
-
-
-def _scoped_native_context_summary(context_summary: str) -> str:
-    """Mark the PA narrative as preceding deterministic completion state."""
-    return (
-        f"{_NATIVE_CONTEXT_SUMMARY_PREFIX}\n{context_summary}\n\n{_NATIVE_CONTEXT_SUMMARY_SUFFIX}"
-    )
-
-
-def persist_pa_context_grounding_completion_v2(  # noqa: PLR0913
-    interaction_root: Path,
-    *,
-    product_requirement: str,
-    completion_turn: int,
-    decision_ref: str,
-    product_context: ProductContextView,
-    clarification_refs: Sequence[str],
-) -> Path:
-    """Persist the official hash-pinned PA grounding completion bundle."""
-    root = Path(interaction_root).resolve()
-    session = load_latest_grounding_session(root)
-    if (
-        session is None
-        or session.status != "complete"
-        or session.requirement_text != product_requirement
-    ):
-        raise GroundingContractError(
-            "PAContextGroundingCompletion v2 requires a complete GroundingSession."
-        )
-    session_path = root / _SESSION_ROOT / f"revision_{session.revision:04d}.json"
-    proposal_candidates = [
-        (path, _read_json_mapping(path, "OntologyGroundingProposal"))
-        for path in sorted((root / "products/grounding/ontology_grounding").glob("proposal_*.json"))
-    ]
-    accepted_proposals = [
-        (path, proposal)
-        for path, proposal in proposal_candidates
-        if proposal.get("schema_version") in _ONTOLOGY_PROPOSAL_SCHEMA_VERSIONS
-        and proposal.get("status") == "accepted"
-    ]
-    if len(accepted_proposals) != 1:
-        raise GroundingContractError(
-            "PAContextGroundingCompletion v2 requires exactly one accepted ontology projection."
-        )
-    proposal_path, proposal = accepted_proposals[0]
-    proposal_session = _proposal_grounding_session(root, proposal)
-    _validate_completion_lineage(session, proposal_session)
-    resource_selection_ref, resource_assignment_delta_ref = _validate_completion_assignment(
-        root, product_context
-    )
-    resource_selection_path = _completion_ref_path(
-        root,
-        resource_selection_ref,
-        prefix=_RESOURCE_SELECTION_PREFIX,
-    )
-    resource_assignment_delta_path = _completion_ref_path(
-        root,
-        resource_assignment_delta_ref,
-        prefix=("products", "grounding", "ontology"),
-    )
-    output = proposal.get("output")
-    proposal_value = (
-        output.get("ontology_grounding_proposal") if isinstance(output, Mapping) else None
-    )
-    context_summary = (
-        proposal_value.get("context_summary") if isinstance(proposal_value, Mapping) else None
-    )
-    context_evidence_refs = (
-        proposal_value.get("evidence_refs") if isinstance(proposal_value, Mapping) else None
-    )
-    missing_information = (
-        proposal_value.get("missing_information") if isinstance(proposal_value, Mapping) else None
-    )
-    if (
-        not isinstance(context_summary, str)
-        or not context_summary.strip()
-        or not isinstance(context_evidence_refs, list)
-        or not context_evidence_refs
-        or not all(isinstance(item, str) and item for item in context_evidence_refs)
-        or not isinstance(missing_information, list)
-        or not all(isinstance(item, str) and item for item in missing_information)
-    ):
-        raise GroundingContractError("Ontology projection final context is invalid.")
-    typed_refs = tuple(
-        {"ref": item.record_ref, "sha256": item.record_sha256}
-        for item in product_context.typed_bindings
-    )
-    source_ids = sorted(set(context_evidence_refs))
-    source_refs = tuple(
-        {"ref": source, "sha256": _grounding_source_hash(root, source, session)}
-        for source in source_ids
-    )
-    clarification_records = tuple(
-        {
-            "ref": ref,
-            "sha256": _sha256_path(_completion_ref_path(root, ref, prefix=("interaction_record",))),
-        }
-        for ref in clarification_refs
-    )
-    session_ref = str(session_path.relative_to(root))
-    proposal_ref = str(proposal_path.relative_to(root))
-    contract = TypedGroundingContract.create(
-        requirement_text=product_requirement,
-        session_ref=session_ref,
-        session_fingerprint=session.fingerprint,
-        ontology_projection_ref=proposal_ref,
-        context_summary=context_summary,
-        context_evidence_refs=context_evidence_refs,
-        missing_information=missing_information,
-        typed_record_refs=typed_refs,
-        source_refs=source_refs,
-        clarification_refs=clarification_records,
-    )
-    contract_path = root / "products/grounding/completion/typed_grounding_contract_0001.json"
-    _write_json_mapping_exclusive(contract_path, contract.to_record())
-    payload: dict[str, object] = {
-        "schema_version": 2,
-        "record_type": "PAContextGroundingCompletion",
-        "status": "context understanding complete",
-        "product_requirement": product_requirement,
-        "completion_turn": completion_turn,
-        "decision_ref": decision_ref,
-        "grounding_session_ref": session_ref,
-        "grounding_session_sha256": _sha256_path(session_path),
-        "grounding_session_fingerprint": session.fingerprint,
-        "ontology_projection_ref": proposal_ref,
-        "ontology_projection_sha256": _sha256_path(proposal_path),
-        "typed_grounding_contract_ref": str(contract_path.relative_to(root)),
-        "typed_grounding_contract_sha256": _sha256_path(contract_path),
-        "typed_grounding_contract_fingerprint": contract.fingerprint,
-        "resource_selection_ref": resource_selection_ref,
-        "resource_selection_sha256": _sha256_path(resource_selection_path),
-        "resource_assignment_delta_ref": resource_assignment_delta_ref,
-        "resource_assignment_delta_sha256": _sha256_path(resource_assignment_delta_path),
-        "tbox_fingerprint": product_context.tbox_fingerprint,
-        "abox_fingerprint": product_context.abox_fingerprint,
-        "typed_context_refs": [dict(item) for item in typed_refs],
-        "source_refs": [dict(item) for item in source_refs],
-        "clarification_refs": [dict(item) for item in clarification_records],
-        "completed_at_ns": product_context.assessed_at_ns,
-    }
-    payload["fingerprint"] = _fingerprint(payload)
-    completion = PAContextGroundingCompletionV2.from_mapping(payload)
-    completion_path = root / "interaction_record/context_completion_0001.json"
-    _write_json_mapping_exclusive(completion_path, completion.to_record())
     load_pa_context_grounding_completion(root)
     return completion_path
 
@@ -3753,6 +3244,7 @@ def load_pa_context_grounding_completion(
     | PAContextGroundingCompletionV4
     | PAContextGroundingCompletionV5
     | PAContextGroundingCompletionV6
+    | PAContextGroundingCompletionV7
 ):
     """Load and verify one current or recovered completion bundle."""
     root = Path(interaction_root).resolve()
@@ -3760,6 +3252,8 @@ def load_pa_context_grounding_completion(
     if len(paths) != 1:
         raise GroundingContractError("Exactly one PAContextGroundingCompletion record is required.")
     completion_value = _read_json_mapping(paths[0], "PAContextGroundingCompletion")
+    if completion_value.get("schema_version") == 7:
+        return _load_pa_context_grounding_completion_v7(root, completion_value)
     if completion_value.get("schema_version") == 6:
         return _load_pa_context_grounding_completion_v6(root, completion_value)
     if completion_value.get("schema_version") == 5:
@@ -3786,12 +3280,235 @@ def load_completed_product_context_view(
             PAContextGroundingCompletionV4,
             PAContextGroundingCompletionV5,
             PAContextGroundingCompletionV6,
+            PAContextGroundingCompletionV7,
         ),
     ):
         raise GroundingContractError(
-            "Completed ProductContextView retrieval requires native completion version 3, 4, 5, or 6."
+            "Completed ProductContextView retrieval requires native completion version 3 through 7."
         )
     return _latest_product_context_view(root)
+
+
+def _load_pa_context_grounding_completion_v7(
+    root: Path,
+    value: Mapping[str, object],
+) -> PAContextGroundingCompletionV7:
+    """Validate the hash-pinned two-decision Phase 4 completion."""
+    expected = {
+        "schema_version",
+        "record_type",
+        "status",
+        "product_requirement",
+        "completion_turn",
+        "decision_ref",
+        "decision_sha256",
+        "process_symbol",
+        "process_iri",
+        "feature_iri",
+        "current_state_iri",
+        "desired_state_iri",
+        "ontology_projection_ref",
+        "ontology_projection_sha256",
+        "resource_selection_ref",
+        "resource_selection_sha256",
+        "resource_selection_fingerprint",
+        "reachability_check_ref",
+        "reachability_check_sha256",
+        "reachability_check_fingerprint",
+        "robot_agent_validation_ref",
+        "robot_agent_validation_sha256",
+        "robot_agent_validation_fingerprint",
+        "resource_assignment_delta_ref",
+        "resource_assignment_delta_sha256",
+        "final_abox_ref",
+        "final_abox_sha256",
+        "tbox_fingerprint",
+        "abox_fingerprint",
+        "registry_snapshot_ref",
+        "registry_snapshot_sha256",
+        "registry_snapshot_fingerprint",
+        "workcell_snapshot_ref",
+        "workcell_snapshot_sha256",
+        "workcell_snapshot_fingerprint",
+        "evidence_presentation_ref",
+        "evidence_presentation_sha256",
+        "evidence_presentation_fingerprint",
+        "allocation_presentation_ref",
+        "allocation_presentation_sha256",
+        "allocation_presentation_fingerprint",
+        "typed_context_refs",
+        "source_refs",
+        "tool_call_refs",
+        "validation_scope",
+        "checked_constraints",
+        "unvalidated_constraints",
+        "allocation_label",
+        "motion_executed",
+        "completed_at_ns",
+        "fingerprint",
+    }
+    _require_exact_keys(value, expected, "PAContextGroundingCompletion v7")
+    payload = dict(value)
+    fingerprint = payload.pop("fingerprint", None)
+    if (
+        value.get("schema_version") != 7
+        or value.get("record_type") != "PAContextGroundingCompletion"
+        or value.get("status") != "grounding complete"
+        or value.get("validation_scope") != "state_location_reachability"
+        or value.get("allocation_label")
+        != "validated state-location resource allocation"
+        or value.get("motion_executed") is not False
+        or not _is_sha256_value(fingerprint)
+        or _fingerprint(payload) != fingerprint
+    ):
+        raise GroundingContractError("PAContextGroundingCompletion v7 is invalid.")
+
+    pinned = (
+        ("decision_ref", "decision_sha256", ("interaction_record",)),
+        (
+            "ontology_projection_ref",
+            "ontology_projection_sha256",
+            ("products", "grounding", "ontology_grounding"),
+        ),
+        (
+            "resource_selection_ref",
+            "resource_selection_sha256",
+            _RESOURCE_SELECTION_PREFIX,
+        ),
+        (
+            "reachability_check_ref",
+            "reachability_check_sha256",
+            ("products", "grounding", "reachability"),
+        ),
+        ("robot_agent_validation_ref", "robot_agent_validation_sha256", ("resources",)),
+        (
+            "resource_assignment_delta_ref",
+            "resource_assignment_delta_sha256",
+            ("products", "grounding", "ontology"),
+        ),
+        (
+            "final_abox_ref",
+            "final_abox_sha256",
+            ("products", "grounding", "ontology"),
+        ),
+        (
+            "registry_snapshot_ref",
+            "registry_snapshot_sha256",
+            ("products", "grounding", "completion"),
+        ),
+        (
+            "workcell_snapshot_ref",
+            "workcell_snapshot_sha256",
+            ("products", "grounding", "completion"),
+        ),
+        (
+            "evidence_presentation_ref",
+            "evidence_presentation_sha256",
+            ("products", "grounding", "presentation"),
+        ),
+        (
+            "allocation_presentation_ref",
+            "allocation_presentation_sha256",
+            ("products", "grounding", "presentation"),
+        ),
+    )
+    resolved: dict[str, Path] = {}
+    for ref_field, sha_field, prefix in pinned:
+        ref = _required_string(value.get(ref_field), ref_field)
+        path = _completion_ref_path(root, ref, prefix=prefix)
+        if value.get(sha_field) != _sha256_path(path):
+            raise GroundingContractError(
+                f"PAContextGroundingCompletion v7 pinned {ref_field} changed."
+            )
+        resolved[ref_field] = path
+
+    for field in ("typed_context_refs", "tool_call_refs"):
+        entries = value.get(field)
+        if not isinstance(entries, list):
+            raise GroundingContractError(f"PAContextGroundingCompletion v7 {field} is invalid.")
+        for item in entries:
+            if not isinstance(item, Mapping) or set(item) != {"ref", "sha256"}:
+                raise GroundingContractError(
+                    f"PAContextGroundingCompletion v7 {field} entry is invalid."
+                )
+            ref = _required_string(item.get("ref"), f"{field}.ref")
+            path = _completion_ref_path(
+                root,
+                ref,
+                prefix=("interaction_record",) if field == "tool_call_refs" else ("products",),
+            )
+            if item.get("sha256") != _sha256_path(path):
+                raise GroundingContractError(
+                    f"PAContextGroundingCompletion v7 {field} changed."
+                )
+    source_refs = value.get("source_refs")
+    if not isinstance(source_refs, list):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion v7 source_refs are invalid."
+        )
+    product_requirement = _required_string(
+        value.get("product_requirement"),
+        "product_requirement",
+    )
+    for item in source_refs:
+        if not isinstance(item, Mapping) or set(item) != {"ref", "sha256"}:
+            raise GroundingContractError(
+                "PAContextGroundingCompletion v7 source ref is invalid."
+            )
+        source_ref = _required_string(item.get("ref"), "source_ref")
+        if item.get("sha256") != _native_source_hash(
+            root,
+            source_ref,
+            product_requirement=product_requirement,
+        ):
+            raise GroundingContractError(
+                "PAContextGroundingCompletion v7 source evidence changed."
+            )
+
+    projection = _read_json_mapping(
+        resolved["ontology_projection_ref"],
+        "OntologyGroundingProposal v9",
+    )
+    selection = _read_json_mapping(
+        resolved["resource_selection_ref"],
+        "ResourceSelectionRecord v5",
+    )
+    reachability = _read_json_mapping(
+        resolved["reachability_check_ref"],
+        "ReachabilityCheckRecord v4",
+    )
+    validation = _read_json_mapping(
+        resolved["robot_agent_validation_ref"],
+        "PlanOnlyFeasibilityValidationRecord v4",
+    )
+    if (
+        projection.get("schema_version") != 9
+        or projection.get("status") != "accepted"
+        or selection.get("schema_version") != 5
+        or selection.get("allocation_status") != "accepted"
+        or reachability.get("schema_version") != 4
+        or reachability.get("status") != "accepted"
+        or validation.get("schema_version") != 4
+        or validation.get("status") != "accepted"
+        or selection.get("process_iri") != value.get("process_iri")
+        or selection.get("feature_iri") != value.get("feature_iri")
+        or reachability.get("resource_iri") != selection.get("selected_resource_iri")
+        or validation.get("request_fingerprint")
+        != value.get("reachability_check_fingerprint")
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion v7 decision lineage is inconsistent."
+        )
+    final_view = _latest_product_context_view(root)
+    if (
+        final_view.product_requirement != product_requirement
+        or final_view.tbox_fingerprint != value.get("tbox_fingerprint")
+        or final_view.abox_fingerprint != value.get("abox_fingerprint")
+    ):
+        raise GroundingContractError(
+            "PAContextGroundingCompletion v7 final context is inconsistent."
+        )
+    return PAContextGroundingCompletionV7(record=dict(value))
 
 
 def _load_pa_context_grounding_completion_v6(  # noqa: C901
@@ -5313,8 +5030,16 @@ def _binding_status(record_type: str, record: Mapping[str, object]) -> str:
     if record_type == "DocumentEvidenceRecord":
         observations = record.get("observations")
         return "accepted" if isinstance(observations, list) else "rejected"
+    if record_type == "DocumentSourceIndexRecord":
+        return _document_source_index_binding_status(record)
+    if record_type == "DocumentQueryRecord":
+        return _document_query_binding_status(record)
     if record_type == "CADSizeCorrespondenceRecord":
+        if record.get("schema_version") == 3:
+            return _cad_size_measurement_binding_status(record)
         return str(record.get("CAD_correspondence"))
+    if record_type == "CandidateSpatialRelationRecord":
+        return _candidate_spatial_relation_binding_status(record)
     if record_type == "CADPoseEstimationRecord":
         return str(record.get("pose"))
     if record_type == "RobotFramePoseRecord":
@@ -5331,6 +5056,161 @@ def _binding_status(record_type: str, record: Mapping[str, object]) -> str:
         return "accepted"
     status = record.get("status")
     return str(status) if isinstance(status, str) else "unavailable"
+
+
+def _document_source_index_binding_status(record: Mapping[str, object]) -> str:
+    source_index = record.get("source_index")
+    return (
+        "accepted"
+        if record.get("status") == "accepted"
+        and isinstance(source_index, Mapping)
+        and _record_fingerprint_is_valid(source_index)
+        and _record_fingerprint_is_valid(record)
+        else "rejected"
+    )
+
+
+def _document_query_binding_status(record: Mapping[str, object]) -> str:
+    question = record.get("question")
+    claims = record.get("claims")
+    if (
+        not isinstance(question, str)
+        or not question.strip()
+        or record.get("question_sha256")
+        != hashlib.sha256(question.encode("utf-8")).hexdigest()
+        or not isinstance(record.get("source_index"), Mapping)
+        or not isinstance(claims, list)
+        or not isinstance(record.get("uncertainty"), list)
+        or not _record_fingerprint_is_valid(record)
+    ):
+        return "rejected"
+    status = str(record.get("status"))
+    if (status == "supported") != bool(claims):
+        return "rejected"
+    return {
+        "supported": "accepted",
+        "contradicted": "rejected",
+        "insufficient_evidence": "unavailable",
+    }.get(status, "rejected")
+
+
+def _cad_size_measurement_binding_status(record: Mapping[str, object]) -> str:
+    """Validate a neutral all-candidate CAD measurement record."""
+    expected_record_keys = {
+        "schema_version",
+        "record_type",
+        "producer",
+        "correspondence_number",
+        "method",
+        "parameters",
+        "CAD",
+        "segmentation",
+        "candidate_measurements",
+        "measurement",
+        "CAD_correspondence",
+        "location",
+        "pose",
+        "cross_camera_fusion",
+        "fingerprint",
+    }
+    expected_measurement_keys = {
+        "observation_handle",
+        "camera_id",
+        "camera_order",
+        "frame",
+        "candidate_handle",
+        "candidate_id",
+        "point_count",
+        "measurement_status",
+        "observed_dimensions_m",
+        "dimension_errors",
+        "mean_dimension_error",
+        "within_size_tolerance",
+        "candidate_center_m",
+    }
+    measurements = record.get("candidate_measurements")
+    if (
+        set(record) != expected_record_keys
+        or record.get("record_type") != "CADSizeCorrespondenceRecord"
+        or record.get("producer") != "rgb_d_cad_grounding"
+        or record.get("measurement") != "accepted"
+        or record.get("CAD_correspondence") != "not_evaluated"
+        or record.get("location") != "not_evaluated"
+        or record.get("pose") != "not_evaluated"
+        or record.get("cross_camera_fusion") != "not_evaluated"
+        or not isinstance(measurements, list)
+        or not _record_fingerprint_is_valid(record)
+    ):
+        return "rejected"
+    for item in measurements:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != expected_measurement_keys
+            or item.get("measurement_status")
+            not in {"measured", "partial_visibility", "unreliable"}
+            or not isinstance(item.get("observation_handle"), str)
+            or not isinstance(item.get("candidate_handle"), str)
+            or not isinstance(item.get("within_size_tolerance"), bool)
+            or not _finite_vector(item.get("candidate_center_m"), 3)
+        ):
+            return "rejected"
+    return "accepted"
+
+
+def _candidate_spatial_relation_binding_status(
+    record: Mapping[str, object],
+) -> str:
+    if record.get("schema_version") == 2:
+        candidate_count = record.get("candidate_count")
+        candidates = record.get("candidates")
+        pairwise = record.get("pairwise_measurements")
+        collinearity = record.get("collinearity_measurements")
+        if (
+            record.get("status") == "measured"
+            and isinstance(candidate_count, int)
+            and not isinstance(candidate_count, bool)
+            and candidate_count >= 2
+            and isinstance(record.get("segmentation"), Mapping)
+            and isinstance(candidates, list)
+            and len(candidates) == candidate_count
+            and isinstance(pairwise, list)
+            and len(pairwise) == candidate_count * (candidate_count - 1) // 2
+            and isinstance(collinearity, list)
+            and len(collinearity)
+            == candidate_count * (candidate_count - 1) * (candidate_count - 2) // 6
+            and _record_fingerprint_is_valid(record)
+        ):
+            return "accepted"
+        return "rejected"
+    status = str(record.get("status"))
+    relations = record.get("relations")
+    if (
+        not isinstance(record.get("comparison"), Mapping)
+        or not isinstance(record.get("segmentation"), Mapping)
+        or not isinstance(record.get("candidates"), list)
+        or not isinstance(relations, list)
+        or not _record_fingerprint_is_valid(record)
+    ):
+        return "rejected"
+    if status == "accepted":
+        return (
+            "accepted"
+            if record.get("candidate_count") == 3 and len(relations) == 1
+            else "rejected"
+        )
+    if status in {"ambiguous", "unavailable"} and not relations:
+        return status
+    return "rejected"
+
+
+def _record_fingerprint_is_valid(record: Mapping[str, object]) -> bool:
+    """Check a provider-owned record fingerprint without repairing the record."""
+    payload = dict(record)
+    fingerprint = payload.pop("fingerprint", None)
+    return bool(
+        _is_sha256_value(fingerprint)
+        and _fingerprint(payload) == fingerprint
+    )
 
 
 def _record_frame(record: Mapping[str, object]) -> str | None:

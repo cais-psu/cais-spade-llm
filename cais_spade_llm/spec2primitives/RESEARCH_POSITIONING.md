@@ -20,16 +20,13 @@ specification.
 The dynamic PA-to-RA composition workflow in this document is the proposed
 ICRA architecture. The PA context adapter through Phase 3.5 exists, and **the
 Phase 4 runtime is implemented through Phase 4.4 under the current framework**.
-The Gate-1 evidence policy intentionally stops the present Medium Gear scene at
-its ambiguous desired state, so no successful baseline is claimed until the
-separately authorized relational-grounding gate is complete. Phase 4.4
-adds a native controlled `retrieve` tool, transient ontology-proposal
-validation, requirement-neutral controller readiness, deterministic unique-state
-evidence gating, a
-configuration-derived Workcell with explicit per-resource process capabilities,
-PA-authored physical state-evidence and resource choices, two-state coarse
-reach, and exact-resource plan-only endpoint validation before a system-authored
-`processExecution` assignment. **Phase 5.1 now implements only the contract-first selected-RA
+Phase 4.4 now consists of two final PA decisions: an evidence-grounded
+`target_feature`, followed by PA-selected state-location lists and a capable
+resource backed by per-location reachability. Deterministic code validates
+syntax, provenance, ontology consistency, capability, and reachability without
+ranking or repairing either decision. Accepted runs commit seven target-feature
+assertions and four `processExecution`/resource-assignment assertions. **Phase
+5.1 now implements only the contract-first selected-RA
 assignment and state/catalog snapshot boundary, and Phase 5.2A implements
 RA-LLM-authored structural `PrimitiveProgramDraft`.** The composition input
 reconstructs the accepted PA `target_feature` and resolves its completion-pinned
@@ -38,11 +35,11 @@ primitive-level validation, and execution remain unimplemented; no Phase
 5.2B--9 runtime behavior is claimed.
 
 The completed Phase 4 boundary is location-based pre-RA grounding and resource
-assignment. It includes PA-authored current and desired product states, a
-separate PA semantic review, and endpoint-motion validation, but not cross-camera
-fusion, grasp/contact/tolerance/insertion validation, activation of an
-orientation-sensitive consumer, parameter binding, primitive-level robot
-validation, execution, or observed outcomes.
+assignment. It includes PA-authored current and desired product states and
+resource/location choices, but not cross-camera fusion, grasp/contact/tolerance/
+insertion validation, activation of an orientation-sensitive consumer,
+parameter binding, primitive-level robot validation, execution, or observed
+outcomes.
 
 ## Abstraction level
 
@@ -80,19 +77,21 @@ Trajectory generation, force control, velocity commands, and joint commands
 remain below `primitive_steps`.
 
 The implemented nominal contract currently supports one requirement and one
-feature. PA authors a v8 `target_feature` with an evidence-cited authorized
+feature. PA authors a v9 `target_feature` with an evidence-cited authorized
 process, complete evidence-cited current- and desired-state statements, and
-zero, one, or multiple optional typed state-value references for each state. PA chooses the semantic text,
-process, value count and names, record refs, JSON Pointer paths, and citations
-from retrieved evidence. Deterministic code validates authority and lineage but
-does not author those values.
+generic typed state-value references. The proposal schema permits zero, one, or
+multiple values of any accepted typed-record type. Resource assignment does not
+consume those values; PA separately chooses one or more neutral location handles
+for each state. PA chooses the semantic text, process, value count and names,
+record refs, JSON Pointer paths, citations, locations, and resource. Deterministic
+code validates authority and lineage but does not author those choices.
 
 The host generates `feature_0001`, `currentstate_0001`, and
 `desiredstate_0001` and compiles the exact seven feature/state/defines/realizes
 assertions. Rich authored state meaning remains in the
-accepted PA proposal. A separate `TargetFeatureSemanticReview` v2 accepts the
-meaning or returns a concise gap to bounded PA retrieval/revision without
-persisting private reasoning or accepted missing information.
+accepted PA proposal. There is no separate semantic-review call or
+controller-guided revision loop. A malformed final response is audited and
+fails with a deterministic stage-level code.
 
 Assembly is the controlled example, not the contract's only possible process.
 The production profile currently contains only `assembly`, `xarm6`, and `ur5e`,
@@ -137,24 +136,24 @@ planning, or execution.
 
 The perception records expose neutral candidates without assigning a semantic
 source or target role. The architecture has no `TargetFeatureGeometryRecord`.
-PA dynamically chooses approved evidence and assigns candidates to
+PA dynamically chooses approved evidence and may link typed values to
 `current_state` and `desired_state`; calibration and numeric robot-frame
-locations are derived only when reachability or another verifier needs them.
+locations are derived only when a downstream verifier receives compatible
+geometric bindings.
 No fixed evidence or resource order is prescribed.
 
 This PA claim is bounded. The controller prompt does not prescribe an evidence
 modality or record type. Approved observation retrieval automatically runs the
-deterministic preprocessing and segmentation implementation, and the current
-acceptance gate validates candidate state values resolved from
-`RGBDSegmentationRecord` evidence. PA does not choose that algorithm or its
-parameters. It does choose the approved evidence handle, the neutral candidate and state
-assignments, and the provisional resource; deterministic reachability and
-RobotAgent checks can only accept or reject those unchanged choices. The paper
+deterministic preprocessing and segmentation implementation when PA requests
+that evidence. PA does not choose that algorithm or its parameters. It chooses
+approved evidence, current and desired statements, optional typed state values,
+and—when geometric bindings permit allocation—the provisional resource;
+deterministic reachability and RobotAgent checks can only accept or reject those
+unchanged downstream choices. The paper
 therefore describes evidence-conditioned bounded PA autonomy within the fixed
 `assembly` process, not unrestricted freewill or dynamic perception-chain
-selection. Replacing the fixed record requirement with the existing
-descriptor-derived record plan is deferred and is required only for the latter
-claim.
+selection. Descriptor-derived record planning remains deferred and is required
+only for the latter claim.
 
 Spec2Primitives studies a composite-function coverage gap. It begins after an RA
 has been selected and no valid selection, ordering, and parameterization of its
@@ -248,10 +247,33 @@ Within the proposed method, the ontology is the canonical semantic interface for
 entity identity, the requested process, broad Workcell capabilities, and the
 selected process execution. Typed context and status records represent evidence
 links, primitive-input bindings, unresolved needs, conflicts, numeric values,
-and freshness. `GroundingProducerDescriptor` records map an already identified
-semantic or typed output need to authorized tools without hard-coding a PDF,
-CAD, RGB-D, calibration, or existing-record sequence. The TBox defines valid
-meaning; it does not decide which producer or source to use.
+and freshness. `GroundingProducerDescriptor` records describe available
+authorized evidence operations without prescribing which operation or source
+PA should use. The TBox defines valid shared symbols; it does not select a
+producer, source, candidate, state interpretation, or resource.
+
+New Phase 4 acceptance is deliberately narrower than semantic answer scoring:
+
+```text
+target_feature_shape_valid
+and every cited reference is authorized, hash-valid, and resolvable
+and required_process is configured
+and PA-selected resource is capable of required_process
+and every PA-submitted state location has accepted reachability
+```
+
+`current_state.state_values` and `desired_state.state_values` are optional
+evidence links: each may contain zero, one, or multiple values from any accepted
+typed record. PA chooses their names, references, and citations. They are not
+location requirements. In the second decision PA separately chooses one or more
+neutral location handles for each state and a capable resource. Deterministic
+code validates those exact choices once; it does not score whether another
+semantic answer, candidate, or resource would be preferable.
+
+An unlisted physical property is simply outside this Phase 4 schema. It cannot
+be introduced as an ad hoc blocker by either PA or the controller. Later
+primitive contracts may require pose, grasp, clearance, tolerance, or other
+inputs without retroactively changing the accepted target-feature record.
 
 SPARQL is an optional graph-access mechanism, not a requirement for every
 ontology consumer. The host may use fixed, validated graph extraction to
@@ -273,8 +295,8 @@ local validation boundary. It does not establish global context completeness.
 The neural side makes the decisions that are intentionally absent from the
 formal model:
 
-- PA identifies the next relevant product or scene knowledge need and uses only
-  controlled evidence producers to extend the interaction context;
+- PA autonomously chooses approved evidence and tools, authors the target
+  feature, then independently chooses state locations and a capable resource;
 - the selected RA LLM first authors a structural `PrimitiveProgramDraft` and
   later a fully bound, variable-length `primitive_steps` candidate by choosing,
   ordering, repeating, and binding only exact symbols in the pinned catalog;
@@ -288,8 +310,9 @@ The resulting closed loop is:
 TBox + interaction ABox + predefined Workcell ABox + system assignment
         + selected-RA typed catalog + typed context refs + partial contracts
         ↓ bounded grounded projection
-        ├─ PA neural decision → controlled evidence producer
-        │       → validated evidence delta → ABox/typed-context update → reassess
+        ├─ PA neural grounding decision → controlled evidence producers
+        │       → final target_feature → integrity/ontology validation
+        │       → PA neural allocation decision → reachability validation
         │
         └─ RA neural decision → structural PrimitiveProgramDraft
                 → binding preflight
@@ -683,19 +706,20 @@ PA retrieves only currently relevant approved evidence
         ↓
 PA authors one cited target_feature with current and desired states
         ↓
-host generates and validates its exact seven-assertion ABox projection
+host validates the final shape, process authority, citations, hashes,
+and any included typed-evidence links once
         ↓
-separate PA semantic review accepts or returns a revision gap ↺
+host commits the exact seven-assertion ABox projection
         ↓
-unresolved processExecution activates PA resource allocation
+host presents all capable resources and neutral location handles
         ↓
-PA chooses two state-evidence values and a provisional resource
+PA chooses one or more locations for each state and one resource
         ↓
-check_reachability derives locations and checks both feature states
+check_reachability reports every PA-submitted location independently
         ↓
-exact selected RobotAgent performs plan-only endpoint IK/collision/path checks ↺
+host validates the unchanged cited selection once
         ↓
-system commits exactly the accepted PA choice and v6 completion
+system commits four assignment assertions and v7 completion
         ↓
 selected RA receives reconstructed target_feature + fresh state
         + complete current primitive catalog
@@ -718,25 +742,25 @@ non-mutating validation and RA revision
 accepted candidate or fail-closed result
 ```
 
-- PA may make zero or more native `retrieve(evidence_id)` calls and then returns
-  a direct v8 two-state target-feature proposal, clarification, or insufficient-evidence result.
+- PA may make zero or more native tool calls and then returns one complete
+  two-state target feature, a genuine requirement-meaning clarification, or
+  `unsupported_process`.
   The system records tool-call IDs, resolved evidence, source revisions, hashes,
   and failures. `ProductContextView` exposes only the final accepted ABox and
   versioned `TypedContextBinding` records; it is not PA's reasoning state.
 - The official TBox defines valid meaning and types; it does not choose a
-  document, sensor, CAD, or tool. `GroundingProducerDescriptor` records map a
-  missing semantic or typed output to an authorized producer and evidence
-  policy. PA may dynamically select approved document, exact approved CAD,
-  RGB-D, calibration, or an existing record.
-- A structurally valid proposal and complete semantic review do not by
-  themselves commit a resource assignment. The grounded feature, both states,
-  required process, and unresolved `processExecution` activate PA allocation.
-  PA chooses the state evidence and resource supplied to the controlled
-  reachability verifier; the verifier never selects or substitutes a robot.
-- PA resolves only currently blocking task-level and assignment evidence before
-  the system records `processExecution`. Grounding completion means
-  only that Phase 5's current post-assignment consumer inputs are satisfied. It
-  is not a claim that later primitive bindings or execution context are complete.
+  document, sensor, CAD, tool, candidate, or resource. PA may dynamically select
+  any approved source or controlled tool.
+- The final target feature is validated once and committed before allocation.
+  `state_values` may contain zero or more values of any accepted record type and
+  do not supply allocation locations.
+- A second PA decision assigns one or more neutral location handles to each
+  state and selects a capable resource. The verifier checks only the submitted
+  combination and never ranks or substitutes alternatives.
+- PA does not author an insufficiency, failure reason, or unmet path. The
+  controller exposes only a deterministic stage code for invalid structure,
+  provenance, unavailable locations, capability, or reachability and never
+  returns it to PA as correction feedback.
 - RA retrieves the complete selected-RA-authoritative primitive-only catalog
   and fresh local state after allocation. Catalog cardinality is runtime-
   determined; the attempt pins its version, fingerprint, and exact symbols.
@@ -754,10 +778,9 @@ accepted candidate or fail-closed result
 - Binders and validators may detect and categorize missing inputs, but may never
   create, reorder, bind, or repair primitive steps. Only RA authors structural
   drafts, fully bound candidates, and revisions.
-- PA readiness means that the target feature, both states, semantic review,
-  two-state reachability, exact RobotAgent validation, and assignment are
-  accepted and pinned by v6
-  completion. There is no separate task-transition contract. RA
+- Phase 4 completion means the seven target-feature assertions and four
+  assignment assertions are accepted and pinned by completion v7. There is no
+  separate task-transition or new-run typed-grounding contract. RA
   readiness means that one unchanged candidate is fully bound and accepted by
   every applicable declared-contract and resource-owned check. Neither agent
   certifies the next authority's work or the post-execution outcome.
@@ -773,9 +796,7 @@ system resolves each exact catalog ref and source revision
         ↓
 approved sources are retrieved and returned in the same PA conversation
         ↓
-PA returns a direct proposal; system validates a transient candidate
-        ↓
-typed descriptor gap returns to PA retrieval, or acceptance continues
+PA returns one final proposal; system either accepts it unchanged or stops
 ```
 
 Each tool call is an internal evidence audit boundary, not a fixed PA decision
@@ -818,37 +839,30 @@ return compact typed evidence into the same conversation
         ↓
 PA authors one evidence-cited target_feature proposal with both states
         ↓
-host generates and validates feature/state types, state links, defines, and realizes
-        ↓
-PA assigns approved neutral candidates to currentstate and desiredstate
-        ↓
-deterministically validate both assignments, hashes, and unique correspondences ↺
-        ↓
-separate scaffold-free PA semantic consistency review accepts or returns a revision gap ↺
+host validates the unchanged proposal and its exact seven-assertion projection once
         ↓
 commit the accepted feature-state ABox
         ↓
-unresolved processExecution activates a free PA provisional resource choice
+present every capable resource and neutral location handle
         ↓
-check_reachability derives and evaluates both selected locations ↺
+PA selects one or more locations per state and a capable resource
         ↓
-send only the PA-chosen resource to its RobotAgent for plan-only validation
+check_reachability evaluates every submitted location independently
         ↓
-rejection returns evidence to PA; acceptance commits the exact choice
+validate the unchanged cited PA choice once
         ↓
-system commits processExecution and the post-assignment completion
+system commits four processExecution assertions and v7 completion
         ↓
 Phase 5.1 assignment envelope + injected-runtime state/catalog snapshots
         ↓
 Phase 5.2A reconstructed target_feature + RA-authored structural draft
 ```
 
-`TypedGroundingContract` v6 and `PAContextGroundingCompletion` v6 pin the
-accepted v8 proposal, both states, semantic review, evidence and allocation
-presentations, registry and workcell snapshots, PA-authored state-evidence
-mapping, referenced typed records, reachability, endpoint-motion RobotAgent
+`PAContextGroundingCompletion` v7 directly pins the accepted v9 proposal, both
+states, evidence and allocation presentations, registry and workcell snapshots,
+PA-authored location lists, referenced typed records, reachability, RobotAgent
 validation, resource selection, assignment delta, and final ABox without copying
-the target feature.
+the target feature or creating a duplicate `TypedGroundingContract`.
 Phase 5.2A reconstructs it from those authorities, resolves each
 referenced JSON Pointer into a bounded value projection, and presents no
 top-level `task` section. `PrimitiveProgramDraft` itself remains unchanged and
@@ -871,7 +885,7 @@ For ICRA:
 
 - PA performs schema-constrained, evidence-backed ABox instance grounding under
   the supplied PPR TBox. It does not discover or revise the ontology schema.
-  The active v8 proposal contains exactly one target feature. Multi-feature
+  The active v9 proposal contains exactly one target feature. Multi-feature
   requirements remain deferred.
 - The immutable TBox supplies the exact `product`, `feature`, `process`,
   `resource`, `capability`, and `processExecution` vocabulary before the first
@@ -953,8 +967,8 @@ The remaining ontology boundaries are:
 - CAD correspondence, observation association, and context-record links also
   remain in typed records when the fixed PPR vocabulary cannot express them.
   The runtime never invents an ontology predicate.
-- Initial PA handoff occurs only after the dynamic grounding loop finds no
-  currently identified blocking product-level ambiguity. If a later primitive
+- Initial PA handoff occurs only after one final target feature and one final
+  resource/location selection pass their declared Phase 4 checks. If a later primitive
   contract exposes missing product or scene bindings, RA returns one
   `MissingContextBatch`; PA resumes the same controlled producer loop and
   returns a versioned `CompositionContextBundle`. The validated post-assignment
@@ -969,10 +983,9 @@ The remaining ontology boundaries are:
   readiness.
 - The ontology join identifies only the configured resources broadly capable of
   the accepted feature's selected process; it does not choose among them. PA
-  freely proposes a resource and
-  the evidence assigned to both feature states. Deterministic workspace/distance
-  checks return reach evidence, and only the exact selected RobotAgent returns a
-  closed plan-only endpoint IK/collision/path verdict. These checks are
+  freely proposes a resource and one or more neutral location handles for each
+  state. The exact selected RobotAgent reports each submitted location's
+  reachability. These checks are
   supporting evidence, not an optimal allocator or manufacturing execution.
   Recovery input
   already carries its assigned `resource_jid`; both paths later unicast to the

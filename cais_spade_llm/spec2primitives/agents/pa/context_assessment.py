@@ -18,10 +18,11 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
+    _resource_assignment_output_validation_error,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v6,
+    persist_pa_context_grounding_completion_v7,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -32,6 +33,16 @@ logger = logging.getLogger(__name__)
 
 _REQUIREMENT_PATH = Path("products/user_requirement/product_requirement.json")
 _RECORD_ROOT = Path("interaction_record")
+_GROUNDING_VALIDATION_CODES = frozenset(
+    {
+        "unsupported_process",
+        "invalid_target_feature",
+        "evidence_reference_invalid",
+        "location_evidence_unavailable",
+        "no_reachable_resource",
+        "invalid_resource_selection",
+    }
+)
 
 
 async def submit_pa_clarification_reply(
@@ -246,16 +257,14 @@ async def continue_pa_context_interaction(
                 assessed_at_ns=time.time_ns(),
             )
             persist_product_context_view(root, fresh_view)
-            persist_pa_context_grounding_completion_v6(
+            _persist_resource_assignment_completion(
                 root,
                 tbox=tbox,
                 product_requirement=requirement,
                 completion_turn=next_turn,
                 decision_ref=turn_path.relative_to(root).as_posix(),
                 product_context=fresh_view,
-                ontology_projection_ref=str(output["ontology_projection_ref"]),
-                resource_selection_ref=str(output["resource_selection_ref"]),
-                tool_call_refs=_tool_call_refs(root),
+                output=output,
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.exception("Native clarification completion failed.")
@@ -400,13 +409,53 @@ def _native_output_error(value: Mapping[str, object]) -> str | None:
         return "Native clarification output is invalid."
     if status == "incomplete" and not isinstance(value.get("insufficient_evidence"), str):
         return "Native insufficient-evidence output is invalid."
-    if status == "complete" and (
-        not isinstance(value.get("ontology_projection_ref"), str)
-        or not isinstance(value.get("resource_selection_ref"), str)
-        or not isinstance(value.get("tool_call_refs"), list)
-    ):
-        return "Native completion output is invalid."
+    validation_code = value.get("grounding_validation_code")
+    if status == "incomplete" and validation_code not in _GROUNDING_VALIDATION_CODES:
+        return "Native grounding-validation code is invalid."
+    if status != "incomplete" and validation_code is not None:
+        return "Native grounding-validation code is invalid."
+    if value.get("unmet_grounding_obligation") is not None:
+        return "Native output cannot contain a grounding obligation."
+    if status == "complete":
+        if not isinstance(value.get("ontology_projection_ref"), str) or not isinstance(
+            value.get("tool_call_refs"),
+            list,
+        ):
+            return "Native completion output is invalid."
+        resource_error = _resource_assignment_output_validation_error(value)
+        if resource_error is not None:
+            return resource_error
     return None
+
+
+def _persist_resource_assignment_completion(
+    root: Path,
+    *,
+    tbox: object,
+    product_requirement: str,
+    completion_turn: int,
+    decision_ref: str,
+    product_context: object,
+    output: Mapping[str, object],
+) -> None:
+    """Persist v7 only after both autonomous Phase 4 decisions complete."""
+    if output.get("resource_assignment_status") != "complete":
+        return
+    persist_pa_context_grounding_completion_v7(
+        root,
+        tbox=tbox,
+        product_requirement=product_requirement,
+        completion_turn=completion_turn,
+        decision_ref=decision_ref,
+        product_context=product_context,
+        ontology_projection_ref=str(output["ontology_projection_ref"]),
+        resource_selection_ref=str(output["resource_selection_ref"]),
+        tool_call_refs=tuple(
+            item
+            for item in output.get("tool_call_refs", [])
+            if isinstance(item, str)
+        ),
+    )
 
 
 def _configuration_error(

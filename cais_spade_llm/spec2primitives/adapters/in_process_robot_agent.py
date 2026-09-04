@@ -147,7 +147,7 @@ class InProcessRobotAgentCompositionRuntime:
             )
         return response
 
-    async def validate_plan_only_allocation(  # noqa: C901
+    async def validate_plan_only_allocation(  # noqa: C901, PLR0915
         self,
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
@@ -182,6 +182,141 @@ class InProcessRobotAgentCompositionRuntime:
             resource_jid=resource_jid,
             execution_mode=execution_mode,
         )
+
+        if request.get("validation_scope") == "state_location_reachability":
+            state_locations = request.get("state_locations")
+            if not isinstance(state_locations, Mapping) or set(state_locations) != {
+                "current_state",
+                "desired_state",
+            }:
+                raise RAContextHandoffError(
+                    "Plan-only state-location inputs are invalid."
+                )
+
+            async def _location_precheck() -> Mapping[str, object]:
+                self._require_alive(selected_agent, resource_jid)
+                snapshot_reader = getattr(selected_agent, "get_recovery_snapshot", None)
+                feasibility_check = getattr(
+                    selected_agent,
+                    "check_recovery_physical_feasibility",
+                    None,
+                )
+                if not callable(snapshot_reader) or not callable(feasibility_check):
+                    raise RAContextHandoffError(
+                        "Selected RobotAgent does not expose physical validation."
+                    )
+                snapshot = snapshot_reader()
+                if not isinstance(snapshot, Mapping):
+                    raise RAContextHandoffError(
+                        "Selected RobotAgent returned an invalid validation snapshot."
+                    )
+                results: dict[str, list[Mapping[str, object]]] = {}
+                statuses: list[str] = []
+                for state_name in ("current_state", "desired_state"):
+                    submitted = state_locations[state_name]
+                    if (
+                        not isinstance(submitted, Sequence)
+                        or isinstance(submitted, (str, bytes))
+                        or not submitted
+                    ):
+                        raise RAContextHandoffError(
+                            f"Plan-only {state_name} locations are invalid."
+                        )
+                    state_results: list[Mapping[str, object]] = []
+                    for location in submitted:
+                        translation = (
+                            location.get("translation_m")
+                            if isinstance(location, Mapping)
+                            else None
+                        )
+                        state_iri = (
+                            location.get("state_iri")
+                            if isinstance(location, Mapping)
+                            else None
+                        )
+                        evidence_handle = (
+                            location.get("evidence_handle")
+                            if isinstance(location, Mapping)
+                            else None
+                        )
+                        if (
+                            not isinstance(translation, Sequence)
+                            or isinstance(translation, (str, bytes))
+                            or len(translation) != 3
+                            or not isinstance(state_iri, str)
+                            or not state_iri
+                            or not isinstance(evidence_handle, str)
+                            or not evidence_handle
+                        ):
+                            raise RAContextHandoffError(
+                                f"Plan-only {state_name} location is invalid."
+                            )
+                        pose = {
+                            axis: float(value)
+                            for axis, value in zip(
+                                ("x", "y", "z"),
+                                translation,
+                                strict=True,
+                            )
+                        }
+                        result = feasibility_check(
+                            part_context={
+                                "feature_iri": feature_iri,
+                                "process_symbol": process_symbol,
+                                "process_iri": process_iri,
+                                "state_name": state_name,
+                                "state_iri": state_iri,
+                                "state_evidence_handle": evidence_handle,
+                            },
+                            recovery_snapshot=deepcopy(dict(snapshot)),
+                            operation_kind=process_symbol,
+                            grounded_action={
+                                "task_kind": process_symbol,
+                                "process_iri": process_iri,
+                                "feature_iri": feature_iri,
+                                "state_iri": state_iri,
+                                "target": {"pose": pose},
+                            },
+                        )
+                        if not isinstance(result, Mapping):
+                            raise RAContextHandoffError(
+                                "Selected RobotAgent physical validation is invalid."
+                            )
+                        allowed = result.get("allowed") is True
+                        status = "accepted" if allowed else "rejected"
+                        statuses.append(status)
+                        reason = str(result.get("reason") or "").strip()
+                        state_results.append(
+                            {
+                                "evidence_handle": evidence_handle,
+                                "status": status,
+                                "message": reason
+                                or (
+                                    "RobotAgent workspace precheck accepted the location."
+                                    if allowed
+                                    else "RobotAgent workspace precheck rejected the location."
+                                ),
+                                "error_code": None,
+                            }
+                        )
+                    results[state_name] = state_results
+                status = "rejected" if "rejected" in statuses else "accepted"
+                return {
+                    "status": status,
+                    "state_locations": results,
+                    "feedback": (
+                        None
+                        if status == "accepted"
+                        else "One or more submitted locations are unreachable."
+                    ),
+                }
+
+            response = await self._host._run_on_agent_runtime(_location_precheck())
+            if not isinstance(response, Mapping):
+                raise RAContextHandoffError(
+                    "Selected RobotAgent state-location validation is unavailable."
+                )
+            return deepcopy(dict(response))
 
         if request.get("motion_mode") == "cartesian_pick_place":
             if execution_mode != "simulation":

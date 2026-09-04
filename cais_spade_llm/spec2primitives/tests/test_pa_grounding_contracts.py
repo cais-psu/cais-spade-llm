@@ -268,6 +268,179 @@ def test_changed_embedded_source_reopens_world_location_as_stale(
     assert reopened.typed_bindings[0].record_ref == accepted.typed_bindings[0].record_ref
 
 
+def test_dynamic_document_and_layout_records_enter_hash_validated_typed_context(
+    tmp_path: Path,
+) -> None:
+    def fingerprinted(value: dict[str, object]) -> dict[str, object]:
+        value["fingerprint"] = hashlib.sha256(
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return value
+
+    tbox = ontology_config().load_tbox()
+    initialize_interaction_abox(tmp_path, "an unforeseen requirement", tbox)
+    evidence_root = tmp_path / "products/grounding"
+    document_root = evidence_root / "document_evidence"
+    geometry_root = evidence_root / "rgb_d_cad_grounding"
+    document_root.mkdir(parents=True)
+    geometry_root.mkdir(parents=True)
+
+    source_index = fingerprinted(
+        {"pages": [{"page": 1, "extracted_text": "text"}]}
+    )
+    source_index_path = document_root / "source_index_0001.json"
+    source_index_path.write_text(
+        json.dumps(
+            fingerprinted(
+            {
+                "schema_version": 1,
+                "record_type": "DocumentSourceIndexRecord",
+                "producer": "document_evidence",
+                "status": "accepted",
+                "evidence_refs": ["manual.pdf#page=1"],
+                "source_index": source_index,
+            }
+            )
+        ),
+        encoding="utf-8",
+    )
+    source_index_ref = source_index_path.relative_to(tmp_path).as_posix()
+    query_path = document_root / "query_0001.json"
+    query_path.write_text(
+        json.dumps(
+            fingerprinted(
+            {
+                "schema_version": 1,
+                "record_type": "DocumentQueryRecord",
+                "producer": "document_evidence",
+                "status": "supported",
+                "question": "What is stated?",
+                "question_sha256": hashlib.sha256(b"What is stated?").hexdigest(),
+                "source_index": {
+                    "ref": source_index_ref,
+                    "sha256": hashlib.sha256(source_index_path.read_bytes()).hexdigest(),
+                },
+                "claims": [{"predicate_text": "open predicate", "arguments": []}],
+                "uncertainty": [],
+                "evidence_refs": [source_index_ref, "manual.pdf#page=1"],
+            }
+            )
+        ),
+        encoding="utf-8",
+    )
+    query_ref = query_path.relative_to(tmp_path).as_posix()
+    historical_path = document_root / "overview_0001.json"
+    historical_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "record_type": "DocumentOverviewRecord",
+                "producer": "document_evidence",
+                "overview": {},
+                "evidence_refs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    historical_ref = historical_path.relative_to(tmp_path).as_posix()
+    document_merge = validate_and_merge_triple_delta(
+        tmp_path,
+        tbox,
+        "document_evidence",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [source_index_ref, query_ref, historical_ref],
+        },
+        authorized_evidence_refs=["manual.pdf#page=1", source_index_ref],
+    )
+
+    comparison_path = geometry_root / "comparison.json"
+    segmentation_path = geometry_root / "segmentation.json"
+    comparison_path.write_text('{"comparison":"ambiguous"}\n', encoding="utf-8")
+    segmentation_path.write_text('{"candidates":3}\n', encoding="utf-8")
+    comparison_ref = comparison_path.relative_to(tmp_path).as_posix()
+    segmentation_ref = segmentation_path.relative_to(tmp_path).as_posix()
+    relation_path = geometry_root / "relation_0001.json"
+    relation_path.write_text(
+        json.dumps(
+            fingerprinted(
+            {
+                "schema_version": 1,
+                "record_type": "CandidateSpatialRelationRecord",
+                "producer": "rgb_d_cad_grounding",
+                "status": "accepted",
+                "comparison": {
+                    "ref": comparison_ref,
+                    "sha256": hashlib.sha256(comparison_path.read_bytes()).hexdigest(),
+                },
+                "segmentation": {
+                    "ref": segmentation_ref,
+                    "sha256": hashlib.sha256(segmentation_path.read_bytes()).hexdigest(),
+                },
+                "candidate_count": 3,
+                "candidates": ["candidate_a", "candidate_b", "candidate_c"],
+                "relations": [{"predicate_text": "between"}],
+                "evidence_refs": [comparison_ref, segmentation_ref],
+            }
+            )
+        ),
+        encoding="utf-8",
+    )
+    relation_ref = relation_path.relative_to(tmp_path).as_posix()
+    geometry_merge = validate_and_merge_triple_delta(
+        tmp_path,
+        tbox,
+        "rgb_d_cad_grounding",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [relation_ref],
+        },
+        authorized_evidence_refs=[comparison_ref, segmentation_ref],
+    )
+    view = build_product_context_view(
+        tmp_path,
+        geometry_merge.abox,
+        attempted_evidence=(),
+        assessed_at_ns=1,
+    )
+    statuses = {
+        binding.record_type: binding.status for binding in view.typed_bindings
+    }
+    assert statuses == {
+        "DocumentSourceIndexRecord": "accepted",
+        "DocumentQueryRecord": "accepted",
+        "DocumentOverviewRecord": "accepted",
+        "CandidateSpatialRelationRecord": "accepted",
+    }
+    assert document_merge.abox.delta_count == 1
+
+    changed_source_index = json.loads(source_index_path.read_text(encoding="utf-8"))
+    changed_source_index["source_index"]["pages"][0]["extracted_text"] = "changed"
+    source_index_path.write_text(json.dumps(changed_source_index), encoding="utf-8")
+    reopened = build_product_context_view(
+        tmp_path,
+        geometry_merge.abox,
+        attempted_evidence=(),
+        assessed_at_ns=2,
+    )
+    query_binding = next(
+        binding
+        for binding in reopened.typed_bindings
+        if binding.record_type == "DocumentQueryRecord"
+    )
+    assert query_binding.status == "stale"
+
+
 def test_document_typed_record_requires_explicit_record_type(tmp_path: Path) -> None:
     tbox = ontology_config().load_tbox()
     initialize_interaction_abox(tmp_path, "assemble Medium Gear", tbox)

@@ -106,6 +106,7 @@ class PlanOnlyFeasibilityValidation:
     motion_mode: str | None = None
     tcp_link: str | None = None
     cartesian_path_service: str | None = None
+    state_locations: Mapping[str, tuple[Mapping[str, object], ...]] | None = None
 
     def to_record(self) -> Mapping[str, object]:
         """Reload and return the exact persisted record."""
@@ -141,8 +142,18 @@ async def validate_provisional_allocation(
             prepared=reachability,
             validation_number=validation_number,
         )
+    if reachability.schema_version == 4:
+        return await _validate_state_location_allocation(
+            runtime,
+            interaction_root=interaction_root,
+            workcell=workcell,
+            reachability=reachability,
+            validation_number=validation_number,
+        )
     workcell.assert_unchanged()
     reachability.assert_unchanged()
+    if reachability.current_state is None or reachability.desired_state is None:
+        raise RobotAgentFeasibilityError("Reachability state evidence is unavailable.")
     moveit_group, end_effector_link = _moveit_profile(workcell, reachability)
     unvalidated_constraints = _unvalidated_constraints(reachability.process_symbol)
     request = {
@@ -262,6 +273,162 @@ async def validate_provisional_allocation(
         ),
         request_fingerprint=reachability.fingerprint,
         fingerprint=str(payload["fingerprint"]),
+    )
+
+
+async def _validate_state_location_allocation(  # noqa: PLR0913
+    runtime: RobotAgentFeasibilityRuntime,
+    *,
+    interaction_root: Path,
+    workcell: PredefinedWorkcellSnapshot,
+    reachability: ReachabilityCheckRecord,
+    validation_number: int,
+) -> PlanOnlyFeasibilityValidation:
+    """Ask the selected RobotAgent to check each submitted location independently."""
+    workcell.assert_unchanged()
+    reachability.assert_unchanged()
+    state_locations = reachability.state_locations
+    if state_locations is None or set(state_locations) != {"current_state", "desired_state"}:
+        raise RobotAgentFeasibilityError("Reachability state locations are unavailable.")
+    moveit_group, end_effector_link = _moveit_profile(workcell, reachability)
+    request_locations = {
+        state_name: [
+            {
+                "state_iri": item.state_iri,
+                "evidence_handle": item.evidence_handle,
+                "translation_m": list(item.translation_m),
+                "location_record_ref": item.location_record_ref,
+                "location_record_sha256": item.location_record_sha256,
+            }
+            for item in locations
+        ]
+        for state_name, locations in state_locations.items()
+    }
+    request = {
+        "process_symbol": reachability.process_symbol,
+        "process_iri": reachability.process_iri,
+        "feature_iri": reachability.feature_iri,
+        "resource_symbol": reachability.resource_symbol,
+        "resource_iri": reachability.resource_iri,
+        "resource_jid": reachability.resource_jid,
+        "execution_mode": reachability.execution_mode,
+        "moveit_group": moveit_group,
+        "end_effector_link": end_effector_link,
+        "target_frame": reachability.target_frame,
+        "validation_scope": "state_location_reachability",
+        "checked_constraints": ["resource_endpoint_reachability"],
+        "unvalidated_constraints": [
+            "grasping",
+            "insertion",
+            "force_contact",
+            "process_tolerance",
+        ],
+        "state_locations": request_locations,
+        "mode": "plan_only",
+        "motion_executed": False,
+        "request_fingerprint": reachability.fingerprint,
+    }
+    try:
+        response = await runtime.validate_plan_only_allocation(request)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        response = {
+            "status": "needs_context",
+            "state_locations": {
+                state_name: [
+                    {
+                        "evidence_handle": str(item["evidence_handle"]),
+                        "status": "needs_context",
+                        "message": "Exact RobotAgent validation is unavailable.",
+                        "error_code": None,
+                    }
+                    for item in locations
+                ]
+                for state_name, locations in request_locations.items()
+            },
+            "feedback": "Exact RobotAgent validation is unavailable.",
+        }
+    validated = _validated_state_location_response(response, request_locations)
+    payload: dict[str, object] = {
+        "schema_version": 4,
+        "record_type": "PlanOnlyFeasibilityValidationRecord",
+        "validation_number": validation_number,
+        "validator_authority": reachability.resource_jid,
+        "process_symbol": reachability.process_symbol,
+        "process_iri": reachability.process_iri,
+        "feature_iri": reachability.feature_iri,
+        "current_state_iri": state_locations["current_state"][0].state_iri,
+        "desired_state_iri": state_locations["desired_state"][0].state_iri,
+        "resource_symbol": reachability.resource_symbol,
+        "resource_iri": reachability.resource_iri,
+        "resource_jid": reachability.resource_jid,
+        "execution_mode": reachability.execution_mode,
+        "moveit_group": moveit_group,
+        "end_effector_link": end_effector_link,
+        "target_frame": reachability.target_frame,
+        "validation_scope": "state_location_reachability",
+        "checked_constraints": ["resource_endpoint_reachability"],
+        "unvalidated_constraints": [
+            "grasping",
+            "insertion",
+            "force_contact",
+            "process_tolerance",
+        ],
+        "state_locations": validated["state_locations"],
+        "mode": "plan_only",
+        "motion_executed": False,
+        "status": validated["status"],
+        "feedback": validated["feedback"],
+        "validated_at_ns": time.time_ns(),
+        "request_fingerprint": reachability.fingerprint,
+    }
+    payload["fingerprint"] = _fingerprint(payload)
+    root = Path(interaction_root).resolve()
+    destination = (
+        root
+        / "resources"
+        / reachability.resource_jid
+        / "validation"
+        / f"plan_only_validation_{validation_number:04d}"
+    )
+    record_path = destination / "plan_only_feasibility_validation_record.json"
+    _persist_record(destination, record_path.name, payload)
+    return PlanOnlyFeasibilityValidation(
+        record_path=record_path,
+        record_ref=record_path.relative_to(root).as_posix(),
+        validation_number=validation_number,
+        process_symbol=reachability.process_symbol,
+        process_iri=reachability.process_iri,
+        feature_iri=reachability.feature_iri,
+        current_state_iri=state_locations["current_state"][0].state_iri,
+        desired_state_iri=state_locations["desired_state"][0].state_iri,
+        resource_symbol=reachability.resource_symbol,
+        resource_iri=reachability.resource_iri,
+        resource_jid=reachability.resource_jid,
+        execution_mode=reachability.execution_mode,
+        moveit_group=moveit_group,
+        end_effector_link=end_effector_link,
+        target_frame=reachability.target_frame,
+        validation_scope="state_location_reachability",
+        checked_constraints=("resource_endpoint_reachability",),
+        unvalidated_constraints=(
+            "grasping",
+            "insertion",
+            "force_contact",
+            "process_tolerance",
+        ),
+        status=str(validated["status"]),
+        feedback=(
+            str(validated["feedback"])
+            if validated["feedback"] is not None
+            else None
+        ),
+        request_fingerprint=reachability.fingerprint,
+        fingerprint=str(payload["fingerprint"]),
+        schema_version=4,
+        state_locations={
+            state_name: tuple(dict(item) for item in locations)
+            for state_name, locations in validated["state_locations"].items()
+        },
     )
 
 
@@ -685,6 +852,85 @@ def _moveit_profile(
             "PA-chosen resource has no matching MoveIt validation profile."
         )
     return group_name, end_effector_link
+
+
+def _validated_state_location_response(
+    value: object,
+    requested: Mapping[str, Sequence[Mapping[str, object]]],
+) -> Mapping[str, object]:
+    """Validate a RobotAgent verdict for every submitted location handle."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "status",
+        "state_locations",
+        "feedback",
+    }:
+        raise RobotAgentFeasibilityError(
+            "RobotAgent state-location validation response fields are invalid."
+        )
+    locations = value["state_locations"]
+    if not isinstance(locations, Mapping) or set(locations) != set(requested):
+        raise RobotAgentFeasibilityError(
+            "RobotAgent state-location validation groups are invalid."
+        )
+    validated: dict[str, list[Mapping[str, object]]] = {}
+    statuses: list[str] = []
+    for state_name, expected_items in requested.items():
+        supplied_items = locations[state_name]
+        if (
+            not isinstance(supplied_items, Sequence)
+            or isinstance(supplied_items, (str, bytes))
+            or len(supplied_items) != len(expected_items)
+        ):
+            raise RobotAgentFeasibilityError(
+                f"RobotAgent {state_name} location results are invalid."
+            )
+        state_results: list[Mapping[str, object]] = []
+        for expected, supplied in zip(expected_items, supplied_items, strict=True):
+            if not isinstance(supplied, Mapping) or set(supplied) != {
+                "evidence_handle",
+                "status",
+                "message",
+                "error_code",
+            }:
+                raise RobotAgentFeasibilityError(
+                    f"RobotAgent {state_name} location result is invalid."
+                )
+            status = supplied["status"]
+            message = supplied["message"]
+            error_code = supplied["error_code"]
+            if (
+                supplied["evidence_handle"] != expected["evidence_handle"]
+                or status not in _VALIDATION_STATUSES
+                or not isinstance(message, str)
+                or not message.strip()
+                or (
+                    error_code is not None
+                    and (isinstance(error_code, bool) or not isinstance(error_code, int))
+                )
+            ):
+                raise RobotAgentFeasibilityError(
+                    f"RobotAgent {state_name} location result is inconsistent."
+                )
+            statuses.append(str(status))
+            state_results.append(dict(supplied))
+        validated[state_name] = state_results
+    expected_status = (
+        "rejected"
+        if "rejected" in statuses
+        else "needs_context" if "needs_context" in statuses else "accepted"
+    )
+    feedback = value["feedback"]
+    if value["status"] != expected_status or (
+        feedback is not None and (not isinstance(feedback, str) or not feedback.strip())
+    ):
+        raise RobotAgentFeasibilityError(
+            "RobotAgent state-location validation verdict is inconsistent."
+        )
+    return {
+        "status": expected_status,
+        "state_locations": validated,
+        "feedback": feedback,
+    }
 
 
 def _validated_response(value: object) -> Mapping[str, object]:

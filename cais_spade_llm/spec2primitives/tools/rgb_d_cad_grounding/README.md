@@ -40,18 +40,20 @@ cannot add `current_state`, `desired_state`, CAD, process, or resource decisions
 already-preprocessed exact approved CAD record. It revalidates their paths,
 hashes, arrays, bounds, masks, frames, summaries, and counts; reconstructs each
 candidate's camera-local points; and compares the two largest principal
-dimensions with the two largest CAD dimensions. Both relative errors must be at
-most 15 percent, and the next reliable candidate must be at least ten percentage
-points worse. Similar valid sizes are ambiguous, no valid size is rejected, and
-an image-boundary candidate is treated as unreliable partial visibility.
-
-Each successful call atomically persists one `CADSizeCorrespondenceRecord` with
-the exact CAD and segmentation provenance, deterministic ranked candidates,
-dimension errors, and any selected median center in its camera optical frame.
-The result reports only `CAD_correspondence` and camera-frame `location` status.
+dimensions with the two largest CAD dimensions. The active Phase 4
+`measure_segmented_candidates_against_cad` path atomically persists
+`CADSizeCorrespondenceRecord` v3 with every candidate measurement in observation
+order. It records no rank, plausible subset, winner, or correspondence verdict.
 Rotation, complete pose, cross-camera fusion, and robot-frame conversion remain
-`not_evaluated`. The tool never searches the CAD inventory or loads more than
-the exact CAD record supplied by its caller.
+`not_evaluated`. The older selecting association function remains available only
+to historical pose/diagnostic consumers; Phase 4 does not call it.
+
+`candidate_layout.py` accepts any two or more unique PA-selected candidates from
+one view and frame. It persists their positions, pairwise displacement vectors,
+distances, and triple collinearity measurements in
+`CandidateSpatialRelationRecord` v2. The fixed record name is retained for
+compatibility, but the tool emits no relation label or built-in `between`
+verdict.
 
 `pose_estimation.py` consumes one intact `CADSizeCorrespondenceRecord`,
 revalidates its complete CAD, segmentation, point-cloud, mask, and hash chain,
@@ -82,7 +84,7 @@ input hashes. A separate orientation-sensitive consumer may activate the
 retained `CADPoseEstimationRecord` and `RobotFramePoseRecord` path. Ambiguous or
 rejected inputs preserve their state without accepted robot-frame coordinates.
 `RobotFrameLocationRecord` and `RobotFramePoseRecord` have no embedded semantic
-source/target role. PA's feature-state assignment provides their meaning. These
+source/target role. PA's allocation request provides their state role. These
 paths perform no robot selection, RA call, planning, or execution and
 read no world, spawn, entity-state, detector, or evaluator input.
 
@@ -115,7 +117,8 @@ context completion.
 
 These components expose neutral candidates, not semantic source/target labels.
 The architecture has no `TargetFeatureGeometryRecord`. PA decides which
-approved evidence to retrieve and which candidate supports each feature state;
-the frame converter derives a location only after a verifier requests that
-selected handle. This README prescribes no document, RGB-D, CAD, camera, or
-resource order.
+approved evidence to retrieve and may cite any accepted record in target-feature
+`state_values`. In the separate allocation decision, PA selects one or more
+neutral location handles for each state; the frame converter derives locations
+only for submitted segmentation handles. This README prescribes no document,
+RGB-D, CAD, candidate, camera, or resource order.

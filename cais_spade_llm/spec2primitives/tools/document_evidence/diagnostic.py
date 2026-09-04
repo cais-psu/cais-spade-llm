@@ -17,8 +17,6 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingInterruption,
     commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
-    reject_ontology_grounding_candidate,
-    review_target_feature_semantics,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     initialize_interaction_abox,
@@ -165,32 +163,10 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             tools=[],
             tool_executor=no_retrieval,
             max_tool_rounds=1,
-            required_output_projection={
-                "record_type": "RobotFrameLocationRecord",
-                "target_frame": "configured resource reach frame",
-                "purpose": "diagnostic schema projection only",
-            },
         )
         if isinstance(candidate, OntologyGroundingInterruption):
             raise OntologyGroundingError(
                 f"Document diagnostic did not return a proposal: {candidate.message}"
-            )
-        semantic_review = await review_target_feature_semantics(
-            product_agent,
-            interaction_root=root,
-            candidate=candidate,
-            product_requirement=product_requirement,
-            evidence_catalog=evidence_catalog,
-        )
-        if semantic_review.verdict != "complete":
-            reject_ontology_grounding_candidate(
-                candidate,
-                interaction_root=root,
-                abox=overview_merge.abox,
-                semantic_review=semantic_review,
-            )
-            raise OntologyGroundingError(
-                semantic_review.gap or "Document target feature is semantically incomplete."
             )
         proposal = commit_ontology_grounding_candidate(
             candidate,
@@ -199,7 +175,6 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             abox=overview_merge.abox,
             workcell=workcell,
             authorized_evidence_refs=authorized_evidence_refs,
-            semantic_review=semantic_review,
         )
         proposal_record = _read_mapping(
             proposal.proposal_path,

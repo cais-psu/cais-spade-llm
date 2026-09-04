@@ -16,6 +16,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     PAContextGroundingCompletionV4,
     PAContextGroundingCompletionV5,
     PAContextGroundingCompletionV6,
+    PAContextGroundingCompletionV7,
     ProductContextView,
     load_completed_product_context_view,
     load_pa_context_grounding_completion,
@@ -300,6 +301,7 @@ def _composition_input(
         PAContextGroundingCompletionV4
         | PAContextGroundingCompletionV5
         | PAContextGroundingCompletionV6
+        | PAContextGroundingCompletionV7
     ),
 ) -> dict[str, object]:
     assignment = context.assignment
@@ -358,7 +360,7 @@ def _reconstructed_target_feature(  # noqa: C901
     proposal_schema_version = proposal.get("schema_version")
     output = proposal.get("output")
     if (
-        proposal_schema_version not in {6, 7, 8}
+        proposal_schema_version not in {6, 7, 8, 9}
         or proposal.get("status") != "accepted"
         or proposal.get("initialized_specification_iri") != assignment.specification_iri
         or proposal.get("feature_iri") != assignment.feature_iri
@@ -408,7 +410,7 @@ def _reconstructed_target_feature(  # noqa: C901
                 state,
                 pinned_hashes=pinned_hashes,
                 binding_types=binding_types,
-                include_state_role=proposal_schema_version in {7, 8},
+                include_state_role=proposal_schema_version in {7, 8, 9},
             )
         )
         assert isinstance(state, Mapping)
@@ -840,7 +842,8 @@ def _load_completion(
 ) -> tuple[
     PAContextGroundingCompletionV4
     | PAContextGroundingCompletionV5
-    | PAContextGroundingCompletionV6,
+    | PAContextGroundingCompletionV6
+    | PAContextGroundingCompletionV7,
     Path,
 ]:
     completion = load_pa_context_grounding_completion(root)
@@ -850,9 +853,10 @@ def _load_completion(
             PAContextGroundingCompletionV4,
             PAContextGroundingCompletionV5,
             PAContextGroundingCompletionV6,
+            PAContextGroundingCompletionV7,
         ),
     ):
-        raise PrimitiveDraftError("Phase 5.2 requires PA completion version 4, 5, or 6.")
+        raise PrimitiveDraftError("Phase 5.2 requires PA completion version 4 through 7.")
     paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
     if len(paths) != 1:
         raise PrimitiveDraftError("Phase 5.2 requires exactly one PA completion.")

@@ -1049,11 +1049,13 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert assignment_record["schema_version"] == 3
     assert assignment_record["process_symbol"] == "assembly"
     assert assignment_record["selected_resource_symbol"] == "xarm6"
-    assert assignment_record["allocation_label"] == ("validated endpoint-motion allocation")
-    assert assignment_record["validation_scope"] == "endpoint_motion"
+    assert assignment_record["allocation_label"] == (
+        "validated state-location resource allocation"
+    )
+    assert assignment_record["validation_scope"] == "state_location_reachability"
     assert assignment_record["motion_executed"] is False
-    assert assignment_record["current_state_evidence"]["evidence_handle"]
-    assert assignment_record["desired_state_evidence"]["evidence_handle"]
+    assert assignment_record["current_state_evidence"]["location_handles"]
+    assert assignment_record["desired_state_evidence"]["location_handles"]
     assert assignment_record["registry_snapshot_ref"].endswith(
         "resource_registry_snapshot_0001.json"
     )
@@ -1217,7 +1219,7 @@ def test_assignment_envelope_v3_rejects_altered_authority_lineage(
     if variant == "process":
         assignment["process_symbol"] = "altered_process"
     elif variant == "state":
-        assignment["current_state_evidence"]["evidence_handle"] = "altered_evidence"
+        assignment["current_state_evidence"]["location_handles"] = ["altered_evidence"]
     else:
         fingerprint_field = {
             "reachability": "reachability_check_fingerprint",

@@ -15,10 +15,6 @@ from rdflib import Namespace, URIRef
 from rdflib.namespace import RDF
 
 from cais_spade_llm.spec2primitives.agents.pa import production_grounding
-from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingProducerDescriptor,
-    build_product_context_view,
-)
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingCandidate,
     OntologyGroundingError,
@@ -27,7 +23,6 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingResult,
     commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
-    review_target_feature_semantics,
 )
 from cais_spade_llm.spec2primitives.agents.pa.presentation_records import (
     AllocationEvidenceEntry,
@@ -40,28 +35,19 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
-    ProductionGroundingError,
     ProductionProductContextGroundingRuntime,
-    _allocation_entry_for_binding,
-    _append_validation_feedback,
+    _analyze_candidate_layout_tool,
     _approved_evidence_handles,
     _approved_evidence_sources,
     _cad_size_comparison_projection,
     _CADComparisonBinding,
-    _clarification_requests_system_choice,
     _compare_cad_size_tool,
     _EvidenceHandle,
     _NativeEvidenceInvestigation,
     _neutral_candidate_views,
     _pa_allocation_prompt,
-    _producer_descriptors,
-    _proposal_cad_bindings,
-    _proposal_state_candidate_bindings,
-    _raw_evidence_types_for_gap,
-    _required_record_plan,
+    _proposal_evidence_is_intact,
     _retrieve_tool,
-    _StateCandidateBinding,
-    _validate_pa_state_cad_comparison,
 )
 from cais_spade_llm.spec2primitives.config import load_model_runtime_config
 from cais_spade_llm.spec2primitives.ontology import (
@@ -76,6 +62,10 @@ from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
 
 class _NoDocumentVision:
     async def interpret_document(self, request: object) -> object:
+        del request
+        raise AssertionError("CAD-only test must not invoke document vision.")
+
+    async def query_document(self, request: object) -> object:
         del request
         raise AssertionError("CAD-only test must not invoke document vision.")
 
@@ -105,32 +95,145 @@ def _default_handles(root: Path) -> tuple[EvidencePresentationRecord, tuple[_Evi
     return presentation, _approved_evidence_handles(presentation)
 
 
-def _allow_unrelated_test_through_selected_candidate_gate(
-    runtime: ProductionProductContextGroundingRuntime,
+def test_pa_document_question_is_persisted_verbatim_and_scene_refs_are_rejected(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep legacy semantic/clarification tests focused on their own boundary."""
-    binding = SimpleNamespace(
-        state="current_state",
-        name="selected_candidate",
-        record_ref="selected_segmentation.json",
-        field_path="/cameras/0/candidates/0",
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "an unforeseen requirement", tbox)
+    context_ref = "controlled_manual.pdf"
+    document_handle = _EvidenceHandle(
+        evidence_id="document_opaque",
+        evidence_type="document",
+        display_name="document_opaque",
+        context_ref=context_ref,
+        source_revision="a" * 64,
+    )
+    handles = (document_handle,)
+    presentation = _presentation_for_handles(root, handles)
+    runtime = SimpleNamespace(
+        _document_config=load_model_runtime_config().document_vlm,
+        _document_vision_runtime=_NoDocumentVision(),
+        _grounding_candidate_order=None,
+    )
+    investigation = _NativeEvidenceInvestigation(
+        runtime=runtime,
+        interaction_root=root,
+        tbox=tbox,
+        abox=abox,
+        requirement=abox.product_requirement,
+        handles=handles,
+        presentation=presentation,
+    )
+    source_index_path = (
+        root / "products/grounding/document_evidence/source_index_0001.json"
+    )
+    source_index_path.parent.mkdir(parents=True)
+    source_index_path.write_text(
+        json.dumps({"record_type": "DocumentSourceIndexRecord"}),
+        encoding="utf-8",
+    )
+    source_index_ref = source_index_path.relative_to(root).as_posix()
+    investigation._register_references(
+        source_refs=(context_ref, f"{context_ref}#page=1"),
+        record_refs=(source_index_ref,),
+    )
+    investigation.retrieved_results[document_handle.evidence_id] = {
+        "record_refs": [investigation.project_canonical_reference(source_index_ref)]
+    }
+    source_binding = SimpleNamespace(
+        record_type="DocumentSourceIndexRecord",
+        status="accepted",
+        record_ref=source_index_ref,
+        record_sha256=hashlib.sha256(source_index_path.read_bytes()).hexdigest(),
+        evidence_refs=(context_ref,),
     )
     monkeypatch.setattr(
         production_grounding,
-        "_proposal_state_candidate_bindings",
-        lambda proposal: (binding, binding),
+        "build_product_context_view",
+        lambda *args, **kwargs: SimpleNamespace(typed_bindings=(source_binding,)),
     )
+    captured_questions: list[str] = []
 
-    def accepted_correspondence(**kwargs: object) -> None:
-        del kwargs
-        return None
+    async def query_fixture(**kwargs: object) -> SimpleNamespace:
+        question = str(kwargs["question"])
+        captured_questions.append(question)
+        query_path = root / "products/grounding/document_evidence/query_0001.json"
+        record: dict[str, object] = {
+            "schema_version": 1,
+            "record_type": "DocumentQueryRecord",
+            "producer": "document_evidence",
+            "status": "supported",
+            "question": question,
+            "claims": [
+                {
+                    "predicate_text": "shown_in_order",
+                    "arguments": ["first item", "second item", "third item"],
+                    "evidence_refs": [f"{context_ref}#page=1"],
+                    "uncertainty": [],
+                }
+            ],
+            "uncertainty": [],
+            "evidence_refs": [source_index_ref, f"{context_ref}#page=1"],
+        }
+        record["fingerprint"] = production_grounding._json_fingerprint(record)
+        query_path.write_text(json.dumps(record), encoding="utf-8")
+        return SimpleNamespace(record_path=query_path, status="supported", record=record)
 
+    monkeypatch.setattr(production_grounding, "query_document_evidence", query_fixture)
     monkeypatch.setattr(
-        runtime,
-        "_validate_pa_state_cad_comparisons",
-        accepted_correspondence,
+        production_grounding,
+        "_merge_derived_record",
+        lambda *args, **kwargs: (
+            abox,
+            SimpleNamespace(
+                record_type="DocumentQueryRecord",
+                status="accepted",
+                record_ref="products/grounding/document_evidence/query_0001.json",
+            ),
+        ),
     )
+    exact_question = "Which ordered items are explicitly shown?"
+    result = asyncio.run(
+        investigation.execute(
+            "query_document",
+            {
+                "document_evidence_id": document_handle.evidence_id,
+                "question": exact_question,
+            },
+        )
+    )
+
+    assert result["question"] == exact_question
+    assert captured_questions == [exact_question]
+    audit = json.loads(
+        (root / "interaction_record/tool_call_0001.json").read_text(encoding="utf-8")
+    )
+    assert audit["arguments"]["question"] == exact_question
+    assert audit["tool_name"] == "query_document"
+
+    investigation.retrieved_results["issued_scene"] = {
+        "segmentation": {
+            "views": [
+                {
+                    "observation_handle": "issued_view_token",
+                    "candidates": [{"candidate_handle": "issued_candidate_token"}],
+                }
+            ]
+        }
+    }
+    rejected = asyncio.run(
+        investigation.execute(
+            "query_document",
+            {
+                "document_evidence_id": document_handle.evidence_id,
+                "question": "Where should issued_candidate_token be placed?",
+            },
+        )
+    )
+    assert rejected["error"]["reason"] == "cross_modal_question_reference"
+    assert captured_questions == [exact_question]
 
 
 def test_pa_candidate_projection_removes_semantic_sensor_shortcuts() -> None:
@@ -287,9 +390,6 @@ def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candi
         },
         allocation_presentation=allocation_presentation,
         investigation=investigation,
-        current_state_evidence=entry,
-        desired_state_evidence=entry,
-        validation_feedback=None,
     )
 
     prompt_input = json.loads(prompt.split("Allocation input:\n", maxsplit=1)[1])
@@ -298,17 +398,16 @@ def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candi
         "CAD",
         "observation",
     }
-    state_evidence = prompt_input["grounded_state_evidence"]["current_state"]
-    assert state_evidence["observation_handle"] == "view_0001"
-    assert state_evidence["candidate_handle"] == "candidate_0001_0002"
-    assert state_evidence["candidate_value_ref"] == {
+    location_evidence = prompt_input["location_evidence_catalog"]
+    assert len(location_evidence) == 1
+    assert location_evidence[0]["evidence_handle"] == "state_evidence_0001"
+    assert location_evidence[0]["observation_handle"] == "view_0001"
+    assert location_evidence[0]["candidate_handle"] == "candidate_0001_0002"
+    assert location_evidence[0]["candidate_value_ref"] == {
         "record_ref": opaque_record_ref,
         "field_path": field_path,
     }
-    assert (
-        state_evidence["candidate_value_ref"]
-        == observation_result["segmentation"]["views"][0]["candidates"][0]["candidate_value_ref"]
-    )
+    assert "grounded_state_evidence" not in prompt_input
     assert canonical_record_ref not in prompt
     assert "Gazebo_ground_truth" not in prompt
 
@@ -388,10 +487,10 @@ class _SequencedProductAgent(_ToolUsingProductAgent):
         return {"result": dict(self.results[len(self.calls) - 1])}
 
 
-class _RevisingAllocationAgent:
-    def __init__(self) -> None:
-        self.resource_choices = ["xarm6", "ur5e"]
-        self.prompts: list[str] = []
+class _TwoStageAllocationAgent:
+    def __init__(self, resource_symbol: str) -> None:
+        self.resource_symbol = resource_symbol
+        self.calls: list[dict[str, object]] = []
 
     async def ask_llm_structured(
         self,
@@ -403,49 +502,73 @@ class _RevisingAllocationAgent:
         | None = None,
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
-        del max_tool_rounds
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "response_format": response_format,
+                "tools": tools,
+                "max_tool_rounds": max_tool_rounds,
+            }
+        )
+        if response_format["name"] == "spec2primitives_grounding_result":
+            return {"result": _proposal("requirement_0001")}
         assert response_format["name"] == "spec2primitives_pa_resource_allocation"
-        assert tool_executor is not None
-        assert tools is not None
+        assert tool_executor is not None and tools is not None
         parameters = tools[0]["function"]["parameters"]
-        assert set(parameters["properties"]) == {"resource_symbol"}
-        assert parameters["required"] == ["resource_symbol"]
-        resource_symbol = self.resource_choices[len(self.prompts)]
-        self.prompts.append(prompt)
+        assert set(parameters["properties"]) == {
+            "resource_symbol",
+            "state_locations",
+        }
+        location_handles = parameters["properties"]["state_locations"]["properties"][
+            "current_state"
+        ]["items"]["enum"]
+        assert len(location_handles) >= 2
+        state_locations = {
+            "current_state": [location_handles[0]],
+            "desired_state": [location_handles[1]],
+        }
         reachability = await tool_executor(
             "check_reachability",
-            {"resource_symbol": resource_symbol},
+            {
+                "resource_symbol": self.resource_symbol,
+                "state_locations": state_locations,
+            },
         )
         assert reachability["status"] == "accepted"
         return {
             "result": {
-                "provisional_resource_symbol": resource_symbol,
+                "resource_symbol": self.resource_symbol,
+                "state_locations": state_locations,
                 "reachability_check_ref": reachability["reachability_check_ref"],
             }
         }
 
 
-class _RejectXarmAcceptUr5Feasibility:
+class _AcceptingStateLocationFeasibility:
     def __init__(self) -> None:
-        self.resources: list[str] = []
+        self.requests: list[Mapping[str, object]] = []
 
     async def validate_plan_only_allocation(
         self,
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
-        resource_symbol = str(request["resource_symbol"])
-        self.resources.append(resource_symbol)
-        status = "rejected" if resource_symbol == "xarm6" else "accepted"
-        endpoint = {
-            "status": status,
-            "message": f"{resource_symbol} plan-only {status}",
-            "error_code": -1 if status == "rejected" else 1,
-        }
+        self.requests.append(dict(request))
+        state_locations = request["state_locations"]
         return {
-            "status": status,
-            "current_state": dict(endpoint),
-            "desired_state": dict(endpoint),
-            "feedback": endpoint["message"] if status == "rejected" else None,
+            "status": "accepted",
+            "state_locations": {
+                state_name: [
+                    {
+                        "evidence_handle": item["evidence_handle"],
+                        "status": "accepted",
+                        "message": "selected location is reachable",
+                        "error_code": 1,
+                    }
+                    for item in locations
+                ]
+                for state_name, locations in state_locations.items()
+            },
+            "feedback": None,
         }
 
 
@@ -509,10 +632,6 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
             ],
             tool_executor=retrieve,
             max_tool_rounds=12,
-            required_output_projection={
-                "record_type": "RobotFrameLocationRecord",
-                "target_frame": "world",
-            },
         )
     )
 
@@ -521,15 +640,6 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
     assert result.proposal_path.name == "proposal_0001.json"
     assert not result.proposal_path.exists()
     assert load_interaction_abox(root, tbox).delta_count == 0
-    semantic_review = asyncio.run(
-        review_target_feature_semantics(
-            agent,
-            interaction_root=root,
-            candidate=result,
-            product_requirement=abox.product_requirement,
-            evidence_catalog=[],
-        )
-    )
     committed = commit_ontology_grounding_candidate(
         result,
         interaction_root=root,
@@ -537,7 +647,6 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         abox=abox,
         workcell=workcell,
         authorized_evidence_refs=authorized,
-        semantic_review=semantic_review,
     )
     assert isinstance(committed, OntologyGroundingResult)
     assert committed.merge.abox.delta_count == 1
@@ -574,14 +683,21 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         "current_state",
         "desired_state",
     }
-    assert target_schema["properties"]["required_process"]["properties"]["process_iri"]["enum"] == [
+    required_process_schema = target_schema["properties"]["required_process"]
+    assert required_process_schema["properties"]["process_iri"]["enum"] == [
         "https://cais-spade-llm.local/process/assembly"
     ]
     for state_name in ("current_state", "desired_state"):
-        assert set(target_schema["properties"][state_name]["properties"]) == {
+        state_schema = target_schema["properties"][state_name]
+        assert set(state_schema["properties"]) == {
             "statement",
             "state_values",
         }
+    serialized_schema = json.dumps(schema)
+    assert "insufficient_evidence" not in serialized_schema
+    assert '"reason"' not in serialized_schema
+    assert "unmet_obligation" not in serialized_schema
+    assert '"enum": [true]' not in serialized_schema
     serialized = json.dumps(call)
     for removed_protocol in (
         "next_action",
@@ -593,31 +709,72 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         '"missing_information"',
     ):
         assert removed_protocol not in serialized
-    assert "RobotFrameLocationRecord" in str(call["prompt"])
+    assert "resource locations" in str(call["prompt"])
 
 
-def test_direct_clarification_and_insufficient_evidence_stop_without_proposal(
+def test_direct_clarification_stops_without_proposal(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    workcell = load_predefined_workcell(
+        tbox,
+        load_predefined_resource_registry(tbox),
+    )
+    result = asyncio.run(
+        propose_and_validate_ontology_grounding(
+            _ToolUsingProductAgent(
+                retrieve_order=(),
+                final_result={
+                    "clarification_question": "Which product variant is intended?"
+                },
+            ),
+            interaction_root=tmp_path,
+            tbox=tbox,
+            abox=abox,
+            workcell=workcell,
+            evidence_catalog=[],
+            authorized_evidence_refs={"requirement_0001"},
+            tools=[],
+            tool_executor=_unused_tool,
+            max_tool_rounds=3,
+        )
+    )
+
+    assert isinstance(result, OntologyGroundingInterruption)
+    assert result.kind == "clarification_question"
+    assert not (tmp_path / "products/grounding/ontology_grounding").exists()
+
+
+@pytest.mark.parametrize(
+    "removed_result",
+    [
+        {"insufficient_evidence": "Legacy unscoped reason."},
+        {
+            "insufficient_evidence": {
+                "unmet_obligation": "clearance",
+                "reason": "Mounting and meshing are not established.",
+            }
+        },
+    ],
+)
+def test_removed_insufficient_evidence_result_cannot_interrupt_grounding(
     tmp_path: Path,
+    removed_result: Mapping[str, object],
 ) -> None:
-    for index, final_result in enumerate(
-        (
-            {"clarification_question": "Which product variant is intended?"},
-            {"insufficient_evidence": "No retrieved source supports a feature."},
-        ),
-        start=1,
-    ):
-        root = tmp_path / f"case_{index}"
-        tbox = ontology_config().load_tbox()
-        abox = initialize_interaction_abox(root, "assemble product", tbox)
-        registry = load_predefined_resource_registry(tbox)
-        workcell = load_predefined_workcell(tbox, registry)
-        result = asyncio.run(
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    workcell = load_predefined_workcell(
+        tbox,
+        load_predefined_resource_registry(tbox),
+    )
+
+    with pytest.raises(OntologyGroundingError, match="target-feature candidate"):
+        asyncio.run(
             propose_and_validate_ontology_grounding(
                 _ToolUsingProductAgent(
                     retrieve_order=(),
-                    final_result=final_result,
+                    final_result=removed_result,
                 ),
-                interaction_root=root,
+                interaction_root=tmp_path,
                 tbox=tbox,
                 abox=abox,
                 workcell=workcell,
@@ -625,15 +782,9 @@ def test_direct_clarification_and_insufficient_evidence_stop_without_proposal(
                 authorized_evidence_refs={"requirement_0001"},
                 tools=[],
                 tool_executor=_unused_tool,
-                max_tool_rounds=3,
-                required_output_projection={
-                    "record_type": "RobotFrameLocationRecord",
-                    "target_frame": "world",
-                },
+                max_tool_rounds=1,
             )
         )
-        assert isinstance(result, OntologyGroundingInterruption)
-        assert not (root / "products/grounding/ontology_grounding").exists()
 
 
 @pytest.mark.parametrize("state_name", ["current_state", "desired_state"])
@@ -688,7 +839,6 @@ def test_target_feature_supports_zero_one_or_multiple_state_values(
             tools=[],
             tool_executor=_unused_tool,
             max_tool_rounds=1,
-            required_output_projection={},
             typed_record_resolver=resolver,
         )
     )
@@ -780,7 +930,6 @@ def test_invalid_target_feature_fails_before_commit(
                 tools=[],
                 tool_executor=_unused_tool,
                 max_tool_rounds=1,
-                required_output_projection={},
                 typed_record_resolver=resolver,
             )
         )
@@ -789,7 +938,7 @@ def test_invalid_target_feature_fails_before_commit(
             encoding="utf-8"
         )
     )
-    assert rejected["schema_version"] == 8
+    assert rejected["schema_version"] == 9
     assert rejected["status"] == "rejected"
 
 
@@ -837,6 +986,26 @@ def test_compare_cad_size_tool_exposes_only_typed_opaque_input_handles(
     )
     serialized = json.dumps(tool)
     for forbidden in ("camera_id", "candidate_index", "selected_candidate", "state_role"):
+        assert forbidden not in serialized
+
+
+def test_candidate_layout_tool_metadata_is_generic_and_accepts_two_or_more() -> None:
+    tool = _analyze_candidate_layout_tool()
+
+    assert tool["function"]["name"] == "analyze_candidate_layout"
+    parameters = tool["function"]["parameters"]
+    assert parameters["properties"]["candidate_field_paths"]["minItems"] == 2
+    serialized = json.dumps(tool).casefold()
+    assert "same observation frame" in serialized
+    assert "uniqueitems" not in serialized
+    for forbidden in (
+        "gear",
+        "shaft",
+        "middle",
+        "between",
+        "expected candidate",
+        "preferred evidence",
+    ):
         assert forbidden not in serialized
 
 
@@ -986,16 +1155,14 @@ def test_cad_size_projection_is_measurement_only_and_answer_blind() -> None:
     )
 
     assert result["selection_made_by_tool"] is False
-    candidate = result["ranked_candidates"][0]
+    candidate = result["candidate_measurements"][0]
     assert set(candidate) == {
-        "rank",
         "observation_handle",
         "candidate_handle",
         "candidate_value_ref",
         "observed_dimensions_m",
         "dimension_errors",
         "mean_dimension_error",
-        "within_size_tolerance",
         "candidate_center_m",
     }
     serialized = json.dumps(result)
@@ -1010,7 +1177,7 @@ def test_cad_size_projection_is_measurement_only_and_answer_blind() -> None:
         assert forbidden not in serialized
 
 
-def test_ambiguous_cad_projection_exposes_neutral_plausible_order() -> None:
+def test_cad_projection_exposes_every_measurement_in_neutral_observation_order() -> None:
     comparison_ref = "products/grounding/correspondence_0001.json"
     investigation = SimpleNamespace(
         presentation=SimpleNamespace(entries=()),
@@ -1069,15 +1236,13 @@ def test_ambiguous_cad_projection_exposes_neutral_plausible_order() -> None:
         observation_result=observation_result,
     )
 
-    assert "ranked_candidates" not in result
     assert [
-        candidate["candidate_handle"] for candidate in result["plausible_candidates"]
+        candidate["candidate_handle"] for candidate in result["candidate_measurements"]
     ] == candidate_handles
-    assert result["plausible_candidate_count"] == 3
-    assert all(
-        {"rank", "dimension_errors", "mean_dimension_error"}.isdisjoint(candidate)
-        for candidate in result["plausible_candidates"]
-    )
+    assert "ranked_candidates" not in result
+    assert "plausible_candidates" not in result
+    assert "selected_candidate" not in result
+    assert all("rank" not in candidate for candidate in result["candidate_measurements"])
 
 
 def test_compare_cad_size_persists_result_and_audits_reuse(
@@ -1201,6 +1366,7 @@ def test_compare_cad_size_persists_result_and_audits_reuse(
         )
         record_path.parent.mkdir(parents=True)
         record = {
+            "schema_version": 3,
             "record_type": "CADSizeCorrespondenceRecord",
             "CAD": {
                 "record": {"ref": cad_ref},
@@ -1208,10 +1374,10 @@ def test_compare_cad_size_persists_result_and_audits_reuse(
             },
             "segmentation": {"record": {"ref": segmentation_ref}},
             "parameters": {"dimension_error_limit": 0.15},
-            "CAD_correspondence": "accepted",
-            "ranked_candidates": [
+            "CAD_correspondence": "not_evaluated",
+            "measurement": "accepted",
+            "candidate_measurements": [
                 {
-                    "rank": 1,
                     "observation_handle": "view_opaque",
                     "candidate_handle": "candidate_opaque",
                     "observed_dimensions_m": [0.020, 0.010],
@@ -1221,20 +1387,19 @@ def test_compare_cad_size_persists_result_and_audits_reuse(
                     "candidate_center_m": [0.1, 0.2, 0.3],
                 }
             ],
-            "plausible_candidates": [],
-            "selected_candidate": {
-                "observation_handle": "view_opaque",
-                "candidate_handle": "candidate_opaque",
-            },
         }
         record_path.write_text(json.dumps(record), encoding="utf-8")
         return SimpleNamespace(
             record_path=record_path,
             record=record,
-            CAD_correspondence="accepted",
+            measurement="accepted",
         )
 
-    monkeypatch.setattr(production_grounding, "associate_segmented_candidate_by_size", match_size)
+    monkeypatch.setattr(
+        production_grounding,
+        "measure_segmented_candidates_against_cad",
+        match_size,
+    )
     monkeypatch.setattr(
         production_grounding,
         "_merge_derived_record",
@@ -1601,106 +1766,99 @@ def test_live_observation_is_reused_within_run_and_refreshed_after_resume(
     assert capture_count == 2
 
 
-def test_descriptor_closure_is_location_driven_and_accepts_synthetic_provider() -> None:
-    descriptors = _producer_descriptors(calibration_available=True)
-
-    assert _required_record_plan(descriptors, "RobotFrameLocationRecord") == (
-        "ColoredPointCloudSetRecord",
-        "RGBDSegmentationRecord",
-        "CameraToRobotCalibrationRecord",
-        "RobotFrameLocationRecord",
-    )
-    pose_plan = _required_record_plan(descriptors, "CADPoseEstimationRecord")
-    assert pose_plan[-1] == "CADPoseEstimationRecord"
-    assert "RobotFrameLocationRecord" not in pose_plan
-    assert "CameraToRobotCalibrationRecord" not in pose_plan
-
-    synthetic = GroundingProducerDescriptor.from_mapping(
-        {
-            "provider_id": "synthetic_consumer_provider",
-            "description": "Consume any accepted location record.",
-            "accepted_evidence_types": ["existing_record"],
-            "produced_record_types": ["SyntheticReachRecord"],
-            "prerequisites": {"SyntheticReachRecord": ["RobotFrameLocationRecord"]},
-            "availability": True,
-            "estimated_cost": 0,
-        }
-    )
-    plan = _required_record_plan((*descriptors, synthetic), "SyntheticReachRecord")
-    assert plan[-2:] == ("RobotFrameLocationRecord", "SyntheticReachRecord")
-
-
-def test_descriptor_gap_derives_raw_evidence_types_without_product_rules() -> None:
-    descriptors = _producer_descriptors(calibration_available=True)
-
-    assert _raw_evidence_types_for_gap(
-        descriptors,
-        ("CADMeshRecord",),
-    ) == {"CAD"}
-    assert _raw_evidence_types_for_gap(
-        descriptors,
-        ("ColoredPointCloudSetRecord", "RGBDSegmentationRecord"),
-    ) == {"observation"}
-    assert _raw_evidence_types_for_gap(
-        descriptors,
-        (
-            "CADMeshRecord",
-            "ColoredPointCloudSetRecord",
-            "RGBDSegmentationRecord",
-            "CADSizeCorrespondenceRecord",
-            "CameraToRobotCalibrationRecord",
-            "RobotFrameLocationRecord",
-        ),
-    ) == {"CAD", "observation"}
-
-
-def test_target_cad_requires_primary_feature_citation(tmp_path: Path) -> None:
-    record_path = tmp_path / "products/grounding/cad/geometry_record.json"
+def test_generic_state_values_do_not_require_candidate_or_cad_evidence(
+    tmp_path: Path,
+) -> None:
+    record_path = tmp_path / "products/grounding/document/value_record.json"
     record_path.parent.mkdir(parents=True)
     record_path.write_text(
-        json.dumps({"source": {"context_ref": "Gear_Medium.STL"}}),
+        json.dumps(
+            {
+                "record_type": "DocumentOverviewRecord",
+                "value": "specified",
+                "other_value": "measured",
+            }
+        ),
         encoding="utf-8",
     )
+    record_ref = record_path.relative_to(tmp_path).as_posix()
+    record_sha256 = hashlib.sha256(record_path.read_bytes()).hexdigest()
     binding = SimpleNamespace(
-        record_type="CADMeshRecord",
+        record_type="DocumentOverviewRecord",
         status="accepted",
-        record_ref=record_path.relative_to(tmp_path).as_posix(),
-        evidence_refs=("Gear_Medium.STL",),
+        record_ref=record_ref,
+        record_sha256=record_sha256,
+        evidence_refs=("approved_document#page=1",),
     )
-    other_path = tmp_path / "products/grounding/cad/other_geometry_record.json"
-    other_path.write_text(
-        json.dumps({"source": {"context_ref": "Gear_Other.STL"}}),
+    view = SimpleNamespace(typed_bindings=(binding,))
+    investigation = SimpleNamespace(root=tmp_path, comparison_bindings={})
+    no_values = OntologyGroundingProposal(
+        target_feature={
+            "current_state": {"state_values": []},
+            "desired_state": {"state_values": []},
+        },
+        feature_iri="urn:feature:1",
+        resolved_state_values=(),
+        evidence_refs=(),
+    )
+    open_values = OntologyGroundingProposal(
+        target_feature={
+            "current_state": {
+                "state_values": [
+                    {
+                        "name": "document_value",
+                        "value_ref": {
+                            "record_ref": record_ref,
+                            "field_path": "/value",
+                        },
+                        "evidence_refs": ["approved_document#page=1"],
+                    },
+                    {
+                        "name": "other_document_value",
+                        "value_ref": {
+                            "record_ref": record_ref,
+                            "field_path": "/other_value",
+                        },
+                        "evidence_refs": ["approved_document#page=1"],
+                    },
+                ],
+            }
+        },
+        feature_iri="urn:feature:1",
+        resolved_state_values=(
+            {
+                "state": "current_state",
+                "name": "document_value",
+                "record_type": "DocumentOverviewRecord",
+                "record_sha256": record_sha256,
+                "value_ref": {"record_ref": record_ref, "field_path": "/value"},
+                "resolved_value": "specified",
+            },
+            {
+                "state": "current_state",
+                "name": "other_document_value",
+                "record_type": "DocumentOverviewRecord",
+                "record_sha256": record_sha256,
+                "value_ref": {
+                    "record_ref": record_ref,
+                    "field_path": "/other_value",
+                },
+                "resolved_value": "measured",
+            },
+        ),
+        evidence_refs=(),
+    )
+
+    assert _proposal_evidence_is_intact(investigation, view, no_values) is True
+    assert _proposal_evidence_is_intact(investigation, view, open_values) is True
+    record_path.write_text(
+        json.dumps({"record_type": "DocumentOverviewRecord", "value": "changed"}),
         encoding="utf-8",
     )
-    other_binding = SimpleNamespace(
-        record_type="CADMeshRecord",
-        status="accepted",
-        record_ref=other_path.relative_to(tmp_path).as_posix(),
-        evidence_refs=("Gear_Other.STL",),
-    )
-    view = SimpleNamespace(typed_bindings=(other_binding, binding))
-    uncited = SimpleNamespace(
-        target_feature={
-            "current_state": {
-                "statement": {"evidence_refs": ["requirement_0001"]},
-                "state_values": [],
-            }
-        }
-    )
-    cited = SimpleNamespace(
-        target_feature={
-            "current_state": {
-                "statement": {"evidence_refs": ["Gear_Medium.STL"]},
-                "state_values": [],
-            }
-        }
-    )
-
-    assert _proposal_cad_bindings(tmp_path, view, uncited, state_name="current_state") == ()
-    assert _proposal_cad_bindings(tmp_path, view, cited, state_name="current_state") == (binding,)
+    assert _proposal_evidence_is_intact(investigation, view, open_values) is False
 
 
-def test_desired_candidate_rejects_ambiguous_size_correspondence(
+def test_state_value_does_not_require_unique_size_correspondence(
     tmp_path: Path,
 ) -> None:
     cad_ref = "products/grounding/cad/shaft.json"
@@ -1787,6 +1945,7 @@ def test_desired_candidate_rejects_ambiguous_size_correspondence(
     )
 
     def proposal(candidate_index: int) -> OntologyGroundingProposal:
+        field_path = f"/cameras/0/candidates/{candidate_index}"
         return OntologyGroundingProposal(
             target_feature={
                 "desired_state": {
@@ -1799,7 +1958,7 @@ def test_desired_candidate_rejects_ambiguous_size_correspondence(
                             "name": "supported_destination",
                             "value_ref": {
                                 "record_ref": segmentation_ref,
-                                "field_path": f"/cameras/0/candidates/{candidate_index}",
+                                "field_path": field_path,
                             },
                             "evidence_refs": [cad_ref, comparison_ref],
                         }
@@ -1807,30 +1966,212 @@ def test_desired_candidate_rejects_ambiguous_size_correspondence(
                 }
             },
             feature_iri="urn:feature:1",
-            resolved_state_values=(),
+            resolved_state_values=(
+                {
+                    "state": "desired_state",
+                    "name": "supported_destination",
+                    "record_type": "RGBDSegmentationRecord",
+                    "record_sha256": segmentation_binding.record_sha256,
+                    "value_ref": {
+                        "record_ref": segmentation_ref,
+                        "field_path": field_path,
+                    },
+                    "resolved_value": {
+                        "candidate_handle": candidate_handles[candidate_index]
+                    },
+                },
+            ),
             evidence_refs=(),
         )
 
-    plausible_binding = _StateCandidateBinding(
-        state="desired_state",
-        name="supported_destination",
-        record_ref=segmentation_ref,
-        field_path="/cameras/0/candidates/1",
-    )
-    gap = _validate_pa_state_cad_comparison(
-        investigation,
-        view,
-        proposal(1),
-        state_name="desired_state",
-        state_binding=plausible_binding,
-    )
-    assert gap is not None
-    assert "not uniquely supported" in gap
-    assert "Gear_Shaft" not in gap
-    assert all(handle not in gap for handle in candidate_handles)
+    assert _proposal_evidence_is_intact(investigation, view, proposal(1)) is True
 
 
-def test_current_candidate_still_requires_unique_size_correspondence(
+def test_state_value_does_not_require_spatial_relation_subject_match(
+    tmp_path: Path,
+) -> None:
+    segmentation_ref = "products/grounding/observation/segmentation.json"
+    comparison_ref = "products/grounding/comparison/ambiguous.json"
+    relation_ref = "products/grounding/relation/layout.json"
+    for relative in (segmentation_ref, comparison_ref, relation_ref):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+    candidates = ["candidate_left", "candidate_middle", "candidate_right"]
+    segmentation_path = tmp_path / segmentation_ref
+    segmentation_path.write_text(
+        json.dumps(
+            {
+                "cameras": [
+                    {
+                        "observation_handle": "view_opaque",
+                        "candidates": [
+                            {"candidate_handle": candidate} for candidate in candidates
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    comparison_path = tmp_path / comparison_ref
+    comparison_path.write_text(
+        json.dumps(
+            {
+                "record_type": "CADSizeCorrespondenceRecord",
+                "CAD_correspondence": "ambiguous",
+                "segmentation": {"record": {"ref": segmentation_ref}},
+                "plausible_candidates": [
+                    {
+                        "observation_handle": "view_opaque",
+                        "candidate_handle": candidate,
+                        "within_size_tolerance": True,
+                    }
+                    for candidate in candidates
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def candidate_ref(index: int) -> dict[str, object]:
+        return {
+            "observation_handle": "view_opaque",
+            "candidate_handle": candidates[index],
+            "value_ref": {
+                "record_ref": segmentation_ref,
+                "field_path": f"/cameras/0/candidates/{index}",
+            },
+        }
+
+    relation_record: dict[str, object] = {
+        "schema_version": 1,
+        "record_type": "CandidateSpatialRelationRecord",
+        "producer": "rgb_d_cad_grounding",
+        "comparison": {
+            "ref": comparison_ref,
+            "sha256": hashlib.sha256(comparison_path.read_bytes()).hexdigest(),
+        },
+        "segmentation": {
+            "ref": segmentation_ref,
+            "sha256": hashlib.sha256(segmentation_path.read_bytes()).hexdigest(),
+        },
+        "evidence_refs": [comparison_ref, segmentation_ref],
+        "candidate_count": 3,
+        "candidates": [candidate_ref(index) for index in range(3)],
+        "relations": [
+            {
+                "predicate_text": "between",
+                "subject": candidate_ref(1),
+                "objects": [candidate_ref(0), candidate_ref(2)],
+                "group_size": 3,
+                "residual": 0.0,
+                "next_best_residual": 2.0,
+                "residual_separation": 2.0,
+            }
+        ],
+        "status": "accepted",
+    }
+    relation_record["fingerprint"] = production_grounding._json_fingerprint(
+        relation_record
+    )
+    relation_path = tmp_path / relation_ref
+    relation_path.write_text(json.dumps(relation_record), encoding="utf-8")
+    segmentation_sha256 = hashlib.sha256(segmentation_path.read_bytes()).hexdigest()
+    relation_binding = SimpleNamespace(
+        record_type="CandidateSpatialRelationRecord",
+        status="accepted",
+        record_ref=relation_ref,
+        record_sha256=hashlib.sha256(relation_path.read_bytes()).hexdigest(),
+        evidence_refs=(comparison_ref, segmentation_ref),
+    )
+    view = SimpleNamespace(
+        typed_bindings=(
+            SimpleNamespace(
+                record_type="RGBDSegmentationRecord",
+                status="accepted",
+                record_ref=segmentation_ref,
+                record_sha256=segmentation_sha256,
+                evidence_refs=(),
+            ),
+            SimpleNamespace(
+                record_type="CADSizeCorrespondenceRecord",
+                status="ambiguous",
+                record_ref=comparison_ref,
+                record_sha256=hashlib.sha256(comparison_path.read_bytes()).hexdigest(),
+                evidence_refs=(),
+            ),
+            relation_binding,
+        )
+    )
+    investigation = SimpleNamespace(
+        root=tmp_path,
+        comparison_bindings={
+            comparison_ref: _CADComparisonBinding(
+                record_ref=comparison_ref,
+                cad_record_ref="products/grounding/cad/unused.json",
+                segmentation_record_ref=segmentation_ref,
+            )
+        },
+    )
+
+    def proposal(index: int) -> OntologyGroundingProposal:
+        field_path = f"/cameras/0/candidates/{index}"
+        return OntologyGroundingProposal(
+            target_feature={
+                "desired_state": {
+                    "state_values": [
+                        {
+                            "name": "selected_value",
+                            "value_ref": {
+                                "record_ref": segmentation_ref,
+                                "field_path": field_path,
+                            },
+                            "evidence_refs": [comparison_ref, relation_ref],
+                        }
+                    ]
+                }
+            },
+            feature_iri="urn:feature:1",
+            resolved_state_values=(
+                {
+                    "state": "desired_state",
+                    "name": "selected_value",
+                    "record_type": "RGBDSegmentationRecord",
+                    "record_sha256": segmentation_sha256,
+                    "value_ref": {
+                        "record_ref": segmentation_ref,
+                        "field_path": field_path,
+                    },
+                    "resolved_value": {"candidate_handle": candidates[index]},
+                },
+            ),
+            evidence_refs=(relation_ref,),
+        )
+
+    assert _proposal_evidence_is_intact(investigation, view, proposal(1)) is True
+    assert _proposal_evidence_is_intact(investigation, view, proposal(0)) is True
+    assert _proposal_evidence_is_intact(investigation, view, proposal(2)) is True
+
+    relation_record["comparison"] = {
+        "ref": "products/grounding/comparison/unrelated.json",
+        "sha256": "f" * 64,
+    }
+    relation_record["fingerprint"] = production_grounding._json_fingerprint(
+        {
+            key: value
+            for key, value in relation_record.items()
+            if key != "fingerprint"
+        }
+    )
+    relation_path.write_text(json.dumps(relation_record), encoding="utf-8")
+    relation_binding.record_sha256 = hashlib.sha256(relation_path.read_bytes()).hexdigest()
+    assert _proposal_evidence_is_intact(investigation, view, proposal(1)) is True
+
+    relation_record["relations"][0]["subject"] = candidate_ref(0)  # type: ignore[index]
+    relation_path.write_text(json.dumps(relation_record), encoding="utf-8")
+    assert _proposal_evidence_is_intact(investigation, view, proposal(1)) is False
+
+
+def test_current_state_value_does_not_require_unique_size_correspondence(
     tmp_path: Path,
 ) -> None:
     cad_ref = "cad.json"
@@ -1868,6 +2209,7 @@ def test_current_candidate_still_requires_unique_size_correspondence(
         },
     }
     (tmp_path / comparison_ref).write_text(json.dumps(comparison), encoding="utf-8")
+    segmentation_sha256 = hashlib.sha256((tmp_path / segmentation_ref).read_bytes()).hexdigest()
     view = SimpleNamespace(
         typed_bindings=(
             SimpleNamespace(
@@ -1881,9 +2223,7 @@ def test_current_candidate_still_requires_unique_size_correspondence(
                 record_type="RGBDSegmentationRecord",
                 status="accepted",
                 record_ref=segmentation_ref,
-                record_sha256=hashlib.sha256(
-                    (tmp_path / segmentation_ref).read_bytes()
-                ).hexdigest(),
+                record_sha256=segmentation_sha256,
                 evidence_refs=(),
             ),
             SimpleNamespace(
@@ -1922,128 +2262,60 @@ def test_current_candidate_still_requires_unique_size_correspondence(
             }
         },
         feature_iri="urn:feature:1",
-        resolved_state_values=(),
-        evidence_refs=(),
-    )
-
-    accepted = _validate_pa_state_cad_comparison(
-        investigation,
-        view,
-        proposal,
-        state_name="current_state",
-        state_binding=_StateCandidateBinding(
-            state="current_state",
-            name="medium_gear",
-            record_ref=segmentation_ref,
-            field_path="/cameras/0/candidates/0",
-        ),
-    )
-    rejected = _validate_pa_state_cad_comparison(
-        investigation,
-        view,
-        proposal,
-        state_name="current_state",
-        state_binding=_StateCandidateBinding(
-            state="current_state",
-            name="medium_gear",
-            record_ref=segmentation_ref,
-            field_path="/cameras/0/candidates/1",
-        ),
-    )
-
-    assert accepted is None
-    assert rejected is not None
-    assert "not uniquely supported" in rejected
-
-
-def test_state_candidate_bindings_and_allocation_ignore_presentation_order() -> None:
-    current_ref = "products/grounding/segmentation_current.json"
-    desired_ref = "products/grounding/segmentation_desired.json"
-    current_path = "/cameras/1/candidates/2"
-    desired_path = "/cameras/0/candidates/0"
-    proposal = OntologyGroundingProposal(
-        target_feature={},
-        feature_iri="urn:feature:1",
         resolved_state_values=(
-            {
-                "state": "desired_state",
-                "name": "supported_destination",
-                "record_type": "RGBDSegmentationRecord",
-                "record_sha256": "b" * 64,
-                "value_ref": {
-                    "record_ref": desired_ref,
-                    "field_path": desired_path,
-                },
-                "resolved_value": {"candidate_handle": "candidate_desired"},
-            },
             {
                 "state": "current_state",
                 "name": "medium_gear",
                 "record_type": "RGBDSegmentationRecord",
-                "record_sha256": "a" * 64,
+                "record_sha256": segmentation_sha256,
                 "value_ref": {
-                    "record_ref": current_ref,
-                    "field_path": current_path,
+                    "record_ref": segmentation_ref,
+                    "field_path": "/cameras/0/candidates/0",
                 },
-                "resolved_value": {"candidate_handle": "candidate_current"},
+                "resolved_value": {"candidate_handle": "loose_candidate"},
             },
         ),
         evidence_refs=(),
     )
 
-    current, desired = _proposal_state_candidate_bindings(proposal)
-
-    assert (current.name, current.record_ref, current.field_path) == (
-        "medium_gear",
-        current_ref,
-        current_path,
+    accepted = _proposal_evidence_is_intact(investigation, view, proposal)
+    rejected_proposal = OntologyGroundingProposal(
+        target_feature={
+            "current_state": {
+                "statement": proposal.target_feature["current_state"]["statement"],
+                "state_values": [
+                    {
+                        "name": "medium_gear",
+                        "value_ref": {
+                            "record_ref": segmentation_ref,
+                            "field_path": "/cameras/0/candidates/1",
+                        },
+                        "evidence_refs": [cad_ref, comparison_ref],
+                    }
+                ],
+            }
+        },
+        feature_iri="urn:feature:1",
+        resolved_state_values=(
+            {
+                **dict(proposal.resolved_state_values[0]),
+                "value_ref": {
+                    "record_ref": segmentation_ref,
+                    "field_path": "/cameras/0/candidates/1",
+                },
+                "resolved_value": {"candidate_handle": "other_candidate"},
+            },
+        ),
+        evidence_refs=(),
     )
-    assert (desired.name, desired.record_ref, desired.field_path) == (
-        "supported_destination",
-        desired_ref,
-        desired_path,
+    alternative = _proposal_evidence_is_intact(
+        investigation,
+        view,
+        rejected_proposal,
     )
-    entries = (
-        _allocation_entry("desired", desired_ref, desired_path),
-        _allocation_entry("unselected", current_ref, "/cameras/0/candidates/1"),
-        _allocation_entry("current", current_ref, current_path),
-    )
-    presentation = SimpleNamespace(evidence_entries=entries)
-    assert _allocation_entry_for_binding(presentation, current).pa_handle == "current"
-    assert _allocation_entry_for_binding(presentation, desired).pa_handle == "desired"
 
-
-def test_state_candidate_binding_rejects_only_incompatible_candidate_reuse() -> None:
-    def proposal(current_name: str, desired_name: str) -> OntologyGroundingProposal:
-        return OntologyGroundingProposal(
-            target_feature={},
-            feature_iri="urn:feature:1",
-            resolved_state_values=tuple(
-                {
-                    "state": state,
-                    "name": name,
-                    "record_type": "RGBDSegmentationRecord",
-                    "record_sha256": "a" * 64,
-                    "value_ref": {
-                        "record_ref": "products/grounding/segmentation.json",
-                        "field_path": "/cameras/0/candidates/0",
-                    },
-                    "resolved_value": {"candidate_handle": "candidate_0001_0001"},
-                }
-                for state, name in (
-                    ("current_state", current_name),
-                    ("desired_state", desired_name),
-                )
-            ),
-            evidence_refs=(),
-        )
-
-    current, desired = _proposal_state_candidate_bindings(
-        proposal("same_supported_value", "same_supported_value")
-    )
-    assert current.field_path == desired.field_path
-    with pytest.raises(ProductionGroundingError, match="incompatible"):
-        _proposal_state_candidate_bindings(proposal("medium_gear", "supported_destination"))
+    assert accepted is True
+    assert alternative is True
 
 
 def _allocation_entry(
@@ -2065,9 +2337,110 @@ def _allocation_entry(
     )
 
 
-def test_completion_requires_pa_selected_state_candidates(
+def test_two_autonomous_pa_decisions_commit_exactly_eleven_assertions(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    initial_abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    current_path, current_source = _write_neutral_location(
+        root,
+        "first",
+        (0.0, -0.7, 1.1),
+    )
+    desired_path, desired_source = _write_neutral_location(
+        root,
+        "second",
+        (0.0, -0.2, 1.1),
+    )
+    current_ref = current_path.relative_to(root).as_posix()
+    desired_ref = desired_path.relative_to(root).as_posix()
+    validate_and_merge_triple_delta(
+        root,
+        tbox,
+        "neutral_test_location_provider",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [current_ref],
+        },
+        authorized_evidence_refs={current_source},
+    )
+    locations = validate_and_merge_triple_delta(
+        root,
+        tbox,
+        "neutral_test_location_provider",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [desired_ref],
+        },
+        authorized_evidence_refs={desired_source},
+    )
+    feasibility = _AcceptingStateLocationFeasibility()
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+        robot_agent_feasibility_runtime=feasibility,
+    )
+    agent = _TwoStageAllocationAgent("xarm6")
+
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=locations.abox,
+            product_context={},
+            max_pa_turns=1,
+        )
+    )
+
+    assert result["grounding_status"] == "complete"
+    assert result["resource_assignment_status"] == "complete"
+    assert len(agent.calls) == 2
+    assert len(feasibility.requests) == 1
+    assert feasibility.requests[0]["validation_scope"] == (
+        "state_location_reachability"
+    )
+    final_abox = load_interaction_abox(root, tbox)
+    assert initial_abox.accepted_assertion_count == 0
+    assert final_abox.accepted_assertion_count == 11
+    proposal = json.loads((root / str(result["ontology_projection_ref"])).read_text())
+    selection = json.loads((root / str(result["resource_selection_ref"])).read_text())
+    reachability = json.loads(
+        (root / str(selection["reachability_check_ref"])).read_text()
+    )
+    assert proposal["schema_version"] == 9
+    assert len(proposal["compiled_delta"]["assertions"]) == 7
+    assert selection["schema_version"] == 5
+    assert selection["selected_resource_symbol"] == "xarm6"
+    assert reachability["schema_version"] == 4
+    assert all(
+        reachability["state_locations"][state_name]
+        for state_name in ("current_state", "desired_state")
+    )
+    allocation_contract = json.dumps(
+        {
+            "response_format": agent.calls[1]["response_format"],
+            "tools": agent.calls[1]["tools"],
+        }
+    ).casefold()
+    assert "uniqueitems" not in allocation_contract
+    assert '"enum": [true]' not in allocation_contract
+    allocation_prompt = str(agent.calls[1]["prompt"])
+    assert "translated_location_m" in allocation_prompt
+    assert "expected_resource" not in allocation_prompt
+    assert "expected_candidate" not in allocation_prompt
+    assert not (root / "products/grounding/target_feature_review").exists()
+    assert not (root / "products/grounding/completion").exists()
+
+
+def test_grounding_accepts_empty_state_values_then_reports_missing_location_evidence(
+    tmp_path: Path,
 ) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
@@ -2091,14 +2464,110 @@ def test_completion_requires_pa_selected_state_candidates(
     )
 
     assert result["grounding_status"] == "incomplete"
-    assert result["insufficient_evidence"] == (
-        "current_state must select exactly one supplied neutral candidate."
+    assert result["grounding_stage"] == "resource_assignment"
+    assert result["grounding_validation_code"] == "location_evidence_unavailable"
+    assert isinstance(result["ontology_projection_ref"], str)
+    assert len(agent.calls) == 1
+    assert agent.review_calls == []
+    first_input = json.loads(str(agent.calls[0]["prompt"]).split("Grounding input:\n", 1)[1])
+    assert first_input["target_feature_contract"] == {
+        "cardinality": "exactly_one",
+        "state_value_cardinality": "zero_or_more",
+        "value_names": "PA_authored_without_host_enum",
+    }
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
+    assert (root / str(result["ontology_projection_ref"])).is_file()
+    assert not (
+        root / "products/grounding/presentation/allocation_presentation_record.json"
+    ).exists()
+
+
+def test_supported_current_statement_does_not_require_unlisted_physical_relations(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
     )
-    assert len(agent.calls) == 3
-    assert "current_validation_gap" not in str(agent.calls[0]["prompt"])
-    assert "TargetFeatureGeometryRecord" not in str(agent.calls[0]["prompt"])
+    partial = _proposal("requirement_0001")
+    target_feature = partial["target_feature"]
+    assert isinstance(target_feature, dict)
+    current_state = target_feature["current_state"]
+    assert isinstance(current_state, dict)
+    current_state["statement"] = {
+        "text": "The observed candidate is the current product state.",
+        "evidence_refs": ["requirement_0001"],
+    }
+    current_state["state_values"] = []
+    agent = _ToolUsingProductAgent(retrieve_order=(), final_result=partial)
+
+    result = asyncio.run(
+        runtime.ground_product_context(
+            agent,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            product_context={},
+            max_pa_turns=1,
+        )
+    )
+
+    assert result["grounding_status"] == "incomplete"
+    assert result["grounding_validation_code"] == "location_evidence_unavailable"
+    assert agent.review_calls == []
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
+    assert (root / str(result["ontology_projection_ref"])).is_file()
+    prompt = str(agent.calls[0]["prompt"])
+    assert "mounting" not in prompt
+    assert "meshing" not in prompt
+
+
+def test_transport_failure_is_not_mislabeled_as_an_invalid_target_feature(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+
+    class _RejectedTransport:
+        async def ask_llm_structured(
+            self,
+            prompt: str,
+            *,
+            response_format: dict[str, Any],
+            tools: list[dict[str, Any]] | None = None,
+            tool_executor: Callable[
+                [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
+            ]
+            | None = None,
+            max_tool_rounds: int = 3,
+        ) -> dict[str, Any]:
+            del prompt, response_format, tools, tool_executor, max_tool_rounds
+            raise RuntimeError("provider rejected the structured request")
+
+    with pytest.raises(RuntimeError, match="provider rejected"):
+        asyncio.run(
+            runtime.ground_product_context(
+                _RejectedTransport(),
+                interaction_root=root,
+                tbox=tbox,
+                abox=abox,
+                product_context={},
+                max_pa_turns=1,
+            )
+        )
+
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
-    assert not (root / "products/grounding/ontology_grounding/proposal_0001.json").exists()
+    assert not (root / "products/grounding/ontology_grounding").exists()
 
 
 @pytest.mark.parametrize("failure_mode", ["ambiguous", "malformed"])
@@ -2115,28 +2584,13 @@ def test_cad_correspondence_failure_remains_incomplete(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
-    binding = SimpleNamespace(
-        state="current_state",
-        name="medium_gear",
-        record_ref="selected_segmentation.json",
-        field_path="/cameras/0/candidates/0",
-    )
-    monkeypatch.setattr(
-        production_grounding,
-        "_proposal_state_candidate_bindings",
-        lambda proposal: (binding, binding),
-    )
-
-    def correspondence(**kwargs: object) -> str | None:
+    def evidence_integrity(**kwargs: object) -> bool:
         del kwargs
         if failure_mode == "malformed":
             raise ValueError("controlled malformed evidence")
-        return (
-            "The submitted state assignments are not uniquely supported by complete, "
-            "internally consistent, hash-pinned approved evidence."
-        )
+        return False
 
-    monkeypatch.setattr(runtime, "_validate_pa_state_cad_comparisons", correspondence)
+    monkeypatch.setattr(runtime, "_proposal_evidence_is_intact", evidence_integrity)
 
     result = asyncio.run(
         runtime.ground_product_context(
@@ -2150,239 +2604,12 @@ def test_cad_correspondence_failure_remains_incomplete(
     )
 
     assert result["grounding_status"] == "incomplete"
-    message = str(result["insufficient_evidence"])
-    assert "not uniquely supported" in message
-    assert "CAD" not in message
-    assert "candidate_" not in message
+    assert result["grounding_validation_code"] == "evidence_reference_invalid"
+    assert result["insufficient_evidence"] == "The target feature cites invalid evidence."
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
 
 
-def test_robot_agent_rejection_returns_to_pa_without_resource_substitution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    initial_abox = initialize_interaction_abox(
-        root,
-        "assemble medium gear",
-        tbox,
-    )
-    current_path, current_source = _write_neutral_location(
-        root,
-        "current",
-        (0.0, 0.0, 1.1),
-    )
-    desired_path, desired_source = _write_neutral_location(
-        root,
-        "desired",
-        (0.0, 0.05, 1.1),
-    )
-    current_ref = current_path.relative_to(root).as_posix()
-    desired_ref = desired_path.relative_to(root).as_posix()
-    validate_and_merge_triple_delta(
-        root,
-        tbox,
-        "neutral_test_location_provider",
-        {
-            "assertions": [],
-            "uncertainty": [],
-            "unresolved_evidence_needs": [],
-            "typed_context_refs": [current_ref],
-        },
-        authorized_evidence_refs={current_source},
-    )
-    location_merge = validate_and_merge_triple_delta(
-        root,
-        tbox,
-        "neutral_test_location_provider",
-        {
-            "assertions": [],
-            "uncertainty": [],
-            "unresolved_evidence_needs": [],
-            "typed_context_refs": [desired_ref],
-        },
-        authorized_evidence_refs={desired_source},
-    )
-    proposal_value = _proposal("requirement_0001")
-    records = {current_ref: current_path, desired_ref: desired_path}
-
-    def resolve_typed_record(record_ref: str) -> Mapping[str, object]:
-        path = records[record_ref]
-        return {
-            "record_type": "RobotFrameLocationRecord",
-            "record_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "record": json.loads(path.read_text(encoding="utf-8")),
-        }
-
-    registry = load_predefined_resource_registry(tbox)
-    workcell = load_predefined_workcell(tbox, registry)
-    proposal_agent = _ToolUsingProductAgent(
-        retrieve_order=(),
-        final_result=proposal_value,
-    )
-    candidate = asyncio.run(
-        propose_and_validate_ontology_grounding(
-            proposal_agent,
-            interaction_root=root,
-            tbox=tbox,
-            abox=location_merge.abox,
-            workcell=workcell,
-            evidence_catalog=[],
-            authorized_evidence_refs={
-                "requirement_0001",
-                current_ref,
-                desired_ref,
-            },
-            tools=[],
-            tool_executor=_unused_tool,
-            max_tool_rounds=1,
-            required_output_projection={
-                "record_type": "RobotFrameLocationRecord",
-                "target_frame": "world",
-            },
-            typed_record_resolver=resolve_typed_record,
-        )
-    )
-    assert isinstance(candidate, OntologyGroundingCandidate)
-    semantic_review = asyncio.run(
-        review_target_feature_semantics(
-            proposal_agent,
-            interaction_root=root,
-            candidate=candidate,
-            product_requirement=initial_abox.product_requirement,
-            evidence_catalog=[],
-        )
-    )
-    grounded = commit_ontology_grounding_candidate(
-        candidate,
-        interaction_root=root,
-        tbox=tbox,
-        abox=location_merge.abox,
-        workcell=workcell,
-        authorized_evidence_refs={
-            "requirement_0001",
-            current_ref,
-            desired_ref,
-        },
-        semantic_review=semantic_review,
-    )
-    accepted_view = build_product_context_view(
-        root,
-        grounded.merge.abox,
-        attempted_evidence=(),
-        assessed_at_ns=1,
-    )
-    feasibility = _RejectXarmAcceptUr5Feasibility()
-    runtime = ProductionProductContextGroundingRuntime(
-        tbox=tbox,
-        document_config=load_model_runtime_config().document_vlm,
-        document_vision_runtime=_NoDocumentVision(),
-        robot_agent_feasibility_runtime=feasibility,
-    )
-    investigation = _NativeEvidenceInvestigation(
-        runtime=runtime,
-        interaction_root=root,
-        tbox=tbox,
-        abox=grounded.merge.abox,
-        requirement=initial_abox.product_requirement,
-        handles=(),
-        presentation=_default_handles(root)[0],
-    )
-    allocation_agent = _RevisingAllocationAgent()
-    bindings = (
-        SimpleNamespace(
-            state="current_state",
-            record_ref=current_ref,
-            field_path="/translated_location_m",
-        ),
-        SimpleNamespace(
-            state="desired_state",
-            record_ref=desired_ref,
-            field_path="/translated_location_m",
-        ),
-    )
-    monkeypatch.setattr(
-        production_grounding,
-        "_proposal_state_candidate_bindings",
-        lambda proposal: bindings,
-    )
-
-    def selected_location_entry(
-        presentation: object,
-        binding: object,
-    ) -> AllocationEvidenceEntry:
-        return next(
-            entry
-            for entry in presentation.evidence_entries
-            if entry.record_ref == binding.record_ref
-        )
-
-    monkeypatch.setattr(
-        production_grounding,
-        "_allocation_entry_for_binding",
-        selected_location_entry,
-    )
-    original_catalog = production_grounding.candidate_resource_catalog
-
-    def physical_mode_catalog(*args: object, **kwargs: object) -> Mapping[str, Mapping[str, str]]:
-        catalog = original_catalog(*args, **kwargs)
-        return {
-            symbol: {**dict(entry), "execution_mode": "physical"}
-            for symbol, entry in catalog.items()
-        }
-
-    monkeypatch.setattr(
-        production_grounding,
-        "candidate_resource_catalog",
-        physical_mode_catalog,
-    )
-
-    result = asyncio.run(
-        runtime._complete_resource_assignment(
-            product_agent=allocation_agent,
-            investigation=investigation,
-            root=root,
-            tbox=tbox,
-            abox=grounded.merge.abox,
-            view=accepted_view,
-            proposal=grounded.proposal,
-            max_pa_turns=3,
-        )
-    )
-
-    assert result["grounding_status"] == "complete"
-    assert result["allocation_label"] == "validated endpoint-motion allocation"
-    assert feasibility.resources == ["xarm6", "ur5e"]
-    assert len(allocation_agent.prompts) == 2
-    assert "xarm6 plan-only rejected" in allocation_agent.prompts[1]
-    selection_paths = sorted(
-        root.glob(
-            "products/grounding/resource_selection/selection_*/resource_selection_record.json"
-        )
-    )
-    assert len(selection_paths) == 2
-    rejected_selection = json.loads(selection_paths[0].read_text(encoding="utf-8"))
-    accepted_selection = json.loads(selection_paths[1].read_text(encoding="utf-8"))
-    assert rejected_selection["provisional_resource_symbol"] == "xarm6"
-    assert rejected_selection["selected_resource_symbol"] is None
-    assert accepted_selection["provisional_resource_symbol"] == "ur5e"
-    assert accepted_selection["selected_resource_symbol"] == "ur5e"
-    final_abox = load_interaction_abox(root, tbox)
-    execution = URIRef(f"{final_abox.namespace}process_execution_0001")
-    assert (
-        execution,
-        Namespace(PPR_NAMESPACE).runsOnResource,
-        URIRef("https://cais-spade-llm.local/resource/ur5e"),
-    ) in final_abox.graph
-    assert (
-        execution,
-        Namespace(PPR_NAMESPACE).runsOnResource,
-        URIRef("https://cais-spade-llm.local/resource/xarm6"),
-    ) not in final_abox.graph
-
-
-def test_invalid_proposal_receives_bounded_feedback_before_commit(
+def test_invalid_state_evidence_stops_before_review_and_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2394,107 +2621,18 @@ def test_invalid_proposal_receives_bounded_feedback_before_commit(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
-    invalid = _proposal("requirement_0001")
-    del invalid["target_feature"]["desired_state"]
-    agent = _SequencedProductAgent((invalid, _proposal("requirement_0001")))
-
-    async def complete(**kwargs: object) -> Mapping[str, object]:
+    def reject_tampered_evidence(**kwargs: object) -> bool:
         del kwargs
-        assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
-        return {
-            "grounding_status": "complete",
-            "resource_selection_ref": ("products/grounding/resource_selection/test.json"),
-        }
+        return False
 
-    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
-    result = asyncio.run(
-        runtime.ground_product_context(
-            agent,
-            interaction_root=root,
-            tbox=tbox,
-            abox=abox,
-            product_context={},
-            max_pa_turns=3,
-        )
-    )
-
-    assert result["grounding_status"] == "complete"
-    assert len(agent.calls) == 2
-    assert "ontology_proposal_validation_error" in str(agent.calls[1]["prompt"])
-    assert "target_feature fields are invalid" in str(agent.calls[1]["prompt"])
-    rejected = json.loads(
-        (root / "products/grounding/ontology_grounding/proposal_0001.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    accepted = json.loads(
-        (root / "products/grounding/ontology_grounding/proposal_0002.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert rejected["status"] == "rejected"
-    assert accepted["status"] == "accepted"
-    assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
-
-
-def test_validation_feedback_history_accumulates_and_deduplicates() -> None:
-    history: list[Mapping[str, object]] = []
-    first = {"kind": "first_gap", "message": "Retrieve comparison evidence."}
-    second = {"kind": "second_gap", "message": "Revise the selected destination."}
-
-    _append_validation_feedback(history, first)
-    _append_validation_feedback(history, first)
-    _append_validation_feedback(history, second)
-
-    assert history == [first, second]
-
-
-def test_ambiguous_state_evidence_stops_before_review_and_allocation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
-    runtime = ProductionProductContextGroundingRuntime(
-        tbox=tbox,
-        document_config=load_model_runtime_config().document_vlm,
-        document_vision_runtime=_NoDocumentVision(),
-    )
-    binding = SimpleNamespace(
-        state="current_state",
-        name="selected_candidate",
-        record_ref="selected_segmentation.json",
-        field_path="/cameras/0/candidates/0",
-    )
-    monkeypatch.setattr(
-        production_grounding,
-        "_proposal_state_candidate_bindings",
-        lambda proposal: (binding, binding),
-    )
-    gap = (
-        "The submitted desired_state assignment is not uniquely supported by complete, "
-        "internally consistent, hash-pinned approved evidence."
-    )
-
-    def reject_ambiguous_evidence(**kwargs: object) -> str:
-        del kwargs
-        return gap
-
-    monkeypatch.setattr(runtime, "_validate_pa_state_cad_comparisons", reject_ambiguous_evidence)
+    monkeypatch.setattr(runtime, "_proposal_evidence_is_intact", reject_tampered_evidence)
 
     async def unexpected_allocation(**kwargs: object) -> Mapping[str, object]:
         del kwargs
         raise AssertionError("Allocation must not run after ambiguous state evidence.")
 
     monkeypatch.setattr(runtime, "_complete_resource_assignment", unexpected_allocation)
-    agent = _SequencedProductAgent(
-        (
-            _proposal("requirement_0001"),
-            {"insufficient_evidence": "The approved evidence remains ambiguous."},
-        )
-    )
+    agent = _SequencedProductAgent((_proposal("requirement_0001"),))
 
     result = asyncio.run(
         runtime.ground_product_context(
@@ -2508,105 +2646,40 @@ def test_ambiguous_state_evidence_stops_before_review_and_allocation(
     )
 
     assert result["grounding_status"] == "incomplete"
-    assert result["insufficient_evidence"] == "The approved evidence remains ambiguous."
+    assert result["grounding_validation_code"] == "evidence_reference_invalid"
+    assert result["insufficient_evidence"] == "The target feature cites invalid evidence."
+    assert "unmet_grounding_obligation" not in result
     assert agent.review_calls == []
     assert not (root / "products/grounding/target_feature_review").exists()
-    first_input = json.loads(str(agent.calls[0]["prompt"]).split("Grounding input:\n", 1)[1])
-    projection = json.dumps(first_input["required_output_projection"]).casefold()
-    feedback_input = json.loads(str(agent.calls[1]["prompt"]).split("Grounding input:\n", 1)[1])
-    feedback = json.dumps(feedback_input["validation_feedback_history"]).casefold()
-    assert "state_evidence_uniqueness" in feedback
-    for forbidden in (
-        "gear_medium",
-        "gear_shaft",
-        "stl",
-        "rgb-d",
-        "cad",
-        "document",
-        "target_frame",
-        "mounted",
-    ):
-        assert forbidden not in projection
-        assert forbidden not in feedback
+    assert len(agent.calls) == 1
+    prompt = str(agent.calls[0]["prompt"]).casefold()
+    assert "validation_feedback" not in prompt
+    assert "expected_revision" not in prompt
 
 
-def test_distinct_validation_feedback_is_preserved_across_pa_attempts(
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (
+            OntologyGroundingError(
+                "This structural message happens to contain the word evidence."
+            ),
+            "invalid_target_feature",
+        ),
+        (
+            OntologyGroundingError(
+                "Opaque validation failure.",
+                validation_code="evidence_reference_invalid",
+            ),
+            "evidence_reference_invalid",
+        ),
+    ],
+)
+def test_incomplete_code_is_typed_and_never_inferred_from_exception_prose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
-    runtime = ProductionProductContextGroundingRuntime(
-        tbox=tbox,
-        document_config=load_model_runtime_config().document_vlm,
-        document_vision_runtime=_NoDocumentVision(),
-    )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
-    invalid = _proposal("requirement_0001")
-    del invalid["target_feature"]["desired_state"]
-
-    class CumulativeFeedbackAgent(_SequencedProductAgent):
-        async def ask_llm_structured(
-            self,
-            prompt: str,
-            *,
-            response_format: dict[str, Any],
-            tools: list[dict[str, Any]] | None = None,
-            tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
-            | None = None,
-            max_tool_rounds: int = 3,
-        ) -> dict[str, Any]:
-            if response_format["name"] == "spec2primitives_target_feature_review":
-                self.review_calls.append({"prompt": prompt, "response_format": response_format})
-                if len(self.review_calls) == 1:
-                    return {
-                        "verdict": "incomplete",
-                        "gap": "The desired state needs a supported destination.",
-                    }
-                return {"verdict": "complete", "gap": None}
-            return await super().ask_llm_structured(
-                prompt,
-                response_format=response_format,
-                tools=tools,
-                tool_executor=tool_executor,
-                max_tool_rounds=max_tool_rounds,
-            )
-
-    agent = CumulativeFeedbackAgent(
-        (invalid, _proposal("requirement_0001"), _proposal("requirement_0001"))
-    )
-
-    async def complete(**kwargs: object) -> Mapping[str, object]:
-        del kwargs
-        return {
-            "grounding_status": "complete",
-            "resource_selection_ref": "products/grounding/resource_selection/test.json",
-        }
-
-    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
-    result = asyncio.run(
-        runtime.ground_product_context(
-            agent,
-            interaction_root=root,
-            tbox=tbox,
-            abox=abox,
-            product_context={},
-            max_pa_turns=3,
-        )
-    )
-
-    assert result["grounding_status"] == "complete"
-    final_prompt = str(agent.calls[2]["prompt"])
-    prompt_input = json.loads(final_prompt.split("Grounding input:\n", maxsplit=1)[1])
-    assert [item["kind"] for item in prompt_input["validation_feedback_history"]] == [
-        "ontology_proposal_validation_error",
-        "target_feature_semantic_review",
-    ]
-
-
-def test_tool_round_exhaustion_gets_one_final_no_tools_pa_call(
-    tmp_path: Path,
+    error: OntologyGroundingError,
+    expected_code: str,
 ) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
@@ -2617,42 +2690,14 @@ def test_tool_round_exhaustion_gets_one_final_no_tools_pa_call(
         document_vision_runtime=_NoDocumentVision(),
     )
 
-    class ExhaustionAgent:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
+    def reject(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise error
 
-        async def ask_llm_structured(
-            self,
-            prompt: str,
-            *,
-            response_format: dict[str, Any],
-            tools: list[dict[str, Any]] | None = None,
-            tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
-            | None = None,
-            max_tool_rounds: int = 3,
-        ) -> dict[str, Any]:
-            del response_format, tool_executor
-            self.calls.append(
-                {
-                    "prompt": prompt,
-                    "tools": tools,
-                    "max_tool_rounds": max_tool_rounds,
-                }
-            )
-            if len(self.calls) == 1:
-                raise RuntimeError("Exceeded max tool rounds")
-            return {
-                "result": {
-                    "insufficient_evidence": (
-                        "Accumulated evidence does not support a final destination."
-                    )
-                }
-            }
-
-    agent = ExhaustionAgent()
+    monkeypatch.setattr(production_grounding, "validate_ontology_grounding_attempt", reject)
     result = asyncio.run(
         runtime.ground_product_context(
-            agent,
+            _SequencedProductAgent((_proposal("requirement_0001"),)),
             interaction_root=root,
             tbox=tbox,
             abox=abox,
@@ -2661,248 +2706,9 @@ def test_tool_round_exhaustion_gets_one_final_no_tools_pa_call(
         )
     )
 
-    assert result == {
-        "grounding_status": "incomplete",
-        "insufficient_evidence": ("Accumulated evidence does not support a final destination."),
-        "tool_call_refs": [],
-    }
-    assert len(agent.calls) == 2
-    assert {tool["function"]["name"] for tool in agent.calls[0]["tools"]} == {
-        "retrieve",
-        "compare_cad_size",
-    }
-    assert agent.calls[1]["tools"] == []
-    assert agent.calls[1]["max_tool_rounds"] == 0
-    assert "tool_budget_exhausted" in str(agent.calls[1]["prompt"])
-
-
-def test_semantic_review_accepts_supported_destination_contract(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
-    proposal = OntologyGroundingProposal(
-        target_feature={
-            "required_process": {
-                "process_iri": "https://cais-spade-llm.local/process/assembly",
-                "evidence_refs": ["requirement_0001"],
-            },
-            "current_state": {
-                "statement": {
-                    "text": "The medium gear is currently loose.",
-                    "evidence_refs": ["requirement_0001"],
-                },
-                "state_values": [],
-            },
-            "desired_state": {
-                "statement": {
-                    "text": "The medium gear will be assembled at the destination.",
-                    "evidence_refs": ["requirement_0001"],
-                },
-                "state_values": [
-                    {
-                        "name": "supported_destination",
-                        "value_ref": {
-                            "record_ref": "typed_record_segmentation",
-                            "field_path": "/cameras/0/candidates/0",
-                        },
-                        "evidence_refs": ["typed_record_comparison"],
-                    }
-                ],
-            },
-        },
-        feature_iri="urn:feature:1",
-        resolved_state_values=(
-            {
-                "state": "desired_state",
-                "name": "supported_destination",
-                "record_type": "RGBDSegmentationRecord",
-                "record_sha256": "a" * 64,
-                "value_ref": {
-                    "record_ref": "typed_record_segmentation",
-                    "field_path": "/cameras/0/candidates/0",
-                },
-                "resolved_value": {"candidate_handle": "candidate_opaque"},
-            },
-        ),
-        evidence_refs=("requirement_0001", "typed_record_comparison"),
-    )
-    candidate = OntologyGroundingCandidate(
-        provisional_abox=abox,
-        proposal_path=(root / "products/grounding/ontology_grounding/proposal_0001.json"),
-        proposal_number=1,
-        output={},
-        compiled_delta={},
-        proposal=proposal,
-    )
-    agent = _ToolUsingProductAgent(retrieve_order=())
-
-    review = asyncio.run(
-        review_target_feature_semantics(
-            agent,
-            interaction_root=root,
-            candidate=candidate,
-            product_requirement=abox.product_requirement,
-            evidence_catalog=[],
-        )
-    )
-
-    assert review.verdict == "complete"
-    prompt = str(agent.review_calls[0]["prompt"])
-    assert "supported_destination" in prompt
-    assert "scaffold-free consistency review" in prompt
-    assert "required_output_projection" not in prompt
-    assert "without depicting the completed assembly" not in prompt
-
-
-def test_incomplete_semantic_review_reenters_pa_before_commit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
-    runtime = ProductionProductContextGroundingRuntime(
-        tbox=tbox,
-        document_config=load_model_runtime_config().document_vlm,
-        document_vision_runtime=_NoDocumentVision(),
-    )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
-
-    class _ReviewRevisionAgent(_SequencedProductAgent):
-        def __init__(self) -> None:
-            shallow = _proposal("requirement_0001")
-            shallow["target_feature"]["desired_state"]["statement"]["text"] = (
-                "An assembly feature is requested."
-            )
-            super().__init__((shallow, _proposal("requirement_0001")))
-            self.review_results = (
-                {
-                    "verdict": "incomplete",
-                    "gap": "The desired state omits the medium gear.",
-                },
-                {"verdict": "complete", "gap": None},
-            )
-
-        async def ask_llm_structured(
-            self,
-            prompt: str,
-            *,
-            response_format: dict[str, Any],
-            tools: list[dict[str, Any]] | None = None,
-            tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
-            | None = None,
-            max_tool_rounds: int = 3,
-        ) -> dict[str, Any]:
-            if response_format["name"] == "spec2primitives_target_feature_review":
-                self.review_calls.append({"prompt": prompt, "response_format": response_format})
-                return dict(self.review_results[len(self.review_calls) - 1])
-            return await super().ask_llm_structured(
-                prompt,
-                response_format=response_format,
-                tools=tools,
-                tool_executor=tool_executor,
-                max_tool_rounds=max_tool_rounds,
-            )
-
-    async def complete(**kwargs: object) -> Mapping[str, object]:
-        del kwargs
-        return {
-            "grounding_status": "complete",
-            "resource_selection_ref": ("products/grounding/resource_selection/test.json"),
-        }
-
-    agent = _ReviewRevisionAgent()
-    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
-    result = asyncio.run(
-        runtime.ground_product_context(
-            agent,
-            interaction_root=root,
-            tbox=tbox,
-            abox=abox,
-            product_context={},
-            max_pa_turns=2,
-        )
-    )
-
-    assert result["grounding_status"] == "complete"
-    assert len(agent.calls) == 2
-    assert len(agent.review_calls) == 2
-    assert "target_feature_semantic_review" in str(agent.calls[1]["prompt"])
-    first = json.loads(
-        (root / "products/grounding/ontology_grounding/proposal_0001.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    second = json.loads(
-        (root / "products/grounding/ontology_grounding/proposal_0002.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    review = json.loads(
-        (root / "products/grounding/target_feature_review/review_0001.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert first["status"] == "rejected"
-    assert second["status"] == "accepted"
-    assert set(review) == {
-        "schema_version",
-        "record_type",
-        "review_number",
-        "proposal_number",
-        "target_feature_fingerprint",
-        "evidence_refs",
-        "verdict",
-        "gap",
-        "reviewed_at_ns",
-        "fingerprint",
-    }
-    assert "reasoning" not in review
-
-
-def test_clarification_requires_successful_approved_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
-    runtime = ProductionProductContextGroundingRuntime(
-        tbox=tbox,
-        document_config=load_model_runtime_config().document_vlm,
-        document_vision_runtime=_NoDocumentVision(),
-    )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
-    question = {"clarification_question": "Which product variant is intended?"}
-    agent = _SequencedProductAgent((question, _proposal("requirement_0001")))
-
-    async def complete(**kwargs: object) -> Mapping[str, object]:
-        del kwargs
-        return {
-            "grounding_status": "complete",
-            "resource_selection_ref": ("products/grounding/resource_selection/test.json"),
-        }
-
-    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
-    result = asyncio.run(
-        runtime.ground_product_context(
-            agent,
-            interaction_root=root,
-            tbox=tbox,
-            abox=abox,
-            product_context={},
-            max_pa_turns=2,
-        )
-    )
-
-    assert result["grounding_status"] == "complete"
-    assert len(agent.calls) == 2
-    revision_prompt = str(agent.calls[1]["prompt"])
-    assert "evidence_first_clarification" in revision_prompt
-    assert "Do not assume or supply an interpretation" in revision_prompt
-    assert "completed assembly is already visible" not in revision_prompt
+    assert result["grounding_validation_code"] == expected_code
+    assert str(error) not in result["insufficient_evidence"]
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
 
 
 def test_clarification_after_successful_retrieval_is_returned(
@@ -2917,8 +2723,6 @@ def test_clarification_after_successful_retrieval_is_returned(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
-
     async def retrieve(
         investigation: _NativeEvidenceInvestigation,
         tool_name: str,
@@ -2976,7 +2780,7 @@ def test_clarification_after_successful_retrieval_is_returned(
     assert "hidden case knowledge" in str(agent.calls[0]["prompt"])
 
 
-def test_premature_clarification_at_turn_limit_is_incomplete(tmp_path: Path) -> None:
+def test_genuine_clarification_is_returned_without_controller_retry(tmp_path: Path) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
     abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
@@ -3000,11 +2804,12 @@ def test_premature_clarification_at_turn_limit_is_incomplete(tmp_path: Path) -> 
         )
     )
 
-    assert result["grounding_status"] == "incomplete"
-    assert "clarification_question" not in result
-    assert result["insufficient_evidence"] == (
-        "PA requested user clarification before retrieving and considering approved evidence."
-    )
+    assert result == {
+        "grounding_status": "clarification_required",
+        "clarification_question": "Which product variant is intended?",
+        "tool_call_refs": [],
+    }
+    assert len(agent.calls) == 1
 
 
 def test_answered_clarification_uses_persisted_record_ref(
@@ -3019,7 +2824,6 @@ def test_answered_clarification_uses_persisted_record_ref(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
     clarification = {
         "record_type": "PAClarification",
         "question_turn": 3,
@@ -3068,71 +2872,17 @@ def test_answered_clarification_uses_persisted_record_ref(
     target_feature = proposal["output"]["target_feature"]
     assert evidence_ref in target_feature["required_process"]["evidence_refs"]
     assert evidence_ref in target_feature["desired_state"]["statement"]["evidence_refs"]
-    review_prompt = str(agent.review_calls[0]["prompt"])
-    assert evidence_ref not in review_prompt
-    assert presented_ref in review_prompt
-
-
-def test_system_owned_evidence_question_is_not_user_clarification(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
-    runtime = ProductionProductContextGroundingRuntime(
-        tbox=tbox,
-        document_config=load_model_runtime_config().document_vlm,
-        document_vision_runtime=_NoDocumentVision(),
-    )
-    _allow_unrelated_test_through_selected_candidate_gate(runtime, monkeypatch)
-    question = {
-        "clarification_question": (
-            "Do you also want retrieval of the live RGB-D observation evidence "
-            "for the current RGBDSegmentationRecord validation gap?"
-        )
-    }
-    agent = _SequencedProductAgent((question, _proposal("requirement_0001")))
-
-    async def complete(**kwargs: object) -> Mapping[str, object]:
-        del kwargs
-        return {
-            "grounding_status": "complete",
-            "resource_selection_ref": ("products/grounding/resource_selection/test.json"),
-        }
-
-    monkeypatch.setattr(runtime, "_complete_resource_assignment", complete)
-    result = asyncio.run(
-        runtime.ground_product_context(
-            agent,
-            interaction_root=root,
-            tbox=tbox,
-            abox=abox,
-            product_context={},
-            max_pa_turns=3,
-        )
-    )
-
-    assert result["grounding_status"] == "complete"
-    assert "clarification_question" not in result
-    assert len(agent.calls) == 2
-    assert "system_owned_grounding_choice" in str(agent.calls[1]["prompt"])
-    assert _clarification_requests_system_choice(
-        str(question["clarification_question"]),
-        required_record_type="RGBDSegmentationRecord",
-        handles=_default_handles(tmp_path / "first_catalog")[1],
-    )
-    assert not _clarification_requests_system_choice(
-        "Which product variant do you mean?",
-        required_record_type="RGBDSegmentationRecord",
-        handles=_default_handles(tmp_path / "second_catalog")[1],
-    )
+    assert agent.review_calls == []
 
 
 def test_production_source_has_no_task_label_or_answer_recipe() -> None:
     package_root = Path(__file__).resolve().parents[1]
     source = (package_root / "agents/pa/production_grounding.py").read_text(encoding="utf-8")
     prompt_source = (package_root / "agents/pa/ontology_grounding.py").read_text(encoding="utf-8")
+    layout_source = (
+        package_root / "tools/rgb_d_cad_grounding/candidate_layout.py"
+    ).read_text(encoding="utf-8")
+    active_sources = f"{source}\n{prompt_source}\n{layout_source}".casefold()
 
     assert "supports_manipulator_pick_place" not in source
     assert "mounting order" not in prompt_source
@@ -3145,6 +2895,19 @@ def test_production_source_has_no_task_label_or_answer_recipe() -> None:
     assert "Gear_Shaft" not in source
     assert "required_CAD_size_comparisons" not in source
     assert "target_frame_if_a_verifier_derives_geometry" not in source
+    for forbidden in (
+        "medium gear",
+        "gear_shaft",
+        "shaft-centered",
+        "expected_candidate",
+        "expected_resource",
+        "required evidence order",
+        "groundingreadinesscontract",
+        "targetfeaturesemanticreview",
+        "expected_revision",
+        "semantic_review",
+    ):
+        assert forbidden not in active_sources
 
 
 async def _unused_tool(

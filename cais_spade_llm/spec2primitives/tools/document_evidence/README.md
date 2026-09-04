@@ -32,10 +32,11 @@ readable only where recovery validation explicitly supports them.
 
 The document tool never authors ontology facts. PA uses the requirement,
 authoritative ontology, and retrieved typed records together, then returns a
-cited v8 `target_feature` with a required process, explicit current and desired
-states, optional typed state-value refs, and direct evidence. A separate PA
-semantic-review call checks adequacy before commit. That proposal remains transient until every
-typed prerequisite activated by its provisional graph is accepted.
+cited v9 `target_feature` with a required process, explicit current and desired
+states, optional typed state-value refs, and direct evidence. The host validates
+structure, provenance, hashes, JSON Pointers, and ontology consistency once
+before committing the proposal; it does not ask a semantic reviewer or issue a
+correction prompt.
 
 The VLM overview may provide semantic evidence that a manual describes a
 destination or final condition, but it neither labels RGB-D regions nor emits

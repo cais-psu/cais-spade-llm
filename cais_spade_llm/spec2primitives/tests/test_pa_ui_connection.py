@@ -27,7 +27,12 @@ def test_connected_ui_starts_one_native_grounding_call(
     calls: list[dict[str, object]] = []
     output = {
         "grounding_status": "incomplete",
-        "insufficient_evidence": "No approved observation is available.",
+        "insufficient_evidence": (
+            "The active grounding contract has no valid value for "
+            "current_state.state_values."
+        ),
+        "grounding_validation_code": "missing_obligation",
+        "unmet_grounding_obligation": "current_state.state_values",
         "tool_call_refs": [],
     }
 
@@ -106,7 +111,7 @@ def test_ui_observer_forwards_native_tools_without_changing_them() -> None:
             assert tool_executor is _retrieve
             assert max_tool_rounds == 7
             await tool_executor("retrieve", {"evidence_id": "evidence_0001"})
-            return {"insufficient_evidence": "More evidence is required."}
+            return {"result": {"clarification_question": "Which variant is intended?"}}
 
     observer = spec2primitives_ui._PAUIRuntimeObserver(
         _Agent(),
@@ -122,7 +127,9 @@ def test_ui_observer_forwards_native_tools_without_changing_them() -> None:
         )
     )
 
-    assert result == {"insufficient_evidence": "More evidence is required."}
+    assert result == {
+        "result": {"clarification_question": "Which variant is intended?"}
+    }
     assert tool_results == [("retrieve", {"evidence_id": "evidence_0001"})]
     assert stages == ["Investigating approved evidence and authoring the target feature."]
 
@@ -314,7 +321,7 @@ def test_completed_view_has_five_simple_stages_and_location(
         "Requirement received",
         "Evidence investigated",
         "Target feature grounded",
-        "Endpoint-motion allocation validated",
+        "State-location allocation validated",
         "Grounding complete",
     ]
     final_result = view["final_result"]
@@ -323,7 +330,7 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert final_result["target_frame"] == "world"
     assert final_result["pose"] is None
     assert final_result["selected_resource"] == "xarm6"
-    assert final_result["allocation_label"] == "validated endpoint-motion allocation"
+    assert final_result["allocation_label"] == "validated state-location resource allocation"
     assert final_result["motion_executed"] is False
     assert final_result["limitations"] == []
     assert final_result["reachability"]["status"] == "accepted"
@@ -332,7 +339,10 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert final_result["reachability"]["target_frame"] == "world"
     assert final_result["robot_agent_validation"]["status"] == "accepted"
     assert final_result["robot_agent_validation"]["mode"] == "plan_only"
-    assert final_result["robot_agent_validation"]["validation_scope"] == ("endpoint_motion")
+    assert final_result["robot_agent_validation"]["validation_scope"] == (
+        "state_location_reachability"
+    )
+    assert final_result["reachability"]["state_locations"] is not None
     assert final_result["robot_agent_validation"]["motion_executed"] is False
     assert final_result["target_feature"]["desired_state"]["statement"]["text"] == (
         "The medium gear is assembled as requested."
@@ -475,7 +485,7 @@ def test_completed_view_recovers_from_persisted_native_records(
     assert spec2primitives_ui._pa_ui_view(recovered)["activity_state"] == ("grounding complete")
 
 
-def test_timeline_distinguishes_clarification_from_incomplete_grounding() -> None:
+def test_timeline_distinguishes_grounded_deferred_clarification_and_incomplete() -> None:
     clarification = spec2primitives_ui._persisted_pa_timeline(
         "assemble medium gear",
         turns=[
@@ -498,7 +508,29 @@ def test_timeline_distinguishes_clarification_from_incomplete_grounding() -> Non
             {
                 "PA_output": {
                     "grounding_status": "incomplete",
-                    "insufficient_evidence": "No approved evidence resolved the need.",
+                    "insufficient_evidence": (
+                        "The active grounding contract has no valid value for "
+                        "desired_state.state_values."
+                    ),
+                    "grounding_validation_code": "missing_obligation",
+                }
+            }
+        ],
+        retrievals=[],
+        clarifications=[],
+        records={},
+        final_result=None,
+        terminal_failure=None,
+    )
+    grounded = spec2primitives_ui._persisted_pa_timeline(
+        "assemble medium gear",
+        turns=[
+            {
+                "PA_output": {
+                    "grounding_status": "complete",
+                    "resource_assignment_status": "deferred",
+                    "ontology_projection_ref": "proposal.json",
+                    "tool_call_refs": [],
                 }
             }
         ],
@@ -511,6 +543,72 @@ def test_timeline_distinguishes_clarification_from_incomplete_grounding() -> Non
 
     assert clarification[-1]["title"] == "Clarification requested"
     assert incomplete[-1]["title"] == "Grounding incomplete"
+    assert incomplete[-1]["detail"] == (
+        "The active grounding contract has no valid value for "
+        "desired_state.state_values. Validation code: missing_obligation."
+    )
+    assert grounded[-1] == {
+        "state": "accepted",
+        "title": "Product-state grounding complete",
+        "detail": (
+            "The current and desired states are validated; resource assignment is deferred."
+        ),
+    }
+
+
+def test_product_state_grounding_view_is_complete_when_assignment_is_deferred(
+    tmp_path: Path,
+) -> None:
+    interaction_root = tmp_path / "interaction"
+    turn_path = interaction_root / "interaction_record/turn_0001.json"
+    turn_path.parent.mkdir(parents=True)
+    output = {
+        "grounding_status": "complete",
+        "resource_assignment_status": "deferred",
+        "ontology_projection_ref": "proposal.json",
+        "tool_call_refs": [],
+    }
+    turn_path.write_text(json.dumps({"PA_output": output}), encoding="utf-8")
+    interaction = {
+        "interaction_identifier": interaction_root.name,
+        "interaction_root": interaction_root,
+        "product_requirement": "assemble medium gear",
+        "phase_3_1": output,
+        "phase_3_2": None,
+        "phase_3_3": output,
+    }
+
+    view = spec2primitives_ui._pa_ui_view(interaction)
+
+    assert view["activity_state"] == "product state grounded"
+    assert view["activity_color"] == "green"
+    assert view["final_result"] is None
+
+
+def test_ui_does_not_render_uncoded_legacy_failure_prose() -> None:
+    detail = spec2primitives_ui._grounding_incomplete_detail(
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "PA-authored legacy mounting and meshing prose.",
+        }
+    )
+
+    assert detail == (
+        "Grounding is incomplete; this legacy record has no controller validation code."
+    )
+    assert "mounting" not in detail
+
+
+def test_ui_ignores_removed_live_semantic_review_responses() -> None:
+    event = spec2primitives_ui._live_pa_response_event(
+        {
+            "verdict": "incomplete",
+            "gap": "Provider-authored mounting and meshing gap.",
+        },
+        {"name": "spec2primitives_target_feature_review"},
+    )
+
+    assert event is None
 
 
 def test_cad_identity_reports_all_cited_candidates_as_ambiguous(

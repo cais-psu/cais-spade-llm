@@ -72,11 +72,23 @@ class _GroundingRuntime:
             "clarification_question": "Which product variant is intended?",
             "tool_call_refs": [],
         },
-        {
-            "grounding_status": "incomplete",
-            "insufficient_evidence": "No evidence supports a feature.",
-            "tool_call_refs": [],
-        },
+        *[
+            {
+                "grounding_status": "incomplete",
+                "grounding_stage": "target_feature",
+                "insufficient_evidence": f"Deterministic controller result: {code}.",
+                "grounding_validation_code": code,
+                "tool_call_refs": [],
+            }
+            for code in (
+                "unsupported_process",
+                "invalid_target_feature",
+                "evidence_reference_invalid",
+                "location_evidence_unavailable",
+                "no_reachable_resource",
+                "invalid_resource_selection",
+            )
+        ],
     ],
 )
 def test_start_runs_one_native_investigation_and_persists_direct_result(
@@ -138,6 +150,50 @@ def test_blank_requirement_is_rejected_without_records(
         {"grounding_status": "unknown"},
         {"grounding_status": "clarification_required"},
         {"grounding_status": "incomplete"},
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "Historical uncoded grounding result.",
+            "tool_call_refs": [],
+        },
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "A declared obligation is unresolved.",
+            "unmet_grounding_obligation": 1,
+        },
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "Controller-authored diagnostic.",
+            "grounding_validation_code": "not_a_grounding_code",
+        },
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "Controller-authored diagnostic.",
+            "grounding_validation_code": "missing_obligation",
+        },
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "Controller-authored diagnostic.",
+            "grounding_validation_code": "missing_obligation",
+            "unmet_grounding_obligation": "backlash",
+        },
+        {
+            "grounding_status": "incomplete",
+            "insufficient_evidence": "Controller-authored diagnostic.",
+            "grounding_validation_code": "claims_evidence_invalid",
+            "unmet_grounding_obligation": "current_state.state_values",
+        },
+        {
+            "grounding_status": "complete",
+            "grounding_validation_code": "investigation_exhausted",
+            "ontology_projection_ref": "proposal.json",
+            "resource_selection_ref": "selection.json",
+            "tool_call_refs": [],
+        },
+        {
+            "grounding_status": "clarification_required",
+            "clarification_question": "Which product variant is intended?",
+            "unmet_grounding_obligation": "current_state.statement",
+        },
         {
             "grounding_status": "complete",
             "ontology_projection_ref": "proposal.json",

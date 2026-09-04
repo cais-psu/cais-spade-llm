@@ -45,18 +45,17 @@ records snapshot the validated overview and never treat a cache file as an ABox
 assertion.
 
 New runs keep native PA turns and tool audits rather than an active
-`GroundingSession`. A proposal candidate and its validation gap remain
-transient while source evidence and failures stay audited. `ProductContextView`
-is written only from the accepted ABox and typed-record view after the evidence
-gate passes; it is not PA reasoning state. Clarification answers or
-cancellation, `TargetFeatureSemanticReview` v2, and version-6 completion records
-are append-only. The accepted v8 proposal owns the single PA-authored
-`target_feature`; the v6 contract and completion pin that proposal, its two
-states, review, evidence and allocation presentations, registry and workcell
-snapshots, PA-authored physical state mapping, reachability, endpoint-motion
-RobotAgent validation, resource selection, assignment, and final ABox without
-copying the target feature. Supported older
-session and completion records remain read-only recovery inputs. Planned
+`GroundingSession`. PA's final target candidate is validated once; source
+evidence and failures remain audited. `ProductContextView` is written only from
+the accepted ABox and typed-record view after validation; it is not PA reasoning
+state. Clarification answers or cancellation and version-7 completion records
+are append-only. The accepted v9 proposal owns the single PA-authored
+`target_feature`; completion v7 directly pins that proposal, its two states,
+evidence and allocation presentations, registry and workcell snapshots,
+PA-authored location mapping, v4 reachability, v5 resource selection,
+assignment, and final ABox without copying the target feature. It does not
+produce a new `TypedGroundingContract`. Supported older session and completion
+records remain read-only recovery inputs. Planned
 `CompositionContextBundle` versions
 will preserve task, ABox, typed-binding, catalog, and selected-resource
 fingerprints. Each deduplicated `MissingContextBatch`, PA response, progress or

@@ -9,45 +9,46 @@ grounding. It does not discover or change the PPR TBox.
 
 ## Implementation status
 
-**Phase 4 is implemented through Phase 4.4 under the current framework.** This
-includes ontology context, document evidence, CAD/RGB-D grounding, typed
-grounding contracts, evidence-gated semantic acceptance, live simulation
-Cartesian reachability, and the selected `processExecution` assignment. Phase 5 selected-RA
-handoff is partially implemented. Phase 5.1 provides the contract-first
-assignment envelope and injected-runtime state/catalog snapshots. Phase 5.2A
-now lets that exact selected RobotAgent author one immutable, unbound
-`PrimitiveProgramDraft` from the latest captured pair. Live SPADE delivery,
-parameter binding, executable primitive-program validation, execution, and
-observed outcomes remain unimplemented.
+**Phase 4 is implemented as two autonomous ProductAgent decisions.** PA first
+investigates approved evidence and authors one complete `target_feature`. After
+that seven-assertion projection is validated and committed, PA independently
+selects state-location evidence and a capable resource, invokes reachability,
+and returns its cited selection. An accepted selection adds four
+`processExecution` assertions, for exactly eleven Phase 4 assertions.
 
-Phase 4 completion does not add cross-camera fusion, execute motion, or claim
-an observed manufacturing outcome. It derives numeric state locations only
-when PA invokes a verifier. Simulation allocation uses the live end-effector
-orientation and EE-to-TCP transform, but does not claim a measured object pose.
+New runs persist `OntologyGroundingProposal` v9, `ReachabilityCheckRecord` v4,
+`PlanOnlyFeasibilityValidationRecord` v4, `ResourceSelectionRecord` v5, and
+`PAContextGroundingCompletion` v7. Completion v7 directly pins the proposal,
+selection, reachability and RobotAgent validation records, final ABox, source
+and tool evidence, presentation records, registry, and workcell. It does not
+create a new `TypedGroundingContract`. Historical v4-v6 completions remain
+readable.
+
+Phase 5 selected-RA handoff remains partially implemented. Phase 5.1 provides
+the assignment envelope and injected-runtime state/catalog snapshots. Phase
+5.2A lets that exact selected RobotAgent author one immutable, unbound
+`PrimitiveProgramDraft`. Primitive binding, executable-program validation,
+execution, and observed outcomes remain unimplemented.
 
 ## Current PA workflow
 
 ```text
-requirement
-→ PA sees the PPR projection and approved evidence catalog
-→ PA calls retrieve(evidence_id) for relevant document, CAD, and observation evidence
-→ PA calls compare_cad_size(cad_evidence_id, observation_evidence_id) for relevant CAD
-→ PA authors one evidence-grounded target_feature, clarification, or insufficiency
-→ deterministic validation creates a transient provisional ABox
-→ the provisional graph activates its typed downstream requirements
-→ missing prerequisites are reported to PA, which may retrieve again
-→ a separate PA semantic review accepts the target meaning or requests revision
-→ exact candidate refs, hashes, CAD size, and state-value consistency are checked
-→ accepted typed evidence gates the semantic ABox commit
-→ PA chooses a provisional resource without reselecting either state
-→ PA calls check_reachability(resource_symbol) for that resource
-→ the exact selected RobotAgent asks live MoveIt for chained pick/place Cartesian paths
-→ rejection evidence returns to PA without automatic substitution
-→ only an accepted PA choice is committed as processExecution
-→ a hash-pinned completion record is written
+arbitrary requirement
+→ initialize the TBox and interaction ABox
+→ present every approved source through neutral prompt-local handles
+→ PA autonomously retrieves and analyzes the evidence it chooses
+→ PA returns one complete target_feature or a genuine clarification
+→ validate its structure, provenance, ontology consistency, and seven assertions once
+→ commit the unchanged target_feature projection
+→ present all capable resources and every neutral location handle
+→ PA chooses location lists and resources and invokes reachability as it chooses
+→ validate the unchanged cited reachable selection once
+→ commit four processExecution/resource assertions
+→ persist PAContextGroundingCompletion v7
 ```
 
-PA has two controlled native grounding tools:
+PA has four controlled native grounding tools: `retrieve`, `query_document`,
+`compare_cad_size`, and `analyze_candidate_layout`. Example calls include:
 
 ```json
 {
@@ -66,54 +67,30 @@ PA has two controlled native grounding tools:
 }
 ```
 
-The `evidence_id` is prompt-local. PA cannot provide a filesystem path, provider
-ID, frame, record type, or arbitrary source name. It may retrieve documents,
-approved CAD, and live observations in any order. The system validates the
-handle, processes the source, and returns compact typed evidence in the same PA
-conversation. `compare_cad_size` requires both inputs to have been retrieved and
-returns measurements from a persisted `CADSizeCorrespondenceRecord`; an
-ambiguous PA-facing result contains a neutrally ordered plausible set without
-rank or numerical error ranking, while the canonical record retains its full
-audit data. The tool does not select or substitute a candidate.
-Derived segmentation, calibration, frame conversion, and prerequisite checks
-remain controlled system operations. During allocation, PA receives a separate
-controlled `check_reachability` tool. In simulation, it derives gear pick and
-shaft-centered placement targets and asks the exact PA-chosen RobotAgent for a
-live, no-motion Cartesian result. It returns evidence without choosing a
-resource. Physical mode retains its existing safety path.
+The `evidence_id` is prompt-local. PA cannot supply a filesystem path, hidden
+provider identity, ground-truth label, or arbitrary source. It may retrieve
+documents, approved CAD, and observations in any order. `query_document`
+accepts PA's exact question. `compare_cad_size` persists and returns every
+evaluated candidate's measurements in observation order; it does not rank,
+select, or label a winner. `analyze_candidate_layout` accepts any two or more
+PA-selected candidates from one frame and returns raw positions, pairwise
+displacements, distances, and collinearity measurements. It does not produce a
+built-in spatial-relation verdict.
 
-The proposal is not accepted merely because its RDF vocabulary is valid. The
-system first evaluates it against a provisional graph and returns deterministic
-validation feedback without repairing the proposal. Both state assignments must
-pass the deterministic uniqueness gate before the scaffold-free semantic
-consistency review. The production prompt supplies only a generic two-state
-readiness rule and does not prescribe a component, evidence modality, CAD choice,
-or candidate. PA may call `retrieve` again in the same logical investigation and
-may choose approved sources in any order. Descriptor-derived record planning through
-`_producer_descriptors`, `_required_record_plan`, and `_grounding_gap` is not
-active in this path and remains deferred.
+PA's target-feature response is final for that conversation. There is no
+controller evidence plan, readiness contract, semantic-review call, expected
+revision, or outer correction loop. A malformed or unsupported response fails
+without answer-shaping feedback. The only normal alternatives are one complete
+`target_feature`, a genuine `clarification_question`, or
+`unsupported_process`. The latter is accepted only when no configured process
+represents the requirement; the controller never rewrites a requirement as
+`assembly`.
 
-The required-output projection is supplied by the system, not chosen by the
-user. PA may ask the user about genuinely ambiguous requirement meaning, but it
-may not ask whether a required record should be satisfied or whether an
-approved evidence category should be retrieved. Such a response receives
-internal correction feedback instead of becoming a UI clarification.
-
-After tool use, PA directly returns exactly one of:
-
-- `OntologyGroundingProposal` version 8 containing exactly one `target_feature`
-  with explicit current and desired states;
-- `clarification_question`; or
-- `insufficient_evidence`.
-
-New runs have no `next_action`, `inspect`, `propose_grounding`, or active
-`GroundingSession` action loop. They persist host-only
-`EvidencePresentationRecord` v1 and `AllocationPresentationRecord` v1,
-`TargetFeatureSemanticReview` v2, simulation `ReachabilityCheckRecord` v3,
-simulation `PlanOnlyFeasibilityValidationRecord` v3, `ResourceSelectionRecord` v4,
-`TypedGroundingContract` v6, and `PAContextGroundingCompletion` v6. Older
-proposal, reachability, validation, selection, and completion versions remain
-read-only; physical-mode allocation retains the v2 reachability/validation path.
+New incomplete results use only the deterministic stage codes
+`unsupported_process`, `invalid_target_feature`,
+`evidence_reference_invalid`, `location_evidence_unavailable`,
+`no_reachable_resource`, and `invalid_resource_selection`. Their display text
+is controller-authored and is not sent back to PA.
 
 ## Evidence and ontology boundary
 
@@ -141,17 +118,16 @@ neutral segmentation, stable crop, and `ObservationCandidateReview` records.
 The observation VLM describes every opaque candidate morphologically and its
 uncertainty but cannot assign a part identity, state, CAD identity, process, or
 resource. PA-facing projections omit semantic camera names and source/target
-shortcuts. Each candidate that PA
-binds through `state_values` plus approved calibration produces a neutral
-`RobotFrameLocationRecord` version 2. Coarse reach evaluates both translated 3D
-locations only on the retained physical path. Simulation allocation instead
-reloads the selected candidates, CAD size correspondences, CAD dimensions,
-support planes, and calibrations before live Cartesian planning.
+shortcuts. Target-feature `state_values` and allocation locations are separate:
+the former may cite any accepted typed record, while the latter are chosen from
+the neutral location catalog. If PA selects a segmentation candidate for
+reachability, approved calibration converts only that selected candidate to a
+`RobotFrameLocationRecord` v2.
 
 These physical records remain outside RDF because the PPR TBox does not model
 their numeric payloads. PA's explicit state assignment gives a selected neutral
-record its current or desired meaning. In simulation, the exact PA-selected
-RobotAgent returns the live Cartesian result. Neither the evidence host nor the
+record its current or desired meaning. The exact PA-selected RobotAgent returns
+the per-location reachability result. Neither the evidence host nor the
 RobotAgent chooses or substitutes a resource.
 
 ## Ontology grounding
@@ -162,10 +138,10 @@ PA authors exactly one `target_feature` in this increment. Its
 requested feature conditions and cite direct evidence. `state_values`
 carry PA-authored semantic names,
 accepted typed-record refs, JSON Pointer field paths, and direct citations.
-There is no host enum of value names. The general proposal schema permits zero,
-one, or multiple values, while fresh production completion requires exactly one
-`RGBDSegmentationRecord` candidate value for each state. Reusing one candidate
-is rejected only when the two PA-authored value names are incompatible.
+There is no host enum of value names. Grounding permits zero, one, or multiple
+values from any accepted typed record. They need not be RGB-D candidates or
+locations. Location evidence is selected independently during the second PA
+decision.
 
 `config/model_runtime.json` schema version 3 configures `product_agent_llm` as
 `gpt-5.6` with `none` reasoning for function tools through Chat Completions.
@@ -186,24 +162,18 @@ record hashes, JSON Pointers, nonempty resolved values, unique names, and this
 exact RDF projection. It does not author the target meaning or select
 primitives.
 
-A separate structured `TargetFeatureSemanticReview` asks PA whether the
-statement and included values adequately represent the requirement under the
-currently retrieved evidence. An incomplete review returns a concise gap to the
-bounded retrieval/revision loop and is never accepted as missing information.
-
-A structurally invalid PA proposal is never repaired by inserting an assertion.
-The rejected output is audited and its deterministic validation message is
-returned to PA for a bounded correction round. Only a corrected proposal can
-enter the typed-evidence gate or be committed.
+A structurally invalid PA proposal is never repaired, ranked, or sent back for
+a convergence retry. Validation either accepts the unchanged response or emits
+a stage-level code before ABox mutation.
 
 ### Geometry is verifier-derived
 
-The architecture does not contain `TargetFeatureGeometryRecord`. PA assigns
-neutral approved evidence to `current_state` and `desired_state`; numeric
-location is derived from the selected candidate and approved calibration only
-when reachability or another verifier requests it. The derived value is
-evidence for checking the PA-authored state assignment, not a predetermined
-target answer. Document, CAD, and RGB-D retrieval order remains PA-controlled.
+The architecture does not contain `TargetFeatureGeometryRecord`. Numeric
+location is derived from a PA-selected location handle and approved calibration
+only when PA invokes reachability. That derived value checks the submitted
+resource/location choice; it does not retroactively constrain `state_values` or
+provide a predetermined target answer. Document, CAD, and RGB-D retrieval order
+remains PA-controlled.
 
 ## Resource grounding
 
@@ -215,33 +185,25 @@ configuration. Python routing contains no product filename rule and no
 `supports_manipulator_pick_place` task flag.
 
 The grounded feature, its two states, the required process, and unresolved
-`processExecution` activate allocation directly. PA chooses a resource and one
-approved value for each state, then calls controlled `check_reachability`.
-For simulation, static `workspace_bounds`, `gripper_reach`, and station lists
-are not allocation authority. The tool derives a grasp from the loose gear and
-a final gear center on the installed shaft, then asks the chosen robot's live
-MoveIt group for collision-aware pick and place Cartesian paths. The place
-phase starts from the pick phase's terminal state; both must have fraction at
-least `0.999`. Registry order carries no preference. Only an `accepted` verdict
-permits `processExecution` and `runsOnResource` to be committed.
+`processExecution` activate allocation directly. PA receives every configured
+resource capable of the selected process and every approved neutral location
+handle. It submits one or more handles for each state and any capable resource
+to `check_reachability`. The result reports each submitted location
+independently. The controller accepts any PA-selected resource when its cited
+record is current, capability-valid, and fully reachable; registry order and
+distance do not rank choices.
 
-For example, for `assemble medium gear`, PA may retrieve approved requirement,
-CAD, and RGB-D evidence, author both feature states, and assign neutral regions
-to each state. PA freely chooses a capable resource and invokes reachability on
-those two regions. Calibration and robot-frame locations are derived at that
-point. If the exact selected RobotAgent rejects plan-only feasibility, PA sees
-the evidence and makes another free choice; the host does not substitute a
-resource. An accepted simulation choice is recorded as a validated Cartesian
-pick-place allocation, not completed manufacturing, and no motion is executed.
-Gripper actuation, grasp contact, attached-part collision geometry, process
-tolerance, force control, and final constrained insertion remain explicitly
-unvalidated.
+Reachability does not certify grasping, insertion, force, tolerance, or process
+execution, and it executes no motion. A failure does not trigger automatic
+resource substitution or a controller-authored retry. Only an unchanged PA
+selection backed by an accepted reachability record commits
+`processExecution`, its process/resource links, and the state transition.
 
 ## PA-to-RA target-feature handoff
 
-New Phase 5 handoff requires `PAContextGroundingCompletion` v6 and writes
+New Phase 5 handoff accepts `PAContextGroundingCompletion` v7 and writes
 `SelectedRAAssignmentEnvelope` v3. Phase 5.2A hash-verifies that completion and
-its accepted v8 proposal, then reconstructs a
+its accepted v9 proposal, then reconstructs a
 transient `target_feature` containing `product_requirement`,
 `specification_iri`, host-generated `feature_iri`, the PA-authored required
 process and both current and desired states, and `resolved_state_values`. Every
@@ -270,18 +232,15 @@ shows only:
 1. `Requirement received`
 2. `Evidence investigated`
 3. `Target feature grounded`
-4. `Cartesian pick-place allocation validated` (or the retained physical-mode
-   endpoint result)
+4. `State-location allocation validated`
 5. `Grounding complete`
 
 Tool IDs, hashes, provider mechanics, and failures remain in diagnostics. The
 final view shows both feature-state statements, optional semantic values with
-their record/path refs, annotated PA-selected RGB regions, post-acceptance CAD
-identity (or all cited candidates as ambiguous), both locations, the PA-selected
-process/resource, and the exact RobotAgent Cartesian phase verdicts, live pose,
-EE-to-TCP transform, and checked/unvalidated constraints. Generic document
-uncertainty remains in its evidence record for audit. A validated plan-only
-allocation does not mean manufacturing was completed or motion was executed.
+their record/path refs, the PA-selected state-location lists and resource, and
+the per-location reachability verdicts. Generic document uncertainty remains in
+its evidence record for audit. A validated reachability allocation does not
+mean manufacturing was completed or motion was executed.
 
 Below the final grounding result, the temporary **Phase 5 · RobotAgent
 Diagnostics** card provides operator activation and persisted inspection. Its current

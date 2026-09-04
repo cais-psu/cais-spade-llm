@@ -111,6 +111,35 @@ _PLAN_VALIDATION_V3_KEYS = {
     "request_fingerprint",
     "fingerprint",
 }
+_PLAN_VALIDATION_V4_KEYS = {
+    "schema_version",
+    "record_type",
+    "validation_number",
+    "validator_authority",
+    "process_symbol",
+    "process_iri",
+    "feature_iri",
+    "current_state_iri",
+    "desired_state_iri",
+    "resource_symbol",
+    "resource_iri",
+    "resource_jid",
+    "execution_mode",
+    "moveit_group",
+    "end_effector_link",
+    "target_frame",
+    "validation_scope",
+    "checked_constraints",
+    "unvalidated_constraints",
+    "state_locations",
+    "mode",
+    "motion_executed",
+    "status",
+    "feedback",
+    "validated_at_ns",
+    "request_fingerprint",
+    "fingerprint",
+}
 _CARTESIAN_CHECKED_CONSTRAINTS = [
     "live_tf",
     "collision_aware_cartesian_pick_path",
@@ -406,8 +435,8 @@ class ReachabilityCheckRecord:
     allocation_presentation_ref: str
     allocation_presentation_sha256: str
     allocation_presentation_fingerprint: str
-    current_state: StateReachEvidence | CartesianStateEvidence
-    desired_state: StateReachEvidence | CartesianStateEvidence
+    current_state: StateReachEvidence | CartesianStateEvidence | None
+    desired_state: StateReachEvidence | CartesianStateEvidence | None
     tbox_fingerprint: str
     registry_fingerprint: str
     workcell_fingerprint: str
@@ -422,6 +451,7 @@ class ReachabilityCheckRecord:
     robot_agent_validation_sha256: str | None = None
     robot_agent_validation_fingerprint: str | None = None
     phase_results: Mapping[str, object] | None = None
+    state_locations: Mapping[str, tuple[StateReachEvidence, ...]] | None = None
 
     def to_record(self) -> dict[str, object]:
         """Return the exact persisted reachability record."""
@@ -444,10 +474,23 @@ class ReachabilityCheckRecord:
             "allocation_presentation_ref": self.allocation_presentation_ref,
             "allocation_presentation_sha256": self.allocation_presentation_sha256,
             "allocation_presentation_fingerprint": self.allocation_presentation_fingerprint,
-            "current_state": self.current_state.to_record(),
-            "desired_state": self.desired_state.to_record(),
         }
-        if self.schema_version == 3:
+        if self.schema_version == 4:
+            if self.state_locations is None:
+                raise ResourceGroundingError(
+                    "ReachabilityCheckRecord v4 has no state locations."
+                )
+            payload["state_locations"] = {
+                state_name: [item.to_record() for item in locations]
+                for state_name, locations in self.state_locations.items()
+            }
+        elif self.schema_version == 3:
+            if self.current_state is None or self.desired_state is None:
+                raise ResourceGroundingError(
+                    "ReachabilityCheckRecord v3 has no state evidence."
+                )
+            payload["current_state"] = self.current_state.to_record()
+            payload["desired_state"] = self.desired_state.to_record()
             payload.update(
                 {
                     "motion_mode": self.motion_mode,
@@ -463,7 +506,14 @@ class ReachabilityCheckRecord:
                     ),
                 }
             )
-        elif self.schema_version != 2:
+        elif self.schema_version == 2:
+            if self.current_state is None or self.desired_state is None:
+                raise ResourceGroundingError(
+                    "ReachabilityCheckRecord v2 has no state evidence."
+                )
+            payload["current_state"] = self.current_state.to_record()
+            payload["desired_state"] = self.desired_state.to_record()
+        else:
             raise ResourceGroundingError("ReachabilityCheckRecord schema is invalid.")
         payload.update(
             {
@@ -487,7 +537,19 @@ class ReachabilityCheckRecord:
             raise ResourceGroundingError(
                 "ReachabilityCheckRecord fingerprint changed after validation."
             )
-        for state in (self.current_state, self.desired_state):
+        if self.schema_version == 4:
+            state_evidence = tuple(
+                item
+                for locations in (self.state_locations or {}).values()
+                for item in locations
+            )
+        else:
+            state_evidence = tuple(
+                state
+                for state in (self.current_state, self.desired_state)
+                if state is not None
+            )
+        for state in state_evidence:
             source_path = _resolve_interaction_ref(
                 self._interaction_root,
                 state.source_record_ref,
@@ -538,8 +600,8 @@ class ResourceSelectionRecord:
     desired_state_iri: str
     candidate_resource_iris: tuple[str, ...]
     candidate_resource_symbols: tuple[str, ...]
-    current_state_evidence: StateEvidenceAssignment
-    desired_state_evidence: StateEvidenceAssignment
+    current_state_evidence: StateEvidenceAssignment | None
+    desired_state_evidence: StateEvidenceAssignment | None
     evidence_presentation_ref: str
     evidence_presentation_sha256: str
     evidence_presentation_fingerprint: str
@@ -567,9 +629,60 @@ class ResourceSelectionRecord:
     workcell_fingerprint: str
     fingerprint: str
     _interaction_root: Path = field(repr=False, compare=False)
+    schema_version: int = 4
+    state_location_handles: Mapping[str, tuple[str, ...]] | None = None
 
     def to_record(self) -> dict[str, object]:
         """Return the exact JSON-safe selection record."""
+        if self.schema_version == 5:
+            if self.state_location_handles is None:
+                raise ResourceGroundingError(
+                    "ResourceSelectionRecord v5 has no state locations."
+                )
+            return {
+                "schema_version": 5,
+                "record_type": "ResourceSelectionRecord",
+                "selection_number": self.selection_number,
+                "authority": _PA_AUTHORITY,
+                "specification_iri": self.specification_iri,
+                "feature_iri": self.feature_iri,
+                "process_symbol": self.process_symbol,
+                "process_iri": self.process_iri,
+                "current_state_iri": self.current_state_iri,
+                "desired_state_iri": self.desired_state_iri,
+                "candidate_resource_iris": list(self.candidate_resource_iris),
+                "candidate_resource_symbols": list(self.candidate_resource_symbols),
+                "state_locations": {
+                    state_name: list(handles)
+                    for state_name, handles in self.state_location_handles.items()
+                },
+                "evidence_presentation_ref": self.evidence_presentation_ref,
+                "evidence_presentation_sha256": self.evidence_presentation_sha256,
+                "evidence_presentation_fingerprint": self.evidence_presentation_fingerprint,
+                "allocation_presentation_ref": self.allocation_presentation_ref,
+                "allocation_presentation_sha256": self.allocation_presentation_sha256,
+                "allocation_presentation_fingerprint": self.allocation_presentation_fingerprint,
+                "reachability_check_ref": self.reachability_check_ref,
+                "reachability_check_sha256": self.reachability_check_sha256,
+                "reachability_check_fingerprint": self.reachability_check_fingerprint,
+                "selected_resource_symbol": self.selected_resource_symbol,
+                "selected_resource_iri": self.selected_resource_iri,
+                "selected_resource_jid": self.selected_resource_jid,
+                "selected_execution_mode": self.selected_execution_mode,
+                "robot_agent_validation_ref": self.robot_agent_validation_ref,
+                "robot_agent_validation_sha256": self.robot_agent_validation_sha256,
+                "robot_agent_validation_fingerprint": self.robot_agent_validation_fingerprint,
+                "robot_agent_validation_status": self.robot_agent_validation_status,
+                "allocation_status": self.allocation_status,
+                "tbox_fingerprint": self.tbox_fingerprint,
+                "registry_fingerprint": self.registry_fingerprint,
+                "workcell_fingerprint": self.workcell_fingerprint,
+                "fingerprint": self.fingerprint,
+            }
+        if self.schema_version != 4:
+            raise ResourceGroundingError("ResourceSelectionRecord schema is invalid.")
+        if self.current_state_evidence is None or self.desired_state_evidence is None:
+            raise ResourceGroundingError("ResourceSelectionRecord v4 state evidence is missing.")
         return {
             "schema_version": 4,
             "record_type": "ResourceSelectionRecord",
@@ -628,7 +741,12 @@ class ResourceSelectionRecord:
             path = _resolve_interaction_ref(self._interaction_root, record_ref)
             if _sha256_path(path) != expected_sha256:
                 raise ResourceGroundingError("ResourceSelectionRecord pinned evidence changed.")
-        for assignment in (self.current_state_evidence, self.desired_state_evidence):
+        assignments = tuple(
+            assignment
+            for assignment in (self.current_state_evidence, self.desired_state_evidence)
+            if assignment is not None
+        )
+        for assignment in assignments:
             source_path = _resolve_interaction_ref(
                 self._interaction_root,
                 assignment.source_record_ref,
@@ -693,13 +811,34 @@ def check_resource_reachability(  # noqa: PLR0913
     workcell: PredefinedWorkcellSnapshot,
     resource_symbol: str,
     allocation_presentation: AllocationPresentationRecord,
-    current_state_evidence_handle: str,
-    desired_state_evidence_handle: str,
-    current_location_record_path: Path,
-    desired_location_record_path: Path,
+    current_state_evidence_handle: str | None = None,
+    desired_state_evidence_handle: str | None = None,
+    current_location_record_path: Path | None = None,
+    desired_location_record_path: Path | None = None,
+    state_location_record_paths: Mapping[str, Sequence[tuple[str, Path]]] | None = None,
     check_number: int = 1,
 ) -> ReachabilityCheckRecord:
     """Check both feature states for one explicit PA-chosen resource."""
+    if state_location_record_paths is not None:
+        return _check_resource_location_lists(
+            interaction_root=interaction_root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            resource_symbol=resource_symbol,
+            allocation_presentation=allocation_presentation,
+            state_location_record_paths=state_location_record_paths,
+            check_number=check_number,
+        )
+    if (
+        current_state_evidence_handle is None
+        or desired_state_evidence_handle is None
+        or current_location_record_path is None
+        or desired_location_record_path is None
+    ):
+        raise ResourceGroundingError(
+            "Reachability requires location evidence for both feature states."
+        )
     _validate_positive_integer(check_number, "check_number")
     root = Path(interaction_root).resolve()
     _assert_authorities(workcell, registry, tbox=tbox)
@@ -828,6 +967,173 @@ def check_resource_reachability(  # noqa: PLR0913
         status=status,
         fingerprint=str(payload["fingerprint"]),
         _interaction_root=root,
+    )
+    result.assert_unchanged()
+    return result
+
+
+def _check_resource_location_lists(  # noqa: PLR0913
+    *,
+    interaction_root: Path,
+    tbox: TBoxSnapshot,
+    registry: ResourceRegistrySnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    resource_symbol: str,
+    allocation_presentation: AllocationPresentationRecord,
+    state_location_record_paths: Mapping[str, Sequence[tuple[str, Path]]],
+    check_number: int,
+) -> ReachabilityCheckRecord:
+    """Evaluate every PA-submitted location independently for one resource."""
+    _validate_positive_integer(check_number, "check_number")
+    if set(state_location_record_paths) != {"current_state", "desired_state"}:
+        raise ResourceGroundingError("Reachability state-location fields are invalid.")
+    root = Path(interaction_root).resolve()
+    _assert_authorities(workcell, registry, tbox=tbox)
+    abox = load_interaction_abox(root, tbox)
+    context = _allocation_context(abox, workcell)
+    allocation_presentation.assert_unchanged()
+    if (
+        allocation_presentation.process_symbol != context.process_symbol
+        or allocation_presentation.process_iri != context.process_iri
+        or allocation_presentation.feature_iri != context.feature_iri
+        or allocation_presentation.current_state_iri != context.current_state_iri
+        or allocation_presentation.desired_state_iri != context.desired_state_iri
+        or resource_symbol not in allocation_presentation.resource_order
+    ):
+        raise ResourceGroundingError(
+            "check_reachability does not match the pinned allocation presentation."
+        )
+
+    entries = {
+        entry.resource_symbol: entry
+        for entry in registry.resources
+        if entry.resource_iri in context.candidate_resource_iris
+    }
+    entry = entries.get(resource_symbol)
+    if entry is None:
+        raise ResourceGroundingError(
+            "check_reachability resource_symbol is not a capable resource."
+        )
+    manifest = _load_resource_manifest(entry, _manifest_path(workcell, entry))
+    environment = _resource_environment(manifest, entry.resource_symbol)
+    static_capabilities = environment.get("static_capabilities")
+    if not isinstance(static_capabilities, Mapping):
+        raise ResourceGroundingError(
+            f"Resource static_capabilities are missing: {entry.resource_symbol}."
+        )
+    workspace = _workspace_bounds(static_capabilities.get("workspace_bounds"))
+    reach = _gripper_reach(
+        static_capabilities.get("gripper_reach"),
+        target_frame=context.target_frame,
+    )
+    state_iris = {
+        "current_state": context.current_state_iri,
+        "desired_state": context.desired_state_iri,
+    }
+    state_locations: dict[str, tuple[StateReachEvidence, ...]] = {}
+    for state_name in ("current_state", "desired_state"):
+        submitted = state_location_record_paths[state_name]
+        if (
+            not isinstance(submitted, Sequence)
+            or isinstance(submitted, (str, bytes))
+            or not submitted
+        ):
+            raise ResourceGroundingError(
+                f"Reachability requires one or more {state_name} locations."
+            )
+        seen_handles: set[str] = set()
+        results: list[StateReachEvidence] = []
+        for evidence_handle, location_path in submitted:
+            if evidence_handle in seen_handles:
+                raise ResourceGroundingError(
+                    f"Reachability {state_name} location handles must be unique."
+                )
+            seen_handles.add(evidence_handle)
+            evidence = allocation_presentation.evidence_for_handle(evidence_handle)
+            _assert_presented_evidence_unchanged(root, evidence)
+            location = _load_robot_frame_location(
+                location_path,
+                root,
+                target_frame=context.target_frame,
+            )
+            results.append(
+                _state_reach_evidence(
+                    state_name,
+                    state_iris[state_name],
+                    location,
+                    evidence=evidence,
+                    workspace=workspace,
+                    reach=reach,
+                )
+            )
+        state_locations[state_name] = tuple(results)
+
+    status = (
+        "accepted"
+        if all(item.reachable for values in state_locations.values() for item in values)
+        else "rejected"
+    )
+    execution_mode = str(manifest["execution_mode"])
+    payload: dict[str, object] = {
+        "schema_version": 4,
+        "record_type": "ReachabilityCheckRecord",
+        "check_number": check_number,
+        "authority": _TOOL_AUTHORITY,
+        "specification_iri": context.specification_iri,
+        "feature_iri": context.feature_iri,
+        "process_symbol": context.process_symbol,
+        "process_iri": context.process_iri,
+        "resource_symbol": entry.resource_symbol,
+        "resource_iri": entry.resource_iri,
+        "resource_jid": entry.resource_jid,
+        "execution_mode": execution_mode,
+        "target_frame": context.target_frame,
+        "manifest_ref": entry.source_ref,
+        "manifest_sha256": entry.source_sha256,
+        "allocation_presentation_ref": allocation_presentation.record_ref,
+        "allocation_presentation_sha256": _sha256_path(allocation_presentation.record_path),
+        "allocation_presentation_fingerprint": allocation_presentation.fingerprint,
+        "state_locations": {
+            state_name: [item.to_record() for item in values]
+            for state_name, values in state_locations.items()
+        },
+        "tbox_fingerprint": tbox.fingerprint,
+        "registry_fingerprint": registry.fingerprint,
+        "workcell_fingerprint": workcell.fingerprint,
+        "status": status,
+    }
+    payload["fingerprint"] = _record_fingerprint(payload)
+    destination = root / _REACHABILITY_ROOT / f"check_{check_number:04d}"
+    record_path = destination / _REACHABILITY_RECORD_NAME
+    _persist_record(destination, _REACHABILITY_RECORD_NAME, payload)
+    result = ReachabilityCheckRecord(
+        record_path=record_path,
+        record_ref=record_path.relative_to(root).as_posix(),
+        check_number=check_number,
+        specification_iri=context.specification_iri,
+        feature_iri=context.feature_iri,
+        process_symbol=context.process_symbol,
+        process_iri=context.process_iri,
+        resource_symbol=entry.resource_symbol,
+        resource_iri=entry.resource_iri,
+        resource_jid=entry.resource_jid,
+        execution_mode=execution_mode,
+        target_frame=context.target_frame,
+        manifest_ref=entry.source_ref,
+        manifest_sha256=entry.source_sha256,
+        allocation_presentation_ref=allocation_presentation.record_ref,
+        allocation_presentation_sha256=str(payload["allocation_presentation_sha256"]),
+        allocation_presentation_fingerprint=allocation_presentation.fingerprint,
+        current_state=None,
+        desired_state=None,
+        tbox_fingerprint=tbox.fingerprint,
+        registry_fingerprint=registry.fingerprint,
+        workcell_fingerprint=workcell.fingerprint,
+        status=status,
+        fingerprint=str(payload["fingerprint"]),
+        _interaction_root=root,
+        schema_version=4,
+        state_locations=state_locations,
     )
     result.assert_unchanged()
     return result
@@ -1081,6 +1387,18 @@ def persist_pa_resource_selection(  # noqa: PLR0913
     context = _allocation_context(abox, workcell)
     reachability.assert_unchanged()
     allocation_presentation.assert_unchanged()
+    if reachability.schema_version == 4:
+        return _persist_location_resource_selection(
+            root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            context=context,
+            reachability=reachability,
+            allocation_presentation=allocation_presentation,
+            robot_agent_validation_path=robot_agent_validation_path,
+            selection_number=selection_number,
+        )
     if (
         reachability.status != "accepted"
         or reachability.specification_iri != context.specification_iri
@@ -1251,6 +1569,185 @@ def persist_pa_resource_selection(  # noqa: PLR0913
     return result
 
 
+def _persist_location_resource_selection(  # noqa: PLR0913
+    *,
+    root: Path,
+    tbox: TBoxSnapshot,
+    registry: ResourceRegistrySnapshot,
+    workcell: PredefinedWorkcellSnapshot,
+    context: _AllocationContext,
+    reachability: ReachabilityCheckRecord,
+    allocation_presentation: AllocationPresentationRecord,
+    robot_agent_validation_path: Path,
+    selection_number: int,
+) -> ResourceSelectionRecord:
+    """Persist PA's unchanged resource and location-list selection as v5."""
+    state_locations = reachability.state_locations
+    if state_locations is None or set(state_locations) != {"current_state", "desired_state"}:
+        raise ResourceGroundingError("PA resource choice has invalid state locations.")
+    if (
+        reachability.status != "accepted"
+        or not state_locations["current_state"]
+        or not state_locations["desired_state"]
+        or any(
+            item.state_iri
+            != (
+                context.current_state_iri
+                if state_name == "current_state"
+                else context.desired_state_iri
+            )
+            for state_name, locations in state_locations.items()
+            for item in locations
+        )
+        or reachability.specification_iri != context.specification_iri
+        or reachability.feature_iri != context.feature_iri
+        or reachability.process_symbol != context.process_symbol
+        or reachability.process_iri != context.process_iri
+        or reachability.resource_iri not in context.candidate_resource_iris
+        or reachability.tbox_fingerprint != tbox.fingerprint
+        or reachability.registry_fingerprint != registry.fingerprint
+        or reachability.workcell_fingerprint != workcell.fingerprint
+        or reachability.allocation_presentation_ref != allocation_presentation.record_ref
+        or reachability.allocation_presentation_sha256
+        != _sha256_path(allocation_presentation.record_path)
+        or reachability.allocation_presentation_fingerprint
+        != allocation_presentation.fingerprint
+    ):
+        raise ResourceGroundingError(
+            "PA resource choice requires one cited accepted reachability check."
+        )
+    validation_path = Path(robot_agent_validation_path).resolve()
+    try:
+        validation_ref = validation_path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ResourceGroundingError(
+            "RobotAgent validation is outside the interaction."
+        ) from exc
+    validation = _read_json_mapping(validation_path, "plan-only RobotAgent validation")
+    _validate_plan_only_record(validation, reachability)
+    validation_status = str(validation["status"])
+    selected = validation_status == "accepted"
+    candidate_resource_iris = context.candidate_resource_iris
+    candidate_resource_symbols = tuple(
+        entry.resource_symbol
+        for entry in registry.resources
+        if entry.resource_iri in candidate_resource_iris
+    )
+    presented_resources = {
+        (entry.resource_symbol, entry.resource_iri, entry.resource_jid)
+        for entry in allocation_presentation.resources
+    }
+    registry_resources = {
+        (entry.resource_symbol, entry.resource_iri, entry.resource_jid)
+        for entry in registry.resources
+        if entry.resource_iri in candidate_resource_iris
+    }
+    if presented_resources != registry_resources:
+        raise ResourceGroundingError(
+            "Allocation presentation candidate resources changed before selection."
+        )
+    handles = {
+        state_name: tuple(item.evidence_handle for item in locations)
+        for state_name, locations in state_locations.items()
+    }
+    evidence_presentation_path = _resolve_interaction_ref(
+        root,
+        allocation_presentation.evidence_presentation_ref,
+    )
+    payload: dict[str, object] = {
+        "schema_version": 5,
+        "record_type": "ResourceSelectionRecord",
+        "selection_number": selection_number,
+        "authority": _PA_AUTHORITY,
+        "specification_iri": context.specification_iri,
+        "feature_iri": context.feature_iri,
+        "process_symbol": context.process_symbol,
+        "process_iri": context.process_iri,
+        "current_state_iri": context.current_state_iri,
+        "desired_state_iri": context.desired_state_iri,
+        "candidate_resource_iris": list(candidate_resource_iris),
+        "candidate_resource_symbols": list(candidate_resource_symbols),
+        "state_locations": {
+            state_name: list(state_handles) for state_name, state_handles in handles.items()
+        },
+        "evidence_presentation_ref": allocation_presentation.evidence_presentation_ref,
+        "evidence_presentation_sha256": _sha256_path(evidence_presentation_path),
+        "evidence_presentation_fingerprint": (
+            allocation_presentation.evidence_presentation_fingerprint
+        ),
+        "allocation_presentation_ref": allocation_presentation.record_ref,
+        "allocation_presentation_sha256": _sha256_path(allocation_presentation.record_path),
+        "allocation_presentation_fingerprint": allocation_presentation.fingerprint,
+        "reachability_check_ref": reachability.record_ref,
+        "reachability_check_sha256": _sha256_path(reachability.record_path),
+        "reachability_check_fingerprint": reachability.fingerprint,
+        "selected_resource_symbol": reachability.resource_symbol if selected else None,
+        "selected_resource_iri": reachability.resource_iri if selected else None,
+        "selected_resource_jid": reachability.resource_jid if selected else None,
+        "selected_execution_mode": reachability.execution_mode if selected else None,
+        "robot_agent_validation_ref": validation_ref,
+        "robot_agent_validation_sha256": _sha256_path(validation_path),
+        "robot_agent_validation_fingerprint": validation["fingerprint"],
+        "robot_agent_validation_status": validation_status,
+        "allocation_status": validation_status,
+        "tbox_fingerprint": tbox.fingerprint,
+        "registry_fingerprint": registry.fingerprint,
+        "workcell_fingerprint": workcell.fingerprint,
+    }
+    payload["fingerprint"] = _record_fingerprint(payload)
+    destination = root / _SELECTION_ROOT / f"selection_{selection_number:04d}"
+    record_path = destination / _SELECTION_RECORD_NAME
+    _persist_record(destination, _SELECTION_RECORD_NAME, payload)
+    result = ResourceSelectionRecord(
+        record_path=record_path,
+        record_ref=record_path.relative_to(root).as_posix(),
+        selection_number=selection_number,
+        specification_iri=context.specification_iri,
+        feature_iri=context.feature_iri,
+        process_symbol=context.process_symbol,
+        process_iri=context.process_iri,
+        current_state_iri=context.current_state_iri,
+        desired_state_iri=context.desired_state_iri,
+        candidate_resource_iris=candidate_resource_iris,
+        candidate_resource_symbols=candidate_resource_symbols,
+        current_state_evidence=None,
+        desired_state_evidence=None,
+        evidence_presentation_ref=allocation_presentation.evidence_presentation_ref,
+        evidence_presentation_sha256=str(payload["evidence_presentation_sha256"]),
+        evidence_presentation_fingerprint=(
+            allocation_presentation.evidence_presentation_fingerprint
+        ),
+        allocation_presentation_ref=allocation_presentation.record_ref,
+        allocation_presentation_sha256=str(payload["allocation_presentation_sha256"]),
+        allocation_presentation_fingerprint=allocation_presentation.fingerprint,
+        reachability_check_ref=reachability.record_ref,
+        reachability_check_sha256=str(payload["reachability_check_sha256"]),
+        reachability_check_fingerprint=reachability.fingerprint,
+        provisional_resource_symbol=reachability.resource_symbol,
+        provisional_resource_iri=reachability.resource_iri,
+        provisional_resource_jid=reachability.resource_jid,
+        provisional_execution_mode=reachability.execution_mode,
+        robot_agent_validation_ref=validation_ref,
+        robot_agent_validation_sha256=str(payload["robot_agent_validation_sha256"]),
+        robot_agent_validation_fingerprint=str(validation["fingerprint"]),
+        robot_agent_validation_status=validation_status,
+        allocation_status=validation_status,
+        selected_resource_symbol=(reachability.resource_symbol if selected else None),
+        selected_resource_iri=reachability.resource_iri if selected else None,
+        selected_resource_jid=reachability.resource_jid if selected else None,
+        selected_execution_mode=reachability.execution_mode if selected else None,
+        tbox_fingerprint=tbox.fingerprint,
+        registry_fingerprint=registry.fingerprint,
+        workcell_fingerprint=workcell.fingerprint,
+        fingerprint=str(payload["fingerprint"]),
+        _interaction_root=root,
+        schema_version=5,
+        state_location_handles=handles,
+    )
+    result.assert_unchanged()
+    return result
+
+
 def commit_resource_assignment(
     *,
     interaction_root: Path,
@@ -1265,6 +1762,21 @@ def commit_resource_assignment(
     abox = load_interaction_abox(root, tbox)
     context = _allocation_context(abox, workcell)
     selection.assert_unchanged()
+    if selection.schema_version == 5:
+        state_evidence_valid = (
+            selection.state_location_handles is not None
+            and set(selection.state_location_handles)
+            == {"current_state", "desired_state"}
+            and bool(selection.state_location_handles["current_state"])
+            and bool(selection.state_location_handles["desired_state"])
+        )
+    else:
+        state_evidence_valid = (
+            selection.current_state_evidence is not None
+            and selection.desired_state_evidence is not None
+            and selection.current_state_evidence.state_iri == context.current_state_iri
+            and selection.desired_state_evidence.state_iri == context.desired_state_iri
+        )
     if (
         selection.allocation_status != "accepted"
         or selection.robot_agent_validation_status != "accepted"
@@ -1278,8 +1790,7 @@ def commit_resource_assignment(
         or selection.desired_state_iri != context.desired_state_iri
         or selection.selected_resource_iri not in context.candidate_resource_iris
         or set(selection.candidate_resource_iris) != set(context.candidate_resource_iris)
-        or selection.current_state_evidence.state_iri != context.current_state_iri
-        or selection.desired_state_evidence.state_iri != context.desired_state_iri
+        or not state_evidence_valid
     ):
         raise ResourceGroundingError(
             "Resource assignment requires the accepted PA choice without substitution."
@@ -1908,6 +2419,60 @@ def _validate_plan_only_record(
     validation: Mapping[str, object],
     reachability: ReachabilityCheckRecord,
 ) -> None:
+    if reachability.schema_version == 4:
+        state_locations = reachability.state_locations
+        payload = dict(validation)
+        fingerprint = payload.pop("fingerprint", None)
+        submitted = validation.get("state_locations")
+        if state_locations is None or not isinstance(submitted, Mapping):
+            raise ResourceGroundingError(
+                "RobotAgent state-location validation record is inconsistent."
+            )
+        submitted_handles = {
+            state_name: [
+                item.get("evidence_handle") if isinstance(item, Mapping) else None
+                for item in submitted.get(state_name, [])
+            ]
+            for state_name in ("current_state", "desired_state")
+        }
+        expected_handles = {
+            state_name: [item.evidence_handle for item in state_locations[state_name]]
+            for state_name in ("current_state", "desired_state")
+        }
+        if (
+            set(validation) != _PLAN_VALIDATION_V4_KEYS
+            or validation.get("schema_version") != 4
+            or validation.get("record_type") != "PlanOnlyFeasibilityValidationRecord"
+            or validation.get("validator_authority") != reachability.resource_jid
+            or validation.get("process_symbol") != reachability.process_symbol
+            or validation.get("process_iri") != reachability.process_iri
+            or validation.get("feature_iri") != reachability.feature_iri
+            or validation.get("current_state_iri")
+            != state_locations["current_state"][0].state_iri
+            or validation.get("desired_state_iri")
+            != state_locations["desired_state"][0].state_iri
+            or validation.get("resource_symbol") != reachability.resource_symbol
+            or validation.get("resource_iri") != reachability.resource_iri
+            or validation.get("resource_jid") != reachability.resource_jid
+            or validation.get("execution_mode") != reachability.execution_mode
+            or validation.get("target_frame") != reachability.target_frame
+            or validation.get("validation_scope") != "state_location_reachability"
+            or validation.get("checked_constraints")
+            != ["resource_endpoint_reachability"]
+            or validation.get("unvalidated_constraints")
+            != ["grasping", "insertion", "force_contact", "process_tolerance"]
+            or submitted_handles != expected_handles
+            or validation.get("mode") != "plan_only"
+            or validation.get("motion_executed") is not False
+            or validation.get("status") not in _VALIDATION_STATUSES
+            or validation.get("request_fingerprint") != reachability.fingerprint
+            or not _is_sha256(fingerprint)
+            or _record_fingerprint(payload) != fingerprint
+        ):
+            raise ResourceGroundingError(
+                "RobotAgent state-location validation record is inconsistent."
+            )
+        return
     if reachability.schema_version == 3:
         payload = dict(validation)
         fingerprint = payload.pop("fingerprint", None)

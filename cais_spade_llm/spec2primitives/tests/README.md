@@ -5,25 +5,23 @@ covers the narrow dual Gazebo adapter, placeholder reply, NIST scene structure,
 launch pass-through, installed-world prerequisite, do-not-leak rule, and the
 no-`bridge.py`-import boundary.
 
-Current PA production-grounding coverage verifies the native `retrieve` tool,
-single `target_feature` proposal validation, the separate semantic-review pass,
-and the evidence-gated retry loop. Tests prove
-that an early proposal does not write accepted RDF, a descriptor-derived typed
-gap re-enters PA with the previous evidence state, and the proposal is committed
-only after its active consumer's prerequisite chain is accepted. They also
-cover CAD-first, observation-first, document-first, repeated live observation,
-unauthorized or stale evidence, target-feature-only CAD correspondence,
-ambiguous results, missing calibration, inconsistent frames, unreachable
-resources, emergency exhaustion, and synthetic descriptor routing without
-product or modality branches.
+Current PA production-grounding coverage verifies the two native tool-using PA
+decisions: one complete `target_feature`, followed by independently selected
+location handles and a capable resource. Tests prove that validation runs once,
+malformed responses do not write RDF or receive correction hints, seven feature
+assertions precede four accepted allocation assertions, and failures do not
+cause controller substitution. They also cover CAD-first, observation-first,
+document-first, repeated live observation, unauthorized or stale evidence,
+missing calibration, inconsistent frames, unreachable resources, tool-budget
+exhaustion, and synthetic process/resource names without product or modality
+branches.
 The same suite verifies zero, one, and multiple state values; multiple paths in
 one record; unchanged PA-authored text, names, refs, paths, and evidence; and
 rejection of empty statements, duplicate names, unsupported processes,
 unauthorized evidence, missing or unaccepted records, invalid JSON Pointers,
-empty resolved values, and changed hashes. It verifies that deterministic state-
-evidence validation runs before semantic review, ambiguity stops before review
-or allocation, and a scaffold-free semantic consistency gap returns to PA before
-ontology commit.
+empty resolved values, and changed hashes. It verifies that deterministic
+structure and provenance checks precede ABox mutation while state values remain
+independent of location evidence.
 It also verifies that PA cannot turn a required-record or approved-evidence
 choice into a user clarification while genuine requirement ambiguity remains
 eligible for clarification.
@@ -55,14 +53,13 @@ document/model/schema invalidation, atomic persistence, a second registered PDF,
 the `--all`/`--context-ref` preparation command, page-level provenance,
 assertion-free document deltas, and the separate stage-oriented diagnostic.
 Production grounding tests reproduce the original `specification` entity-key
-output and prove it cannot mutate the ABox. They also check one schema for
-`assemble medium gear`, drilling, welding, and inspection; answer-leak prompt
+output and prove it cannot mutate the ABox. They also check one schema with
+multiple synthetic process names and requirements; answer-leak prompt
 boundaries; native document, CAD, and observation retrieval; dynamic selection
 independent of registration order; synthetic providers; source-revision replay
-protection; evidence-gap retries and emergency ceilings; directly-supported-only
-late mapping; wrong-domain/range rejection; completion-v6 proposal, review,
-opaque presentation, process and physical-state choices, two-state reachability,
-endpoint-motion RobotAgent validation, registry/workcell lineage, evidence, and
+protection; fail-closed tool ceilings; wrong-domain/range rejection; completion
+v7 with proposal v9, reachability v4, selection v5, opaque presentation,
+process/state/location choices, registry/workcell lineage, evidence, and
 typed-value hashes; F5
 zero-inference startup; and zero document-VLM calls on CAD/RGB-D paths. Phase 4.2A
 tests cover exact approved CAD paths and hashes, complete binary STL loading,
@@ -75,13 +72,13 @@ candidate retention, fixed parameters, stable label masks and hashes,
 zero-candidate unresolved records, tamper rejection, atomic cleanup and
 no-overwrite behavior, automatic capture → preprocessing → segmentation,
 unique roots, compact status, and the absence of operator processing controls.
-Phase 4.2B2A tests use analytic 22 mm, 42 mm, and 62 mm candidates to verify
-that `Gear_Medium.STL` uniquely selects the 42 mm candidate and reports its
-camera optical frame and median center. They also cover accepted measurement
-noise, duplicate-size ambiguity, no-match and zero-candidate rejection,
-image-boundary partial visibility, deterministic ranking, record hashes,
-tamper rejection, atomic cleanup, no-overwrite persistence, compact status, and
-the absence of coordinates or controls from the UI surface.
+Phase 4.2B2A tests verify that active CAD measurement reports every evaluated
+candidate in observation order without ranking, selecting, or attaching a
+state/component role. Candidate-layout tests exercise 2, 3, and 5 PA-selected
+same-frame candidates and return only raw positions, pairwise displacement
+vectors, distances, and collinearity measurements. They also cover presentation
+permutations, record hashes, tamper rejection, atomic cleanup, no-overwrite
+persistence, and the absence of answer labels from tool metadata.
 The implemented Phase 4.2B2 pose tests cover known asymmetric camera-frame
 translations and rotations, same-size shape-fit resolution, candidate and
 rotation ambiguity, zero-candidate rejection, complete provenance, tamper
@@ -93,18 +90,18 @@ validation, observation-time validity, payload and input-hash tampering,
 ambiguous and rejected propagation, deterministic reruns, atomic cleanup,
 no-overwrite behavior, and status-only UI output.
 Phase 4.3 contract tests cover provider capabilities, typed context bindings,
-`TargetFeatureSemanticReview` version 2, proposal version 8, typed-contract and
-completion version 6, both state IRIs, presentation lineage, nested evidence and
-referenced state-value hashes, two-state reachability, endpoint-motion RobotAgent
-validation, native tool audits, and read-only validation of supported historical
-proposal, selection, completion, envelope, and session/action contracts. They
+proposal version 9, reachability version 4, selection version 5, completion
+version 7, both state IRIs, presentation lineage, nested evidence, referenced
+state-value hashes, independent state-location lists, RobotAgent validation,
+native tool audits, and read-only validation of supported historical proposal,
+selection, completion, envelope, and session/action contracts. They
 also cover exact fixed symbols, PA-only authority, typed-binding
 status/frame/freshness validation, rejected obsolete formats, and artifact
 tamper rejection. Production grounding tests cover document-only semantic
 consumers; dynamically discovered CAD, observation, segmentation,
-size-correspondence, calibration, and robot-frame-location paths;
-unused-modality exclusion; and derived incomplete diagnostics without turning a
-system evidence gap into user clarification. The PA UI tests cover the turn control, live turn counter,
+size measurement, layout, calibration, and robot-frame-location paths;
+unused-modality exclusion; and deterministic stage codes without model-authored
+failure prose. The PA UI tests cover the turn control, live turn counter,
 compact served-context summaries, full audit records, configured production
 grounding, fail-closed unconfigured state, read-only ontology assertions,
 source records, typed bindings, native tool audits, complete/waiting/incomplete

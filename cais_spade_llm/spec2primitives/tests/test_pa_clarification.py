@@ -36,7 +36,9 @@ def test_exact_reply_resumes_same_interaction_with_native_history(
             },
             {
                 "grounding_status": "incomplete",
-                "insufficient_evidence": "No live observation is available.",
+                "grounding_stage": "target_feature",
+                "insufficient_evidence": "The target feature cites invalid evidence.",
+                "grounding_validation_code": "evidence_reference_invalid",
                 "tool_call_refs": [],
             },
         ]
@@ -55,6 +57,8 @@ def test_exact_reply_resumes_same_interaction_with_native_history(
     )
 
     assert result["grounding_status"] == "incomplete"
+    assert result["grounding_validation_code"] == "evidence_reference_invalid"
+    assert "unmet_grounding_obligation" not in result
     record = _read_json(tmp_path / "interaction_record/clarification_0001.json")
     assert record["record_type"] == "PAClarification"
     assert record["question_turn"] == 1
@@ -63,10 +67,49 @@ def test_exact_reply_resumes_same_interaction_with_native_history(
     assert record["fingerprint"] == _fingerprint(payload)
     assert runtime.calls[-1]["clarification_history"] == (record,)
     turn = _read_json(tmp_path / "interaction_record/turn_0002.json")
+    assert turn["PA_output"]["grounding_validation_code"] == (
+        "evidence_reference_invalid"
+    )
     assert turn["PA_input"]["mode"] == "native_tool_grounding"
     assert turn["PA_input"]["clarification_refs"] == [
         "interaction_record/clarification_0001.json"
     ]
+    assert not (tmp_path / "products/grounding/session").exists()
+
+
+def test_reply_cannot_complete_without_resource_assignment(
+    tmp_path: Path,
+) -> None:
+    runtime = _GroundingRuntime(
+        [
+            {
+                "grounding_status": "clarification_required",
+                "clarification_question": "Which gear size should be assembled?",
+                "tool_call_refs": [],
+            },
+            {
+                "grounding_status": "complete",
+                "resource_assignment_status": "deferred",
+                "ontology_projection_ref": "proposal.json",
+                "tool_call_refs": [],
+            },
+        ]
+    )
+    agent = _UnusedProductAgent()
+    _start(tmp_path, agent, runtime)
+
+    result = asyncio.run(
+        submit_pa_clarification_reply(
+            agent,
+            tmp_path,
+            "Medium Gear",
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
+    )
+
+    assert result["failure"]["reason"] == "pa_call_failed"
+    assert "resource-assignment status is invalid" in result["failure"]["message"]
     assert not (tmp_path / "products/grounding/session").exists()
 
 
@@ -85,7 +128,9 @@ def test_repeated_clarifications_use_append_only_turns(tmp_path: Path) -> None:
             },
             {
                 "grounding_status": "incomplete",
-                "insufficient_evidence": "No observation is available.",
+                "grounding_stage": "resource_assignment",
+                "insufficient_evidence": "No valid state-location evidence is available.",
+                "grounding_validation_code": "location_evidence_unavailable",
                 "tool_call_refs": [],
             },
         ]
@@ -223,6 +268,40 @@ def test_different_reply_cannot_replace_persisted_answer(tmp_path: Path) -> None
     assert replacement["failure"]["reason"] == "invalid_clarification"
     record = _read_json(tmp_path / "interaction_record/clarification_0001.json")
     assert record["reply"] == "Medium Gear"
+
+
+def test_resume_rejects_unknown_grounding_validation_code(tmp_path: Path) -> None:
+    runtime = _GroundingRuntime(
+        [
+            {
+                "grounding_status": "clarification_required",
+                "clarification_question": "Which gear size?",
+                "tool_call_refs": [],
+            },
+            {
+                "grounding_status": "incomplete",
+                "insufficient_evidence": "Invalid controller result.",
+                "grounding_validation_code": "unknown_code",
+                "tool_call_refs": [],
+            },
+        ]
+    )
+    agent = _UnusedProductAgent()
+    _start(tmp_path, agent, runtime)
+
+    result = asyncio.run(
+        submit_pa_clarification_reply(
+            agent,
+            tmp_path,
+            "Medium Gear",
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
+    )
+
+    assert result["failure"]["reason"] == "pa_call_failed"
+    turn = _read_json(tmp_path / "interaction_record/turn_0002.json")
+    assert turn["PA_output"] is None
 
 
 def _start(

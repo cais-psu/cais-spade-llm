@@ -65,14 +65,13 @@ have no host enum. Each included value has exactly one `value_ref` and one or
 more direct evidence refs. PA—not deterministic code—chooses the process,
 statement, values, refs, paths, and citations from retrieved evidence.
 
-Validation first produces a transient candidate and provisional ABox. The host
-generates `feature_0001`, `currentstate_0001`, and `desiredstate_0001` and
-compiles their exact seven type, state-link, `ppr:defines`, and `ppr:realizes`
-assertions. It neither writes an accepted proposal nor merges RDF at that
-boundary. Only after `TargetFeatureSemanticReview` v2 is complete and the active
-consumer's typed prerequisite chain passes does the system persist the accepted
-version-7 proposal and merge the compiled assertions. Versions 3, 4, 5, and 6
-remain read-only recovery contracts.
+Validation receives PA's final candidate after one native tool-using
+conversation. The host generates `feature_0001`, `currentstate_0001`, and
+`desiredstate_0001` and compiles their exact seven type, state-link,
+`ppr:defines`, and `ppr:realizes` assertions. It persists the accepted version-9
+proposal and merges those assertions only after structure, provenance, hashes,
+JSON Pointers, and ontology consistency pass. There is no separate semantic
+review, readiness contract, or correction loop.
 
 Phase 4.2A typed geometry records are owned by
 `tools/rgb_d_cad_grounding/preprocessor.py`. `CADMeshRecord` references complete
@@ -97,16 +96,13 @@ descriptions, uncertainty, provider configuration, and response metadata. Its
 strict output has no state, CAD, process, or resource assignment fields.
 
 Phase 4.2B2A adds `CADSizeCorrespondenceRecord`, owned by
-`tools/rgb_d_cad_grounding/size_correspondence.py`. It binds one exact validated
-CAD record to one validated segmentation record and preserves CAD and artifact
-hashes, two-dimensional principal-size comparisons, relative errors,
-deterministic ranking, and any unique candidate's median center and optical
-frame. Its `CAD_correspondence` state is `accepted`, `ambiguous`, or `rejected`;
-its `location` state is `available`, `ambiguous`, or `unavailable`; pose remains
-`not_evaluated`. The compact `RGBDSegmentationStatus` can show these two states
-without exposing coordinates, scores, masks, or thresholds. The record is not
-an ontology assertion, complete pose, context-completion assessment, or
-assembly-readiness claim.
+`tools/rgb_d_cad_grounding/size_correspondence.py`. Its active version-3 form
+binds one exact validated CAD record to one validated segmentation record and
+preserves CAD and artifact hashes plus measurements for every evaluated
+candidate in observation order. It does not rank, select, label, or attach a
+state role to a candidate; correspondence, location, and pose remain
+`not_evaluated`. Historical correspondence records remain readable by their
+existing consumers.
 
 The implemented Phase 4.2B2 pose increment adds
 `CADPoseEstimationRecord`, owned by
@@ -141,31 +137,23 @@ Implemented pre-RA grounding contracts in
   details;
 - `EvidencePresentationRecord` version 1, pinning host-only opaque source
   handles to canonical source identities and hashes;
-- `AllocationPresentationRecord` version 1, pinning randomized resource and
-  shared neutral-candidate presentation orders while allocation reuses the two
-  candidate bindings already accepted in `state_values`;
-- `ReachabilityCheckRecord` version 3 for simulation, recording the selected
-  process, PA-authored state-evidence mapping, explicit provisional resource,
-  hash-pinned CAD/support provenance, derived Cartesian targets, request
-  fingerprint, exact RobotAgent validation ref, phase results, and final status
-  without static `in_workspace` or `in_gripper_reach` claims;
-- `PlanOnlyFeasibilityValidationRecord` version 3 for simulation, recording the
-  live start pose, EE-to-TCP transform, ordered waypoint roles, configured
-  group/link/service, per-phase fractions and MoveIt error codes, and
-  `motion_executed: false`;
-- `ResourceSelectionRecord` version 4, pinning PA authority, process and
-  candidate set, both presentations, both state-evidence assignments, the
-  provisional choice, reach evidence, and exact RobotAgent plan-only
-  verdict;
-- `TargetFeatureSemanticReview` schema version 2, preserving only the structured
-  `complete`/`incomplete` verdict and concise gap, never private reasoning;
-- `TypedGroundingContract` schema version 6, pinning the accepted v8 proposal,
-  selected process, both state IRIs, semantic review, nested evidence, typed
-  values, both presentation records, registry/workcell snapshots, two-state
-  reachability, endpoint-motion or Cartesian RobotAgent validation, resource selection,
-  assignment delta, and final ABox without copying `target_feature`; and
+- `AllocationPresentationRecord` version 1, pinning randomized capable-resource
+  and neutral location-handle presentation orders independently of
+  `state_values`;
+- `ReachabilityCheckRecord` version 4, recording PA's selected process,
+  resource, current/desired location-handle lists, per-location results, exact
+  RobotAgent validation ref, request fingerprint, and final status;
+- `PlanOnlyFeasibilityValidationRecord` version 4, recording independent
+  state-location reachability with `motion_executed: false`;
+- `ResourceSelectionRecord` version 5, pinning PA authority, exact location
+  handles, cited accepted reachability, and the unchanged capable resource;
+- `OntologyGroundingProposal` version 9, preserving PA's evidence-backed target
+  feature and exact seven compiled assertions without a semantic-review ref;
 - append-only native PA tool audits, `PAClarification` records, and
-  `PAContextGroundingCompletion` version 6.
+  `PAContextGroundingCompletion` version 7, which directly pins the v9 proposal,
+  v4 reachability, v5 selection, assignment delta, final ABox, evidence,
+  presentations, registry, and workcell. No new-run `TypedGroundingContract` is
+  produced.
 
 `agents/ra/context_handoff.py` now covers the Phase 5.1 contracts:
 
@@ -199,12 +187,12 @@ bounded projection of each hash-pinned JSON-Pointer value. It has no top-level
 into the model-authored `PrimitiveProgramDraft`.
 
 The active system exposes approved neutral evidence to PA. Once PA has grounded
-both feature states, it explicitly chooses state values and a provisional
-resource through `check_reachability`. In simulation that verifier derives the
-gear pick and shaft-centered place targets from pinned geometry and requests
-live Cartesian planning from the exact chosen RobotAgent; it never chooses or
-substitutes a resource. Historical and physical-mode version 2 records remain
-read-only/compatible.
+both feature states, a separate allocation call exposes all capable resources
+and neutral location handles. PA submits one resource and one or more locations
+for each state through `check_reachability`. The verifier reports each submitted
+location independently; it never chooses or substitutes a resource and does not
+certify grasping, insertion, or execution. Historical reachability records
+remain read-only/compatible.
 
 `GroundingNextAction`, `GroundingActionAttempt`, `GroundingSession` version 2,
 targeted document evidence, pose-linked `ResourceSelectionRecord` version 1,
@@ -212,9 +200,9 @@ older ontology proposals, `TypedGroundingContract` versions 2/3/4, resource
 selection versions 1/2, and completion versions 2/3/4 describe historical
 interactions only. Supported loaders may
 verify them for read-only recovery; new production runs do not write or migrate
-them. New Phase 5 handoff requires completion version 6. Proposal v7,
-selection v1-v3, completion v2-v5, feasibility-validation v1, and prior RA
-envelopes remain read-only.
+them. New Phase 5 handoff accepts completion version 7. Historical proposals,
+selections, completions, feasibility validations, and prior RA envelopes remain
+read-only where their compatibility readers support them.
 
 Planned downstream contracts cover:
 

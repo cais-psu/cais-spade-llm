@@ -1,4 +1,4 @@
-"""Interpret approved PDF evidence into ontology-neutral overview records."""
+"""Index approved PDFs and answer isolated, PA-authored document questions."""
 
 from __future__ import annotations
 
@@ -25,10 +25,21 @@ from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
 )
 
 DOCUMENT_OVERVIEW_SCHEMA_VERSION = 3
+DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION = 1
+DOCUMENT_QUERY_SCHEMA_VERSION = 1
 _PRODUCER = "document_evidence"
 _OUTPUT_NAME = "spec2primitives_document_overview"
+_QUERY_OUTPUT_NAME = "spec2primitives_document_query"
 _OUTPUT_KEYS = {"summary", "observations", "uncertainty"}
 _OBSERVATION_KEYS = {"description", "evidence_pages"}
+_QUERY_OUTPUT_KEYS = {"status", "claims", "uncertainty"}
+_QUERY_CLAIM_KEYS = {
+    "predicate_text",
+    "arguments",
+    "evidence_pages",
+    "uncertainty",
+}
+_QUERY_STATUSES = frozenset({"supported", "contradicted", "insufficient_evidence"})
 _CACHE_RECORD_KEYS = {
     "schema_version",
     "record_type",
@@ -84,6 +95,16 @@ class DocumentVisionRequest:
 
 
 @dataclass(frozen=True)
+class DocumentQueryVisionRequest:
+    """Contain one exact PA-authored question and only its document source."""
+
+    question: str
+    context_ref: str
+    source_sha256: str
+    pages: tuple[RenderedDocumentPage, ...]
+
+
+@dataclass(frozen=True)
 class DocumentVisionResponse:
     """Return one structured overview and provider audit fields."""
 
@@ -102,6 +123,13 @@ class DocumentVisionRuntime(Protocol):
         """Interpret the ordered pages without product or ontology context."""
         ...
 
+    async def query_document(
+        self,
+        request: DocumentQueryVisionRequest,
+    ) -> DocumentVisionResponse:
+        """Answer one PA-authored question using only the ordered pages."""
+        ...
+
 @dataclass(frozen=True)
 class DocumentOverviewRecord:
     """Reference one validated content-addressed document overview."""
@@ -111,6 +139,37 @@ class DocumentOverviewRecord:
     cache_fingerprint: str
     cache_status: str
     record_path: Path
+    record: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class DocumentSourceIndexRecord:
+    """Reference one deterministic, content-addressed document source index."""
+
+    context_ref: str
+    source_sha256: str
+    cache_fingerprint: str
+    cache_status: str
+    record_path: Path
+    record: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class DocumentSourceIndexResult:
+    """Return the assertion-free delta for one interaction-local source index."""
+
+    delta: Mapping[str, object]
+    source_index_record_path: Path
+    cache_status: str
+    page_count: int
+
+
+@dataclass(frozen=True)
+class DocumentQueryResult:
+    """Return one persisted response to an exact PA-authored document question."""
+
+    record_path: Path
+    status: str
     record: Mapping[str, object]
 
 
@@ -182,6 +241,48 @@ class OpenAIDocumentVisionRuntime:
             ) from exc
 
         return _document_vision_response(response, "document overview")
+
+    async def query_document(
+        self,
+        request: DocumentQueryVisionRequest,
+    ) -> DocumentVisionResponse:
+        """Submit one isolated PA-authored document question with strict JSON."""
+        content: list[dict[str, object]] = [
+            {"type": "input_text", "text": _query_request_text(request)}
+        ]
+        content.extend(
+            {
+                "type": "input_image",
+                "image_url": page.image_data_url,
+                "detail": self._config.image_detail,
+            }
+            for page in request.pages
+        )
+        try:
+            response = await self._client.responses.create(
+                model=self._config.model,
+                instructions=_OPENAI_QUERY_INSTRUCTIONS,
+                input=[{"role": "user", "content": content}],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": _QUERY_OUTPUT_NAME,
+                        "strict": True,
+                        "schema": document_query_schema(),
+                    }
+                },
+                reasoning={"effort": self._config.reasoning_effort},
+                max_output_tokens=self._config.max_output_tokens,
+                store=False,
+            )
+        except OpenAIError as exc:
+            diagnostic = _openai_error_diagnostic(exc)
+            raise DocumentInterpretationError(
+                "OpenAI document query failed: "
+                f"{_diagnostic_summary(diagnostic)}",
+                diagnostic=diagnostic,
+            ) from exc
+        return _document_vision_response(response, "document query")
 
 async def prepare_document_overview(
     *,
@@ -278,6 +379,240 @@ async def prepare_document_overview(
         cache_fingerprint=cache_fingerprint,
         cache_status="miss",
         record_path=record_path,
+        record=record,
+    )
+
+
+def prepare_document_source_index(
+    *,
+    served_context: Mapping[str, object],
+    cache_root: Path,
+) -> DocumentSourceIndexRecord:
+    """Load or create a deterministic page-text and rendered-page index."""
+    context_ref, source_sha256, document_pages = _validated_served_document(
+        served_context
+    )
+    cache_fingerprint = _source_index_cache_fingerprint(source_sha256)
+    source_root = Path(cache_root).resolve() / "document" / source_sha256
+    record_root = source_root / cache_fingerprint
+    record_path = record_root / "source_index.json"
+    if record_path.is_file():
+        record = _load_source_index_cache_record(
+            record_path,
+            context_ref=context_ref,
+            source_sha256=source_sha256,
+            cache_fingerprint=cache_fingerprint,
+        )
+        return DocumentSourceIndexRecord(
+            context_ref=context_ref,
+            source_sha256=source_sha256,
+            cache_fingerprint=cache_fingerprint,
+            cache_status="hit",
+            record_path=record_path,
+            record=record,
+        )
+
+    source_root.mkdir(parents=True, exist_ok=True)
+    temporary_root = Path(tempfile.mkdtemp(prefix=".source-index-", dir=source_root))
+    try:
+        rendered_pages = _render_pages(
+            context_ref,
+            document_pages,
+            temporary_root / "rendered",
+        )
+        record: dict[str, object] = {
+            "schema_version": DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION,
+            "record_type": "DocumentSourceIndexRecord",
+            "context_ref": context_ref,
+            "source_sha256": source_sha256,
+            "cache_fingerprint": cache_fingerprint,
+            "page_count": len(rendered_pages),
+            "pages": [
+                {
+                    "page": page.page_number,
+                    "evidence_ref": f"{context_ref}#page={page.page_number}",
+                    "extracted_text": page.text,
+                    "image_ref": f"rendered/pages/page_{page.page_number:04d}.png",
+                    "image_sha256": page.image_sha256,
+                }
+                for page in rendered_pages
+            ],
+        }
+        record["fingerprint"] = _fingerprint(record)
+        _write_json_exclusive(temporary_root / "source_index.json", record)
+        try:
+            temporary_root.rename(record_root)
+        except FileExistsError:
+            shutil.rmtree(temporary_root, ignore_errors=True)
+            record = _load_source_index_cache_record(
+                record_path,
+                context_ref=context_ref,
+                source_sha256=source_sha256,
+                cache_fingerprint=cache_fingerprint,
+            )
+            return DocumentSourceIndexRecord(
+                context_ref=context_ref,
+                source_sha256=source_sha256,
+                cache_fingerprint=cache_fingerprint,
+                cache_status="hit",
+                record_path=record_path,
+                record=record,
+            )
+    except (DocumentInterpretationError, OSError, RuntimeError, TypeError, ValueError):
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise
+    return DocumentSourceIndexRecord(
+        context_ref=context_ref,
+        source_sha256=source_sha256,
+        cache_fingerprint=cache_fingerprint,
+        cache_status="miss",
+        record_path=record_path,
+        record=record,
+    )
+
+
+def index_document_evidence(
+    *,
+    interaction_root: Path,
+    tbox: TBoxSnapshot,
+    abox: ABoxSnapshot,
+    served_context: Mapping[str, object],
+    operation_number: int,
+) -> DocumentSourceIndexResult:
+    """Persist one requirement-blind source index and assertion-free delta."""
+    _validate_operation_number(operation_number)
+    root = Path(interaction_root).resolve()
+    if abox.interaction_root != root or abox.tbox_fingerprint != tbox.fingerprint:
+        raise DocumentInterpretationError(
+            "Document indexing ABox does not match its interaction and TBox."
+        )
+    tbox.assert_unchanged()
+    record_path = (
+        root
+        / "products/grounding/document_evidence"
+        / f"source_index_{operation_number:04d}.json"
+    )
+    if record_path.exists():
+        raise DocumentInterpretationError(
+            f"Document source index {operation_number:04d} already exists."
+        )
+    index = prepare_document_source_index(
+        served_context=served_context,
+        cache_root=root.parent / "source_cache",
+    )
+    evidence_refs = [index.context_ref]
+    evidence_refs.extend(
+        str(page["evidence_ref"])
+        for page in index.record["pages"]  # type: ignore[index]
+        if isinstance(page, Mapping)
+    )
+    snapshot: dict[str, object] = {
+        "schema_version": DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION,
+        "record_type": "DocumentSourceIndexRecord",
+        "producer": _PRODUCER,
+        "operation_number": operation_number,
+        "status": "accepted",
+        "cache_status": index.cache_status,
+        "cache_record_ref": str(index.record_path),
+        "document_context_ref": index.context_ref,
+        "source_sha256": index.source_sha256,
+        "evidence_refs": evidence_refs,
+        "source_index": dict(index.record),
+    }
+    snapshot["fingerprint"] = _fingerprint(snapshot)
+    _write_json_exclusive(record_path, snapshot)
+    return DocumentSourceIndexResult(
+        delta={
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [record_path.relative_to(root).as_posix()],
+        },
+        source_index_record_path=record_path,
+        cache_status=index.cache_status,
+        page_count=int(index.record["page_count"]),
+    )
+
+
+async def query_document_evidence(
+    *,
+    interaction_root: Path,
+    source_index_record_path: Path,
+    operation_number: int,
+    question: str,
+    config: DocumentVLMConfig,
+    vision_runtime: DocumentVisionRuntime,
+) -> DocumentQueryResult:
+    """Answer one exact PA-authored question from one hash-pinned source index."""
+    _validate_operation_number(operation_number)
+    if not isinstance(question, str) or not question.strip():
+        raise DocumentInterpretationError("Document question must be non-empty.")
+    root = Path(interaction_root).resolve()
+    source_path, source_ref, snapshot = _load_interaction_source_index(
+        root,
+        source_index_record_path,
+    )
+    rendered_pages = _rendered_pages_from_source_index(snapshot)
+    request = DocumentQueryVisionRequest(
+        question=question,
+        context_ref=str(snapshot["document_context_ref"]),
+        source_sha256=str(snapshot["source_sha256"]),
+        pages=rendered_pages,
+    )
+    response = await vision_runtime.query_document(request)
+    if not _response_model_matches_config(response.model, config.model):
+        raise DocumentInterpretationError(
+            "Document query response model does not match configured model."
+        )
+    output = _validated_query_output(response.output, page_count=len(rendered_pages))
+    claims = _query_claim_records(
+        output["claims"],
+        context_ref=request.context_ref,
+    )
+    uncertainty = _query_uncertainty_records(
+        output["uncertainty"],
+        context_ref=request.context_ref,
+    )
+    page_refs = sorted(
+        {
+            str(ref)
+            for item in (*claims, *uncertainty)
+            for ref in item["evidence_refs"]  # type: ignore[index]
+        }
+    )
+    record: dict[str, object] = {
+        "schema_version": DOCUMENT_QUERY_SCHEMA_VERSION,
+        "record_type": "DocumentQueryRecord",
+        "producer": _PRODUCER,
+        "operation_number": operation_number,
+        "status": output["status"],
+        "question": question,
+        "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
+        "source_index": {
+            "ref": source_ref,
+            "sha256": _sha256_path(source_path),
+        },
+        "document_context_ref": request.context_ref,
+        "source_sha256": request.source_sha256,
+        "provider": config.provider,
+        "configured_model": config.model,
+        "response_model": response.model,
+        "response_id": response.response_id,
+        "store": False,
+        "claims": claims,
+        "uncertainty": uncertainty,
+        "evidence_refs": [source_ref, request.context_ref, *page_refs],
+    }
+    record["fingerprint"] = _fingerprint(record)
+    record_path = (
+        root
+        / "products/grounding/document_evidence"
+        / f"query_{operation_number:04d}.json"
+    )
+    _write_json_exclusive(record_path, record)
+    return DocumentQueryResult(
+        record_path=record_path,
+        status=str(output["status"]),
         record=record,
     )
 
@@ -466,6 +801,48 @@ def document_interpretation_schema() -> dict[str, object]:
     }
 
 
+def document_query_schema() -> dict[str, object]:
+    """Return the strict, manufacturing-semantics-open query response schema."""
+    evidence_pages = {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 1},
+        "minItems": 1,
+    }
+    claim = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(_QUERY_CLAIM_KEYS),
+        "properties": {
+            "predicate_text": {"type": "string"},
+            "arguments": {"type": "array", "items": {"type": "string"}},
+            "evidence_pages": evidence_pages,
+            "uncertainty": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    uncertainty = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(_OBSERVATION_KEYS),
+        "properties": {
+            "description": {"type": "string"},
+            "evidence_pages": evidence_pages,
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(_QUERY_OUTPUT_KEYS),
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": sorted(_QUERY_STATUSES),
+            },
+            "claims": {"type": "array", "items": claim},
+            "uncertainty": {"type": "array", "items": uncertainty},
+        },
+    }
+
+
 def _request_text(request: DocumentVisionRequest) -> str:
     return json.dumps(
         {
@@ -481,7 +858,25 @@ def _request_text(request: DocumentVisionRequest) -> str:
     )
 
 
+def _query_request_text(request: DocumentQueryVisionRequest) -> str:
+    """Serialize exactly one PA question and its document-only source pages."""
+    return json.dumps(
+        {
+            "question": request.question,
+            "document_pages": [
+                {"page": page.page_number, "extracted_text": page.text}
+                for page in request.pages
+            ],
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
 _OPENAI_INSTRUCTIONS = """You are a bounded document overview tool. Describe only the supplied ordered PDF page images and extracted text. Produce a generic source overview independent of any user requirement or ontology. Preserve visible callout text, part labels, relative sizes, and spatial or support relationships when the page shows them. Record short surface-form observations with the visible page numbers that support them. Put ambiguous, occluded, or unclear content in uncertainty rather than guessing. Do not create entity keys, IRIs, ontology classes, ontology properties, RDF assertions, robot resources, capabilities, primitive steps, execution state, simulator state, or hidden expected answers. Return only the requested structured object."""
+
+
+_OPENAI_QUERY_INSTRUCTIONS = """You are a bounded document-only question-answering tool. Answer the exact supplied question only from the supplied ordered PDF page images and extracted text. You receive no scene, CAD, ontology, requirement field, simulator state, or expected answer. Use status supported only when the pages directly support at least one claim. Use contradicted only when the pages directly contradict the question's premise; otherwise use insufficient_evidence. Each claim uses an unrestricted short predicate_text and ordered source-faithful text arguments, with every supporting page cited. Do not classify claims into a manufacturing taxonomy. Do not infer an observed candidate, choose a robot action, repair the question, or add facts that are not visible. Put ambiguity in uncertainty rather than guessing. Return only the requested structured object."""
 
 
 def _document_vision_response(response: object, label: str) -> DocumentVisionResponse:
@@ -664,6 +1059,135 @@ def _validated_overview_output(
     return output
 
 
+def _validated_query_output(
+    value: Mapping[str, object],
+    *,
+    page_count: int,
+) -> dict[str, object]:
+    """Validate an open-claim response without assigning manufacturing semantics."""
+    if not isinstance(value, Mapping) or set(value) != _QUERY_OUTPUT_KEYS:
+        raise DocumentInterpretationError("Document query output fields are invalid.")
+    status = value.get("status")
+    if status not in _QUERY_STATUSES:
+        raise DocumentInterpretationError("Document query status is invalid.")
+    raw_claims = value.get("claims")
+    if not isinstance(raw_claims, list):
+        raise DocumentInterpretationError("Document query claims must be a list.")
+    claims: list[dict[str, object]] = []
+    for index, item in enumerate(raw_claims):
+        if not isinstance(item, Mapping) or set(item) != _QUERY_CLAIM_KEYS:
+            raise DocumentInterpretationError(
+                f"Document query claims[{index}] fields are invalid."
+            )
+        predicate_text = item.get("predicate_text")
+        arguments = item.get("arguments")
+        uncertainty = item.get("uncertainty")
+        if not isinstance(predicate_text, str) or not predicate_text.strip():
+            raise DocumentInterpretationError(
+                f"Document query claims[{index}] predicate_text is invalid."
+            )
+        if not isinstance(arguments, list) or not all(
+            isinstance(argument, str) and argument.strip() for argument in arguments
+        ):
+            raise DocumentInterpretationError(
+                f"Document query claims[{index}] arguments are invalid."
+            )
+        if not isinstance(uncertainty, list) or not all(
+            isinstance(item, str) and item.strip() for item in uncertainty
+        ):
+            raise DocumentInterpretationError(
+                f"Document query claims[{index}] uncertainty is invalid."
+            )
+        pages = _evidence_pages(
+            item.get("evidence_pages"),
+            page_count,
+            f"Document query claims[{index}]",
+        )
+        claims.append(
+            {
+                "predicate_text": predicate_text,
+                "arguments": list(arguments),
+                "evidence_pages": list(pages),
+                "uncertainty": list(uncertainty),
+            }
+        )
+    if status == "supported" and not claims:
+        raise DocumentInterpretationError(
+            "A supported document query requires at least one cited claim."
+        )
+    if status != "supported" and claims:
+        raise DocumentInterpretationError(
+            "Only a supported document query may return claims."
+        )
+    raw_uncertainty = value.get("uncertainty")
+    if not isinstance(raw_uncertainty, list):
+        raise DocumentInterpretationError("Document query uncertainty must be a list.")
+    uncertainty_records: list[dict[str, object]] = []
+    for index, item in enumerate(raw_uncertainty):
+        if not isinstance(item, Mapping) or set(item) != _OBSERVATION_KEYS:
+            raise DocumentInterpretationError(
+                f"Document query uncertainty[{index}] fields are invalid."
+            )
+        description = item.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise DocumentInterpretationError(
+                f"Document query uncertainty[{index}] description is invalid."
+            )
+        pages = _evidence_pages(
+            item.get("evidence_pages"),
+            page_count,
+            f"Document query uncertainty[{index}]",
+        )
+        uncertainty_records.append(
+            {"description": description, "evidence_pages": list(pages)}
+        )
+    return {
+        "status": status,
+        "claims": claims,
+        "uncertainty": uncertainty_records,
+    }
+
+
+def _query_claim_records(
+    value: object,
+    *,
+    context_ref: str,
+) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise DocumentInterpretationError("Document query claims are invalid.")
+    return [
+        {
+            "predicate_text": item["predicate_text"],
+            "arguments": list(item["arguments"]),
+            "evidence_refs": [
+                f"{context_ref}#page={page}" for page in item["evidence_pages"]
+            ],
+            "uncertainty": list(item["uncertainty"]),
+        }
+        for item in value
+        if isinstance(item, Mapping)
+    ]
+
+
+def _query_uncertainty_records(
+    value: object,
+    *,
+    context_ref: str,
+) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise DocumentInterpretationError("Document query uncertainty is invalid.")
+    return [
+        {
+            "description": item["description"],
+            "evidence_refs": [
+                f"{context_ref}#page={page}" for page in item["evidence_pages"]
+            ],
+        }
+        for item in value
+        if isinstance(item, Mapping)
+    ]
+
+
 def _overview_cache_record(
     *,
     context_ref: str,
@@ -716,6 +1240,202 @@ def _overview_cache_record(
         "observations": _items("observations", "observation"),
         "uncertainty": _items("uncertainty", "uncertainty"),
     }
+
+
+def _load_interaction_source_index(
+    root: Path,
+    record_path: Path,
+) -> tuple[Path, str, Mapping[str, object]]:
+    path = Path(record_path).resolve()
+    try:
+        record_ref = path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise DocumentInterpretationError(
+            "Document source index leaves the interaction."
+        ) from exc
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DocumentInterpretationError(
+            "Document source index could not be read."
+        ) from exc
+    if (
+        not isinstance(snapshot, Mapping)
+        or snapshot.get("schema_version") != DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION
+        or snapshot.get("record_type") != "DocumentSourceIndexRecord"
+        or snapshot.get("producer") != _PRODUCER
+        or snapshot.get("status") != "accepted"
+    ):
+        raise DocumentInterpretationError("Document source index is invalid.")
+    snapshot_payload = dict(snapshot)
+    snapshot_fingerprint = snapshot_payload.pop("fingerprint", None)
+    if snapshot_fingerprint != _fingerprint(snapshot_payload):
+        raise DocumentInterpretationError("Document source index fingerprint is invalid.")
+    context_ref = snapshot.get("document_context_ref")
+    source_sha256 = snapshot.get("source_sha256")
+    cache_fingerprint = None
+    embedded = snapshot.get("source_index")
+    if isinstance(embedded, Mapping):
+        cache_fingerprint = embedded.get("cache_fingerprint")
+    if not all(
+        isinstance(item, str) and item
+        for item in (context_ref, source_sha256, cache_fingerprint)
+    ):
+        raise DocumentInterpretationError("Document source index identity is invalid.")
+    metadata = approved_document_metadata(str(context_ref))
+    if metadata.get("source_sha256") != source_sha256:
+        raise DocumentInterpretationError("Approved document changed after indexing.")
+    cache_record_ref = snapshot.get("cache_record_ref")
+    if not isinstance(cache_record_ref, str) or not cache_record_ref:
+        raise DocumentInterpretationError("Document source cache reference is invalid.")
+    cache_path = Path(cache_record_ref).resolve()
+    try:
+        cache_path.relative_to(root.parent.resolve() / "source_cache")
+    except ValueError as exc:
+        raise DocumentInterpretationError(
+            "Document source cache reference leaves its cache root."
+        ) from exc
+    cached = _load_source_index_cache_record(
+        cache_path,
+        context_ref=str(context_ref),
+        source_sha256=str(source_sha256),
+        cache_fingerprint=str(cache_fingerprint),
+    )
+    if dict(cached) != dict(embedded):
+        raise DocumentInterpretationError("Document source index cache snapshot changed.")
+    return path, record_ref, snapshot
+
+
+def _rendered_pages_from_source_index(
+    snapshot: Mapping[str, object],
+) -> tuple[RenderedDocumentPage, ...]:
+    cache_record_ref = snapshot.get("cache_record_ref")
+    embedded = snapshot.get("source_index")
+    if not isinstance(cache_record_ref, str) or not isinstance(embedded, Mapping):
+        raise DocumentInterpretationError("Document source index cache metadata is invalid.")
+    cache_root = Path(cache_record_ref).resolve().parent
+    pages = embedded.get("pages")
+    if not isinstance(pages, list):
+        raise DocumentInterpretationError("Document source index pages are invalid.")
+    rendered: list[RenderedDocumentPage] = []
+    for item in pages:
+        if not isinstance(item, Mapping):
+            raise DocumentInterpretationError("Document source index page is invalid.")
+        image_ref = item.get("image_ref")
+        image_sha256 = item.get("image_sha256")
+        page_number = item.get("page")
+        text = item.get("extracted_text")
+        if (
+            not isinstance(image_ref, str)
+            or Path(image_ref).is_absolute()
+            or ".." in Path(image_ref).parts
+            or not isinstance(image_sha256, str)
+            or isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or not isinstance(text, str)
+        ):
+            raise DocumentInterpretationError("Document source index page is invalid.")
+        image_path = (cache_root / image_ref).resolve()
+        try:
+            image_path.relative_to(cache_root)
+            image_bytes = image_path.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise DocumentInterpretationError(
+                "Rendered document page could not be validated."
+            ) from exc
+        if hashlib.sha256(image_bytes).hexdigest() != image_sha256:
+            raise DocumentInterpretationError("Rendered document page hash is invalid.")
+        rendered.append(
+            RenderedDocumentPage(
+                page_number=page_number,
+                image_path=image_path,
+                image_sha256=image_sha256,
+                image_data_url=(
+                    "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+                ),
+                text=text,
+            )
+        )
+    if [item.page_number for item in rendered] != list(range(1, len(rendered) + 1)):
+        raise DocumentInterpretationError("Document source index pages are not ordered.")
+    return tuple(rendered)
+
+
+def _source_index_cache_fingerprint(source_sha256: str) -> str:
+    return _fingerprint(
+        {
+            "source_sha256": source_sha256,
+            "source_index_schema_version": DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION,
+            "render_width_pixels": 1600,
+        }
+    )
+
+
+def _load_source_index_cache_record(
+    path: Path,
+    *,
+    context_ref: str,
+    source_sha256: str,
+    cache_fingerprint: str,
+) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DocumentInterpretationError("Document source index cache is unreadable.") from exc
+    expected_keys = {
+        "schema_version",
+        "record_type",
+        "context_ref",
+        "source_sha256",
+        "cache_fingerprint",
+        "page_count",
+        "pages",
+        "fingerprint",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise DocumentInterpretationError("Document source index cache fields are invalid.")
+    payload = dict(value)
+    fingerprint = payload.pop("fingerprint", None)
+    if (
+        value.get("schema_version") != DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION
+        or value.get("record_type") != "DocumentSourceIndexRecord"
+        or value.get("context_ref") != context_ref
+        or value.get("source_sha256") != source_sha256
+        or value.get("cache_fingerprint") != cache_fingerprint
+        or fingerprint != _fingerprint(payload)
+    ):
+        raise DocumentInterpretationError("Document source index cache identity is invalid.")
+    page_count = value.get("page_count")
+    pages = value.get("pages")
+    if (
+        isinstance(page_count, bool)
+        or not isinstance(page_count, int)
+        or page_count <= 0
+        or not isinstance(pages, list)
+        or len(pages) != page_count
+    ):
+        raise DocumentInterpretationError("Document source index cached pages are invalid.")
+    for page_number, page in enumerate(pages, start=1):
+        if (
+            not isinstance(page, Mapping)
+            or set(page)
+            != {
+                "page",
+                "evidence_ref",
+                "extracted_text",
+                "image_ref",
+                "image_sha256",
+            }
+            or page.get("page") != page_number
+            or page.get("evidence_ref") != f"{context_ref}#page={page_number}"
+            or not isinstance(page.get("extracted_text"), str)
+            or not isinstance(page.get("image_ref"), str)
+            or not _is_sha256(page.get("image_sha256"))
+        ):
+            raise DocumentInterpretationError(
+                "Document source index cached page content is invalid."
+            )
+    return value
 
 
 def _cache_fingerprint(source_sha256: str, config: DocumentVLMConfig) -> str:
@@ -907,6 +1627,29 @@ def _diagnostic_summary(diagnostic: Mapping[str, object]) -> str:
         )
         if diagnostic.get(field) is not None
     )
+
+
+def _sha256_path(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _fingerprint(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_json_exclusive(path: Path, record: Mapping[str, object]) -> None:

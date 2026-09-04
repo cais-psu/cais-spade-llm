@@ -18,6 +18,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     PAContextGroundingCompletionV4,
     PAContextGroundingCompletionV5,
     PAContextGroundingCompletionV6,
+    PAContextGroundingCompletionV7,
     load_pa_context_grounding_completion,
 )
 
@@ -149,6 +150,45 @@ _SELECTION_V4_KEYS = frozenset(
         "selected_resource_iri",
         "selected_resource_jid",
         "selected_execution_mode",
+        "tbox_fingerprint",
+        "registry_fingerprint",
+        "workcell_fingerprint",
+        "fingerprint",
+    }
+)
+_SELECTION_V5_KEYS = frozenset(
+    {
+        "schema_version",
+        "record_type",
+        "selection_number",
+        "authority",
+        "specification_iri",
+        "feature_iri",
+        "process_symbol",
+        "process_iri",
+        "current_state_iri",
+        "desired_state_iri",
+        "candidate_resource_iris",
+        "candidate_resource_symbols",
+        "state_locations",
+        "evidence_presentation_ref",
+        "evidence_presentation_sha256",
+        "evidence_presentation_fingerprint",
+        "allocation_presentation_ref",
+        "allocation_presentation_sha256",
+        "allocation_presentation_fingerprint",
+        "reachability_check_ref",
+        "reachability_check_sha256",
+        "reachability_check_fingerprint",
+        "selected_resource_symbol",
+        "selected_resource_iri",
+        "selected_resource_jid",
+        "selected_execution_mode",
+        "robot_agent_validation_ref",
+        "robot_agent_validation_sha256",
+        "robot_agent_validation_fingerprint",
+        "robot_agent_validation_status",
+        "allocation_status",
         "tbox_fingerprint",
         "registry_fingerprint",
         "workcell_fingerprint",
@@ -725,10 +765,11 @@ def _build_assignment_envelope(
             PAContextGroundingCompletionV4,
             PAContextGroundingCompletionV5,
             PAContextGroundingCompletionV6,
+            PAContextGroundingCompletionV7,
         ),
     ):
         raise RAContextHandoffError(
-            "Phase 5.1 requires PAContextGroundingCompletion version 4, 5, or 6."
+            "Phase 5.1 requires PAContextGroundingCompletion version 4 through 7."
         )
     completion_record = completion.to_record()
     completion_paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
@@ -741,7 +782,7 @@ def _build_assignment_envelope(
     payload: dict[str, object] = {
         "schema_version": (
             3
-            if isinstance(completion, PAContextGroundingCompletionV6)
+            if isinstance(completion, (PAContextGroundingCompletionV6, PAContextGroundingCompletionV7))
             else (2 if isinstance(completion, PAContextGroundingCompletionV5) else 1)
         ),
         "record_type": "SelectedRAAssignmentEnvelope",
@@ -769,7 +810,11 @@ def _build_assignment_envelope(
     }
     if isinstance(
         completion,
-        (PAContextGroundingCompletionV5, PAContextGroundingCompletionV6),
+        (
+            PAContextGroundingCompletionV5,
+            PAContextGroundingCompletionV6,
+            PAContextGroundingCompletionV7,
+        ),
     ):
         payload.update(
             {
@@ -787,13 +832,31 @@ def _build_assignment_envelope(
                 "motion_executed": False,
             }
         )
-    if isinstance(completion, PAContextGroundingCompletionV6):
+    if isinstance(completion, (PAContextGroundingCompletionV6, PAContextGroundingCompletionV7)):
+        state_locations = selection.get("state_locations")
+        current_evidence = selection.get("current_state_evidence")
+        desired_evidence = selection.get("desired_state_evidence")
+        if isinstance(completion, PAContextGroundingCompletionV7):
+            current_evidence = {
+                "location_handles": (
+                    state_locations.get("current_state")
+                    if isinstance(state_locations, Mapping)
+                    else None
+                )
+            }
+            desired_evidence = {
+                "location_handles": (
+                    state_locations.get("desired_state")
+                    if isinstance(state_locations, Mapping)
+                    else None
+                )
+            }
         payload.update(
             {
                 "process_symbol": selection["process_symbol"],
                 "selected_resource_symbol": selection["selected_resource_symbol"],
-                "current_state_evidence": selection["current_state_evidence"],
-                "desired_state_evidence": selection["desired_state_evidence"],
+                "current_state_evidence": current_evidence,
+                "desired_state_evidence": desired_evidence,
                 "registry_snapshot_ref": completion_record["registry_snapshot_ref"],
                 "registry_snapshot_sha256": completion_record["registry_snapshot_sha256"],
                 "registry_snapshot_fingerprint": completion_record["registry_snapshot_fingerprint"],
@@ -821,6 +884,8 @@ def _load_validated_selection(  # noqa: C901
     root: Path,
     completion: Mapping[str, object],
 ) -> dict[str, object]:
+    if completion.get("schema_version") == 7:
+        return _load_validated_selection_v5(root, completion)
     if completion.get("schema_version") == 6:
         return _load_validated_selection_v4(root, completion)
     if completion.get("schema_version") == 5:
@@ -946,6 +1011,97 @@ def _load_validated_selection(  # noqa: C901
         raise RAContextHandoffError(
             "ResourceSelectionRecord is not pinned to accepted typed context."
         )
+    result = deepcopy(selection)
+    result["record_ref"] = selection_ref
+    result["fingerprint"] = selection_fingerprint
+    return result
+
+
+def _load_validated_selection_v5(
+    root: Path,
+    completion: Mapping[str, object],
+) -> dict[str, object]:
+    """Reconstruct the v5 PA resource and exact location-handle choice."""
+    selection_ref = _required_text(
+        completion.get("resource_selection_ref"),
+        "PAContextGroundingCompletion.resource_selection_ref",
+    )
+    selection_path = _resolve_ref(
+        root,
+        selection_ref,
+        prefix=_RESOURCE_SELECTION_PREFIX,
+    )
+    selection = _read_json_mapping(selection_path, "ResourceSelectionRecord v5")
+    _require_exact_keys(selection, _SELECTION_V5_KEYS, "ResourceSelectionRecord v5")
+    state_locations = selection.get("state_locations")
+    if (
+        selection.get("schema_version") != 5
+        or selection.get("record_type") != "ResourceSelectionRecord"
+        or selection.get("authority") != "ProductAgent"
+        or selection.get("allocation_status") != "accepted"
+        or selection.get("robot_agent_validation_status") != "accepted"
+        or not isinstance(state_locations, Mapping)
+        or set(state_locations) != {"current_state", "desired_state"}
+        or any(
+            not isinstance(state_locations[state_name], list)
+            or not state_locations[state_name]
+            for state_name in ("current_state", "desired_state")
+        )
+    ):
+        raise RAContextHandoffError("ResourceSelectionRecord v5 identity is invalid.")
+    if _sha256_path(selection_path) != _sha256_text(
+        completion.get("resource_selection_sha256"),
+        "PAContextGroundingCompletion.resource_selection_sha256",
+    ):
+        raise RAContextHandoffError("ResourceSelectionRecord v5 hash is invalid.")
+    selection_fingerprint = _record_fingerprint(
+        selection,
+        "ResourceSelectionRecord v5",
+    )
+    if (
+        selection_fingerprint != completion.get("resource_selection_fingerprint")
+        or selection.get("tbox_fingerprint") != completion.get("tbox_fingerprint")
+        or selection.get("registry_fingerprint")
+        != completion.get("registry_snapshot_fingerprint")
+        or selection.get("workcell_fingerprint")
+        != completion.get("workcell_snapshot_fingerprint")
+    ):
+        raise RAContextHandoffError("ResourceSelectionRecord v5 authority is inconsistent.")
+    for field in (
+        "specification_iri",
+        "feature_iri",
+        "process_symbol",
+        "process_iri",
+        "current_state_iri",
+        "desired_state_iri",
+        "selected_resource_symbol",
+        "selected_resource_iri",
+        "selected_resource_jid",
+        "selected_execution_mode",
+    ):
+        _required_text(selection.get(field), f"ResourceSelectionRecord.{field}")
+    _validate_resource_jid(str(selection["selected_resource_jid"]))
+    for ref_field, sha_field, prefix in (
+        (
+            "reachability_check_ref",
+            "reachability_check_sha256",
+            ("products", "grounding", "reachability"),
+        ),
+        (
+            "robot_agent_validation_ref",
+            "robot_agent_validation_sha256",
+            ("resources", str(selection["selected_resource_jid"]), "validation"),
+        ),
+    ):
+        if (
+            selection.get(ref_field) != completion.get(ref_field)
+            or selection.get(sha_field) != completion.get(sha_field)
+            or _sha256_path(_resolve_ref(root, str(selection[ref_field]), prefix=prefix))
+            != _sha256_text(selection.get(sha_field), sha_field)
+        ):
+            raise RAContextHandoffError(
+                "ResourceSelectionRecord v5 verifier lineage is invalid."
+            )
     result = deepcopy(selection)
     result["record_ref"] = selection_ref
     result["fingerprint"] = selection_fingerprint
@@ -1275,7 +1431,7 @@ def _validate_assignment_delta(
         )
     by_predicate: dict[str, Mapping[str, object]] = {}
     expected_evidence_refs = [selection["record_ref"]]
-    if selection.get("schema_version") in {3, 4}:
+    if selection.get("schema_version") in {3, 4, 5}:
         expected_evidence_refs.extend(
             [
                 selection["reachability_check_ref"],
@@ -1456,9 +1612,13 @@ def _assignment_from_mapping(
             "validated Cartesian pick-place allocation"
             if schema_version == 3 and validation_scope == "cartesian_pick_place"
             else (
-                "validated endpoint-motion allocation"
-                if schema_version == 3
-                else "validated allocation"
+                "validated state-location resource allocation"
+                if schema_version == 3 and validation_scope == "state_location_reachability"
+                else (
+                    "validated endpoint-motion allocation"
+                    if schema_version == 3
+                    else "validated allocation"
+                )
             )
         )
         if (
@@ -1497,7 +1657,11 @@ def _assignment_from_mapping(
             )
         }
         validation_scope = version_three_texts["validation_scope"]
-        if validation_scope not in {"endpoint_motion", "cartesian_pick_place"}:
+        if validation_scope not in {
+            "endpoint_motion",
+            "cartesian_pick_place",
+            "state_location_reachability",
+        }:
             raise RAContextHandoffError("SelectedRAAssignmentEnvelope validation scope is invalid.")
         version_three_shas = {
             field: _sha256_text(value.get(field), field)
@@ -1526,7 +1690,15 @@ def _assignment_from_mapping(
         unvalidated_constraints = tuple(
             _text_list(value.get("unvalidated_constraints"), "unvalidated_constraints")
         )
-        if validation_scope == "cartesian_pick_place":
+        if validation_scope == "state_location_reachability":
+            expected_checked = ("resource_endpoint_reachability",)
+            expected_unvalidated = (
+                "grasping",
+                "insertion",
+                "force_contact",
+                "process_tolerance",
+            )
+        elif validation_scope == "cartesian_pick_place":
             expected_checked = (
                 "live_tf",
                 "collision_aware_cartesian_pick_path",

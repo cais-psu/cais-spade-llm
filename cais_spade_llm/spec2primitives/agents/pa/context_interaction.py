@@ -16,7 +16,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v6,
+    persist_pa_context_grounding_completion_v7,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 _PRODUCT_REQUIREMENT_PATH = Path("products/user_requirement/product_requirement.json")
 _FIRST_TURN_PATH = Path("interaction_record/turn_0001.json")
+_GROUNDING_VALIDATION_CODES = frozenset(
+    {
+        "unsupported_process",
+        "invalid_target_feature",
+        "evidence_reference_invalid",
+        "location_evidence_unavailable",
+        "no_reachable_resource",
+        "invalid_resource_selection",
+    }
+)
 
 
 class ProductAgentContextRuntime(Protocol):
@@ -150,17 +160,18 @@ async def start_pa_context_interaction(
                 assessed_at_ns=time.time_ns(),
             )
             persist_product_context_view(root, fresh_view)
-            persist_pa_context_grounding_completion_v6(
-                root,
-                tbox=tbox,
-                product_requirement=product_requirement,
-                completion_turn=1,
-                decision_ref=turn_path.relative_to(root).as_posix(),
-                product_context=fresh_view,
-                ontology_projection_ref=str(pa_output["ontology_projection_ref"]),
-                resource_selection_ref=str(pa_output["resource_selection_ref"]),
-                tool_call_refs=tuple(pa_output["tool_call_refs"]),
-            )
+            if pa_output.get("resource_assignment_status") == "complete":
+                persist_pa_context_grounding_completion_v7(
+                    root,
+                    tbox=tbox,
+                    product_requirement=product_requirement,
+                    completion_turn=1,
+                    decision_ref=turn_path.relative_to(root).as_posix(),
+                    product_context=fresh_view,
+                    ontology_projection_ref=str(pa_output["ontology_projection_ref"]),
+                    resource_selection_ref=str(pa_output["resource_selection_ref"]),
+                    tool_call_refs=tuple(pa_output["tool_call_refs"]),
+                )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.exception("Native grounding completion failed.")
             return _failure(
@@ -180,14 +191,37 @@ def _native_output_validation_error(value: Mapping[str, object]) -> str | None:
         return "Native PA clarification output is invalid."
     if status == "incomplete" and not isinstance(value.get("insufficient_evidence"), str):
         return "Native PA insufficient-evidence output is invalid."
+    validation_code = value.get("grounding_validation_code")
+    if status == "incomplete" and validation_code not in _GROUNDING_VALIDATION_CODES:
+        return "Native PA grounding-validation code is invalid."
+    if status != "incomplete" and validation_code is not None:
+        return "Native PA grounding-validation code is invalid."
+    if value.get("unmet_grounding_obligation") is not None:
+        return "Native PA output cannot contain a grounding obligation."
     if status == "complete":
         if not isinstance(value.get("ontology_projection_ref"), str):
             return "Native completion ontology projection is invalid."
-        if not isinstance(value.get("resource_selection_ref"), str):
-            return "Native completion resource selection is invalid."
+        resource_error = _resource_assignment_output_validation_error(value)
+        if resource_error is not None:
+            return resource_error
         tool_refs = value.get("tool_call_refs")
         if not isinstance(tool_refs, list) or not all(isinstance(item, str) for item in tool_refs):
             return "Native completion tool-call references are invalid."
+    return None
+
+
+def _resource_assignment_output_validation_error(
+    value: Mapping[str, object],
+) -> str | None:
+    """Validate the optional resource-assignment portion of semantic completion."""
+    status = value.get("resource_assignment_status")
+    if status != "complete":
+        return "Native completion resource-assignment status is invalid."
+    resource_selection_ref = value.get("resource_selection_ref")
+    if not isinstance(resource_selection_ref, str):
+        return "Native completion resource selection is invalid."
+    if value.get("resource_assignment_validation_code") is not None:
+        return "Native completion resource-assignment validation code is invalid."
     return None
 
 

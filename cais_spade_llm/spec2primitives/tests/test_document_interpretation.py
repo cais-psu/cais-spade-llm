@@ -26,12 +26,16 @@ from cais_spade_llm.spec2primitives.tools import exact_ref_resolver
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
     DOCUMENT_OVERVIEW_SCHEMA_VERSION,
     DocumentInterpretationError,
+    DocumentQueryVisionRequest,
     DocumentVisionRequest,
     DocumentVisionResponse,
     OpenAIDocumentVisionRuntime,
     document_overview_cache_status,
+    document_query_schema,
+    index_document_evidence,
     interpret_document_evidence,
     prepare_document_overview,
+    query_document_evidence,
     run_document_interpretation_diagnostic,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
@@ -55,11 +59,14 @@ class ControlledVisionRuntime:
         self,
         output: dict[str, object] | None = None,
         *,
+        query_output: dict[str, object] | None = None,
         model: str = "gpt-5.6-sol",
     ) -> None:
         self.output = output or _valid_output()
+        self.query_output = query_output or _valid_query_output()
         self.model = model
         self.requests: list[DocumentVisionRequest] = []
+        self.query_requests: list[DocumentQueryVisionRequest] = []
 
     async def interpret_document(
         self,
@@ -70,6 +77,17 @@ class ControlledVisionRuntime:
             response_id="resp_overview_controlled",
             model=self.model,
             output=self.output,
+        )
+
+    async def query_document(
+        self,
+        request: DocumentQueryVisionRequest,
+    ) -> DocumentVisionResponse:
+        self.query_requests.append(request)
+        return DocumentVisionResponse(
+            response_id="resp_query_controlled",
+            model=self.model,
+            output=self.query_output,
         )
 
 
@@ -136,6 +154,63 @@ def test_openai_adapter_sends_one_neutral_nonstored_overview_request() -> None:
     ]
 
 
+def test_openai_adapter_sends_only_exact_question_and_document_pages() -> None:
+    class ControlledResponses:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def create(self, **kwargs: Any) -> object:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                id="resp_query_controlled",
+                model="gpt-5.6-sol",
+                output_text=json.dumps(_valid_query_output()),
+            )
+
+    responses = ControlledResponses()
+    runtime = OpenAIDocumentVisionRuntime(
+        load_model_runtime_config().document_vlm,
+        client=SimpleNamespace(responses=responses),
+    )
+    exact_question = "Which surface properties are explicitly specified?"
+    request = DocumentQueryVisionRequest(
+        question=exact_question,
+        context_ref=_TEST_DOCUMENT_REF,
+        source_sha256="a" * 64,
+        pages=(
+            RenderedDocumentPage(
+                page_number=1,
+                image_path=Path("page_0001.png"),
+                image_sha256="b" * 64,
+                image_data_url="data:image/png;base64,page1",
+                text="page 1 text",
+            ),
+        ),
+    )
+    response = asyncio.run(runtime.query_document(request))
+    assert response.output == _valid_query_output()
+    call = responses.calls[0]
+    assert call["store"] is False
+    serialized = json.dumps(call)
+    assert exact_question in serialized
+    content = call["input"][0]["content"]
+    request_payload = json.loads(content[0]["text"])
+    assert set(request_payload) == {"question", "document_pages"}
+    assert request_payload["question"] == exact_question
+    assert request_payload["document_pages"] == [
+        {"page": 1, "extracted_text": "page 1 text"}
+    ]
+    for forbidden in (
+        "product_requirement",
+        "authorized_processes",
+        "CADMeshRecord",
+        "RGBDSegmentationRecord",
+        "candidate_handle",
+        "expected_answer",
+    ):
+        assert forbidden not in serialized
+
+
 def test_document_schemas_are_neutral_and_use_supported_constraints() -> None:
     overview_schema = document_interpretation_schema()
     serialized = json.dumps(overview_schema)
@@ -156,6 +231,174 @@ def test_document_schemas_are_neutral_and_use_supported_constraints() -> None:
         "observations",
         "uncertainty",
     }
+    query_schema = document_query_schema()
+    serialized_query = json.dumps(query_schema)
+    assert "fact_kind" not in serialized_query
+    assert "required_process" not in serialized_query
+    assert set(query_schema["properties"]) == {"status", "claims", "uncertainty"}
+    claim_schema = query_schema["properties"]["claims"]["items"]
+    assert claim_schema["properties"]["predicate_text"] == {"type": "string"}
+    assert claim_schema["properties"]["arguments"] == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
+
+
+def test_source_index_is_requirement_blind_and_query_is_exact_and_document_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(
+        root,
+        "a requirement that must not enter document indexing",
+        tbox,
+    )
+    source_index = index_document_evidence(
+        interaction_root=root,
+        tbox=tbox,
+        abox=abox,
+        served_context=_served_document(_TEST_DOCUMENT_REF),
+        operation_number=1,
+    )
+    snapshot = _read_json(source_index.source_index_record_path)
+    assert snapshot["record_type"] == "DocumentSourceIndexRecord"
+    assert snapshot["status"] == "accepted"
+    assert [page["page"] for page in snapshot["source_index"]["pages"]] == list(
+        range(1, 7)
+    )
+    serialized_index = json.dumps(snapshot)
+    assert abox.product_requirement not in serialized_index
+    assert "summary" not in snapshot["source_index"]
+    assert "observations" not in snapshot["source_index"]
+
+    exact_question = "What ordered items are visibly shown on the cited page?"
+    vision = ControlledVisionRuntime()
+    query = asyncio.run(
+        query_document_evidence(
+            interaction_root=root,
+            source_index_record_path=source_index.source_index_record_path,
+            operation_number=1,
+            question=exact_question,
+            config=load_model_runtime_config().document_vlm,
+            vision_runtime=vision,
+        )
+    )
+    assert len(vision.query_requests) == 1
+    request = vision.query_requests[0]
+    assert request.question == exact_question
+    assert len(request.pages) == 6
+    assert not hasattr(request, "requirement")
+    assert not hasattr(request, "ontology")
+    assert not hasattr(request, "candidates")
+    record = _read_json(query.record_path)
+    assert record["record_type"] == "DocumentQueryRecord"
+    assert record["question"] == exact_question
+    assert record["status"] == "supported"
+    assert record["claims"][0]["predicate_text"] == "shown_in_order"
+    assert record["claims"][0]["evidence_refs"] == [
+        f"{_TEST_DOCUMENT_REF}#page=4"
+    ]
+
+
+def test_historical_overview_cannot_be_used_as_a_dynamic_query_source(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    overview_path = root / "products/grounding/document_evidence/overview_0001.json"
+    overview_path.parent.mkdir(parents=True)
+    overview_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "record_type": "DocumentOverviewRecord",
+                "producer": "document_evidence",
+                "overview": {"pages": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DocumentInterpretationError, match="source index is invalid"):
+        asyncio.run(
+            query_document_evidence(
+                interaction_root=root,
+                source_index_record_path=overview_path,
+                operation_number=1,
+                question="What is stated?",
+                config=load_model_runtime_config().document_vlm,
+                vision_runtime=ControlledVisionRuntime(),
+            )
+        )
+
+
+def test_unsupported_leading_document_question_returns_no_claim(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "paint a component", tbox)
+    source_index = index_document_evidence(
+        interaction_root=root,
+        tbox=tbox,
+        abox=abox,
+        served_context=_served_document(_TEST_DOCUMENT_REF),
+        operation_number=1,
+    )
+    vision = ControlledVisionRuntime(
+        query_output={
+            "status": "insufficient_evidence",
+            "claims": [],
+            "uncertainty": [
+                {
+                    "description": "The requested finish is not specified.",
+                    "evidence_pages": [4],
+                }
+            ],
+        }
+    )
+    result = asyncio.run(
+        query_document_evidence(
+            interaction_root=root,
+            source_index_record_path=source_index.source_index_record_path,
+            operation_number=1,
+            question="Does the page require a blue finish?",
+            config=load_model_runtime_config().document_vlm,
+            vision_runtime=vision,
+        )
+    )
+    assert result.status == "insufficient_evidence"
+    assert result.record["claims"] == []
+
+
+def test_document_query_rejects_changed_source_index(tmp_path: Path) -> None:
+    root = tmp_path / "interaction"
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(root, "assemble a component", tbox)
+    source_index = index_document_evidence(
+        interaction_root=root,
+        tbox=tbox,
+        abox=abox,
+        served_context=_served_document(_TEST_DOCUMENT_REF),
+        operation_number=1,
+    )
+    changed = _read_json(source_index.source_index_record_path)
+    changed["source_index"]["pages"][0]["extracted_text"] = "changed"
+    source_index.source_index_record_path.write_text(
+        json.dumps(changed),
+        encoding="utf-8",
+    )
+    with pytest.raises(DocumentInterpretationError, match="fingerprint"):
+        asyncio.run(
+            query_document_evidence(
+                interaction_root=root,
+                source_index_record_path=source_index.source_index_record_path,
+                operation_number=1,
+                question="What is shown?",
+                config=load_model_runtime_config().document_vlm,
+                vision_runtime=ControlledVisionRuntime(),
+            )
+        )
 
 
 def test_overview_cache_hit_is_assertion_free_and_model_change_invalidates(
@@ -530,12 +773,6 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
             tool_executor: Any = None,
             max_tool_rounds: int = 3,
         ) -> dict[str, Any]:
-            if response_format["name"] == "spec2primitives_target_feature_review":
-                assert "Semantic review input" in prompt
-                assert tools is None
-                assert tool_executor is None
-                assert max_tool_rounds == 1
-                return {"verdict": "complete", "gap": None}
             assert "initialized_specification_iri" in prompt
             assert response_format["name"] == "spec2primitives_grounding_result"
             assert tools == []
@@ -584,7 +821,7 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
     proposal_record = _read_json(
         tmp_path / "diagnostic/products/grounding/ontology_grounding/proposal_0001.json"
     )
-    assert proposal_record["schema_version"] == 8
+    assert proposal_record["schema_version"] == 9
     assert len(result["accepted_assertions"]) == 7
     assert result["failure"] is None
 
@@ -615,6 +852,21 @@ def _valid_output() -> dict[str, object]:
                 "evidence_pages": [4],
             }
         ],
+    }
+
+
+def _valid_query_output() -> dict[str, object]:
+    return {
+        "status": "supported",
+        "claims": [
+            {
+                "predicate_text": "shown_in_order",
+                "arguments": ["first visible item", "second visible item", "third visible item"],
+                "evidence_pages": [4],
+                "uncertainty": [],
+            }
+        ],
+        "uncertainty": [],
     }
 
 

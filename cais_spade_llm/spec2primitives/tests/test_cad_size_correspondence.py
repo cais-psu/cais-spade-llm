@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
+from cais_spade_llm.spec2primitives.agents.pa import grounding_contracts
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
     resolve_context_ref,
 )
@@ -24,7 +26,10 @@ from cais_spade_llm.spec2primitives.tools.observation_context import (
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     CADSizeAssociationError,
+    CandidateLayoutError,
+    analyze_candidate_layout,
     associate_segmented_candidate_by_size,
+    measure_segmented_candidates_against_cad,
     preprocess_served_geometry,
     read_rgbd_segmentation_status,
     run_cad_size_association_pipeline,
@@ -33,6 +38,50 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
 
 _DEPTH_M = 0.8
 _FOCAL_LENGTH_PX = 800.0
+
+
+def test_phase4_cad_comparison_measures_all_candidates_without_selecting(
+    tmp_path: Path,
+) -> None:
+    segmentation_path, cad_path = _prepare_inputs(
+        tmp_path,
+        _size_bundle((0.022, 0.042, 0.062)),
+    )
+
+    result = measure_segmented_candidates_against_cad(
+        interaction_root=tmp_path,
+        segmentation_record_path=segmentation_path,
+        cad_record_path=cad_path,
+    )
+
+    record = result.record
+    assert result.measurement == "accepted"
+    assert record["schema_version"] == 3
+    assert record["CAD_correspondence"] == "not_evaluated"
+    assert [
+        candidate["candidate_handle"] for candidate in record["candidate_measurements"]
+    ] == [
+        "candidate_0001_0001",
+        "candidate_0001_0002",
+        "candidate_0001_0003",
+    ]
+    serialized = json.dumps(record)
+    for forbidden in (
+        '"rank"',
+        "ranked_candidates",
+        "plausible_candidates",
+        "selected_candidate",
+    ):
+        assert forbidden not in serialized
+    assert (
+        grounding_contracts._binding_status("CADSizeCorrespondenceRecord", record)
+        == "accepted"
+    )
+    record["candidate_measurements"][0]["candidate_center_m"][0] += 0.01
+    assert (
+        grounding_contracts._binding_status("CADSizeCorrespondenceRecord", record)
+        == "rejected"
+    )
 
 
 def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
@@ -76,6 +125,111 @@ def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
     assert record["segmentation"]["record"]["sha256"] == _sha256(segmentation_path)
     assert record["pose"] == "not_evaluated"
     assert record["cross_camera_fusion"] == "not_evaluated"
+
+
+@pytest.mark.parametrize("candidate_count", [2, 3, 5])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_candidate_layout_measures_any_two_or_more_selected_candidates(
+    tmp_path: Path,
+    candidate_count: int,
+    reverse: bool,
+) -> None:
+    centers = tuple((float(index), float(index % 2), 1.0) for index in range(candidate_count))
+    segmentation_path, field_paths = _write_layout_inputs(tmp_path, centers)
+    selected_paths = tuple(reversed(field_paths)) if reverse else field_paths
+
+    result = analyze_candidate_layout(
+        interaction_root=tmp_path,
+        segmentation_record_path=segmentation_path,
+        candidate_field_paths=selected_paths,
+    )
+
+    assert result.status == "accepted"
+    assert result.record["status"] == "measured"
+    assert result.record["candidate_count"] == candidate_count
+    assert len(result.record["candidates"]) == candidate_count
+    assert len(result.record["pairwise_measurements"]) == candidate_count * (
+        candidate_count - 1
+    ) // 2
+    assert len(result.record["collinearity_measurements"]) == (
+        0 if candidate_count == 2 else candidate_count * (candidate_count - 1) * (candidate_count - 2) // 6
+    )
+    assert "relations" not in result.record
+    assert "between" not in json.dumps(result.record).lower()
+
+
+def test_candidate_layout_measurements_preserve_meaning_under_input_permutation(
+    tmp_path: Path,
+) -> None:
+    centers = ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0), (3.0, 1.0, 1.0))
+    first_path, field_paths = _write_layout_inputs(tmp_path / "first", centers)
+    second_path, second_field_paths = _write_layout_inputs(tmp_path / "second", centers)
+
+    first = analyze_candidate_layout(
+        interaction_root=tmp_path / "first",
+        segmentation_record_path=first_path,
+        candidate_field_paths=field_paths,
+    )
+    second = analyze_candidate_layout(
+        interaction_root=tmp_path / "second",
+        segmentation_record_path=second_path,
+        candidate_field_paths=tuple(reversed(second_field_paths)),
+    )
+
+    def distances(record: Mapping[str, Any]) -> dict[frozenset[str], float]:
+        return {
+            frozenset(
+                (
+                    str(item["first"]["candidate_handle"]),
+                    str(item["second"]["candidate_handle"]),
+                )
+            ): float(item["distance_m"])
+            for item in record["pairwise_measurements"]
+        }
+
+    assert distances(first.record) == distances(second.record)
+
+
+def test_candidate_layout_rejects_too_few_duplicate_or_mixed_frame_candidates(
+    tmp_path: Path,
+) -> None:
+    segmentation_path, field_paths = _write_layout_inputs(
+        tmp_path,
+        ((0.0, 0.0, 1.0), (1.0, 0.0, 1.0)),
+    )
+    with pytest.raises(CandidateLayoutError, match="at least two"):
+        analyze_candidate_layout(
+            interaction_root=tmp_path,
+            segmentation_record_path=segmentation_path,
+            candidate_field_paths=field_paths[:1],
+        )
+    with pytest.raises(CandidateLayoutError, match="unique"):
+        analyze_candidate_layout(
+            interaction_root=tmp_path,
+            segmentation_record_path=segmentation_path,
+            candidate_field_paths=(field_paths[0], field_paths[0]),
+        )
+
+    segmentation = _read_json(segmentation_path)
+    segmentation["cameras"].append(
+        {
+            "observation_handle": "view_0002",
+            "frame": "other_camera_frame",
+            "candidates": [
+                {
+                    "candidate_handle": "candidate_c",
+                    "centroid_m": [2.0, 0.0, 1.0],
+                }
+            ],
+        }
+    )
+    segmentation_path.write_text(json.dumps(segmentation), encoding="utf-8")
+    with pytest.raises(CandidateLayoutError, match="same view and frame"):
+        analyze_candidate_layout(
+            interaction_root=tmp_path,
+            segmentation_record_path=segmentation_path,
+            candidate_field_paths=(field_paths[0], "/cameras/1/candidates/0"),
+        )
 
 
 def test_measurement_noise_within_fifteen_percent_is_accepted(tmp_path: Path) -> None:
@@ -532,6 +686,41 @@ def _calibration(frame: str) -> CameraCalibration:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_layout_inputs(
+    root: Path,
+    centers: tuple[tuple[float, float, float], ...],
+) -> tuple[Path, tuple[str, ...]]:
+    grounding_root = root / "products/grounding/rgb_d_cad_grounding"
+    segmentation_path = grounding_root / "segmentation_0001/rgbd_segmentation_record.json"
+    segmentation_path.parent.mkdir(parents=True, exist_ok=True)
+    handles = [f"candidate_{chr(ord('a') + index)}" for index in range(len(centers))]
+    segmentation = {
+        "schema_version": 2,
+        "record_type": "RGBDSegmentationRecord",
+        "producer": "rgb_d_cad_grounding",
+        "cameras": [
+            {
+                "observation_handle": "view_0001",
+                "frame": "camera_frame",
+                "candidates": [
+                    {
+                        "candidate_handle": handle,
+                        "centroid_m": list(center),
+                    }
+                    for handle, center in zip(handles, centers, strict=True)
+                ],
+            }
+        ],
+    }
+    segmentation_path.write_text(
+        json.dumps(segmentation, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return segmentation_path, tuple(
+        f"/cameras/0/candidates/{index}" for index in range(len(centers))
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -73,15 +73,21 @@ class _CapturingFeasibilityRuntime:
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
         self.requests.append(dict(request))
-        endpoint = {
-            "status": "accepted",
-            "message": "arbitrary-profile endpoint accepted",
-            "error_code": 1,
-        }
+        state_locations = request["state_locations"]
         return {
             "status": "accepted",
-            "current_state": dict(endpoint),
-            "desired_state": dict(endpoint),
+            "state_locations": {
+                state_name: [
+                    {
+                        "evidence_handle": item["evidence_handle"],
+                        "status": "accepted",
+                        "message": "arbitrary-profile location accepted",
+                        "error_code": 1,
+                    }
+                    for item in locations
+                ]
+                for state_name, locations in state_locations.items()
+            },
             "feedback": None,
         }
 
@@ -191,13 +197,20 @@ def test_arbitrary_process_and_resource_symbols_flow_without_code_dependencies(
         process_iri=process_iri,
     )
     current_path = _write_world_location(root, "neutral_a", (0.0, 0.2, 1.1))
+    current_extra_path = _write_world_location(root, "neutral_c", (0.0, 0.1, 1.1))
     desired_path = _write_world_location(root, "neutral_b", (0.0, 0.5, 1.1))
+    desired_extra_path = _write_world_location(root, "neutral_d", (0.0, 0.6, 1.1))
     presentation, handles = _allocation_presentation_for_locations(
         root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        location_paths=(current_path, desired_path),
+        location_paths=(
+            current_path,
+            current_extra_path,
+            desired_path,
+            desired_extra_path,
+        ),
     )
     catalog = candidate_resource_catalog(abox, registry, workcell)
 
@@ -210,10 +223,22 @@ def test_arbitrary_process_and_resource_symbols_flow_without_code_dependencies(
         workcell=workcell,
         resource_symbol="beta_bot",
         allocation_presentation=presentation,
-        current_state_evidence_handle=handles[_location_candidate_key(root, current_path)],
-        desired_state_evidence_handle=handles[_location_candidate_key(root, desired_path)],
-        current_location_record_path=current_path,
-        desired_location_record_path=desired_path,
+        state_location_record_paths={
+            "current_state": [
+                (handles[_location_candidate_key(root, current_path)], current_path),
+                (
+                    handles[_location_candidate_key(root, current_extra_path)],
+                    current_extra_path,
+                ),
+            ],
+            "desired_state": [
+                (handles[_location_candidate_key(root, desired_path)], desired_path),
+                (
+                    handles[_location_candidate_key(root, desired_extra_path)],
+                    desired_extra_path,
+                ),
+            ],
+        },
     )
     runtime = _CapturingFeasibilityRuntime()
     validation = asyncio.run(
@@ -247,15 +272,19 @@ def test_arbitrary_process_and_resource_symbols_flow_without_code_dependencies(
     assert request["process_iri"] == process_iri
     assert request["feature_iri"].endswith("feature_0001")
     assert request["resource_symbol"] == "beta_bot"
-    assert request["current_state"]["evidence_handle"]
-    assert request["desired_state"]["evidence_handle"]
+    assert len(request["state_locations"]["current_state"]) == 2
+    assert len(request["state_locations"]["desired_state"]) == 2
+    assert request["validation_scope"] == "state_location_reachability"
     serialized_request = json.dumps(request, sort_keys=True)
     assert "assembly" not in serialized_request
     assert "xarm6" not in serialized_request
     assert "ur5e" not in serialized_request
     assert selection.process_symbol == "joining"
     assert selection.process_iri == process_iri
+    assert selection.schema_version == 5
+    assert selection.state_location_handles is not None
     assert selection.candidate_resource_symbols == ("alpha_bot", "beta_bot")
+    assert committed.abox.accepted_assertion_count == 11
     assert (
         URIRef(f"{abox.namespace}process_execution_0001"),
         Namespace(PPR_NAMESPACE).runsOnResource,
@@ -548,29 +577,126 @@ def test_rejected_cartesian_plan_cannot_commit_or_substitute_resource(
     assert not (root / "products/grounding/resource_selection").exists()
 
 
-def test_reversing_registry_order_cannot_override_the_pa_choice(
+@pytest.mark.parametrize(
+    ("resource_order", "resource_symbol", "current_y", "desired_y"),
+    [
+        (("xarm6", "ur5e"), "ur5e", 0.2, 0.8),
+        (("ur5e", "xarm6"), "xarm6", -0.7, -0.2),
+    ],
+)
+def test_resource_presentation_order_cannot_override_the_pa_choice(
     tmp_path: Path,
+    resource_order: tuple[str, str],
+    resource_symbol: str,
+    current_y: float,
+    desired_y: float,
 ) -> None:
     root = tmp_path / "interaction"
     tbox, registry, workcell, _ = _authorities(
         tmp_path,
-        resource_order=("ur5e", "xarm6"),
+        resource_order=resource_order,
     )
     _grounded_abox(root, tbox)
+    current_path = _write_world_location(root, "current", (0.0, current_y, 1.1))
+    desired_path = _write_world_location(root, "desired", (0.0, desired_y, 1.1))
+    presentation, handles = _allocation_presentation_for_locations(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        location_paths=(desired_path, current_path),
+    )
 
-    check = check_resource_reachability(
+    check = _runtime_check_resource_reachability(
         interaction_root=root,
         tbox=tbox,
         registry=registry,
         workcell=workcell,
-        resource_symbol="ur5e",
-        current_location_record_path=_write_world_location(root, "current", (0.0, 0.2, 1.1)),
-        desired_location_record_path=_write_world_location(root, "desired", (0.0, 0.8, 1.1)),
+        resource_symbol=resource_symbol,
+        allocation_presentation=presentation,
+        state_location_record_paths={
+            "current_state": [
+                (handles[_location_candidate_key(root, current_path)], current_path)
+            ],
+            "desired_state": [
+                (handles[_location_candidate_key(root, desired_path)], desired_path)
+            ],
+        },
+    )
+    validation = asyncio.run(
+        validate_provisional_allocation(
+            _CapturingFeasibilityRuntime(),
+            interaction_root=root,
+            workcell=workcell,
+            reachability=check,
+        )
+    )
+    selection = persist_pa_resource_selection(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        reachability=check,
+        allocation_presentation=presentation,
+        robot_agent_validation_path=validation.record_path,
     )
 
     assert check.status == "accepted"
-    assert check.resource_symbol == "ur5e"
-    assert check.resource_jid == "ur5e@localhost"
+    assert check.schema_version == 4
+    assert check.resource_symbol == resource_symbol
+    assert selection.schema_version == 5
+    assert selection.selected_resource_symbol == resource_symbol
+
+
+def test_v4_selection_rejects_any_unreachable_submitted_location_without_substitution(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    before = _grounded_abox(root, tbox)
+    current_path = _write_world_location(root, "current", (0.0, -0.7, 1.1))
+    desired_path = _write_world_location(root, "desired", (0.0, 0.8, 1.1))
+    presentation, handles = _allocation_presentation_for_locations(
+        root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        location_paths=(current_path, desired_path),
+    )
+
+    check = _runtime_check_resource_reachability(
+        interaction_root=root,
+        tbox=tbox,
+        registry=registry,
+        workcell=workcell,
+        resource_symbol="xarm6",
+        allocation_presentation=presentation,
+        state_location_record_paths={
+            "current_state": [
+                (handles[_location_candidate_key(root, current_path)], current_path)
+            ],
+            "desired_state": [
+                (handles[_location_candidate_key(root, desired_path)], desired_path)
+            ],
+        },
+    )
+
+    assert check.status == "rejected"
+    assert check.state_locations is not None
+    assert check.state_locations["current_state"][0].reachable is True
+    assert check.state_locations["desired_state"][0].reachable is False
+    with pytest.raises(ResourceGroundingError, match="accepted reachability"):
+        persist_pa_resource_selection(
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            reachability=check,
+            allocation_presentation=presentation,
+            robot_agent_validation_path=root / "missing_validation.json",
+        )
+    assert set(load_interaction_abox(root, tbox).graph) == set(before.graph)
+    assert not (root / "products/grounding/resource_selection").exists()
 
 
 def test_neutral_location_requires_an_intact_hash_chain(tmp_path: Path) -> None:

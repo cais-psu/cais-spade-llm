@@ -1,5 +1,10 @@
 """Phase 4.2 preprocessing, segmentation, correspondence, and pose boundaries."""
 
+from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.candidate_layout import (
+    CandidateLayoutError,
+    CandidateSpatialRelationResult,
+    analyze_candidate_layout,
+)
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.diagnostic import (
     LiveGazeboObservationCaptureRuntime,
     ObservationCaptureRuntime,
@@ -49,12 +54,17 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.segmenter import (
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondence import (
     CADSizeAssociationError,
     CADSizeAssociationResult,
+    CADSizeMeasurementResult,
     associate_segmented_candidate_by_size,
+    measure_segmented_candidates_against_cad,
 )
 
 __all__ = [
     "CADSizeAssociationError",
     "CADSizeAssociationResult",
+    "CADSizeMeasurementResult",
+    "CandidateLayoutError",
+    "CandidateSpatialRelationResult",
     "CADPoseEstimationError",
     "CADPoseEstimationResult",
     "CameraToRobotCalibrationError",
@@ -74,8 +84,10 @@ __all__ = [
     "RobotFrameConversionError",
     "RobotFrameLocationResult",
     "RobotFramePoseResult",
+    "analyze_candidate_layout",
     "associate_segmented_candidate_by_size",
     "estimate_camera_frame_pose",
+    "measure_segmented_candidates_against_cad",
     "preprocess_served_geometry",
     "observation_candidate_review_schema",
     "read_rgbd_segmentation_status",
