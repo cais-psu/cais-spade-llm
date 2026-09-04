@@ -4,3 +4,4 @@
 !ground_truth/
 ground_truth/*
 !ground_truth/README.md
+!ground_truth/phase_4_medium_gear_reference_answer.md
