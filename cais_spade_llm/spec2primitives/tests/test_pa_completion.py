@@ -15,10 +15,10 @@ import pytest
 
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingContractError,
-    PAContextGroundingCompletionV7,
+    PAContextGroundingCompletionV8,
     build_product_context_view,
     load_pa_context_grounding_completion,
-    persist_pa_context_grounding_completion_v7,
+    persist_pa_context_grounding_completion_v8,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
@@ -79,6 +79,46 @@ class _ProposalAgent:
     ) -> dict[str, Any]:
         del prompt, tools, tool_executor, max_tool_rounds
         assert response_format["name"] == "spec2primitives_grounding_result"
+        assert self.current_location_ref is not None
+        assert self.desired_location_ref is not None
+        current_location_value = {
+            "name": "medium_gear_location",
+            "value_ref": {
+                "record_ref": self.current_location_ref,
+                "field_path": "/translated_location_m",
+            },
+            "evidence_refs": [self.current_location_ref],
+        }
+        desired_location_value = {
+            "name": "assembly_board_shaft_location",
+            "value_ref": {
+                "record_ref": self.desired_location_ref,
+                "field_path": "/translated_location_m",
+            },
+            "evidence_refs": [self.desired_location_ref],
+        }
+        desired_state_values = [desired_location_value]
+        if self.target_state_record_ref is not None:
+            desired_state_values.extend(
+                [
+                    {
+                        "name": "specified_finish",
+                        "value_ref": {
+                            "record_ref": self.target_state_record_ref,
+                            "field_path": "/overview/summary",
+                        },
+                        "evidence_refs": [self.target_state_record_ref],
+                    },
+                    {
+                        "name": "specified_coating",
+                        "value_ref": {
+                            "record_ref": self.target_state_record_ref,
+                            "field_path": "/overview/observations/0",
+                        },
+                        "evidence_refs": [self.target_state_record_ref],
+                    },
+                ]
+            )
         proposal = {
             "target_feature": {
                 "required_process": {
@@ -90,35 +130,45 @@ class _ProposalAgent:
                         "text": "The medium gear is currently separate from the assembly.",
                         "evidence_refs": list(self.evidence_refs),
                     },
-                    "state_values": [],
+                    "state_values": [current_location_value],
                 },
                 "desired_state": {
                     "statement": {
                         "text": "The medium gear is assembled as requested.",
                         "evidence_refs": list(self.evidence_refs),
                     },
-                    "state_values": (
-                        []
-                        if self.target_state_record_ref is None
-                        else [
-                            {
-                                "name": "specified_finish",
-                                "value_ref": {
-                                    "record_ref": self.target_state_record_ref,
-                                    "field_path": "/overview/summary",
-                                },
-                                "evidence_refs": [self.target_state_record_ref],
+                    "state_values": desired_state_values,
+                },
+                "assembly_feature_association": {
+                    "assembly": {
+                        "name": "assembly_board_with_medium_gear",
+                        "evidence_refs": list(self.evidence_refs),
+                    },
+                    "assembly_features": [
+                        {
+                            "name": "medium_gear_bore",
+                            "owner": {
+                                "name": "medium_gear",
+                                "type": "Part",
+                                "evidence_refs": list(self.evidence_refs),
                             },
-                            {
-                                "name": "specified_coating",
-                                "value_ref": {
-                                    "record_ref": self.target_state_record_ref,
-                                    "field_path": "/overview/observations/0",
-                                },
-                                "evidence_refs": [self.target_state_record_ref],
+                            "state_name": "current_state",
+                            "state_value_name": "medium_gear_location",
+                            "evidence_refs": list(self.evidence_refs),
+                        },
+                        {
+                            "name": "medium_gear_shaft",
+                            "owner": {
+                                "name": "assembly_board",
+                                "type": "Assembly",
+                                "evidence_refs": list(self.evidence_refs),
                             },
-                        ]
-                    ),
+                            "state_name": "desired_state",
+                            "state_value_name": "assembly_board_shaft_location",
+                            "evidence_refs": list(self.evidence_refs),
+                        },
+                    ],
+                    "evidence_refs": list(self.evidence_refs),
                 },
             }
         }
@@ -169,9 +219,9 @@ def test_completion_v7_pins_two_states_and_state_location_allocation(
 ) -> None:
     completion = persist_native_completion_fixture(tmp_path)
 
-    assert isinstance(completion, PAContextGroundingCompletionV7)
+    assert isinstance(completion, PAContextGroundingCompletionV8)
     record = completion.to_record()
-    assert record["schema_version"] == 7
+    assert record["schema_version"] == 8
     assert record["status"] == "grounding complete"
     assert record["allocation_label"] == "validated state-location resource allocation"
     assert record["validation_scope"] == "state_location_reachability"
@@ -190,14 +240,19 @@ def test_completion_v7_pins_two_states_and_state_location_allocation(
         for item in record["typed_context_refs"]
     )
     proposal = _read_json(tmp_path / str(record["ontology_projection_ref"]))
-    assert proposal["schema_version"] == 9
+    assert proposal["schema_version"] == 10
     assert proposal["feature_iri"].endswith("feature_0001")
     target_feature = proposal["output"]["target_feature"]
     assert target_feature["required_process"]["process_iri"] == (
         "https://cais-spade-llm.local/process/assembly"
     )
-    assert target_feature["current_state"]["state_values"] == []
-    assert target_feature["desired_state"]["state_values"] == []
+    assert target_feature["current_state"]["state_values"][0]["name"] == (
+        "medium_gear_location"
+    )
+    assert target_feature["desired_state"]["state_values"][0]["name"] == (
+        "assembly_board_shaft_location"
+    )
+    assert len(target_feature["assembly_feature_association"]["assembly_features"]) == 2
     selection = _read_json(tmp_path / str(record["resource_selection_ref"]))
     reachability = _read_json(tmp_path / str(record["reachability_check_ref"]))
     validation = _read_json(tmp_path / str(record["robot_agent_validation_ref"]))
@@ -235,16 +290,16 @@ def test_completion_v7_pins_multiple_values_from_one_typed_record(
     ).to_record()
     proposal = _read_json(tmp_path / str(completion["ontology_projection_ref"]))
     state_values = proposal["output"]["target_feature"]["desired_state"]["state_values"]
-    assert [item["name"] for item in state_values] == [
+    assert [item["name"] for item in state_values[1:]] == [
         "specified_finish",
         "specified_coating",
     ]
-    assert len({item["value_ref"]["record_ref"] for item in state_values}) == 1
-    assert [item["value_ref"]["field_path"] for item in state_values] == [
+    assert len({item["value_ref"]["record_ref"] for item in state_values[1:]}) == 1
+    assert [item["value_ref"]["field_path"] for item in state_values[1:]] == [
         "/overview/summary",
         "/overview/observations/0",
     ]
-    state_ref = state_values[0]["value_ref"]["record_ref"]
+    state_ref = state_values[1]["value_ref"]["record_ref"]
     assert any(item["ref"] == state_ref for item in completion["typed_context_refs"])
 
     state_path = tmp_path / state_ref
@@ -267,13 +322,13 @@ def test_completion_v7_generically_pins_dynamic_query_and_layout_records(
         for item in completion["typed_context_refs"]
     }
 
-    assert completion["schema_version"] == 7
+    assert completion["schema_version"] == 8
     assert {
         "DocumentSourceIndexRecord",
         "DocumentQueryRecord",
         "CandidateSpatialRelationRecord",
     }.issubset(record_types)
-    assert isinstance(load_pa_context_grounding_completion(tmp_path), PAContextGroundingCompletionV7)
+    assert isinstance(load_pa_context_grounding_completion(tmp_path), PAContextGroundingCompletionV8)
 
 
 def test_completion_v7_pins_answered_clarification_source(tmp_path: Path) -> None:
@@ -392,8 +447,8 @@ def persist_native_completion_fixture(
     evidence_refs: tuple[str, ...] = ("requirement_0001",),
     include_target_state_values: bool = False,
     include_dynamic_grounding_records: bool = False,
-) -> PAContextGroundingCompletionV7:
-    """Create one complete v7 native record chain for completion and UI tests."""
+) -> PAContextGroundingCompletionV8:
+    """Create one complete v8 native record chain for completion and UI tests."""
     requirement = "assemble medium gear"
     _write_json(
         root / "products/user_requirement/product_requirement.json",
@@ -620,7 +675,7 @@ def persist_native_completion_fixture(
             "failure": None,
         },
     )
-    persist_pa_context_grounding_completion_v7(
+    persist_pa_context_grounding_completion_v8(
         root,
         tbox=tbox,
         product_requirement=requirement,
@@ -634,7 +689,7 @@ def persist_native_completion_fixture(
         workcell=workcell,
     )
     loaded = load_pa_context_grounding_completion(root)
-    assert isinstance(loaded, PAContextGroundingCompletionV7)
+    assert isinstance(loaded, PAContextGroundingCompletionV8)
     return loaded
 
 

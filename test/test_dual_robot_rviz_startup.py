@@ -201,6 +201,10 @@ def test_spec2primitives_starts_and_reuses_only_the_exact_robot_agent() -> None:
     assert creator.resource_calls[0][2] is True
     assert xmpp_calls == [True]
     assert configure_calls == [("gazebo", "simulation", "none")]
+    assert agent.model == "gpt-5.6"
+    assert agent.reasoning_effort == "medium"
+    assert agent.non_function_model == "gpt-5.6"
+    assert agent.non_function_reasoning_effort == "medium"
     assert bridge.resource_agents == []
     assert bridge.system_running is False
 

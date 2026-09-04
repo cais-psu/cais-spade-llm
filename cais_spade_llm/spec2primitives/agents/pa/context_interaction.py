@@ -16,7 +16,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v7,
+    persist_pa_context_grounding_completion_v8,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -161,7 +161,7 @@ async def start_pa_context_interaction(
             )
             persist_product_context_view(root, fresh_view)
             if pa_output.get("resource_assignment_status") == "complete":
-                persist_pa_context_grounding_completion_v7(
+                persist_pa_context_grounding_completion_v8(
                     root,
                     tbox=tbox,
                     product_requirement=product_requirement,

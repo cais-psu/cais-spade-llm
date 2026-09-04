@@ -22,7 +22,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v7,
+    persist_pa_context_grounding_completion_v8,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -438,10 +438,10 @@ def _persist_resource_assignment_completion(
     product_context: object,
     output: Mapping[str, object],
 ) -> None:
-    """Persist v7 only after both autonomous Phase 4 decisions complete."""
+    """Persist v8 only after both autonomous Phase 4 decisions complete."""
     if output.get("resource_assignment_status") != "complete":
         return
-    persist_pa_context_grounding_completion_v7(
+    persist_pa_context_grounding_completion_v8(
         root,
         tbox=tbox,
         product_requirement=product_requirement,

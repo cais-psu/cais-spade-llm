@@ -1378,6 +1378,7 @@ def persist_pa_resource_selection(  # noqa: PLR0913
     allocation_presentation: AllocationPresentationRecord,
     robot_agent_validation_path: Path,
     selection_number: int = 1,
+    state_location_handles: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResourceSelectionRecord:
     """Pin one PA choice to accepted reach evidence and one RA verdict."""
     _validate_positive_integer(selection_number, "selection_number")
@@ -1387,7 +1388,7 @@ def persist_pa_resource_selection(  # noqa: PLR0913
     context = _allocation_context(abox, workcell)
     reachability.assert_unchanged()
     allocation_presentation.assert_unchanged()
-    if reachability.schema_version == 4:
+    if reachability.schema_version == 4 or state_location_handles is not None:
         return _persist_location_resource_selection(
             root=root,
             tbox=tbox,
@@ -1398,6 +1399,7 @@ def persist_pa_resource_selection(  # noqa: PLR0913
             allocation_presentation=allocation_presentation,
             robot_agent_validation_path=robot_agent_validation_path,
             selection_number=selection_number,
+            state_location_handles=state_location_handles,
         )
     if (
         reachability.status != "accepted"
@@ -1580,18 +1582,24 @@ def _persist_location_resource_selection(  # noqa: PLR0913
     allocation_presentation: AllocationPresentationRecord,
     robot_agent_validation_path: Path,
     selection_number: int,
+    state_location_handles: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResourceSelectionRecord:
-    """Persist PA's unchanged resource and location-list selection as v5."""
+    """Persist PA's unchanged resource and location selection as v5."""
     state_locations = reachability.state_locations
-    if state_locations is None or set(state_locations) != {"current_state", "desired_state"}:
-        raise ResourceGroundingError("PA resource choice has invalid state locations.")
-    if (
-        reachability.status != "accepted"
-        or not state_locations["current_state"]
-        or not state_locations["desired_state"]
-        or any(
+    if reachability.schema_version == 4:
+        if state_locations is None or set(state_locations) != {"current_state", "desired_state"}:
+            raise ResourceGroundingError("PA resource choice has invalid state locations.")
+        handles = {
+            state_name: tuple(item.evidence_handle for item in locations)
+            for state_name, locations in state_locations.items()
+        }
+        if state_location_handles is not None and handles != state_location_handles:
+            raise ResourceGroundingError(
+                "PA resource choice changed the checked state locations."
+            )
+        state_iris_match = all(
             item.state_iri
-            != (
+            == (
                 context.current_state_iri
                 if state_name == "current_state"
                 else context.desired_state_iri
@@ -1599,6 +1607,43 @@ def _persist_location_resource_selection(  # noqa: PLR0913
             for state_name, locations in state_locations.items()
             for item in locations
         )
+        has_state_locations = bool(
+            state_locations["current_state"] and state_locations["desired_state"]
+        )
+    elif reachability.schema_version == 3:
+        if (
+            state_location_handles is None
+            or set(state_location_handles) != {"current_state", "desired_state"}
+            or len(state_location_handles["current_state"]) != 1
+            or len(state_location_handles["desired_state"]) != 1
+            or reachability.current_state is None
+            or reachability.desired_state is None
+        ):
+            raise ResourceGroundingError(
+                "Cartesian PA resource choice has invalid state locations."
+            )
+        handles = {
+            state_name: tuple(values)
+            for state_name, values in state_location_handles.items()
+        }
+        if handles != {
+            "current_state": (reachability.current_state.evidence_handle,),
+            "desired_state": (reachability.desired_state.evidence_handle,),
+        }:
+            raise ResourceGroundingError(
+                "Cartesian PA resource choice changed the checked state locations."
+            )
+        state_iris_match = (
+            reachability.current_state.state_iri == context.current_state_iri
+            and reachability.desired_state.state_iri == context.desired_state_iri
+        )
+        has_state_locations = True
+    else:
+        raise ResourceGroundingError("PA resource choice has invalid state locations.")
+    if (
+        reachability.status != "accepted"
+        or not has_state_locations
+        or not state_iris_match
         or reachability.specification_iri != context.specification_iri
         or reachability.feature_iri != context.feature_iri
         or reachability.process_symbol != context.process_symbol
@@ -1646,10 +1691,6 @@ def _persist_location_resource_selection(  # noqa: PLR0913
         raise ResourceGroundingError(
             "Allocation presentation candidate resources changed before selection."
         )
-    handles = {
-        state_name: tuple(item.evidence_handle for item in locations)
-        for state_name, locations in state_locations.items()
-    }
     evidence_presentation_path = _resolve_interaction_ref(
         root,
         allocation_presentation.evidence_presentation_ref,
@@ -1857,7 +1898,12 @@ def _allocation_context(
     defined_features = {
         feature
         for feature in abox.graph.objects(specification, ppr.defines)
-        if isinstance(feature, URIRef) and (feature, RDF.type, ppr.feature) in abox.graph
+        if isinstance(feature, URIRef)
+        and any(
+            isinstance(class_iri, URIRef)
+            and workcell._tbox.is_class_or_subclass(class_iri, ppr.feature)
+            for class_iri in abox.graph.objects(feature, RDF.type)
+        )
     }
     if len(defined_features) != 1:
         raise ResourceGroundingError("Allocation must identify exactly one grounded feature.")
@@ -2163,10 +2209,18 @@ def _load_cartesian_state_evidence(  # noqa: PLR0913
         correspondence_path,
         f"{state_name} CADSizeCorrespondenceRecord",
     )
+    correspondence_schema = correspondence.get("schema_version")
     if (
-        correspondence.get("schema_version") != 2
+        correspondence_schema not in {2, 3}
         or correspondence.get("record_type") != "CADSizeCorrespondenceRecord"
-        or correspondence.get("CAD_correspondence") not in {"accepted", "ambiguous"}
+        or (
+            correspondence_schema == 2
+            and correspondence.get("CAD_correspondence") not in {"accepted", "ambiguous"}
+        )
+        or (
+            correspondence_schema == 3
+            and correspondence.get("measurement") != "accepted"
+        )
     ):
         raise ResourceGroundingError(
             f"{state_name} requires an accepted or size-plausible CAD correspondence."
@@ -2185,7 +2239,11 @@ def _load_cartesian_state_evidence(  # noqa: PLR0913
         raise ResourceGroundingError(
             f"{state_name} correspondence and location use different observations."
         )
-    plausible = correspondence.get("plausible_candidates")
+    plausible = (
+        correspondence.get("candidate_measurements")
+        if correspondence_schema == 3
+        else correspondence.get("plausible_candidates")
+    )
     candidate_matches = (
         [
             item

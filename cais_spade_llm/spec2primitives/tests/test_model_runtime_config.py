@@ -16,9 +16,11 @@ from cais_spade_llm.spec2primitives.config import (
 def test_default_model_configuration_uses_compatible_gpt_5_6_efforts() -> None:
     config = load_model_runtime_config()
 
-    assert config.schema_version == 3
+    assert config.schema_version == 4
     assert config.product_agent_llm.model == "gpt-5.6"
     assert config.product_agent_llm.reasoning_effort == "none"
+    assert config.robot_agent_llm.model == "gpt-5.6"
+    assert config.robot_agent_llm.reasoning_effort == "medium"
     for vision_config in (config.document_vlm, config.observation_vlm):
         assert vision_config.provider == "openai"
         assert vision_config.model == "gpt-5.6"
@@ -52,6 +54,7 @@ def test_models_can_be_changed_only_through_the_validated_config_file(
 ) -> None:
     value = _default_value()
     value["product_agent_llm"]["model"] = "controlled-pa-model"
+    value["robot_agent_llm"]["model"] = "controlled-ra-model"
     value["document_vlm"]["model"] = "controlled-vision-model"
     value["observation_vlm"]["model"] = "controlled-observation-model"
     path = tmp_path / "model_runtime.json"
@@ -60,6 +63,7 @@ def test_models_can_be_changed_only_through_the_validated_config_file(
     config = load_model_runtime_config(path)
 
     assert config.product_agent_llm.model == "controlled-pa-model"
+    assert config.robot_agent_llm.model == "controlled-ra-model"
     assert config.document_vlm.model == "controlled-vision-model"
     assert config.observation_vlm.model == "controlled-observation-model"
 
@@ -71,6 +75,8 @@ def test_models_can_be_changed_only_through_the_validated_config_file(
         lambda value: value.__setitem__("schema_version", 2),
         lambda value: value["product_agent_llm"].__setitem__("unknown", True),
         lambda value: value["product_agent_llm"].__setitem__("reasoning_effort", "maximum"),
+        lambda value: value["robot_agent_llm"].__setitem__("unknown", True),
+        lambda value: value["robot_agent_llm"].__setitem__("reasoning_effort", "maximum"),
         lambda value: value["document_vlm"].__setitem__("provider", "other"),
         lambda value: value["document_vlm"].__setitem__("reasoning_effort", "maximum"),
         lambda value: value["document_vlm"].__setitem__("image_detail", "original"),

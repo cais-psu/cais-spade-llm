@@ -47,7 +47,9 @@ from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
     candidate_resource_catalog,
     check_resource_reachability,
     commit_resource_assignment,
+    persist_cartesian_reachability,
     persist_pa_resource_selection,
+    prepare_cartesian_reachability,
 )
 from cais_spade_llm.spec2primitives.agents.ra.feasibility_validation import (
     PlanOnlyFeasibilityValidation,
@@ -1028,7 +1030,7 @@ class _NativeEvidenceInvestigation:
 
 
 class _PAAllocationInvestigation:
-    """Execute PA-requested reachability checks over independent location handles."""
+    """Execute PA-requested reachability checks over authorized location handles."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -1041,6 +1043,9 @@ class _PAAllocationInvestigation:
         view: ProductContextView,
         allocation_presentation: AllocationPresentationRecord,
         target_frame: str,
+        fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
+        current_cad_correspondence_path: Path | None = None,
+        desired_cad_correspondence_path: Path | None = None,
     ) -> None:
         self.runtime = runtime
         self.investigation = investigation
@@ -1051,6 +1056,17 @@ class _PAAllocationInvestigation:
         self.allocation_presentation = allocation_presentation
         self.allocation_presentation.assert_unchanged()
         self.target_frame = target_frame
+        self.fixed_state_locations = fixed_state_locations
+        self.current_cad_correspondence_path = (
+            Path(current_cad_correspondence_path).resolve()
+            if current_cad_correspondence_path is not None
+            else None
+        )
+        self.desired_cad_correspondence_path = (
+            Path(desired_cad_correspondence_path).resolve()
+            if desired_cad_correspondence_path is not None
+            else None
+        )
         self.reachability_checks: dict[str, ReachabilityCheckRecord] = {}
         self.validations: dict[str, PlanOnlyFeasibilityValidation] = {}
         self._location_paths: dict[str, Path] = {}
@@ -1060,23 +1076,29 @@ class _PAAllocationInvestigation:
         tool_name: str,
         arguments: Mapping[str, object],
     ) -> Mapping[str, object]:
-        """Check every submitted state location for the PA-selected resource."""
+        """Check the applicable state locations for the PA-selected resource."""
         call_number = _next_number(
             self.root,
             "interaction_record/allocation_tool_call_*.json",
         )
         call_id = f"allocation_tool_call_{call_number:04d}"
         try:
-            if tool_name != "check_reachability" or set(arguments) != {
-                "resource_symbol",
-                "state_locations",
-            }:
+            expected_fields = (
+                {"resource_symbol"}
+                if self.fixed_state_locations is not None
+                else {"resource_symbol", "state_locations"}
+            )
+            if tool_name != "check_reachability" or set(arguments) != expected_fields:
                 raise ProductionGroundingError("PA allocation tool call fields are invalid.")
             resource_symbol = _allocation_text(
                 arguments["resource_symbol"],
                 "resource_symbol",
             )
-            submitted = arguments["state_locations"]
+            submitted = (
+                self.fixed_state_locations
+                if self.fixed_state_locations is not None
+                else arguments["state_locations"]
+            )
             if not isinstance(submitted, Mapping) or set(submitted) != {
                 "current_state",
                 "desired_state",
@@ -1106,7 +1128,8 @@ class _PAAllocationInvestigation:
                 self.runtime._registry,
                 self.runtime._workcell,
             )
-            if resource_symbol not in catalog:
+            resource = catalog.get(resource_symbol)
+            if resource is None:
                 raise ProductionGroundingError(
                     "PA allocation resource is not an authorized capable resource."
                 )
@@ -1119,49 +1142,112 @@ class _PAAllocationInvestigation:
                     location_inputs[state_name].append(
                         (entry.pa_handle, await self._location_for(entry))
                     )
-            reachability = check_resource_reachability(
-                interaction_root=self.root,
-                tbox=self.tbox,
-                registry=self.runtime._registry,
-                workcell=self.runtime._workcell,
-                resource_symbol=resource_symbol,
-                allocation_presentation=self.allocation_presentation,
-                state_location_record_paths=location_inputs,
-                check_number=_next_number(
-                    self.root,
-                    "products/grounding/reachability/check_*",
-                ),
-            )
             feasibility_runtime = self.runtime._robot_agent_feasibility_runtime
             if feasibility_runtime is None:
                 feasibility_runtime = _UnavailableRobotAgentFeasibilityRuntime()
-            validation = await validate_provisional_allocation(
-                feasibility_runtime,
-                interaction_root=self.root,
-                workcell=self.runtime._workcell,
-                reachability=reachability,
-                validation_number=_next_number(
-                    self.root,
-                    "resources/*/validation/plan_only_validation_*",
-                ),
-            )
-            reachability_handle = f"reachability_check_{reachability.check_number:04d}"
-            self.reachability_checks[reachability_handle] = reachability
-            self.validations[reachability_handle] = validation
-            status = (
-                "accepted"
-                if reachability.status == "accepted" and validation.status == "accepted"
-                else (
-                    "rejected"
-                    if "rejected" in {reachability.status, validation.status}
-                    else "needs_context"
+            if resource.get("execution_mode") == "simulation":
+                if (
+                    len(state_entries["current_state"]) != 1
+                    or len(state_entries["desired_state"]) != 1
+                    or self.current_cad_correspondence_path is None
+                    or self.desired_cad_correspondence_path is None
+                ):
+                    raise ProductionGroundingError(
+                        "Live Cartesian reachability requires one current location, one "
+                        "desired location, and both PA-requested CAD comparison records."
+                    )
+                current_entry = state_entries["current_state"][0]
+                desired_entry = state_entries["desired_state"][0]
+                prepared = prepare_cartesian_reachability(
+                    interaction_root=self.root,
+                    tbox=self.tbox,
+                    registry=self.runtime._registry,
+                    workcell=self.runtime._workcell,
+                    resource_symbol=resource_symbol,
+                    allocation_presentation=self.allocation_presentation,
+                    current_state_evidence_handle=current_entry.pa_handle,
+                    desired_state_evidence_handle=desired_entry.pa_handle,
+                    current_location_record_path=location_inputs["current_state"][0][1],
+                    desired_location_record_path=location_inputs["desired_state"][0][1],
+                    current_cad_correspondence_record_path=(
+                        self.current_cad_correspondence_path
+                    ),
+                    desired_cad_correspondence_record_path=(
+                        self.desired_cad_correspondence_path
+                    ),
                 )
-            )
-            result = {
-                "reachability_check_ref": reachability_handle,
-                "resource_symbol": reachability.resource_symbol,
-                "status": status,
-                "state_locations": {
+                validation = await validate_provisional_allocation(
+                    feasibility_runtime,
+                    interaction_root=self.root,
+                    workcell=self.runtime._workcell,
+                    reachability=prepared,
+                    validation_number=_next_number(
+                        self.root,
+                        "resources/*/validation/plan_only_validation_*",
+                    ),
+                )
+                reachability = persist_cartesian_reachability(
+                    interaction_root=self.root,
+                    prepared=prepared,
+                    robot_agent_validation_path=validation.record_path,
+                    check_number=_next_number(
+                        self.root,
+                        "products/grounding/reachability/check_*",
+                    ),
+                )
+                state_result = {
+                    "current_state": [
+                        {
+                            "evidence_handle": current_entry.pa_handle,
+                            "robot_agent_status": validation.status,
+                        }
+                    ],
+                    "desired_state": [
+                        {
+                            "evidence_handle": desired_entry.pa_handle,
+                            "robot_agent_status": validation.status,
+                        }
+                    ],
+                }
+                status = reachability.status
+            else:
+                reachability = check_resource_reachability(
+                    interaction_root=self.root,
+                    tbox=self.tbox,
+                    registry=self.runtime._registry,
+                    workcell=self.runtime._workcell,
+                    resource_symbol=resource_symbol,
+                    allocation_presentation=self.allocation_presentation,
+                    state_location_record_paths=location_inputs,
+                    check_number=_next_number(
+                        self.root,
+                        "products/grounding/reachability/check_*",
+                    ),
+                )
+                validation = await validate_provisional_allocation(
+                    feasibility_runtime,
+                    interaction_root=self.root,
+                    workcell=self.runtime._workcell,
+                    reachability=reachability,
+                    validation_number=_next_number(
+                        self.root,
+                        "resources/*/validation/plan_only_validation_*",
+                    ),
+                )
+                status = (
+                    "accepted"
+                    if reachability.status == "accepted" and validation.status == "accepted"
+                    else (
+                        "rejected"
+                        if "rejected" in {reachability.status, validation.status}
+                        else "needs_context"
+                    )
+                )
+                if reachability.state_locations is None or validation.state_locations is None:
+                    raise ProductionGroundingError(
+                        "Physical state-location validation did not return every location."
+                    )
+                state_result = {
                     state_name: [
                         {
                             "evidence_handle": item.evidence_handle,
@@ -1175,7 +1261,15 @@ class _PAAllocationInvestigation:
                         )
                     ]
                     for state_name in ("current_state", "desired_state")
-                },
+                }
+            reachability_handle = f"reachability_check_{reachability.check_number:04d}"
+            self.reachability_checks[reachability_handle] = reachability
+            self.validations[reachability_handle] = validation
+            result = {
+                "reachability_check_ref": reachability_handle,
+                "resource_symbol": reachability.resource_symbol,
+                "status": status,
+                "state_locations": state_result,
                 "motion_executed": False,
                 "selection_made_by_tool": False,
             }
@@ -1685,6 +1779,27 @@ class ProductionProductContextGroundingRuntime:
             explicit_resource_order=self._allocation_resource_order,
             explicit_candidate_order=self._allocation_candidate_order,
         )
+        try:
+            fixed_state_locations = _proposal_state_location_handles(
+                proposal,
+                allocation_presentation,
+            )
+        except ProductionGroundingError:
+            return _incomplete_result(
+                "evidence_reference_invalid",
+                stage="resource_assignment",
+                tool_call_refs=investigation.tool_call_refs,
+            )
+        current_cad_correspondence_path = _proposal_state_comparison_path(
+            investigation,
+            proposal,
+            state_name="current_state",
+        )
+        desired_cad_correspondence_path = _proposal_state_comparison_path(
+            investigation,
+            proposal,
+            state_name="desired_state",
+        )
         allocation = _PAAllocationInvestigation(
             runtime=self,
             investigation=investigation,
@@ -1694,6 +1809,9 @@ class ProductionProductContextGroundingRuntime:
             view=view,
             allocation_presentation=allocation_presentation,
             target_frame=_configured_target_frame(self._workcell),
+            fixed_state_locations=fixed_state_locations,
+            current_cad_correspondence_path=current_cad_correspondence_path,
+            desired_cad_correspondence_path=desired_cad_correspondence_path,
         )
         try:
             response = await product_agent.ask_llm_structured(
@@ -1706,21 +1824,27 @@ class ProductionProductContextGroundingRuntime:
                     resource_catalog=resource_catalog,
                     allocation_presentation=allocation_presentation,
                     investigation=investigation,
+                    fixed_state_locations=fixed_state_locations,
                 ),
                 response_format=_pa_allocation_response_format(
                     allocation_presentation.resource_order,
                     allocation_presentation.neutral_candidate_order,
+                    fixed_state_locations=fixed_state_locations,
                 ),
                 tools=[
                     _check_reachability_tool(
                         allocation_presentation.resource_order,
                         allocation_presentation.neutral_candidate_order,
+                        fixed_state_locations=fixed_state_locations,
                     )
                 ],
                 tool_executor=allocation.execute,
                 max_tool_rounds=_MAX_TOOL_ROUNDS,
             )
-            choice = _validated_pa_allocation_response(response)
+            choice = _validated_pa_allocation_response(
+                response,
+                fixed_state_locations=fixed_state_locations,
+            )
         except (OSError, RuntimeError, TypeError, ValueError):
             return _incomplete_result(
                 "invalid_resource_selection",
@@ -1740,25 +1864,49 @@ class ProductionProductContextGroundingRuntime:
         if (
             reachability is None
             or validation is None
-            or reachability.schema_version != 4
+            or reachability.schema_version not in {3, 4}
             or reachability.resource_symbol != choice["resource_symbol"]
             or reachability.status != "accepted"
             or validation.status != "accepted"
-            or reachability.state_locations is None
         ):
             return _incomplete_result(
                 "invalid_resource_selection",
                 stage="resource_assignment",
                 tool_call_refs=investigation.tool_call_refs,
             )
-        submitted_locations = choice["state_locations"]
-        checked_locations = {
-            state_name: [
-                item.evidence_handle
-                for item in reachability.state_locations[state_name]
-            ]
-            for state_name in ("current_state", "desired_state")
-        }
+        submitted_locations = (
+            {
+                state_name: list(handles)
+                for state_name, handles in fixed_state_locations.items()
+            }
+            if fixed_state_locations is not None
+            else choice["state_locations"]
+        )
+        if reachability.schema_version == 3:
+            if reachability.current_state is None or reachability.desired_state is None:
+                return _incomplete_result(
+                    "invalid_resource_selection",
+                    stage="resource_assignment",
+                    tool_call_refs=investigation.tool_call_refs,
+                )
+            checked_locations = {
+                "current_state": [reachability.current_state.evidence_handle],
+                "desired_state": [reachability.desired_state.evidence_handle],
+            }
+        else:
+            if reachability.state_locations is None:
+                return _incomplete_result(
+                    "invalid_resource_selection",
+                    stage="resource_assignment",
+                    tool_call_refs=investigation.tool_call_refs,
+                )
+            checked_locations = {
+                state_name: [
+                    item.evidence_handle
+                    for item in reachability.state_locations[state_name]
+                ]
+                for state_name in ("current_state", "desired_state")
+            }
         if submitted_locations != checked_locations:
             return _incomplete_result(
                 "invalid_resource_selection",
@@ -1774,6 +1922,10 @@ class ProductionProductContextGroundingRuntime:
                 reachability=reachability,
                 allocation_presentation=allocation_presentation,
                 robot_agent_validation_path=validation.record_path,
+                state_location_handles={
+                    state_name: tuple(handles)
+                    for state_name, handles in checked_locations.items()
+                },
                 selection_number=_next_number(
                     root,
                     "products/grounding/resource_selection/selection_*",
@@ -1810,7 +1962,11 @@ class ProductionProductContextGroundingRuntime:
             "resource_assignment_status": "complete",
             "resource_selection_ref": selection.record_ref,
             "resource_assignment_delta_count": assignment.abox.delta_count,
-            "allocation_label": "validated state-location resource allocation",
+            "allocation_label": (
+                "validated Cartesian pick-place allocation"
+                if reachability.schema_version == 3
+                else "validated state-location resource allocation"
+            ),
         }
 
     def _validate_authorities(self, tbox: TBoxSnapshot) -> None:
@@ -1852,6 +2008,65 @@ def _allocation_evidence_sources(
         else:
             sources.append(_robot_location_evidence_source(binding, record))
     return tuple(sources)
+
+
+def _proposal_state_location_handles(
+    proposal: OntologyGroundingProposal,
+    allocation_presentation: AllocationPresentationRecord,
+) -> Mapping[str, tuple[str, ...]] | None:
+    """Resolve PA-authored assembly state bindings to their exact opaque handles."""
+    if proposal.assembly_feature_association is None:
+        return None
+    state_refs = proposal.assembly_state_value_refs
+    if set(state_refs) != {"current_state", "desired_state"}:
+        raise ProductionGroundingError(
+            "Assembly proposal does not bind both state locations."
+        )
+    resolved: dict[str, tuple[str, ...]] = {}
+    for state_name in ("current_state", "desired_state"):
+        state_ref = state_refs[state_name]
+        if set(state_ref) != {"record_ref", "record_sha256", "field_path"}:
+            raise ProductionGroundingError(
+                f"Assembly proposal {state_name} location binding is invalid."
+            )
+        matches = [
+            entry
+            for entry in allocation_presentation.evidence_entries
+            if entry.record_ref == state_ref["record_ref"]
+            and entry.record_sha256 == state_ref["record_sha256"]
+            and entry.field_path == state_ref["field_path"]
+        ]
+        if len(matches) != 1:
+            raise ProductionGroundingError(
+                f"Assembly proposal {state_name} location is not one presented candidate."
+            )
+        resolved[state_name] = (matches[0].pa_handle,)
+    return resolved
+
+
+def _proposal_state_comparison_path(
+    investigation: _NativeEvidenceInvestigation,
+    proposal: OntologyGroundingProposal,
+    *,
+    state_name: str,
+) -> Path | None:
+    """Resolve the one PA-requested CAD comparison cited by one state value."""
+    state = proposal.target_feature.get(state_name)
+    state_values = state.get("state_values") if isinstance(state, Mapping) else None
+    if not isinstance(state_values, list) or len(state_values) != 1:
+        return None
+    state_value = state_values[0]
+    evidence_refs = (
+        state_value.get("evidence_refs") if isinstance(state_value, Mapping) else None
+    )
+    if not isinstance(evidence_refs, list):
+        return None
+    matches = [
+        investigation.root / record_ref
+        for record_ref in investigation.comparison_bindings
+        if record_ref in evidence_refs
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _register_allocation_references(
@@ -2093,6 +2308,7 @@ def _pa_allocation_prompt(
     resource_catalog: Mapping[str, Mapping[str, str]],
     allocation_presentation: AllocationPresentationRecord,
     investigation: _NativeEvidenceInvestigation,
+    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> str:
     """Describe a neutral location-and-resource decision without ranking choices."""
     prompt_input: dict[str, object] = {
@@ -2109,17 +2325,36 @@ def _pa_allocation_prompt(
         ],
         "presentation_order_has_no_priority": True,
     }
+    if fixed_state_locations is not None:
+        prompt_input["proposal_bound_state_locations"] = {
+            state_name: list(handles)
+            for state_name, handles in fixed_state_locations.items()
+        }
+        instruction = (
+            "The accepted assembly_feature_association already binds the location "
+            "evidence for each state. Those proposal-bound state locations are fixed; "
+            "do not select, replace, or repeat them. Select only a capable resource, "
+            "call check_reachability for any resources you choose, and return one resource "
+            "with an accepted result created in this conversation or return "
+            "no_reachable_resource. "
+        )
+    else:
+        instruction = (
+            "Independently select one or more location evidence handles for each state "
+            "and a resource. You may call check_reachability for any combinations you "
+            "choose. Return one resource only with an accepted reachability result created "
+            "in this conversation and repeat the exact checked state_locations, or return "
+            "no_reachable_resource. "
+        )
     return (
         "Act as the ProductAgent authority for the second Phase 4 decision. "
         "Using the exact requirement, grounded target feature, approved evidence, "
-        "and capable resources, independently select one or more location evidence "
-        "handles for each state and a resource. You may call check_reachability for "
-        "any combinations you choose. The tool reports each submitted location "
-        "independently and never selects a semantic state, location, or resource. "
+        "and capable resources, "
+        + instruction
+        + "The tool validates the submitted locations for only the selected resource "
+        "and never selects a semantic state, location, or resource. "
         "Reachability does not certify grasping, insertion, process execution, force, "
-        "or tolerance. Presentation order has no priority. Return one resource only "
-        "with an accepted reachability result created in this conversation and repeat "
-        "the exact checked state_locations, or return no_reachable_resource. Do not "
+        "or tolerance. Presentation order has no priority. Do not "
         "claim that motion or manufacturing executed.\n\n"
         f"Allocation input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
@@ -2153,8 +2388,10 @@ def _allocation_evidence_prompt_projection(
 def _check_reachability_tool(
     resource_symbols: tuple[str, ...],
     location_handles: tuple[str, ...],
+    *,
+    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
-    """Describe the neutral multi-location reachability operation."""
+    """Describe the neutral reachability operation for one selected resource."""
     state_locations = {
         "type": "object",
         "additionalProperties": False,
@@ -2168,26 +2405,30 @@ def _check_reachability_tool(
             for state_name in ("current_state", "desired_state")
         },
     }
+    properties: dict[str, Any] = {
+        "resource_symbol": {
+            "type": "string",
+            "enum": list(resource_symbols),
+        }
+    }
+    required = ["resource_symbol"]
+    if fixed_state_locations is None:
+        properties["state_locations"] = state_locations
+        required.append("state_locations")
     return {
         "type": "function",
         "function": {
             "name": "check_reachability",
             "description": (
-                "Report reachability independently for each submitted location "
-                "handle on one explicitly selected capable resource."
+                "Validate the submitted state locations for one explicitly selected "
+                "capable resource without executing motion."
             ),
             "strict": True,
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["resource_symbol", "state_locations"],
-                "properties": {
-                    "resource_symbol": {
-                        "type": "string",
-                        "enum": list(resource_symbols),
-                    },
-                    "state_locations": state_locations,
-                },
+                "required": required,
+                "properties": properties,
             },
         },
     }
@@ -2196,6 +2437,8 @@ def _check_reachability_tool(
 def _pa_allocation_response_format(
     resource_symbols: tuple[str, ...],
     location_handles: tuple[str, ...],
+    *,
+    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     """Require one cited PA choice or a code-only no-resource result."""
     state_locations = {
@@ -2211,6 +2454,20 @@ def _pa_allocation_response_format(
             for state_name in ("current_state", "desired_state")
         },
     }
+    accepted_required = ["resource_symbol", "reachability_check_ref"]
+    accepted_properties: dict[str, Any] = {
+        "resource_symbol": {
+            "type": "string",
+            "enum": list(resource_symbols),
+        },
+        "reachability_check_ref": {
+            "type": "string",
+            "minLength": 1,
+        },
+    }
+    if fixed_state_locations is None:
+        accepted_required.append("state_locations")
+        accepted_properties["state_locations"] = state_locations
     return {
         "name": "spec2primitives_pa_resource_allocation",
         "strict": True,
@@ -2224,22 +2481,8 @@ def _pa_allocation_response_format(
                         {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": [
-                                "resource_symbol",
-                                "state_locations",
-                                "reachability_check_ref",
-                            ],
-                            "properties": {
-                                "resource_symbol": {
-                                    "type": "string",
-                                    "enum": list(resource_symbols),
-                                },
-                                "state_locations": state_locations,
-                                "reachability_check_ref": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                },
-                            },
+                            "required": accepted_required,
+                            "properties": accepted_properties,
                         },
                         {
                             "type": "object",
@@ -2260,6 +2503,8 @@ def _pa_allocation_response_format(
 
 def _validated_pa_allocation_response(
     value: object,
+    *,
+    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> Mapping[str, object] | None:
     """Validate shape only; selection acceptance is checked against tool records."""
     if (
@@ -2271,12 +2516,22 @@ def _validated_pa_allocation_response(
     result = value["result"]
     if set(result) == {"no_reachable_resource"} and result["no_reachable_resource"] is True:
         return None
-    if set(result) != {
-        "resource_symbol",
-        "state_locations",
-        "reachability_check_ref",
-    }:
+    expected_fields = {"resource_symbol", "reachability_check_ref"}
+    if fixed_state_locations is None:
+        expected_fields.add("state_locations")
+    if set(result) != expected_fields:
         raise ProductionGroundingError("PA allocation result fields are invalid.")
+    if fixed_state_locations is not None:
+        return {
+            "resource_symbol": _allocation_text(
+                result["resource_symbol"],
+                "resource_symbol",
+            ),
+            "reachability_check_ref": _allocation_text(
+                result["reachability_check_ref"],
+                "reachability_check_ref",
+            ),
+        }
     submitted = result["state_locations"]
     if not isinstance(submitted, Mapping) or set(submitted) != {
         "current_state",

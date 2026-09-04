@@ -1050,7 +1050,7 @@ def _final_grounding_result(
     completion_schema = completion.get("schema_version")
     contract = (
         {}
-        if completion_schema == 7
+        if completion_schema in {7, 8}
         else _read_json_object(
             _interaction_ref_path(
                 interaction_root,
@@ -1084,14 +1084,14 @@ def _final_grounding_result(
     }
     grounding_record_type = (
         "RobotFrameLocationRecord"
-        if completion_schema in {3, 4, 5, 6, 7}
+        if completion_schema in {3, 4, 5, 6, 7, 8}
         else "RobotFramePoseRecord"
     )
     reachability: Mapping[str, object] | None = None
     validation: Mapping[str, object] | None = None
     current_state_evidence: Mapping[str, object] | None = None
     desired_state_evidence: Mapping[str, object] | None = None
-    if completion_schema in {5, 6, 7}:
+    if completion_schema in {5, 6, 7, 8}:
         reachability = _read_json_object(
             _interaction_ref_path(
                 interaction_root,
@@ -1104,7 +1104,7 @@ def _final_grounding_result(
                 completion.get("robot_agent_validation_ref"),
             )
         )
-        if completion_schema == 7:
+        if completion_schema in {7, 8}:
             state_locations = reachability.get("state_locations")
             current_locations = (
                 state_locations.get("current_state")
@@ -1164,7 +1164,7 @@ def _final_grounding_result(
 
     target_feature: Mapping[str, object] | None = None
     context_summary = contract.get("context_summary")
-    if completion_schema in {4, 5, 6, 7}:
+    if completion_schema in {4, 5, 6, 7, 8}:
         proposal = _read_json_object(
             _interaction_ref_path(
                 interaction_root,
@@ -1174,7 +1174,7 @@ def _final_grounding_result(
         output = proposal.get("output")
         candidate = output.get("target_feature") if isinstance(output, Mapping) else None
         if (
-            proposal.get("schema_version") not in {6, 7, 8, 9}
+            proposal.get("schema_version") not in {6, 7, 8, 9, 10}
             or proposal.get("status") != "accepted"
             or not isinstance(candidate, Mapping)
         ):
@@ -1193,10 +1193,10 @@ def _final_grounding_result(
                 completion.get("grounding_session_ref"),
             )
         )
-    if completion_schema in {5, 6, 7}:
+    if completion_schema in {5, 6, 7, 8}:
         assert isinstance(target_feature, Mapping)
         assert isinstance(reachability, Mapping)
-        if completion_schema == 7:
+        if completion_schema in {7, 8}:
             reach_groups = reachability["state_locations"]
             assert isinstance(reach_groups, Mapping)
             current_locations = reach_groups["current_state"]

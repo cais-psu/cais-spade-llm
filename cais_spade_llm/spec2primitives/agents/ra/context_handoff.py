@@ -19,6 +19,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     PAContextGroundingCompletionV5,
     PAContextGroundingCompletionV6,
     PAContextGroundingCompletionV7,
+    PAContextGroundingCompletionV8,
     load_pa_context_grounding_completion,
 )
 
@@ -766,12 +767,18 @@ def _build_assignment_envelope(
             PAContextGroundingCompletionV5,
             PAContextGroundingCompletionV6,
             PAContextGroundingCompletionV7,
+            PAContextGroundingCompletionV8,
         ),
     ):
         raise RAContextHandoffError(
-            "Phase 5.1 requires PAContextGroundingCompletion version 4 through 7."
+            "Phase 5.1 requires PAContextGroundingCompletion version 4 through 8."
         )
     completion_record = completion.to_record()
+    if isinstance(completion, PAContextGroundingCompletionV7):
+        raise RAContextHandoffError(
+            "PAContextGroundingCompletion version 7 is audit-only; rerun Phase 4 "
+            "before Phase 5.1."
+        )
     completion_paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
     if len(completion_paths) != 1:
         raise RAContextHandoffError("Phase 5.1 requires exactly one completion record.")
@@ -782,7 +789,10 @@ def _build_assignment_envelope(
     payload: dict[str, object] = {
         "schema_version": (
             3
-            if isinstance(completion, (PAContextGroundingCompletionV6, PAContextGroundingCompletionV7))
+            if isinstance(
+                completion,
+                (PAContextGroundingCompletionV6, PAContextGroundingCompletionV8),
+            )
             else (2 if isinstance(completion, PAContextGroundingCompletionV5) else 1)
         ),
         "record_type": "SelectedRAAssignmentEnvelope",
@@ -813,7 +823,7 @@ def _build_assignment_envelope(
         (
             PAContextGroundingCompletionV5,
             PAContextGroundingCompletionV6,
-            PAContextGroundingCompletionV7,
+            PAContextGroundingCompletionV8,
         ),
     ):
         payload.update(
@@ -832,11 +842,11 @@ def _build_assignment_envelope(
                 "motion_executed": False,
             }
         )
-    if isinstance(completion, (PAContextGroundingCompletionV6, PAContextGroundingCompletionV7)):
+    if isinstance(completion, (PAContextGroundingCompletionV6, PAContextGroundingCompletionV8)):
         state_locations = selection.get("state_locations")
         current_evidence = selection.get("current_state_evidence")
         desired_evidence = selection.get("desired_state_evidence")
-        if isinstance(completion, PAContextGroundingCompletionV7):
+        if isinstance(completion, PAContextGroundingCompletionV8):
             current_evidence = {
                 "location_handles": (
                     state_locations.get("current_state")
@@ -884,7 +894,7 @@ def _load_validated_selection(  # noqa: C901
     root: Path,
     completion: Mapping[str, object],
 ) -> dict[str, object]:
-    if completion.get("schema_version") == 7:
+    if completion.get("schema_version") in {7, 8}:
         return _load_validated_selection_v5(root, completion)
     if completion.get("schema_version") == 6:
         return _load_validated_selection_v4(root, completion)

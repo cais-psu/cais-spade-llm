@@ -815,15 +815,16 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
         )
     )
 
-    assert result["status"] == "accepted"
+    assert result["status"] == "rejected"
     assert result["overview"]["status"] == "accepted"
-    assert result["ontology_proposal"]["status"] == "accepted"
+    assert result["ontology_proposal"] is None
     proposal_record = _read_json(
         tmp_path / "diagnostic/products/grounding/ontology_grounding/proposal_0001.json"
     )
-    assert proposal_record["schema_version"] == 9
-    assert len(result["accepted_assertions"]) == 7
-    assert result["failure"] is None
+    assert proposal_record["schema_version"] == 10
+    assert proposal_record["status"] == "rejected"
+    assert result["accepted_assertions"] == []
+    assert result["failure"]["reason"] == "document_interpretation_rejected"
 
 
 def _served_document(context_ref: str) -> dict[str, object]:

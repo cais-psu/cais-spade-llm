@@ -35,6 +35,10 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
         PPR.processExecution,
         PPR.resource,
         PPR.capability,
+        PPR.Assembly,
+        PPR.Part,
+        PPR.AssemblyFeature,
+        PPR.AssemblyFeatureAssociation,
     }
     expected_properties = {
         PPR.defines,
@@ -45,6 +49,10 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
         PPR.hasProcessExecution,
         PPR.runsProcess,
         PPR.runsOnResource,
+        PPR.hasPart,
+        PPR.hasAssemblyFeature,
+        PPR.hasAssemblyFeatureAssociation,
+        PPR.relatesAssemblyFeature,
     }
 
     assert set(tbox.classes) == {str(value) for value in expected_classes}
@@ -69,8 +77,37 @@ def test_project_tbox_is_the_exact_schema_only_spec2primitives_vocabulary() -> N
     assert (PPR.runsProcess, RDF.type, OWL.FunctionalProperty) in tbox.graph
     assert (PPR.runsOnResource, RDF.type, OWL.FunctionalProperty) in tbox.graph
     assert (PPR.hasProcessExecution, RDF.type, OWL.FunctionalProperty) not in tbox.graph
+    assert set(tbox.graph.objects(PPR.Assembly, RDFS.subClassOf)) >= {PPR.product}
+    assert set(tbox.graph.objects(PPR.Part, RDFS.subClassOf)) == {PPR.product}
+    assert set(tbox.graph.objects(PPR.AssemblyFeature, RDFS.subClassOf)) == {PPR.feature}
+    assert PPR.feature in set(
+        tbox.graph.objects(PPR.AssemblyFeatureAssociation, RDFS.subClassOf)
+    )
+    assembly_properties = {
+        PPR.hasPart: (PPR.Assembly, PPR.product),
+        PPR.hasAssemblyFeature: (PPR.product, PPR.AssemblyFeature),
+        PPR.hasAssemblyFeatureAssociation: (
+            PPR.Assembly,
+            PPR.AssemblyFeatureAssociation,
+        ),
+        PPR.relatesAssemblyFeature: (
+            PPR.AssemblyFeatureAssociation,
+            PPR.AssemblyFeature,
+        ),
+    }
+    for property_iri, (domain, range_) in assembly_properties.items():
+        assert set(tbox.graph.objects(property_iri, RDFS.domain)) == {domain}
+        assert set(tbox.graph.objects(property_iri, RDFS.range)) == {range_}
+        assert (property_iri, RDF.type, OWL.FunctionalProperty) not in tbox.graph
     assert not any(tbox.graph.subjects(RDF.type, OWL.NamedIndividual))
-    assert not any(tbox.graph.subjects(RDF.type, OWL.Restriction))
+    restrictions = list(tbox.graph.subjects(RDF.type, OWL.Restriction))
+    assert len(restrictions) == 1
+    restriction = restrictions[0]
+    assert (restriction, OWL.onProperty, PPR.relatesAssemblyFeature) in tbox.graph
+    assert (restriction, OWL.onClass, PPR.AssemblyFeature) in tbox.graph
+    cardinalities = list(tbox.graph.objects(restriction, OWL.qualifiedCardinality))
+    assert len(cardinalities) == 1
+    assert cardinalities[0].toPython() == 2
     for recipe_property in (PPR.requires, PPR.precedes, PPR.consistsOf):
         assert not any(tbox.graph.triples((None, recipe_property, None)))
 

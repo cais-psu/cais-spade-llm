@@ -18,17 +18,24 @@ execution action. Missing TF, service, CAD, or support evidence returns
 
 ## Implemented Phase 5.1
 
-`activate_selected_ra_context(...)` requires and verifies the Phase 4 v6
-completion, PA-authored two-state allocation, reachability, exact RobotAgent
+`activate_selected_ra_context(...)` requires and verifies the current Phase 4
+v8 completion, PA-authored two-state allocation, reachability, exact RobotAgent
 plan-only validation, resource selection, and assignment delta before
 persisting one `SelectedRAAssignmentEnvelope` v3. The envelope pins the exact
 process/resource, both state-evidence assignments, evidence and allocation
 presentations, registry/workcell snapshots, reachability, endpoint-motion
 or Cartesian validation, and no-motion claim. It tells the exact selected RA which
 requirement, specification, host-generated feature and state individuals, and
-process it owns. An injected
+process it owns. For `assembly`, it also verifies that the accepted
+`assembly_feature_association` state-value bindings resolve to the exact
+current and desired allocation handles. An injected
 `RobotAgentCompositionRuntime` must confirm that assignment before returning
 fresh JSON state and its complete primitive-only composition catalog.
+
+Completion v7 remains readable for Phase 4 audit but is rejected here with an
+instruction to rerun Phase 4. It predates the assembly association and
+proposal-bound state-location contract and cannot silently enter the current
+Phase 5 path.
 
 The UI supplies an in-process Spec2Primitives adapter for this contract. The
 adapter requires exactly the JID and execution mode selected by Phase 4. It
@@ -82,7 +89,7 @@ projection of every referenced state value. It also includes the selected resour
 completion-consistent post-assignment ontology assertions and TBox/ABox
 fingerprints, current state, complete catalog, and typed-record identities.
 
-Before the RA call, the host reloads the hash-pinned v8 proposal, v6 completion,
+Before the RA call, the host reloads the hash-pinned v10 proposal, v8 completion,
 both state IRIs, accepted typed bindings, reachability, plan-only validation,
 and referenced JSON records. It resolves each JSON
 Pointer and rejects a changed hash, missing record, invalid path, empty value,
@@ -114,7 +121,7 @@ exposes the complete JSON payload.
 It is input provenance, not private model reasoning, feasibility validation, or
 execution evidence, and the reconstructed payload is not persisted.
 
-`PrimitiveProgramDraft` itself is unchanged. It pins the v6 completion and
+`PrimitiveProgramDraft` itself is unchanged. It pins the v8 completion and
 other inputs but does not copy `target_feature`, its statement, or its resolved
 values; diagnostics reconstruct them from the same persisted authority.
 
@@ -127,7 +134,7 @@ product or scene inputs are deduplicated into a `MissingContextBatch` for PA.
 After receiving a versioned `CompositionContextBundle`, RA alone authors the
 fully bound `primitive_steps` candidate.
 
-Multi-feature input, orientation/tolerance grounding, parameter binding,
+Multiple associations in one Phase 4 proposal, orientation/tolerance grounding, parameter binding,
 `MissingContextBatch`, primitive-level execution validation, execution, and
 post-process state update remain future increments. Assembly is the current example; the target-feature handoff
 does not hard-code an assembly-only target shape and may later carry welding,

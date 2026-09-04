@@ -60,13 +60,18 @@ include zero, one, or multiple evidence-backed `state_values` from any accepted
 typed record. Those values are semantic evidence links, not mandatory allocation
 geometry.
 
-The second PA call receives all capable resources and all neutral location
-handles available from the retrieved evidence. PA submits one or more handles
-for each state and one capable resource to `check_reachability`. If a selected
-handle is a segmentation candidate, the tool materializes its approved
-robot-frame location on demand. It reports every submitted location
-independently and executes no motion. It does not certify grasping, insertion,
-or manufacturing execution.
+For `assembly`, the first PA proposal selects the exact coordinate-bearing
+state value for each `AssemblyFeature` endpoint. The second PA call therefore
+receives all capable resources while its current and desired location handles
+are fixed from that accepted proposal; PA chooses a resource and submits it to
+`check_reachability`. For other configured processes, the existing allocation
+response may choose neutral location handles. If a selected handle is a
+segmentation candidate, the tool materializes its approved robot-frame location
+on demand. Simulation validation uses the exact selected RobotAgent, live TF,
+and collision-aware Cartesian MoveIt planning; manifest `workspace_bounds` and
+`gripper_reach` do not veto or replace that result. Missing CAD, support-plane,
+TF, or MoveIt evidence returns `needs_context`. It executes no motion and does
+not certify grasping, insertion, or manufacturing execution.
 
 Before retrieval, `EvidencePresentationRecord` maps canonical sources to
 randomized opaque handles. Approved CAD names and exact `context_ref` values are
@@ -82,7 +87,7 @@ reachability only. It never ranks semantic candidates or resources.
 
 ## Ontology grounding
 
-`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v9
+`ontology_grounding.py` validates a transient `OntologyGroundingProposal` v10
 candidate containing exactly one model-authored `target_feature`. This
 increment supports one requirement and one feature. The target contains:
 
@@ -93,33 +98,51 @@ increment supports one requirement and one feature. The target contains:
 - zero, one, or multiple `state_values` for each state, each with a unique PA-authored semantic
   name, one accepted typed-record ref, one JSON Pointer, and direct evidence.
 
-State values may reference any accepted typed record and are independent of the
-location-handle lists used by resource allocation.
+When `required_process` resolves to the configured `assembly` symbol, the same
+PA response must also contain exactly one `assembly_feature_association`. PA
+authors its `Assembly`, exactly two distinct `AssemblyFeature` endpoints, each
+endpoint's distinct owning `Part` or `Assembly`, and the endpoint binding to an
+existing state-value name. One endpoint binds to `current_state`; the other
+binds to `desired_state`. Both bound values must reference either one complete
+`RGBDSegmentationRecord` candidate or a `RobotFrameLocationRecord` translated
+location. This additional shape is not required for another configured process.
+
+State values may reference any accepted typed record. For `assembly`, each
+association endpoint names one coordinate-bearing state value that determines
+its allocation handle. Other configured processes retain the separate
+location-handle selection path.
 
 PA chooses the process, statement text, state-value count and names, record
-refs, field paths, and citations from retrieved evidence. Deterministic code
-does not fill those semantic values. It validates process authority, citations,
-accepted bindings, exact record hashes, JSON Pointer resolution, nonempty
-resolved values, and unique names.
+refs, field paths, citations, assembly endpoint meanings, owners, and state
+bindings from retrieved evidence. Deterministic code does not fill those
+semantic values or select the endpoint images. It validates process authority,
+citations, accepted bindings, exact record hashes, JSON Pointer resolution,
+nonempty resolved values, unique names, distinct endpoints and owners, one
+endpoint per state, and exact agreement with allocation.
 
 The host generates `feature_0001`, `currentstate_0001`, and
-`desiredstate_0001` and compiles exactly seven assertions: all three types,
+`desiredstate_0001` and compiles the existing seven assertions: all three types,
 `specification ppr:defines feature_0001`, the selected process
 `ppr:realizes feature_0001`, and the feature's `ppr:hascurrentstate` and
 `ppr:hasdesiredstate` links. Rich PA-authored state meaning remains in the
-accepted proposal while RDF records the explicit feature-state structure.
+accepted proposal while RDF records the explicit feature-state structure. For
+`assembly`, the host compiles 12 additional assertions for the `Assembly`, two
+owners, two `AssemblyFeature` endpoints, and their association, for 19 proposal
+assertions total.
 
 If PA's final proposal violates these invariants, the runtime preserves a
 rejected audit record and emits a deterministic stage code. It neither repairs
 the response nor returns the failure to PA. The host does not synthesize a
 missing `defines`, `realizes`, state statement, or state value.
 
-The accepted v9 proposal creates explicit `currentstate_0001` and
+The accepted v10 proposal creates explicit `currentstate_0001` and
 `desiredstate_0001` individuals attached to `feature_0001`. The unresolved
-`processExecution` then activates the separate PA allocation call. Only the
-unchanged PA resource and location lists cited from an accepted v4 reachability
-record can add four assignment assertions. A rejection ends the stage without
-host substitution or another PA correction round.
+`processExecution` then activates the separate PA allocation call. For
+`assembly`, only the unchanged proposal-bound locations plus PA's selected
+resource cited from the applicable accepted reachability record can add four
+assignment assertions. Simulation uses Cartesian record v3; physical mode
+retains state-location record v4. A rejection ends the stage without host
+substitution or another PA correction round.
 
 `RobotFrameLocationRecord` version 2 is semantically neutral. Its current or
 desired role comes only from PA's allocation request. The architecture does not
@@ -130,22 +153,27 @@ derived on demand from selected evidence and approved calibration.
 
 New interactions write append-only native tool audits, direct PA turns,
 `EvidencePresentationRecord` v1, `AllocationPresentationRecord` v1,
-`OntologyGroundingProposal` v9, `ReachabilityCheckRecord` v4,
+`OntologyGroundingProposal` v10, `ReachabilityCheckRecord` v4,
 `ResourceSelectionRecord` v5, `PlanOnlyFeasibilityValidationRecord` v4, and
-`PAContextGroundingCompletion` v7.
+`PAContextGroundingCompletion` v8.
 Clarification resumes the same conversation context using the exact persisted
 question/reply history. Cancellation invokes no PA call.
 
-The v7 completion directly pins the accepted proposal, nested evidence, both
+The v8 completion directly pins the accepted proposal, nested evidence, both
 presentation records, registry/workcell snapshots, referenced typed records,
 reachability, exact RobotAgent validation, resource selection, assignment
 delta, and final ABox. It does not create a duplicate new-run
 `TypedGroundingContract` or copy `target_feature`; downstream consumers
 reconstruct it from the hash-verified accepted proposal.
 
-Historical completion v4-v6 records remain readable and are not migrated. New
-Phase 5 handoff accepts completion v7 while retaining historical readers.
+Completion v7 and earlier supported versions remain readable and are not
+migrated. Completion v7 is audit-only for the current Phase 5 path because it
+does not carry the assembly association and proposal-bound location contract;
+rerun Phase 4 to produce v8.
 
 This boundary performs schema-constrained, evidence-backed instance grounding.
-Multi-feature requirements, primitive parameter binding, motion execution,
-post-process observation, and feature-state update are not implemented here.
+See [`../../ASSEMBLY_ONTOLOGY.md`](../../ASSEMBLY_ONTOLOGY.md) for the full
+ontology slice and examples.
+Multiple associations in one proposal, primitive parameter binding, motion
+execution, post-process observation, and feature-state update are not
+implemented here.

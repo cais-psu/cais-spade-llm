@@ -347,8 +347,17 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert final_result["target_feature"]["desired_state"]["statement"]["text"] == (
         "The medium gear is assembled as requested."
     )
-    assert final_result["target_feature"]["current_state"]["state_values"] == []
-    assert final_result["target_feature"]["desired_state"]["state_values"] == []
+    assert final_result["target_feature"]["current_state"]["state_values"][0]["name"] == (
+        "medium_gear_location"
+    )
+    assert final_result["target_feature"]["desired_state"]["state_values"][0]["name"] == (
+        "assembly_board_shaft_location"
+    )
+    assert len(
+        final_result["target_feature"]["assembly_feature_association"][
+            "assembly_features"
+        ]
+    ) == 2
     current = final_result["current_state_evidence"]
     desired = final_result["desired_state_evidence"]
     assert current["state_iri"].endswith("currentstate_0001")

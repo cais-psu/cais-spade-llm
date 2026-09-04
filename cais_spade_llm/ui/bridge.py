@@ -4718,6 +4718,15 @@ class SystemBridge:
             raise RuntimeError(
                 "Spec2Primitives RobotAgent startup requires simulation mode."
             )
+        from cais_spade_llm.spec2primitives.config import load_model_runtime_config
+
+        try:
+            robot_agent_llm = load_model_runtime_config().robot_agent_llm
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "Spec2Primitives RobotAgent model configuration is invalid: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
         lifecycle_lock = self._get_spec2primitives_robot_agent_lifecycle_lock()
         async with lifecycle_lock:
@@ -4746,6 +4755,13 @@ class SystemBridge:
                     and not dict(getattr(cached, "executables", {}) or {})
                     and not list(getattr(cached, "failure_scenarios", []) or [])
                     and getattr(cached, "_controller", None) is None
+                    and getattr(cached, "model", None) == robot_agent_llm.model
+                    and getattr(cached, "non_function_model", None)
+                    == robot_agent_llm.model
+                    and getattr(cached, "reasoning_effort", None)
+                    == robot_agent_llm.reasoning_effort
+                    and getattr(cached, "non_function_reasoning_effort", None)
+                    == robot_agent_llm.reasoning_effort
                     and callable(cached_is_alive)
                     and cached_is_alive() is True
                 ):
@@ -4788,6 +4804,15 @@ class SystemBridge:
                             "RobotAgent."
                         )
                     agent = agents[0]
+                    # Apply the package-owned model choice before setup so both
+                    # structured composition and the ready trace use the exact
+                    # Spec2Primitives RobotAgent configuration.
+                    agent.model = robot_agent_llm.model
+                    agent.non_function_model = robot_agent_llm.model
+                    agent.reasoning_effort = robot_agent_llm.reasoning_effort
+                    agent.non_function_reasoning_effort = (
+                        robot_agent_llm.reasoning_effort
+                    )
                     if str(getattr(agent, "jid", "") or "") != selected_resource_jid:
                         raise RuntimeError(
                             "Spec2Primitives startup created a different RobotAgent."

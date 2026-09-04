@@ -24,6 +24,10 @@ _REQUIRED_CLASSES = (
     "processExecution",
     "resource",
     "capability",
+    "Assembly",
+    "Part",
+    "AssemblyFeature",
+    "AssemblyFeatureAssociation",
 )
 _REQUIRED_OBJECT_PROPERTIES = (
     "defines",
@@ -34,6 +38,10 @@ _REQUIRED_OBJECT_PROPERTIES = (
     "hasProcessExecution",
     "runsProcess",
     "runsOnResource",
+    "hasPart",
+    "hasAssemblyFeature",
+    "hasAssemblyFeatureAssociation",
+    "relatesAssemblyFeature",
 )
 
 
@@ -131,6 +139,7 @@ def load_ppr_tbox(tbox_path: Path, *, ppr_namespace: str) -> TBoxSnapshot:
     )
     _validate_feature_state_slice(graph, namespace)
     _validate_process_execution_slice(graph, namespace)
+    _validate_assembly_slice(graph, namespace)
     _validate_schema_only_profile(
         graph,
         namespace,
@@ -236,6 +245,64 @@ def _validate_feature_state_slice(graph: Graph, namespace: str) -> None:
             raise TBoxProfileError(
                 f"TBox property has an invalid functional profile: {property_iri}"
             )
+
+
+def _validate_assembly_slice(graph: Graph, namespace: str) -> None:
+    """Require the exact lean PPR assembly-extension profile."""
+    product = URIRef(f"{namespace}product")
+    feature = URIRef(f"{namespace}feature")
+    assembly = URIRef(f"{namespace}Assembly")
+    part = URIRef(f"{namespace}Part")
+    assembly_feature = URIRef(f"{namespace}AssemblyFeature")
+    association = URIRef(f"{namespace}AssemblyFeatureAssociation")
+    expected_superclasses = {
+        assembly: product,
+        part: product,
+        assembly_feature: feature,
+        association: feature,
+    }
+    for class_iri, superclass_iri in expected_superclasses.items():
+        if superclass_iri not in set(graph.objects(class_iri, RDFS.subClassOf)):
+            raise TBoxProfileError(
+                f"TBox assembly class has an invalid superclass: {class_iri}"
+            )
+
+    expected_properties = {
+        URIRef(f"{namespace}hasPart"): (assembly, product),
+        URIRef(f"{namespace}hasAssemblyFeature"): (product, assembly_feature),
+        URIRef(f"{namespace}hasAssemblyFeatureAssociation"): (assembly, association),
+        URIRef(f"{namespace}relatesAssemblyFeature"): (association, assembly_feature),
+    }
+    for property_iri, (expected_domain, expected_range) in expected_properties.items():
+        if set(graph.objects(property_iri, RDFS.domain)) != {expected_domain}:
+            raise TBoxProfileError(
+                f"TBox assembly property has an invalid domain: {property_iri}"
+            )
+        if set(graph.objects(property_iri, RDFS.range)) != {expected_range}:
+            raise TBoxProfileError(
+                f"TBox assembly property has an invalid range: {property_iri}"
+            )
+        if (property_iri, RDF.type, OWL.FunctionalProperty) in graph:
+            raise TBoxProfileError(
+                f"TBox assembly property cannot be functional: {property_iri}"
+            )
+
+    relates = URIRef(f"{namespace}relatesAssemblyFeature")
+    matching_restrictions = []
+    for restriction in graph.objects(association, RDFS.subClassOf):
+        cardinalities = list(graph.objects(restriction, OWL.qualifiedCardinality))
+        if (
+            (restriction, RDF.type, OWL.Restriction) in graph
+            and (restriction, OWL.onProperty, relates) in graph
+            and (restriction, OWL.onClass, assembly_feature) in graph
+            and len(cardinalities) == 1
+            and cardinalities[0].toPython() == 2
+        ):
+            matching_restrictions.append(restriction)
+    if len(matching_restrictions) != 1:
+        raise TBoxProfileError(
+            "TBox AssemblyFeatureAssociation must relate exactly two AssemblyFeature values."
+        )
 
 
 def _validate_schema_only_profile(

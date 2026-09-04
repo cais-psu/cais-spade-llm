@@ -13,10 +13,12 @@ DEFAULT_MODEL_RUNTIME_CONFIG_PATH = Path(__file__).with_name("model_runtime.json
 _ROOT_KEYS = {
     "schema_version",
     "product_agent_llm",
+    "robot_agent_llm",
     "document_vlm",
     "observation_vlm",
 }
 _PRODUCT_AGENT_KEYS = {"model", "reasoning_effort"}
+_ROBOT_AGENT_KEYS = {"model", "reasoning_effort"}
 _DOCUMENT_VLM_KEYS = {
     "provider",
     "model",
@@ -30,6 +32,14 @@ _DOCUMENT_VLM_KEYS = {
 @dataclass(frozen=True)
 class ProductAgentModelConfig:
     """Select the shared ProductAgent LLM without changing its interface."""
+
+    model: str
+    reasoning_effort: str
+
+
+@dataclass(frozen=True)
+class RobotAgentModelConfig:
+    """Select the shared RobotAgent LLM without changing its interface."""
 
     model: str
     reasoning_effort: str
@@ -65,6 +75,7 @@ class ModelRuntimeConfig:
 
     schema_version: int
     product_agent_llm: ProductAgentModelConfig
+    robot_agent_llm: RobotAgentModelConfig
     document_vlm: DocumentVLMConfig
     observation_vlm: ObservationVLMConfig
 
@@ -89,13 +100,18 @@ def load_model_runtime_config(
         value = json.load(stream)
     if not isinstance(value, dict) or set(value) != _ROOT_KEYS:
         raise ValueError("Model config fields are invalid.")
-    if value["schema_version"] != 3:
-        raise ValueError("Model config schema_version must be 3.")
+    if value["schema_version"] != 4:
+        raise ValueError("Model config schema_version must be 4.")
 
     product_agent = _required_mapping(
         value["product_agent_llm"],
         _PRODUCT_AGENT_KEYS,
         "product_agent_llm",
+    )
+    robot_agent = _required_mapping(
+        value["robot_agent_llm"],
+        _ROBOT_AGENT_KEYS,
+        "robot_agent_llm",
     )
     document_vlm = _required_mapping(
         value["document_vlm"],
@@ -128,16 +144,37 @@ def load_model_runtime_config(
             "product_agent_llm.reasoning_effort must be none for GPT-5.4 or GPT-5.6 "
             "function tools through Chat Completions."
         )
+    robot_agent_model = _nonempty_string(
+        robot_agent["model"],
+        "robot_agent_llm.model",
+    )
+    robot_agent_reasoning_effort = _nonempty_string(
+        robot_agent["reasoning_effort"],
+        "robot_agent_llm.reasoning_effort",
+    )
+    if robot_agent_reasoning_effort not in {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    }:
+        raise ValueError("robot_agent_llm.reasoning_effort is invalid.")
     document_values = _validated_vision_config(document_vlm, "document_vlm")
     observation_values = _validated_vision_config(
         observation_vlm,
         "observation_vlm",
     )
     return ModelRuntimeConfig(
-        schema_version=3,
+        schema_version=4,
         product_agent_llm=ProductAgentModelConfig(
             model=product_agent_model,
             reasoning_effort=product_agent_reasoning_effort,
+        ),
+        robot_agent_llm=RobotAgentModelConfig(
+            model=robot_agent_model,
+            reasoning_effort=robot_agent_reasoning_effort,
         ),
         document_vlm=DocumentVLMConfig(
             **document_values,

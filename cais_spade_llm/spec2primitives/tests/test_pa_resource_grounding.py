@@ -384,6 +384,10 @@ def test_live_cartesian_reachability_ignores_static_workspace_box(
         reachability=reachability,
         allocation_presentation=fixture["presentation"],
         robot_agent_validation_path=validation.record_path,
+        state_location_handles={
+            "current_state": (fixture["current_handle"],),
+            "desired_state": (fixture["desired_handle"],),
+        },
     )
 
     assert isinstance(prepared, CartesianReachabilityRequest)
@@ -410,6 +414,11 @@ def test_live_cartesian_reachability_ignores_static_workspace_box(
     assert validation.schema_version == 3
     assert validation.status == "accepted"
     assert validation.to_record()["motion_executed"] is False
+    assert selection.schema_version == 5
+    assert selection.state_location_handles == {
+        "current_state": (fixture["current_handle"],),
+        "desired_state": (fixture["desired_handle"],),
+    }
     assert selection.selected_resource_symbol == "xarm6"
     assert selection.allocation_status == "accepted"
 
@@ -1095,12 +1104,12 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
         candidate = {
             "observation_handle": observation_handle,
             "candidate_handle": candidate_handle,
-            "within_size_tolerance": True,
+            "within_size_tolerance": status in {"accepted", "ambiguous"},
         }
         return write(
             f"products/grounding/cartesian_fixture/{name}_correspondence.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "record_type": "CADSizeCorrespondenceRecord",
                 "CAD": {
                     "record": {
@@ -1114,9 +1123,9 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
                         "sha256": segmentation_sha256,
                     }
                 },
-                "plausible_candidates": [candidate],
-                "selected_candidate": candidate if status == "accepted" else None,
-                "CAD_correspondence": status,
+                "candidate_measurements": [candidate],
+                "measurement": "accepted",
+                "CAD_correspondence": "not_evaluated",
             },
         )
 

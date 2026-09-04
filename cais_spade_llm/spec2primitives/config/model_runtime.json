@@ -1,8 +1,12 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "product_agent_llm": {
     "model": "gpt-5.6",
     "reasoning_effort": "none"
+  },
+  "robot_agent_llm": {
+    "model": "gpt-5.6",
+    "reasoning_effort": "medium"
   },
   "document_vlm": {
     "provider": "openai",

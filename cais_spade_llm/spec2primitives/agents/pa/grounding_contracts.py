@@ -1145,6 +1145,17 @@ class PAContextGroundingCompletionV7:
 
 
 @dataclass(frozen=True)
+class PAContextGroundingCompletionV8:
+    """Hold one verified proposal-bound Phase 4 completion record."""
+
+    record: Mapping[str, object]
+
+    def to_record(self) -> dict[str, object]:
+        """Return the JSON-safe version-8 completion bundle."""
+        return dict(self.record)
+
+
+@dataclass(frozen=True)
 class _CompletionAllocationAuthority:
     """Hold candidate resources reconstructed from pinned registry/workcell records."""
 
@@ -2846,7 +2857,166 @@ def _validate_compiled_delta(  # noqa: PLR0913
             raise GroundingContractError("Target-feature compiled assertion is inconsistent.")
 
 
-def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
+def _proposal_bound_state_refs(
+    target_feature: Mapping[str, object],
+    *,
+    product_context: ProductContextView,
+) -> Mapping[str, tuple[str, str, str]]:
+    """Read the exact PA-authored assembly endpoint state-value references."""
+    association = _required_mapping(
+        target_feature.get("assembly_feature_association"),
+        "assembly_feature_association",
+    )
+    _require_exact_keys(
+        association,
+        {"assembly", "assembly_features", "evidence_refs"},
+        "assembly_feature_association",
+    )
+    assembly = _required_mapping(
+        association["assembly"],
+        "assembly_feature_association.assembly",
+    )
+    _require_exact_keys(
+        assembly,
+        {"name", "evidence_refs"},
+        "assembly_feature_association.assembly",
+    )
+    _required_string(assembly["name"], "assembly_feature_association.assembly.name")
+    _direct_evidence_refs(
+        assembly["evidence_refs"],
+        "assembly_feature_association.assembly.evidence_refs",
+    )
+    _direct_evidence_refs(
+        association["evidence_refs"],
+        "assembly_feature_association.evidence_refs",
+    )
+    features = association["assembly_features"]
+    if not isinstance(features, list) or len(features) != 2:
+        raise GroundingContractError(
+            "assembly_feature_association must contain exactly two assembly_features."
+        )
+    feature_names: set[str] = set()
+    owner_names: set[str] = set()
+    state_refs: dict[str, tuple[str, str, str]] = {}
+    for index, feature_value in enumerate(features):
+        label = f"assembly_feature_association.assembly_features[{index}]"
+        feature = _required_mapping(feature_value, label)
+        _require_exact_keys(
+            feature,
+            {"name", "owner", "state_name", "state_value_name", "evidence_refs"},
+            label,
+        )
+        feature_name = _required_string(feature["name"], f"{label}.name")
+        if feature_name in feature_names:
+            raise GroundingContractError("AssemblyFeature names must be distinct.")
+        feature_names.add(feature_name)
+        _direct_evidence_refs(feature["evidence_refs"], f"{label}.evidence_refs")
+        owner = _required_mapping(feature["owner"], f"{label}.owner")
+        _require_exact_keys(owner, {"name", "type", "evidence_refs"}, f"{label}.owner")
+        owner_name = _required_string(owner["name"], f"{label}.owner.name")
+        if owner_name in owner_names:
+            raise GroundingContractError("AssemblyFeature owners must be distinct.")
+        owner_names.add(owner_name)
+        if owner.get("type") not in {"Part", "Assembly"}:
+            raise GroundingContractError(f"{label}.owner.type is invalid.")
+        _direct_evidence_refs(
+            owner["evidence_refs"],
+            f"{label}.owner.evidence_refs",
+        )
+        state_name = _required_string(feature["state_name"], f"{label}.state_name")
+        if state_name not in {"current_state", "desired_state"} or state_name in state_refs:
+            raise GroundingContractError(
+                "AssemblyFeature endpoints must bind one current_state and one desired_state."
+            )
+        state_value_name = _required_string(
+            feature["state_value_name"],
+            f"{label}.state_value_name",
+        )
+        state = _required_mapping(target_feature[state_name], state_name)
+        state_values = state.get("state_values")
+        matches = [
+            item
+            for item in state_values
+            if isinstance(item, Mapping) and item.get("name") == state_value_name
+        ] if isinstance(state_values, list) else []
+        if len(matches) != 1:
+            raise GroundingContractError(
+                f"{label} does not reference exactly one accepted state value."
+            )
+        value_ref = _required_mapping(matches[0].get("value_ref"), f"{label}.value_ref")
+        _require_exact_keys(value_ref, {"record_ref", "field_path"}, f"{label}.value_ref")
+        record_ref = _required_string(value_ref["record_ref"], f"{label}.record_ref")
+        field_path = _required_string(value_ref["field_path"], f"{label}.field_path")
+        bindings = [
+            binding
+            for binding in product_context.typed_bindings
+            if binding.record_ref == record_ref
+            and binding.status == "accepted"
+            and binding.record_type
+            in {"RGBDSegmentationRecord", "RobotFrameLocationRecord"}
+        ]
+        if len(bindings) != 1:
+            raise GroundingContractError(
+                f"{label} is not backed by one accepted location record."
+            )
+        state_refs[state_name] = (
+            record_ref,
+            bindings[0].record_sha256,
+            field_path,
+        )
+    if set(state_refs) != {"current_state", "desired_state"}:
+        raise GroundingContractError(
+            "AssemblyFeature endpoints must bind both state locations."
+        )
+    return state_refs
+
+
+def _validate_proposal_bound_state_locations(
+    root: Path,
+    *,
+    target_feature: Mapping[str, object],
+    product_context: ProductContextView,
+    selection: Mapping[str, object],
+) -> None:
+    """Require resource validation to reuse the PA-authored assembly state bindings."""
+    expected_refs = _proposal_bound_state_refs(
+        target_feature,
+        product_context=product_context,
+    )
+    presentation = load_allocation_presentation(root)
+    if (
+        presentation.record_ref != selection.get("allocation_presentation_ref")
+        or presentation.fingerprint
+        != selection.get("allocation_presentation_fingerprint")
+        or _sha256_path(presentation.record_path)
+        != selection.get("allocation_presentation_sha256")
+    ):
+        raise GroundingContractError(
+            "Resource selection does not use the pinned allocation presentation."
+        )
+    state_locations = _required_mapping(
+        selection.get("state_locations"),
+        "state_locations",
+    )
+    for state_name in ("current_state", "desired_state"):
+        handles = state_locations.get(state_name)
+        if (
+            not isinstance(handles, list)
+            or len(handles) != 1
+            or not isinstance(handles[0], str)
+        ):
+            raise GroundingContractError(
+                f"Resource selection must reuse one proposal-bound {state_name} location."
+            )
+        entry = presentation.evidence_for_handle(handles[0])
+        actual_ref = (entry.record_ref, entry.record_sha256, entry.field_path)
+        if actual_ref != expected_refs[state_name]:
+            raise GroundingContractError(
+                f"Resource selection replaced the PA-authored {state_name} location."
+            )
+
+
+def persist_pa_context_grounding_completion_v7(  # noqa: PLR0913
     interaction_root: Path,
     *,
     tbox: TBoxSnapshot,
@@ -2860,7 +3030,75 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
     registry: ResourceRegistrySnapshot | None = None,
     workcell: PredefinedWorkcellSnapshot | None = None,
 ) -> Path:
-    """Persist the v9/v5/v4 lineage without a duplicate grounding contract."""
+    """Persist the read-only legacy v9/v5/v4 lineage as completion v7."""
+    return _persist_pa_context_grounding_completion(
+        interaction_root,
+        tbox=tbox,
+        product_requirement=product_requirement,
+        completion_turn=completion_turn,
+        decision_ref=decision_ref,
+        product_context=product_context,
+        ontology_projection_ref=ontology_projection_ref,
+        resource_selection_ref=resource_selection_ref,
+        tool_call_refs=tool_call_refs,
+        registry=registry,
+        workcell=workcell,
+        completion_schema_version=7,
+    )
+
+
+def persist_pa_context_grounding_completion_v8(  # noqa: PLR0913
+    interaction_root: Path,
+    *,
+    tbox: TBoxSnapshot,
+    product_requirement: str,
+    completion_turn: int,
+    decision_ref: str,
+    product_context: ProductContextView,
+    ontology_projection_ref: str,
+    resource_selection_ref: str,
+    tool_call_refs: Sequence[str],
+    registry: ResourceRegistrySnapshot | None = None,
+    workcell: PredefinedWorkcellSnapshot | None = None,
+) -> Path:
+    """Persist the current proposal-bound Phase 4 completion contract."""
+    return _persist_pa_context_grounding_completion(
+        interaction_root,
+        tbox=tbox,
+        product_requirement=product_requirement,
+        completion_turn=completion_turn,
+        decision_ref=decision_ref,
+        product_context=product_context,
+        ontology_projection_ref=ontology_projection_ref,
+        resource_selection_ref=resource_selection_ref,
+        tool_call_refs=tool_call_refs,
+        registry=registry,
+        workcell=workcell,
+        completion_schema_version=8,
+    )
+
+
+def _persist_pa_context_grounding_completion(  # noqa: C901, PLR0913, PLR0915
+    interaction_root: Path,
+    *,
+    tbox: TBoxSnapshot,
+    product_requirement: str,
+    completion_turn: int,
+    decision_ref: str,
+    product_context: ProductContextView,
+    ontology_projection_ref: str,
+    resource_selection_ref: str,
+    tool_call_refs: Sequence[str],
+    registry: ResourceRegistrySnapshot | None = None,
+    workcell: PredefinedWorkcellSnapshot | None = None,
+    completion_schema_version: int,
+) -> Path:
+    """Persist one current or legacy two-decision completion lineage."""
+    if completion_schema_version not in {7, 8}:
+        raise GroundingContractError("Completion schema version is unsupported.")
+    proposal_schema_version = 9 if completion_schema_version == 7 else 10
+    completion_label = f"PAContextGroundingCompletion v{completion_schema_version}"
+    proposal_label = f"OntologyGroundingProposal v{proposal_schema_version}"
     root = Path(interaction_root).resolve()
     if product_context.product_requirement != product_requirement:
         raise GroundingContractError(
@@ -2886,7 +3124,7 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
         resource_selection_ref,
         prefix=_RESOURCE_SELECTION_PREFIX,
     )
-    projection = _read_json_mapping(projection_path, "OntologyGroundingProposal v9")
+    projection = _read_json_mapping(projection_path, proposal_label)
     selection = _read_json_mapping(selection_path, "ResourceSelectionRecord v5")
     if (
         set(projection)
@@ -2901,22 +3139,22 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
             "status",
             "failure",
         }
-        or projection.get("schema_version") != 9
+        or projection.get("schema_version") != proposal_schema_version
         or projection.get("record_type") != "OntologyGroundingProposal"
         or projection.get("status") != "accepted"
         or projection.get("failure") is not None
     ):
-        raise GroundingContractError("OntologyGroundingProposal v9 is invalid.")
+        raise GroundingContractError(f"{proposal_label} is invalid.")
     output = _required_mapping(projection.get("output"), "proposal output")
     _require_exact_keys(output, {"target_feature"}, "proposal output")
     target_feature = _required_mapping(output["target_feature"], "target_feature")
-    _require_exact_keys(
-        target_feature,
-        {"required_process", "current_state", "desired_state"},
-        "target_feature",
-    )
     process = _required_mapping(target_feature["required_process"], "required_process")
     process_iri = _required_string(process.get("process_iri"), "process_iri")
+    process_symbol = selected_workcell.process_symbol_for_iri(process_iri)
+    target_feature_keys = {"required_process", "current_state", "desired_state"}
+    if completion_schema_version == 8 and process_symbol == "assembly":
+        target_feature_keys.add("assembly_feature_association")
+    _require_exact_keys(target_feature, target_feature_keys, "target_feature")
     feature_iri = _required_string(projection.get("feature_iri"), "feature_iri")
     specification_iri = _required_string(
         projection.get("initialized_specification_iri"),
@@ -2924,9 +3162,17 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
     )
     compiled_delta = _required_mapping(projection.get("compiled_delta"), "compiled_delta")
     compiled_assertions = compiled_delta.get("assertions")
-    if not isinstance(compiled_assertions, list) or len(compiled_assertions) != 7:
+    expected_assertion_count = (
+        19
+        if completion_schema_version == 8 and process_symbol == "assembly"
+        else 7
+    )
+    if (
+        not isinstance(compiled_assertions, list)
+        or len(compiled_assertions) != expected_assertion_count
+    ):
         raise GroundingContractError(
-            "OntologyGroundingProposal v9 must compile exactly seven assertions."
+            f"{proposal_label} has an invalid compiled assertion count."
         )
 
     selection_payload = dict(selection)
@@ -3017,6 +3263,13 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
         raise GroundingContractError(
             "ResourceSelectionRecord v5 does not match the pinned authorities."
         )
+    if completion_schema_version == 8 and process_symbol == "assembly":
+        _validate_proposal_bound_state_locations(
+            root,
+            target_feature=target_feature,
+            product_context=product_context,
+            selection=selection,
+        )
 
     reachability_ref = _required_string(
         selection.get("reachability_check_ref"),
@@ -3027,23 +3280,12 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
         reachability_ref,
         prefix=("products", "grounding", "reachability"),
     )
-    reachability = _read_json_mapping(reachability_path, "ReachabilityCheckRecord v4")
+    reachability = _read_json_mapping(reachability_path, "ReachabilityCheckRecord")
     reach_payload = dict(reachability)
     reach_fingerprint = reach_payload.pop("fingerprint", None)
-    reach_groups = reachability.get("state_locations")
-    reach_handles = (
-        {
-            state_name: [
-                item.get("evidence_handle") if isinstance(item, Mapping) else None
-                for item in reach_groups.get(state_name, [])
-            ]
-            for state_name in ("current_state", "desired_state")
-        }
-        if isinstance(reach_groups, Mapping)
-        else None
-    )
+    reach_schema = reachability.get("schema_version")
     if (
-        reachability.get("schema_version") != 4
+        reach_schema not in {3, 4}
         or reachability.get("record_type") != "ReachabilityCheckRecord"
         or reachability.get("status") != "accepted"
         or reachability.get("resource_symbol") != selection.get("selected_resource_symbol")
@@ -3051,13 +3293,81 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
         or reachability.get("resource_jid") != selection.get("selected_resource_jid")
         or reachability.get("process_iri") != process_iri
         or reachability.get("feature_iri") != feature_iri
-        or reach_handles != state_locations
         or not _is_sha256_value(reach_fingerprint)
         or _fingerprint(reach_payload) != reach_fingerprint
         or selection.get("reachability_check_sha256") != _sha256_path(reachability_path)
         or selection.get("reachability_check_fingerprint") != reach_fingerprint
     ):
-        raise GroundingContractError("ReachabilityCheckRecord v4 is invalid.")
+        raise GroundingContractError("ReachabilityCheckRecord is invalid.")
+    if reach_schema == 4:
+        reach_groups = reachability.get("state_locations")
+        reach_handles = (
+            {
+                state_name: [
+                    item.get("evidence_handle") if isinstance(item, Mapping) else None
+                    for item in reach_groups.get(state_name, [])
+                ]
+                for state_name in ("current_state", "desired_state")
+            }
+            if isinstance(reach_groups, Mapping)
+            else None
+        )
+        if reach_handles != state_locations:
+            raise GroundingContractError("ReachabilityCheckRecord v4 is invalid.")
+    else:
+        _require_exact_keys(reachability, _REACHABILITY_V3_KEYS, "ReachabilityCheckRecord v3")
+        cartesian_states = {
+            state_name: _required_mapping(
+                reachability.get(state_name),
+                f"{state_name} Cartesian reachability",
+            )
+            for state_name in ("current_state", "desired_state")
+        }
+        reach_handles = {
+            state_name: [state.get("evidence_handle")]
+            for state_name, state in cartesian_states.items()
+        }
+        if (
+            reach_handles != state_locations
+            or reachability.get("execution_mode") != "simulation"
+            or reachability.get("motion_mode") != "cartesian_pick_place"
+            or not _is_sha256_value(reachability.get("request_fingerprint"))
+            or not _valid_cartesian_targets(
+                reachability.get("cartesian_targets"),
+                current_state=cartesian_states["current_state"],
+                desired_state=cartesian_states["desired_state"],
+            )
+        ):
+            raise GroundingContractError("ReachabilityCheckRecord v3 is invalid.")
+        presentation = load_allocation_presentation(root)
+        state_iris = {
+            "current_state": _required_string(
+                selection.get("current_state_iri"),
+                "current_state_iri",
+            ),
+            "desired_state": _required_string(
+                selection.get("desired_state_iri"),
+                "desired_state_iri",
+            ),
+        }
+        for state_name, handles in state_locations.items():
+            handle = handles[0]
+            entry = presentation.evidence_for_handle(handle)
+            assignment = {
+                "state_iri": state_iris[state_name],
+                "evidence_handle": handle,
+                "source_record_type": entry.record_type,
+                "source_record_ref": entry.record_ref,
+                "source_record_sha256": entry.record_sha256,
+                "source_field_path": entry.field_path,
+            }
+            _validate_state_reach_v3(
+                root,
+                state_name=state_name,
+                state=cartesian_states[state_name],
+                assignment=assignment,
+                product_context=product_context,
+            )
 
     validation_ref = _required_string(
         selection.get("robot_agent_validation_ref"),
@@ -3074,24 +3384,63 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
     )
     validation = _read_json_mapping(
         validation_path,
-        "PlanOnlyFeasibilityValidationRecord v4",
+        "PlanOnlyFeasibilityValidationRecord",
     )
     validation_payload = dict(validation)
     validation_fingerprint = validation_payload.pop("fingerprint", None)
+    expected_validation_schema = 3 if reach_schema == 3 else 4
+    expected_validation_scope = (
+        "cartesian_pick_place"
+        if reach_schema == 3
+        else "state_location_reachability"
+    )
     if (
-        validation.get("schema_version") != 4
+        validation.get("schema_version") != expected_validation_schema
         or validation.get("record_type") != "PlanOnlyFeasibilityValidationRecord"
         or validation.get("status") != "accepted"
         or validation.get("validator_authority") != selection.get("selected_resource_jid")
-        or validation.get("request_fingerprint") != reach_fingerprint
+        or validation.get("process_symbol") != process_symbol
+        or validation.get("process_iri") != process_iri
+        or validation.get("feature_iri") != feature_iri
+        or validation.get("resource_symbol") != selection.get("selected_resource_symbol")
+        or validation.get("resource_iri") != selection.get("selected_resource_iri")
+        or validation.get("resource_jid") != selection.get("selected_resource_jid")
+        or validation.get("validation_scope") != expected_validation_scope
         or not _is_sha256_value(validation_fingerprint)
         or _fingerprint(validation_payload) != validation_fingerprint
         or selection.get("robot_agent_validation_sha256") != _sha256_path(validation_path)
         or selection.get("robot_agent_validation_fingerprint") != validation_fingerprint
     ):
         raise GroundingContractError(
-            "PlanOnlyFeasibilityValidationRecord v4 is invalid."
+            "PlanOnlyFeasibilityValidationRecord is invalid."
         )
+    if reach_schema == 3:
+        if (
+            reachability.get("robot_agent_validation_ref") != validation_ref
+            or reachability.get("robot_agent_validation_sha256")
+            != selection.get("robot_agent_validation_sha256")
+            or reachability.get("robot_agent_validation_fingerprint")
+            != validation_fingerprint
+        ):
+            raise GroundingContractError(
+                "Cartesian reachability validation lineage is invalid."
+            )
+        _validate_cartesian_plan_record_v3(
+            validation,
+            reach=reachability,
+            process_symbol=process_symbol,
+        )
+    elif validation.get("request_fingerprint") != reach_fingerprint:
+        raise GroundingContractError(
+            "State-location reachability validation lineage is invalid."
+        )
+
+    validation_scope = expected_validation_scope
+    allocation_label = (
+        "validated Cartesian pick-place allocation"
+        if validation_scope == "cartesian_pick_place"
+        else "validated state-location resource allocation"
+    )
 
     assignment_delta_ref = _native_assignment_delta_ref_v5(
         root,
@@ -3178,7 +3527,7 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
     if not final_abox_path.is_file():
         raise GroundingContractError("Final interaction ABox is unavailable.")
     payload: dict[str, object] = {
-        "schema_version": 7,
+        "schema_version": completion_schema_version,
         "record_type": "PAContextGroundingCompletion",
         "status": "grounding complete",
         "product_requirement": product_requirement,
@@ -3222,17 +3571,22 @@ def persist_pa_context_grounding_completion_v7(  # noqa: C901, PLR0913, PLR0915
         "typed_context_refs": [dict(item) for item in typed_refs],
         "source_refs": [dict(item) for item in source_refs],
         "tool_call_refs": [dict(item) for item in tool_refs],
-        "validation_scope": "state_location_reachability",
+        "validation_scope": validation_scope,
         "checked_constraints": validation["checked_constraints"],
         "unvalidated_constraints": validation["unvalidated_constraints"],
-        "allocation_label": "validated state-location resource allocation",
+        "allocation_label": allocation_label,
         "motion_executed": False,
         "completed_at_ns": product_context.assessed_at_ns,
     }
     payload["fingerprint"] = _fingerprint(payload)
     completion_path = root / "interaction_record/context_completion_0001.json"
     _write_json_mapping_exclusive(completion_path, payload)
-    load_pa_context_grounding_completion(root)
+    loaded = load_pa_context_grounding_completion(root)
+    if completion_schema_version == 8 and not isinstance(
+        loaded,
+        PAContextGroundingCompletionV8,
+    ):
+        raise GroundingContractError(f"{completion_label} did not reload as version 8.")
     return completion_path
 
 
@@ -3245,6 +3599,7 @@ def load_pa_context_grounding_completion(
     | PAContextGroundingCompletionV5
     | PAContextGroundingCompletionV6
     | PAContextGroundingCompletionV7
+    | PAContextGroundingCompletionV8
 ):
     """Load and verify one current or recovered completion bundle."""
     root = Path(interaction_root).resolve()
@@ -3252,6 +3607,8 @@ def load_pa_context_grounding_completion(
     if len(paths) != 1:
         raise GroundingContractError("Exactly one PAContextGroundingCompletion record is required.")
     completion_value = _read_json_mapping(paths[0], "PAContextGroundingCompletion")
+    if completion_value.get("schema_version") == 8:
+        return _load_pa_context_grounding_completion_v8(root, completion_value)
     if completion_value.get("schema_version") == 7:
         return _load_pa_context_grounding_completion_v7(root, completion_value)
     if completion_value.get("schema_version") == 6:
@@ -3281,10 +3638,11 @@ def load_completed_product_context_view(
             PAContextGroundingCompletionV5,
             PAContextGroundingCompletionV6,
             PAContextGroundingCompletionV7,
+            PAContextGroundingCompletionV8,
         ),
     ):
         raise GroundingContractError(
-            "Completed ProductContextView retrieval requires native completion version 3 through 7."
+            "Completed ProductContextView retrieval requires native completion version 3 through 8."
         )
     return _latest_product_context_view(root)
 
@@ -3293,7 +3651,40 @@ def _load_pa_context_grounding_completion_v7(
     root: Path,
     value: Mapping[str, object],
 ) -> PAContextGroundingCompletionV7:
-    """Validate the hash-pinned two-decision Phase 4 completion."""
+    """Validate the read-only legacy two-decision Phase 4 completion."""
+    record = _validated_two_decision_completion(
+        root,
+        value,
+        completion_schema_version=7,
+        proposal_schema_version=9,
+    )
+    return PAContextGroundingCompletionV7(record=record)
+
+
+def _load_pa_context_grounding_completion_v8(
+    root: Path,
+    value: Mapping[str, object],
+) -> PAContextGroundingCompletionV8:
+    """Validate the proposal-bound two-decision Phase 4 completion."""
+    record = _validated_two_decision_completion(
+        root,
+        value,
+        completion_schema_version=8,
+        proposal_schema_version=10,
+    )
+    return PAContextGroundingCompletionV8(record=record)
+
+
+def _validated_two_decision_completion(  # noqa: C901
+    root: Path,
+    value: Mapping[str, object],
+    *,
+    completion_schema_version: int,
+    proposal_schema_version: int,
+) -> Mapping[str, object]:
+    """Validate shared v7/v8 lineage and the current proposal-bound extension."""
+    completion_label = f"PAContextGroundingCompletion v{completion_schema_version}"
+    proposal_label = f"OntologyGroundingProposal v{proposal_schema_version}"
     expected = {
         "schema_version",
         "record_type",
@@ -3347,21 +3738,29 @@ def _load_pa_context_grounding_completion_v7(
         "completed_at_ns",
         "fingerprint",
     }
-    _require_exact_keys(value, expected, "PAContextGroundingCompletion v7")
+    _require_exact_keys(value, expected, completion_label)
     payload = dict(value)
     fingerprint = payload.pop("fingerprint", None)
+    validation_scope = value.get("validation_scope")
+    expected_allocation_label = (
+        "validated Cartesian pick-place allocation"
+        if validation_scope == "cartesian_pick_place"
+        else "validated state-location resource allocation"
+    )
     if (
-        value.get("schema_version") != 7
+        value.get("schema_version") != completion_schema_version
         or value.get("record_type") != "PAContextGroundingCompletion"
         or value.get("status") != "grounding complete"
-        or value.get("validation_scope") != "state_location_reachability"
-        or value.get("allocation_label")
-        != "validated state-location resource allocation"
+        or validation_scope not in {
+            "cartesian_pick_place",
+            "state_location_reachability",
+        }
+        or value.get("allocation_label") != expected_allocation_label
         or value.get("motion_executed") is not False
         or not _is_sha256_value(fingerprint)
         or _fingerprint(payload) != fingerprint
     ):
-        raise GroundingContractError("PAContextGroundingCompletion v7 is invalid.")
+        raise GroundingContractError(f"{completion_label} is invalid.")
 
     pinned = (
         ("decision_ref", "decision_sha256", ("interaction_record",)),
@@ -3418,18 +3817,18 @@ def _load_pa_context_grounding_completion_v7(
         path = _completion_ref_path(root, ref, prefix=prefix)
         if value.get(sha_field) != _sha256_path(path):
             raise GroundingContractError(
-                f"PAContextGroundingCompletion v7 pinned {ref_field} changed."
+                f"{completion_label} pinned {ref_field} changed."
             )
         resolved[ref_field] = path
 
     for field in ("typed_context_refs", "tool_call_refs"):
         entries = value.get(field)
         if not isinstance(entries, list):
-            raise GroundingContractError(f"PAContextGroundingCompletion v7 {field} is invalid.")
+            raise GroundingContractError(f"{completion_label} {field} is invalid.")
         for item in entries:
             if not isinstance(item, Mapping) or set(item) != {"ref", "sha256"}:
                 raise GroundingContractError(
-                    f"PAContextGroundingCompletion v7 {field} entry is invalid."
+                    f"{completion_label} {field} entry is invalid."
                 )
             ref = _required_string(item.get("ref"), f"{field}.ref")
             path = _completion_ref_path(
@@ -3439,12 +3838,12 @@ def _load_pa_context_grounding_completion_v7(
             )
             if item.get("sha256") != _sha256_path(path):
                 raise GroundingContractError(
-                    f"PAContextGroundingCompletion v7 {field} changed."
+                    f"{completion_label} {field} changed."
                 )
     source_refs = value.get("source_refs")
     if not isinstance(source_refs, list):
         raise GroundingContractError(
-            "PAContextGroundingCompletion v7 source_refs are invalid."
+            f"{completion_label} source_refs are invalid."
         )
     product_requirement = _required_string(
         value.get("product_requirement"),
@@ -3453,7 +3852,7 @@ def _load_pa_context_grounding_completion_v7(
     for item in source_refs:
         if not isinstance(item, Mapping) or set(item) != {"ref", "sha256"}:
             raise GroundingContractError(
-                "PAContextGroundingCompletion v7 source ref is invalid."
+                f"{completion_label} source ref is invalid."
             )
         source_ref = _required_string(item.get("ref"), "source_ref")
         if item.get("sha256") != _native_source_hash(
@@ -3462,12 +3861,12 @@ def _load_pa_context_grounding_completion_v7(
             product_requirement=product_requirement,
         ):
             raise GroundingContractError(
-                "PAContextGroundingCompletion v7 source evidence changed."
+                f"{completion_label} source evidence changed."
             )
 
     projection = _read_json_mapping(
         resolved["ontology_projection_ref"],
-        "OntologyGroundingProposal v9",
+        proposal_label,
     )
     selection = _read_json_mapping(
         resolved["resource_selection_ref"],
@@ -3481,23 +3880,32 @@ def _load_pa_context_grounding_completion_v7(
         resolved["robot_agent_validation_ref"],
         "PlanOnlyFeasibilityValidationRecord v4",
     )
+    expected_reachability_schema = (
+        3 if validation_scope == "cartesian_pick_place" else 4
+    )
+    expected_validation_schema = expected_reachability_schema
+    expected_request_fingerprint = (
+        reachability.get("request_fingerprint")
+        if validation_scope == "cartesian_pick_place"
+        else value.get("reachability_check_fingerprint")
+    )
     if (
-        projection.get("schema_version") != 9
+        projection.get("schema_version") != proposal_schema_version
         or projection.get("status") != "accepted"
         or selection.get("schema_version") != 5
         or selection.get("allocation_status") != "accepted"
-        or reachability.get("schema_version") != 4
+        or reachability.get("schema_version") != expected_reachability_schema
         or reachability.get("status") != "accepted"
-        or validation.get("schema_version") != 4
+        or validation.get("schema_version") != expected_validation_schema
         or validation.get("status") != "accepted"
+        or validation.get("validation_scope") != validation_scope
         or selection.get("process_iri") != value.get("process_iri")
         or selection.get("feature_iri") != value.get("feature_iri")
         or reachability.get("resource_iri") != selection.get("selected_resource_iri")
-        or validation.get("request_fingerprint")
-        != value.get("reachability_check_fingerprint")
+        or validation.get("request_fingerprint") != expected_request_fingerprint
     ):
         raise GroundingContractError(
-            "PAContextGroundingCompletion v7 decision lineage is inconsistent."
+            f"{completion_label} decision lineage is inconsistent."
         )
     final_view = _latest_product_context_view(root)
     if (
@@ -3506,9 +3914,18 @@ def _load_pa_context_grounding_completion_v7(
         or final_view.abox_fingerprint != value.get("abox_fingerprint")
     ):
         raise GroundingContractError(
-            "PAContextGroundingCompletion v7 final context is inconsistent."
+            f"{completion_label} final context is inconsistent."
         )
-    return PAContextGroundingCompletionV7(record=dict(value))
+    if completion_schema_version == 8 and value.get("process_symbol") == "assembly":
+        output = _required_mapping(projection.get("output"), "proposal output")
+        target_feature = _required_mapping(output.get("target_feature"), "target_feature")
+        _validate_proposal_bound_state_locations(
+            root,
+            target_feature=target_feature,
+            product_context=final_view,
+            selection=selection,
+        )
+    return dict(value)
 
 
 def _load_pa_context_grounding_completion_v6(  # noqa: C901

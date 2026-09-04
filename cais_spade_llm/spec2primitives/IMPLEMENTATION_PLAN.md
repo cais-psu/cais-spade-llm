@@ -27,8 +27,10 @@ phase schedule.
 implemented boundary includes Phase 4.0 ontology context, Phase 4.1 document
 evidence, Phase 4.2 CAD/RGB-D preprocessing, segmentation, neutral measurement,
 camera-frame pose estimation, and frame conversion, Phase 4.3 typed records, and
-Phase 4.4 PA-authored single-target-feature grounding plus independent
-state-location/resource assignment.
+Phase 4.4 PA-authored single-target-feature grounding plus resource assignment.
+For the configured `assembly` process, the PA-authored target now includes one
+two-endpoint `assembly_feature_association`; its state-value bindings are the
+authority for current and desired allocation locations.
 
 **Phase 5.1 is implemented as a contract-first assigned-RA activation and
 context-snapshot boundary.** It produces the minimum verified assignment
@@ -45,9 +47,10 @@ assignment, state, and catalog and appends one immutable
 `PrimitiveProgramDraft` per context pair. Parameter binding, missing-context
 requests, feasibility validation, and execution remain later steps.
 
-Phase 4 completion means PA has grounded both feature states, selected one or
-more location handles for each state and a capable resource, and cited accepted
-hash-pinned reachability for every submitted location. It does not claim
+Phase 4 completion means PA has grounded both feature states, selected location
+evidence and a capable resource, and cited accepted hash-pinned validation. In
+simulation that validation is a live collision-aware Cartesian pick/place plan;
+there is no manifest workspace fallback. It does not claim
 grasping, insertion, cross-camera fusion, activation of an orientation-sensitive
 consumer, primitive parameter binding, motion execution, or an observed
 manufacturing outcome.
@@ -61,10 +64,11 @@ blank UI requirement input
 → PA optionally calls retrieve(evidence_id) multiple times
 → return typed evidence into the same PA conversation
 → PA directly returns one complete target_feature proposal or clarification
-→ validate structure, provenance, hashes, and ontology consistency once
-→ commit exactly seven target-feature assertions
-→ expose all capable resources and neutral location handles in a second PA call
-→ let PA call check_reachability for its selected resource and location lists
+→ for assembly, PA authors the two mating endpoints and binds one to each state
+→ validate structure, provenance, state-location bindings, hashes, and ontology consistency once
+→ commit 19 assembly proposal assertions or seven base proposal assertions
+→ expose all capable resources in a second PA call
+→ let PA call check_reachability for its selected resource and proposal-bound assembly locations
 → PA returns one resource backed by its cited accepted reachability result
 → validate the unchanged selection once, without substitution or feedback
 → commit exactly four processExecution/resource assertions
@@ -127,14 +131,15 @@ neither tool ranks or labels candidates.
 When PA invokes `check_reachability`, any submitted segmentation candidate plus
 approved calibration creates a neutral `RobotFrameLocationRecord` version 2
 translated into the common resource frame. The allocation request supplies its
-current or desired meaning. `CADPoseEstimationRecord` remains available only for
-an orientation-sensitive consumer.
+current or desired meaning. For `assembly`, that meaning must already be present
+in the accepted endpoint state-value binding. `CADPoseEstimationRecord` remains
+available only for an orientation-sensitive consumer.
 
 ## Ontology proposal
 
-New runs write `OntologyGroundingProposal` version 9 containing exactly one
+New runs write `OntologyGroundingProposal` version 10 containing exactly one
 model-authored `target_feature`. This increment supports one requirement and one
-feature. The exact active payload is:
+feature. The base payload is:
 
 ```json
 {
@@ -171,16 +176,23 @@ feature. The exact active payload is:
 ```
 
 PA chooses the process, both state statements, zero/one/many state values,
-semantic names, record refs, field paths, and citations from retrieved evidence. The
-host does not deterministically fill those values. It validates the authorized
-process, every citation, accepted typed bindings, exact hashes, JSON Pointer
-resolution, nonempty values, and unique names.
+semantic names, record refs, field paths, and citations from retrieved evidence.
+For `assembly`, PA also authors one `assembly_feature_association`, its
+`Assembly`, two distinct `AssemblyFeature` endpoints and owners, and which
+coordinate-bearing state value belongs to each endpoint. The host does not
+deterministically fill those values. It validates the authorized process, every
+citation, accepted typed bindings, exact hashes, JSON Pointer resolution,
+nonempty values, unique names, distinct endpoint roles, and exact
+proposal/allocation agreement. The full shape and medium-gear example are in
+[`ASSEMBLY_ONTOLOGY.md`](ASSEMBLY_ONTOLOGY.md).
 
 The host generates `feature_0001`, `currentstate_0001`, and
 `desiredstate_0001`. It compiles their exact types, `ppr:hascurrentstate` and
 `ppr:hasdesiredstate` links, `specification ppr:defines feature_0001`, and the
 selected process `ppr:realizes feature_0001`. The authored state semantics
-remain in the accepted proposal.
+remain in the accepted proposal. An assembly proposal additionally creates its
+`Assembly`, owners, two `AssemblyFeature` individuals, and association for 19
+proposal assertions total.
 
 This is schema-constrained, evidence-backed instance grounding under the input
 PPR TBox. It is not independent ontology-schema discovery.
@@ -191,10 +203,10 @@ provenance, record hashes, JSON Pointers, and ontology consistency. There is no
 semantic-review call, readiness contract, or controller-authored correction
 loop. A malformed final response fails without answer-shaping feedback.
 
-After the seven target-feature assertions are committed, the grounded feature,
+After the proposal assertions are committed, the grounded feature,
 both states, required process, and unresolved `processExecution` activate the
-independent allocation decision. Typed numeric geometry remains outside RDF and
-is derived only for location handles PA submits to reachability.
+resource decision. For assembly, accepted endpoint state values fix the location
+handles submitted to reachability. Typed numeric geometry remains outside RDF.
 
 ## Resource grounding
 
@@ -204,25 +216,30 @@ from this profile and PPR graph relations. Product names, CAD filenames,
 modality branches, and task-support flags do not route selection.
 
 The grounded feature, `currentstate`, `desiredstate`, required process, and
-unresolved `processExecution` activate allocation directly. PA receives every
-capable resource and every neutral location handle, then chooses a resource and
-one or more handles for each state. Controlled `check_reachability` reports each
-submitted location independently without selecting a robot. A
-`ReachabilityCheckRecord` v4 and `ResourceSelectionRecord` v5 pin the unchanged
-PA request and result. Any capable resource that reaches all cited locations is
-valid; rejection ends the stage without substitution or corrective re-prompting.
+unresolved `processExecution` activate allocation directly. For `assembly`, PA
+receives every capable resource while the accepted proposal supplies the exact
+current and desired handles; PA chooses the resource. Other configured processes
+retain neutral location selection. Controlled `check_reachability` never selects
+a robot. In simulation it requires one current location, one desired location,
+their CAD comparison records, and the selected RobotAgent's live collision-aware
+MoveIt Cartesian result. It does not use `workspace_bounds` or `gripper_reach`
+as a fallback or veto. Physical mode retains the conservative state-location
+precheck. Cartesian `ReachabilityCheckRecord` v3 or physical v4 and
+`ResourceSelectionRecord` v5 pin the unchanged PA request and result. Rejection
+ends the stage without substitution or corrective re-prompting.
 
 ## Completion and UI
 
-New runs write session-free `PAContextGroundingCompletion` version 7. It pins
-the direct PA decisions, accepted v9 proposal, selected process, both state
+New runs write session-free `PAContextGroundingCompletion` version 8. It pins
+the direct PA decisions, accepted v10 proposal, selected process, both state
 IRIs, nested evidence, both presentation records, registry/workcell snapshots,
-referenced typed records, source authority, tool audits, v4 reachability, exact
-RobotAgent validation, v5 resource selection, assignment delta, and final ABox.
+referenced typed records, source authority, tool audits, the applicable exact
+RobotAgent reachability validation, v5 resource selection, assignment delta,
+and final ABox.
 It neither creates a new `TypedGroundingContract` nor copies `target_feature`;
-consumers reconstruct the target from the pinned proposal. Historical v4-v6
-completion records remain readable and are not migrated. New Phase 5 handoff
-accepts completion v7 while preserving its historical readers.
+consumers reconstruct the target from the pinned proposal. Completion v7 and
+earlier supported versions remain readable and are not migrated. Completion v7
+is audit-only for the current Phase 5 path; rerun Phase 4 to produce v8.
 
 A completed UI timeline contains exactly:
 
@@ -240,6 +257,10 @@ record for audit. Completion is labeled validated state-location allocation and
 does not claim grasp feasibility, end-effector orientation, attached-object
 geometry, process tolerance, force/contact, insertion feasibility, completed
 manufacturing, parameter bindings, or motion execution.
+
+Current and desired images are rendered from the exact records PA assigned to
+those roles. The host resolves and annotates those immutable records; it does
+not assign an image role from a camera name, candidate order, or product rule.
 
 The same page contains an always-visible temporary **Phase 5 · RobotAgent
 Diagnostics** card. Its current **5.1 · Assigned RA activation and context
@@ -265,8 +286,8 @@ card.
 
 ## Implemented Phase 5.1 assigned-RA context handoff
 
-`activate_selected_ra_context(...)` loads and verifies one version-4
-`PAContextGroundingCompletion`, its version-2 `ResourceSelectionRecord`, and the
+`activate_selected_ra_context(...)` loads and verifies one version-8
+`PAContextGroundingCompletion`, its version-5 `ResourceSelectionRecord`, and the
 exact `resource_grounding_host` assignment delta. It persists one immutable
 `SelectedRAAssignmentEnvelope` containing the requirement, semantic feature IRIs,
 exact selected resource identity and execution mode, and pinned Phase 4 record
@@ -307,7 +328,8 @@ a reconstructed `target_feature`, selected resource, completion-consistent
 post-assignment ontology assertions and TBox/ABox fingerprints, current robot
 state, complete primitive catalog, and typed-record identities. The target
 feature contains the requirement, specification and host-generated feature
-IRIs, PA-authored required process and desired state, and bounded resolved-value
+IRIs, PA-authored required process, current and desired states,
+`assembly_feature_association` when present, and bounded resolved-value
 projections for referenced state values. There is no top-level `task` section.
 
 Before contacting the RA, the host reloads the hash-pinned proposal and typed
@@ -348,18 +370,18 @@ target feature; reconstruction follows its pinned completion.
 - future RA `MissingContextBatch → PA producers/clarification →
   CompositionContextBundle`;
 - deterministic parameter-binding preflight and fully bound `primitive_steps`;
-- multi-feature requirements;
+- multiple associations in one Phase 4 proposal;
 - orientation-sensitive manipulation requirements beyond the two selected
   state locations;
 - primitive-level validation, execution, and outcome validation;
-- public API, `SystemBridge`, PPR TBox, or persisted-record migration.
+- public API, `SystemBridge`, or persisted-record migration.
 
 The architecture intentionally has no `TargetFeatureGeometryRecord`. PA
 dynamically retrieves approved evidence and assigns neutral observations to
-both feature states. Calibration and numeric locations are derived on demand by
-the verifier, never supplied as the predetermined target answer. No retrieval
-or resource order is prescribed, and absent orientation/tolerance evidence is
-not silently inferred.
+both feature states. For `assembly`, those endpoint assignments determine which
+locations the verifier derives through calibration. They are never supplied as
+the predetermined target answer. No retrieval or resource order is prescribed,
+and absent orientation/tolerance evidence is not silently inferred.
 
 The future RA binding preflight will examine only the required inputs declared
 by exact primitives selected in the RA-authored `PrimitiveProgramDraft`. An

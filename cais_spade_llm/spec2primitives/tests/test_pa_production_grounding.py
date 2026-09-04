@@ -488,8 +488,16 @@ class _SequencedProductAgent(_ToolUsingProductAgent):
 
 
 class _TwoStageAllocationAgent:
-    def __init__(self, resource_symbol: str) -> None:
+    def __init__(
+        self,
+        resource_symbol: str,
+        *,
+        current_ref: str,
+        desired_ref: str,
+    ) -> None:
         self.resource_symbol = resource_symbol
+        self.current_ref = current_ref
+        self.desired_ref = desired_ref
         self.calls: list[dict[str, object]] = []
 
     async def ask_llm_structured(
@@ -511,34 +519,26 @@ class _TwoStageAllocationAgent:
             }
         )
         if response_format["name"] == "spec2primitives_grounding_result":
-            return {"result": _proposal("requirement_0001")}
+            return {
+                "result": _assembly_proposal(
+                    "requirement_0001",
+                    current_ref=self.current_ref,
+                    desired_ref=self.desired_ref,
+                )
+            }
         assert response_format["name"] == "spec2primitives_pa_resource_allocation"
         assert tool_executor is not None and tools is not None
         parameters = tools[0]["function"]["parameters"]
-        assert set(parameters["properties"]) == {
-            "resource_symbol",
-            "state_locations",
-        }
-        location_handles = parameters["properties"]["state_locations"]["properties"][
-            "current_state"
-        ]["items"]["enum"]
-        assert len(location_handles) >= 2
-        state_locations = {
-            "current_state": [location_handles[0]],
-            "desired_state": [location_handles[1]],
-        }
+        assert set(parameters["properties"]) == {"resource_symbol"}
         reachability = await tool_executor(
             "check_reachability",
-            {
-                "resource_symbol": self.resource_symbol,
-                "state_locations": state_locations,
-            },
+            {"resource_symbol": self.resource_symbol},
         )
-        assert reachability["status"] == "accepted"
+        if reachability["status"] != "accepted":
+            return {"result": {"no_reachable_resource": True}}
         return {
             "result": {
                 "resource_symbol": self.resource_symbol,
-                "state_locations": state_locations,
                 "reachability_check_ref": reachability["reachability_check_ref"],
             }
         }
@@ -572,6 +572,130 @@ class _AcceptingStateLocationFeasibility:
         }
 
 
+def test_simulation_allocation_uses_cartesian_validation_without_static_precheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_path = tmp_path / "current_location.json"
+    desired_path = tmp_path / "desired_location.json"
+    current_path.write_text("{}", encoding="utf-8")
+    desired_path.write_text("{}", encoding="utf-8")
+    current_comparison = tmp_path / "current_comparison.json"
+    desired_comparison = tmp_path / "desired_comparison.json"
+    current_comparison.write_text("{}", encoding="utf-8")
+    desired_comparison.write_text("{}", encoding="utf-8")
+    entries = {
+        handle: AllocationEvidenceEntry(
+            pa_handle=handle,
+            canonical_key=f"{path.name}#/translated_location_m",
+            record_type="RobotFrameLocationRecord",
+            record_ref=path.relative_to(tmp_path).as_posix(),
+            record_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            field_path="/translated_location_m",
+            observation_handle=None,
+            candidate_handle=None,
+            source_frame="world",
+            neutral_projection={"location_record_available": True},
+        )
+        for handle, path in (
+            ("current_handle", current_path),
+            ("desired_handle", desired_path),
+        )
+    }
+    presentation = SimpleNamespace(
+        assert_unchanged=lambda: None,
+        evidence_for_handle=lambda handle: entries[handle],
+    )
+    investigation = SimpleNamespace(
+        presentation=SimpleNamespace(entries=()),
+        tool_call_refs=[],
+    )
+    validation_path = tmp_path / "resources/xarm6@localhost/validation/record.json"
+    validation_path.parent.mkdir(parents=True)
+    validation_path.write_text("{}", encoding="utf-8")
+    reachability_path = tmp_path / "products/grounding/reachability/record.json"
+    reachability_path.parent.mkdir(parents=True)
+    reachability_path.write_text("{}", encoding="utf-8")
+    prepared = object()
+    captured: dict[str, object] = {}
+
+    def prepare(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return prepared
+
+    async def validate(_runtime: object, **kwargs: object) -> SimpleNamespace:
+        assert kwargs["reachability"] is prepared
+        return SimpleNamespace(
+            record_path=validation_path,
+            status="accepted",
+            validation_number=1,
+        )
+
+    def persist(**kwargs: object) -> SimpleNamespace:
+        assert kwargs["robot_agent_validation_path"] == validation_path
+        return SimpleNamespace(
+            check_number=1,
+            resource_symbol="xarm6",
+            status="accepted",
+            schema_version=3,
+            record_ref=reachability_path.relative_to(tmp_path).as_posix(),
+            record_path=reachability_path,
+        )
+
+    monkeypatch.setattr(
+        production_grounding,
+        "candidate_resource_catalog",
+        lambda *_args: {
+            "xarm6": {
+                "resource_iri": "urn:resource:xarm6",
+                "resource_jid": "xarm6@localhost",
+                "execution_mode": "simulation",
+            }
+        },
+    )
+    monkeypatch.setattr(production_grounding, "prepare_cartesian_reachability", prepare)
+    monkeypatch.setattr(production_grounding, "validate_provisional_allocation", validate)
+    monkeypatch.setattr(production_grounding, "persist_cartesian_reachability", persist)
+    monkeypatch.setattr(
+        production_grounding,
+        "check_resource_reachability",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("static reachability must not run in simulation")
+        ),
+    )
+    monkeypatch.setattr(production_grounding, "_assert_blinded_pa_projection", lambda *_: None)
+
+    allocation = production_grounding._PAAllocationInvestigation(
+        runtime=SimpleNamespace(
+            _registry=object(),
+            _workcell=object(),
+            _robot_agent_feasibility_runtime=object(),
+        ),
+        investigation=investigation,
+        interaction_root=tmp_path,
+        tbox=object(),
+        abox=object(),
+        view=object(),
+        allocation_presentation=presentation,
+        target_frame="world",
+        fixed_state_locations={
+            "current_state": ("current_handle",),
+            "desired_state": ("desired_handle",),
+        },
+        current_cad_correspondence_path=current_comparison,
+        desired_cad_correspondence_path=desired_comparison,
+    )
+
+    result = asyncio.run(
+        allocation.execute("check_reachability", {"resource_symbol": "xarm6"})
+    )
+
+    assert result["status"] == "accepted"
+    assert "manifest_reachable" not in json.dumps(result)
+    assert captured["current_cad_correspondence_record_path"] == current_comparison
+    assert captured["desired_cad_correspondence_record_path"] == desired_comparison
+
+
 @pytest.mark.parametrize(
     "retrieve_order",
     [
@@ -592,6 +716,8 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
     workcell = load_predefined_workcell(tbox, registry)
     authorized = {"requirement_0001"}
     calls: list[str] = []
+    current_ref = "products/grounding/test/current_location.json"
+    desired_ref = "products/grounding/test/desired_location.json"
 
     async def retrieve(
         tool_name: str,
@@ -604,7 +730,29 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         authorized.add(evidence_ref)
         return {"evidence_refs": [evidence_ref], "record_refs": [evidence_ref]}
 
-    agent = _ToolUsingProductAgent(retrieve_order=retrieve_order)
+    agent = _ToolUsingProductAgent(
+        retrieve_order=retrieve_order,
+        final_result=_assembly_proposal(
+            "requirement_0001",
+            current_ref=current_ref,
+            desired_ref=desired_ref,
+        ),
+    )
+
+    def resolve_location(record_ref: str) -> Mapping[str, object]:
+        assert record_ref in {current_ref, desired_ref}
+        return {
+            "record_type": "RobotFrameLocationRecord",
+            "record_sha256": "a" * 64,
+            "record": {
+                "translated_location_m": (
+                    [0.0, -0.7, 1.1]
+                    if record_ref == current_ref
+                    else [0.0, -0.2, 1.1]
+                )
+            },
+        }
+
     result = asyncio.run(
         propose_and_validate_ontology_grounding(
             agent,
@@ -632,6 +780,7 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
             ],
             tool_executor=retrieve,
             max_tool_rounds=12,
+            typed_record_resolver=resolve_location,
         )
     )
 
@@ -654,14 +803,31 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
     feature = URIRef(f"{abox.namespace}feature_0001")
     currentstate = URIRef(f"{abox.namespace}currentstate_0001")
     desiredstate = URIRef(f"{abox.namespace}desiredstate_0001")
+    assembly = URIRef(f"{abox.namespace}assembly_0001")
+    part = URIRef(f"{abox.namespace}part_0001")
+    receiving_assembly = URIRef(f"{abox.namespace}assembly_0002")
+    current_feature = URIRef(f"{abox.namespace}assemblyfeature_0001")
+    desired_feature = URIRef(f"{abox.namespace}assemblyfeature_0002")
     assert set(committed.merge.abox.graph) - set(abox.graph) == {
-        (feature, RDF.type, ppr.feature),
+        (feature, RDF.type, ppr.AssemblyFeatureAssociation),
         (URIRef(abox.specification_iri), ppr.defines, feature),
         (URIRef(workcell.processes[0][1]), ppr.realizes, feature),
         (currentstate, RDF.type, ppr.state),
         (desiredstate, RDF.type, ppr.state),
         (feature, ppr.hascurrentstate, currentstate),
         (feature, ppr.hasdesiredstate, desiredstate),
+        (assembly, RDF.type, ppr.Assembly),
+        (part, RDF.type, ppr.Part),
+        (assembly, ppr.hasPart, part),
+        (current_feature, RDF.type, ppr.AssemblyFeature),
+        (part, ppr.hasAssemblyFeature, current_feature),
+        (feature, ppr.relatesAssemblyFeature, current_feature),
+        (receiving_assembly, RDF.type, ppr.Assembly),
+        (assembly, ppr.hasPart, receiving_assembly),
+        (desired_feature, RDF.type, ppr.AssemblyFeature),
+        (receiving_assembly, ppr.hasAssemblyFeature, desired_feature),
+        (feature, ppr.relatesAssemblyFeature, desired_feature),
+        (assembly, ppr.hasAssemblyFeatureAssociation, feature),
     }
     call = agent.calls[0]
     assert call["response_format"]["name"] == "spec2primitives_grounding_result"
@@ -682,6 +848,7 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         "required_process",
         "current_state",
         "desired_state",
+        "assembly_feature_association",
     }
     required_process_schema = target_schema["properties"]["required_process"]
     assert required_process_schema["properties"]["process_iri"]["enum"] == [
@@ -709,7 +876,8 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         '"missing_information"',
     ):
         assert removed_protocol not in serialized
-    assert "resource locations" in str(call["prompt"])
+    assert "assembly_feature_association" in str(call["prompt"])
+    assert "You choose the endpoint meanings and exact evidence" in str(call["prompt"])
 
 
 def test_direct_clarification_stops_without_proposal(tmp_path: Path) -> None:
@@ -801,7 +969,13 @@ def test_target_feature_supports_zero_one_or_multiple_state_values(
         tbox,
         load_predefined_resource_registry(tbox),
     )
-    proposal = _proposal("requirement_0001")
+    current_location_ref = "products/grounding/test/current_location.json"
+    desired_location_ref = "products/grounding/test/desired_location.json"
+    proposal = _assembly_proposal(
+        "requirement_0001",
+        current_ref=current_location_ref,
+        desired_ref=desired_location_ref,
+    )
     values = [
         {
             "name": name,
@@ -816,10 +990,16 @@ def test_target_feature_supports_zero_one_or_multiple_state_values(
             ("specified_coating", "coating"),
         )[:state_value_count]
     ]
-    proposal["target_feature"][state_name]["state_values"] = values
+    proposal["target_feature"][state_name]["state_values"].extend(values)
     exact_record = {state_name: {"finish": "matte", "coating": "primer"}}
 
     def resolver(record_ref: str) -> Mapping[str, object]:
+        if record_ref in {current_location_ref, desired_location_ref}:
+            return {
+                "record_type": "RobotFrameLocationRecord",
+                "record_sha256": "b" * 64,
+                "record": {"translated_location_m": [0.0, 0.0, 0.0]},
+            }
         assert record_ref == "products/grounding/test/specification.json"
         return {
             "record_type": "DocumentOverviewRecord",
@@ -845,10 +1025,15 @@ def test_target_feature_supports_zero_one_or_multiple_state_values(
 
     assert isinstance(result, OntologyGroundingCandidate)
     assert result.output == proposal
-    assert len(result.proposal.resolved_state_values) == state_value_count
+    assert len(result.proposal.resolved_state_values) == state_value_count + 2
     if state_value_count == 2:
-        assert {item["state"] for item in result.proposal.resolved_state_values} == {state_name}
-        assert [item["resolved_value"] for item in result.proposal.resolved_state_values] == [
+        authored_values = [
+            item
+            for item in result.proposal.resolved_state_values
+            if item["record_type"] == "DocumentOverviewRecord"
+        ]
+        assert {item["state"] for item in authored_values} == {state_name}
+        assert [item["resolved_value"] for item in authored_values] == [
             "matte",
             "primer",
         ]
@@ -938,7 +1123,7 @@ def test_invalid_target_feature_fails_before_commit(
             encoding="utf-8"
         )
     )
-    assert rejected["schema_version"] == 9
+    assert rejected["schema_version"] == 10
     assert rejected["status"] == "rejected"
 
 
@@ -2337,8 +2522,9 @@ def _allocation_entry(
     )
 
 
-def test_two_autonomous_pa_decisions_commit_exactly_eleven_assertions(
+def test_simulation_allocation_without_cartesian_evidence_fails_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
@@ -2386,7 +2572,16 @@ def test_two_autonomous_pa_decisions_commit_exactly_eleven_assertions(
         document_vision_runtime=_NoDocumentVision(),
         robot_agent_feasibility_runtime=feasibility,
     )
-    agent = _TwoStageAllocationAgent("xarm6")
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_pa_reference",
+        lambda _self, pa_ref: pa_ref,
+    )
+    agent = _TwoStageAllocationAgent(
+        "xarm6",
+        current_ref=current_ref,
+        desired_ref=desired_ref,
+    )
 
     result = asyncio.run(
         runtime.ground_product_context(
@@ -2399,30 +2594,18 @@ def test_two_autonomous_pa_decisions_commit_exactly_eleven_assertions(
         )
     )
 
-    assert result["grounding_status"] == "complete"
-    assert result["resource_assignment_status"] == "complete"
+    assert result["grounding_status"] == "incomplete"
+    assert result["grounding_validation_code"] == "no_reachable_resource"
     assert len(agent.calls) == 2
-    assert len(feasibility.requests) == 1
-    assert feasibility.requests[0]["validation_scope"] == (
-        "state_location_reachability"
-    )
+    assert feasibility.requests == []
     final_abox = load_interaction_abox(root, tbox)
     assert initial_abox.accepted_assertion_count == 0
-    assert final_abox.accepted_assertion_count == 11
+    assert final_abox.accepted_assertion_count == 19
     proposal = json.loads((root / str(result["ontology_projection_ref"])).read_text())
-    selection = json.loads((root / str(result["resource_selection_ref"])).read_text())
-    reachability = json.loads(
-        (root / str(selection["reachability_check_ref"])).read_text()
-    )
-    assert proposal["schema_version"] == 9
-    assert len(proposal["compiled_delta"]["assertions"]) == 7
-    assert selection["schema_version"] == 5
-    assert selection["selected_resource_symbol"] == "xarm6"
-    assert reachability["schema_version"] == 4
-    assert all(
-        reachability["state_locations"][state_name]
-        for state_name in ("current_state", "desired_state")
-    )
+    assert proposal["schema_version"] == 10
+    assert len(proposal["compiled_delta"]["assertions"]) == 19
+    assert not (root / "products/grounding/reachability").exists()
+    assert not (root / "products/grounding/resource_selection").exists()
     allocation_contract = json.dumps(
         {
             "response_format": agent.calls[1]["response_format"],
@@ -2431,6 +2614,7 @@ def test_two_autonomous_pa_decisions_commit_exactly_eleven_assertions(
     ).casefold()
     assert "uniqueitems" not in allocation_contract
     assert '"enum": [true]' not in allocation_contract
+    assert '"state_locations"' not in allocation_contract
     allocation_prompt = str(agent.calls[1]["prompt"])
     assert "translated_location_m" in allocation_prompt
     assert "expected_resource" not in allocation_prompt
@@ -2464,9 +2648,9 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
     )
 
     assert result["grounding_status"] == "incomplete"
-    assert result["grounding_stage"] == "resource_assignment"
-    assert result["grounding_validation_code"] == "location_evidence_unavailable"
-    assert isinstance(result["ontology_projection_ref"], str)
+    assert result["grounding_stage"] == "target_feature"
+    assert result["grounding_validation_code"] == "invalid_target_feature"
+    assert "ontology_projection_ref" not in result
     assert len(agent.calls) == 1
     assert agent.review_calls == []
     first_input = json.loads(str(agent.calls[0]["prompt"]).split("Grounding input:\n", 1)[1])
@@ -2474,9 +2658,16 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
         "cardinality": "exactly_one",
         "state_value_cardinality": "zero_or_more",
         "value_names": "PA_authored_without_host_enum",
+        "assembly_process": {
+            "process_symbol": "assembly",
+            "association_cardinality": "exactly_one",
+            "assembly_feature_cardinality": "exactly_two",
+            "state_location_binding": "one_current_and_one_desired",
+        },
     }
-    assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
-    assert (root / str(result["ontology_projection_ref"])).is_file()
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
+    rejected = root / "products/grounding/ontology_grounding/proposal_0001.json"
+    assert json.loads(rejected.read_text(encoding="utf-8"))["status"] == "rejected"
     assert not (
         root / "products/grounding/presentation/allocation_presentation_record.json"
     ).exists()
@@ -2484,16 +2675,57 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
 
 def test_supported_current_statement_does_not_require_unlisted_physical_relations(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
-    abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
+    initialize_interaction_abox(root, "assemble medium gear", tbox)
+    current_path, current_source = _write_neutral_location(
+        root,
+        "current",
+        (0.0, -0.7, 1.1),
+    )
+    desired_path, desired_source = _write_neutral_location(
+        root,
+        "desired",
+        (0.0, -0.2, 1.1),
+    )
+    current_ref = current_path.relative_to(root).as_posix()
+    desired_ref = desired_path.relative_to(root).as_posix()
+    validate_and_merge_triple_delta(
+        root,
+        tbox,
+        "neutral_test_location_provider",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [current_ref],
+        },
+        authorized_evidence_refs={current_source},
+    )
+    locations = validate_and_merge_triple_delta(
+        root,
+        tbox,
+        "neutral_test_location_provider",
+        {
+            "assertions": [],
+            "uncertainty": [],
+            "unresolved_evidence_needs": [],
+            "typed_context_refs": [desired_ref],
+        },
+        authorized_evidence_refs={desired_source},
+    )
     runtime = ProductionProductContextGroundingRuntime(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
-    partial = _proposal("requirement_0001")
+    partial = _assembly_proposal(
+        "requirement_0001",
+        current_ref=current_ref,
+        desired_ref=desired_ref,
+    )
     target_feature = partial["target_feature"]
     assert isinstance(target_feature, dict)
     current_state = target_feature["current_state"]
@@ -2502,7 +2734,11 @@ def test_supported_current_statement_does_not_require_unlisted_physical_relation
         "text": "The observed candidate is the current product state.",
         "evidence_refs": ["requirement_0001"],
     }
-    current_state["state_values"] = []
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_pa_reference",
+        lambda _self, pa_ref: pa_ref,
+    )
     agent = _ToolUsingProductAgent(retrieve_order=(), final_result=partial)
 
     result = asyncio.run(
@@ -2510,16 +2746,16 @@ def test_supported_current_statement_does_not_require_unlisted_physical_relation
             agent,
             interaction_root=root,
             tbox=tbox,
-            abox=abox,
+            abox=locations.abox,
             product_context={},
             max_pa_turns=1,
         )
     )
 
     assert result["grounding_status"] == "incomplete"
-    assert result["grounding_validation_code"] == "location_evidence_unavailable"
+    assert result["grounding_validation_code"] == "invalid_resource_selection"
     assert agent.review_calls == []
-    assert load_interaction_abox(root, tbox).accepted_assertion_count == 7
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 19
     assert (root / str(result["ontology_projection_ref"])).is_file()
     prompt = str(agent.calls[0]["prompt"])
     assert "mounting" not in prompt
@@ -2584,6 +2820,29 @@ def test_cad_correspondence_failure_remains_incomplete(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    current_ref = "products/grounding/test/current_location.json"
+    desired_ref = "products/grounding/test/desired_location.json"
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_pa_reference",
+        lambda _self, pa_ref: pa_ref,
+    )
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_typed_record",
+        lambda _self, record_ref: {
+            "record_type": "RobotFrameLocationRecord",
+            "record_sha256": "a" * 64,
+            "record": {
+                "translated_location_m": (
+                    [0.0, -0.7, 1.1]
+                    if record_ref == current_ref
+                    else [0.0, -0.2, 1.1]
+                )
+            },
+        },
+    )
+
     def evidence_integrity(**kwargs: object) -> bool:
         del kwargs
         if failure_mode == "malformed":
@@ -2594,7 +2853,14 @@ def test_cad_correspondence_failure_remains_incomplete(
 
     result = asyncio.run(
         runtime.ground_product_context(
-            _ToolUsingProductAgent(retrieve_order=()),
+            _ToolUsingProductAgent(
+                retrieve_order=(),
+                final_result=_assembly_proposal(
+                    "requirement_0001",
+                    current_ref=current_ref,
+                    desired_ref=desired_ref,
+                ),
+            ),
             interaction_root=root,
             tbox=tbox,
             abox=abox,
@@ -2621,6 +2887,29 @@ def test_invalid_state_evidence_stops_before_review_and_allocation(
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
     )
+    current_ref = "products/grounding/test/current_location.json"
+    desired_ref = "products/grounding/test/desired_location.json"
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_pa_reference",
+        lambda _self, pa_ref: pa_ref,
+    )
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_typed_record",
+        lambda _self, record_ref: {
+            "record_type": "RobotFrameLocationRecord",
+            "record_sha256": "a" * 64,
+            "record": {
+                "translated_location_m": (
+                    [0.0, -0.7, 1.1]
+                    if record_ref == current_ref
+                    else [0.0, -0.2, 1.1]
+                )
+            },
+        },
+    )
+
     def reject_tampered_evidence(**kwargs: object) -> bool:
         del kwargs
         return False
@@ -2632,7 +2921,15 @@ def test_invalid_state_evidence_stops_before_review_and_allocation(
         raise AssertionError("Allocation must not run after ambiguous state evidence.")
 
     monkeypatch.setattr(runtime, "_complete_resource_assignment", unexpected_allocation)
-    agent = _SequencedProductAgent((_proposal("requirement_0001"),))
+    agent = _SequencedProductAgent(
+        (
+            _assembly_proposal(
+                "requirement_0001",
+                current_ref=current_ref,
+                desired_ref=desired_ref,
+            ),
+        )
+    )
 
     result = asyncio.run(
         runtime.ground_product_context(
@@ -2838,7 +3135,38 @@ def test_answered_clarification_uses_persisted_record_ref(
         sources=_approved_evidence_sources(),
     )
     presented_ref = presentation.opaque_reference(evidence_ref, kind="citation")
-    agent = _SequencedProductAgent((_proposal(presented_ref),))
+    current_ref = "products/grounding/test/current_location.json"
+    desired_ref = "products/grounding/test/desired_location.json"
+    agent = _SequencedProductAgent(
+        (
+            _assembly_proposal(
+                presented_ref,
+                current_ref=current_ref,
+                desired_ref=desired_ref,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_pa_reference",
+        lambda _self, pa_ref: evidence_ref if pa_ref == presented_ref else pa_ref,
+    )
+    monkeypatch.setattr(
+        _NativeEvidenceInvestigation,
+        "resolve_typed_record",
+        lambda _self, record_ref: {
+            "record_type": "RobotFrameLocationRecord",
+            "record_sha256": "a" * 64,
+            "record": {
+                "translated_location_m": (
+                    [0.0, -0.7, 1.1]
+                    if record_ref == current_ref
+                    else [0.0, -0.2, 1.1]
+                )
+            },
+        },
+    )
+    monkeypatch.setattr(runtime, "_proposal_evidence_is_intact", lambda **_kwargs: True)
 
     async def complete(**kwargs: object) -> Mapping[str, object]:
         del kwargs
@@ -2983,3 +3311,70 @@ def _proposal(evidence_ref: str) -> dict[str, object]:
             },
         }
     }
+
+
+def _assembly_proposal(
+    evidence_ref: str,
+    *,
+    current_ref: str,
+    desired_ref: str,
+) -> dict[str, object]:
+    proposal = _proposal(evidence_ref)
+    target_feature = proposal["target_feature"]
+    assert isinstance(target_feature, dict)
+    current_state = target_feature["current_state"]
+    desired_state = target_feature["desired_state"]
+    assert isinstance(current_state, dict)
+    assert isinstance(desired_state, dict)
+    current_state["state_values"] = [
+        {
+            "name": "observed_component_location",
+            "value_ref": {
+                "record_ref": current_ref,
+                "field_path": "/translated_location_m",
+            },
+            "evidence_refs": [evidence_ref],
+        }
+    ]
+    desired_state["state_values"] = [
+        {
+            "name": "desired_mating_location",
+            "value_ref": {
+                "record_ref": desired_ref,
+                "field_path": "/translated_location_m",
+            },
+            "evidence_refs": [evidence_ref],
+        }
+    ]
+    target_feature["assembly_feature_association"] = {
+        "assembly": {
+            "name": "requested_assembly",
+            "evidence_refs": [evidence_ref],
+        },
+        "assembly_features": [
+            {
+                "name": "moving_part_feature",
+                "owner": {
+                    "name": "moving_part",
+                    "type": "Part",
+                    "evidence_refs": [evidence_ref],
+                },
+                "state_name": "current_state",
+                "state_value_name": "observed_component_location",
+                "evidence_refs": [evidence_ref],
+            },
+            {
+                "name": "receiving_part_feature",
+                "owner": {
+                    "name": "receiving_part",
+                    "type": "Assembly",
+                    "evidence_refs": [evidence_ref],
+                },
+                "state_name": "desired_state",
+                "state_value_name": "desired_mating_location",
+                "evidence_refs": [evidence_ref],
+            },
+        ],
+        "evidence_refs": [evidence_ref],
+    }
+    return proposal

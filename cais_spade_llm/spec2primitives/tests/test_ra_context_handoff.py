@@ -551,9 +551,19 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
     assert target_feature["desired_state"]["statement"]["text"] == (
         "The medium gear is assembled as requested."
     )
-    assert target_feature["current_state"]["state_values"] == []
-    assert target_feature["desired_state"]["state_values"] == []
-    assert target_feature["resolved_state_values"] == []
+    assert target_feature["current_state"]["state_values"][0]["name"] == (
+        "medium_gear_location"
+    )
+    assert target_feature["desired_state"]["state_values"][0]["name"] == (
+        "assembly_board_shaft_location"
+    )
+    assert {
+        item["name"] for item in target_feature["resolved_state_values"]
+    } == {"medium_gear_location", "assembly_board_shaft_location"}
+    association = target_feature["assembly_feature_association"]
+    assert [
+        item["state_name"] for item in association["assembly_features"]
+    ] == ["current_state", "desired_state"]
     assert "task" not in composition_input
     assert all(
         set(record) == {"record_type", "record_ref"} for record in grounded_context["typed_records"]
@@ -610,6 +620,7 @@ def test_ra_receives_resolved_target_state_values_without_persisting_them(
     assert "task" not in composition_input
     target_feature = composition_input["target_feature"]
     assert [item["name"] for item in target_feature["desired_state"]["state_values"]] == [
+        "assembly_board_shaft_location",
         "specified_finish",
         "specified_coating",
     ]
@@ -1012,6 +1023,30 @@ def test_phase_5_1_diagnostic_waits_for_phase_4_then_reports_selected_ra(
     assert ready["selected_execution_mode"] == "simulation"
     assert ready["assignment_ref"] is None
     assert ready["primitive_count"] == 0
+
+
+def test_phase_5_1_rejects_audit_only_completion_v7_before_assignment(
+    tmp_path: Path,
+) -> None:
+    persist_native_completion_fixture(tmp_path)
+    completion_path = next((tmp_path / "interaction_record").glob("context_completion_*.json"))
+    completion = _read_json(completion_path)
+    proposal_path = tmp_path / str(completion["ontology_projection_ref"])
+    proposal = _read_json(proposal_path)
+    proposal["schema_version"] = 9
+    proposal["fingerprint"] = _record_fingerprint(proposal)
+    _write_json(proposal_path, proposal)
+    completion["schema_version"] = 7
+    completion["ontology_projection_sha256"] = hashlib.sha256(
+        proposal_path.read_bytes()
+    ).hexdigest()
+    completion["fingerprint"] = _record_fingerprint(completion)
+    _write_json(completion_path, completion)
+
+    with pytest.raises(RAContextHandoffError, match="version 7 is audit-only"):
+        asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+
+    assert not (tmp_path / "composition/selected_ra_assignments").exists()
 
 
 def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(

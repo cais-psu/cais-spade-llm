@@ -16,6 +16,29 @@
   <owl:Class rdf:about="#resource"/>
   <owl:Class rdf:about="#capability"/>
 
+  <owl:Class rdf:about="#Assembly">
+    <rdfs:subClassOf rdf:resource="#product"/>
+  </owl:Class>
+
+  <owl:Class rdf:about="#Part">
+    <rdfs:subClassOf rdf:resource="#product"/>
+  </owl:Class>
+
+  <owl:Class rdf:about="#AssemblyFeature">
+    <rdfs:subClassOf rdf:resource="#feature"/>
+  </owl:Class>
+
+  <owl:Class rdf:about="#AssemblyFeatureAssociation">
+    <rdfs:subClassOf rdf:resource="#feature"/>
+    <rdfs:subClassOf>
+      <owl:Restriction>
+        <owl:onProperty rdf:resource="#relatesAssemblyFeature"/>
+        <owl:onClass rdf:resource="#AssemblyFeature"/>
+        <owl:qualifiedCardinality rdf:datatype="http://www.w3.org/2001/XMLSchema#nonNegativeInteger">2</owl:qualifiedCardinality>
+      </owl:Restriction>
+    </rdfs:subClassOf>
+  </owl:Class>
+
   <owl:ObjectProperty rdf:about="#defines"/>
   <owl:ObjectProperty rdf:about="#realizes"/>
   <owl:ObjectProperty rdf:about="#capableOf"/>
@@ -47,6 +70,26 @@
     <rdf:type rdf:resource="http://www.w3.org/2002/07/owl#FunctionalProperty"/>
     <rdfs:domain rdf:resource="#processExecution"/>
     <rdfs:range rdf:resource="#resource"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#hasPart">
+    <rdfs:domain rdf:resource="#Assembly"/>
+    <rdfs:range rdf:resource="#product"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#hasAssemblyFeature">
+    <rdfs:domain rdf:resource="#product"/>
+    <rdfs:range rdf:resource="#AssemblyFeature"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#hasAssemblyFeatureAssociation">
+    <rdfs:domain rdf:resource="#Assembly"/>
+    <rdfs:range rdf:resource="#AssemblyFeatureAssociation"/>
+  </owl:ObjectProperty>
+
+  <owl:ObjectProperty rdf:about="#relatesAssemblyFeature">
+    <rdfs:domain rdf:resource="#AssemblyFeatureAssociation"/>
+    <rdfs:range rdf:resource="#AssemblyFeature"/>
   </owl:ObjectProperty>
 
 </rdf:RDF>
