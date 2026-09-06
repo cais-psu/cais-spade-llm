@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Preprocess approved CAD and RGB-D evidence into typed geometry records."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -217,7 +218,6 @@ def _preprocess_cad(
     )
     artifact_ref = _relative_ref(interaction_root, destination / artifact_name)
     record = {
-        "schema_version": 1,
         "record_type": "CADMeshRecord",
         "producer": _PRODUCER,
         "operation_number": operation_number,
@@ -342,7 +342,6 @@ def _preprocess_observation(
         artifact_names.append(artifact_name)
 
     record = {
-        "schema_version": 1,
         "record_type": "ColoredPointCloudSetRecord",
         "producer": _PRODUCER,
         "operation_number": operation_number,

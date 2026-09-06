@@ -1205,7 +1205,6 @@ def _projected_outline_validation_context(
             "reachable_locations",
             "known_locations",
             "staging_areas",
-            "workspace_bounds",
         ):
             if resource_row.get(key) not in (None, "", [], {}):
                 continue
@@ -1370,15 +1369,9 @@ def _finding_still_unresolved(
         current_observed_pose = deepcopy(part_row.get("observed_pose") or {})
         if checked_pose and current_observed_pose and checked_pose != current_observed_pose:
             return False
-        recorded_workspace = deepcopy(
-            evidence.get("workspace_bounds")
-            or finding.get("workspace_bounds")
-            or {}
-        )
-        current_workspace = deepcopy(resource_row.get("workspace_bounds") or {})
-        if recorded_workspace and current_workspace and recorded_workspace != current_workspace:
-            return False
-        return True
+        # A changed robot state or collision scene can change reachability even
+        # while the observed product pose is identical. Request a fresh check.
+        return False
 
     if constraint_code == "holder_conflict":
         if not part_name or not resource_jid:
@@ -1715,9 +1708,6 @@ def _current_candidate_state_signature(
                     or finding.get("pose")
                     or part_row.get("observed_pose")
                     or {}
-                ),
-                "workspace_bounds": deepcopy(
-                    finding.get("workspace_bounds") or resource_row.get("workspace_bounds") or {}
                 ),
             }
         )

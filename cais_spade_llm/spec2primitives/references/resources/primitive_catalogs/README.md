@@ -1,15 +1,7 @@
-# Primitive catalogs
+# Primitive catalog references
 
-Reserved for approved references to resource-owned primitive catalogs, divided
-by exact RA identifier. Do not copy a shared RobotAgent primitive catalog here
-or create a second authority.
+Primitive catalogs are owned by the exact selected RobotAgent and captured as paired Phase 5.1 state/catalog snapshots after current completion passes review/reachability recovery checks. Preserve exact symbols, order, typed parameters, results, limits and provenance; no fixed catalog cardinality is assumed.
 
-At runtime the selected RA remains authoritative for its complete current
-catalog snapshot and fingerprint. Catalog cardinality is runtime-determined;
-there is no eight-entry invariant. Preserve every primitive symbol exactly and
-never normalize, rename, replace, or silently filter an entry.
+Phase 5.2A authors an unbound structural `PrimitiveProgramDraft` using only current catalog symbols. Phase 4 arm assignment validates robot position plans, while primitive coverage, attached-part motion, grasping and execution feasibility remain unvalidated. Parameter binding, executable validation and execution remain future work.
 
-Phase 5.2A gives the selected RobotAgent LLM this exact snapshot with the
-reconstructed PA `target_feature`. The LLM alone proposes the symbol order;
-deterministic code checks exact membership and lineage without turning this
-reference directory into a recipe or second catalog authority.
+Do not supply completed task recipes or expected sequences through catalog metadata. See [RA behavior](../../../agents/ra/README.md) and [bias validation](../../../BIAS_VALIDATION.md).

@@ -1,8 +1,9 @@
-"""Run the evidence-first document stages in an isolated diagnostic ABox."""
-
 from __future__ import annotations
 
+"""Run the evidence-first document stages in an isolated diagnostic ABox."""
+
 import json
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -11,6 +12,10 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
+)
+from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+    build_product_context_view,
+    persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingError,
@@ -78,6 +83,10 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
     overview_stage: dict[str, object] | None = None
     proposal_stage: dict[str, object] | None = None
     try:
+        _write_record_if_absent(
+            root / "products/user_requirement/product_requirement.json",
+            {"product_requirement": product_requirement},
+        )
         tbox = ontology_config.load_tbox()
         abox = initialize_interaction_abox(root, product_requirement, tbox)
         resolved = resolve_context_ref({"context_ref": context_ref})
@@ -168,8 +177,14 @@ async def run_document_interpretation_diagnostic(  # noqa: PLR0913
             raise OntologyGroundingError(
                 f"Document diagnostic did not return a proposal: {candidate.message}"
             )
+        context_path = persist_product_context_view(
+            root, build_product_context_view(
+                root, overview_merge.abox, attempted_evidence=(), assessed_at_ns=time.time_ns()
+            )
+        )
         proposal = commit_ontology_grounding_candidate(
             candidate,
+            context_view_ref=context_path.relative_to(root).as_posix(),
             interaction_root=root,
             tbox=tbox,
             abox=overview_merge.abox,

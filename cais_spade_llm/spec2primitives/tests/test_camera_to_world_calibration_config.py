@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for operator-approved camera-to-world calibration manifests."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -29,10 +30,7 @@ _CAMERA_FRAMES = (
 _CAMERA_FRAME = _CAMERA_FRAMES[0]
 _PROVENANCE_SHA256 = "a" * 64
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-_GAZEBO_WORLD_PATH = (
-    _REPOSITORY_ROOT
-    / "ros2/cais_lab_robotics/worlds/table_spec2primitives.world"
-)
+_GAZEBO_WORLD_PATH = _REPOSITORY_ROOT / "ros2/cais_lab_robotics/worlds/table_spec2primitives.world"
 _GAZEBO_PROVENANCE_PATH = DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH.with_name(
     "gazebo_camera_to_world_calibration_provenance.json"
 )
@@ -95,9 +93,7 @@ def test_manifest_materializes_exact_runtime_selected_world_transform(
     assert result.source_frame == source_frame
     assert result.target_frame == "world"
     assert result.record["calibration_id"] == "approved-world-v1"
-    assert result.record["target_from_camera_transform"] == transforms[
-        source_frame
-    ].tolist()
+    assert result.record["target_from_camera_transform"] == transforms[source_frame].tolist()
     assert result.record["validity"] == {
         "valid_from_ns": 0,
         "valid_until_ns": None,
@@ -126,7 +122,7 @@ def test_manifest_missing_selected_camera_fails_closed_without_output(
     ):
         runtime.materialize_camera_to_world_calibration(
             interaction_root=interaction_root,
-                grounding_record_path=pose_path,
+            grounding_record_path=pose_path,
             source_frame=_CAMERA_FRAME,
             target_frame="world",
             calibration_number=1,
@@ -138,20 +134,14 @@ def test_manifest_missing_selected_camera_fails_closed_without_output(
 
 def test_default_gazebo_manifest_matches_pinned_fixed_camera_poses() -> None:
     manifest = json.loads(
-        DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH.read_text(
-            encoding="utf-8"
-        )
+        DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH.read_text(encoding="utf-8")
     )
     provenance = json.loads(_GAZEBO_PROVENANCE_PATH.read_text(encoding="utf-8"))
     assert provenance["source_world"] == {
-        "repository_path": (
-            "ros2/cais_lab_robotics/worlds/table_spec2primitives.world"
-        ),
+        "repository_path": ("ros2/cais_lab_robotics/worlds/table_spec2primitives.world"),
         "sha256": hashlib.sha256(_GAZEBO_WORLD_PATH.read_bytes()).hexdigest(),
     }
-    provenance_sha256 = hashlib.sha256(
-        _GAZEBO_PROVENANCE_PATH.read_bytes()
-    ).hexdigest()
+    provenance_sha256 = hashlib.sha256(_GAZEBO_PROVENANCE_PATH.read_bytes()).hexdigest()
 
     world = ET.parse(_GAZEBO_WORLD_PATH).getroot().find("world")
     assert world is not None
@@ -160,16 +150,13 @@ def test_default_gazebo_manifest_matches_pinned_fixed_camera_poses() -> None:
         "xyz",
         [-math.pi / 2.0, 0.0, -math.pi / 2.0],
     ).as_matrix()
-    entries = {
-        entry["source_frame"]: entry for entry in manifest["calibrations"]
-    }
+    entries = {entry["source_frame"]: entry for entry in manifest["calibrations"]}
     assert set(entries) == set(_CAMERA_FRAMES)
     for source_frame, model_name in _MODEL_BY_FRAME.items():
         pose = [float(value) for value in models[model_name].findtext("pose").split()]
         expected = np.eye(4)
         expected[:3, :3] = (
-            Rotation.from_euler("xyz", pose[3:]).as_matrix()
-            @ camera_body_from_optical
+            Rotation.from_euler("xyz", pose[3:]).as_matrix() @ camera_body_from_optical
         )
         expected[:3, 3] = pose[:3]
         entry = entries[source_frame]
@@ -187,9 +174,7 @@ def test_default_gazebo_manifest_matches_pinned_fixed_camera_poses() -> None:
 
 def test_default_gazebo_manifest_projects_optical_axis_downward() -> None:
     manifest = json.loads(
-        DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH.read_text(
-            encoding="utf-8"
-        )
+        DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH.read_text(encoding="utf-8")
     )
     expected_centers = {
         "cam_mk3_link": (-0.4, 0.0, 1.4),
@@ -201,10 +186,7 @@ def test_default_gazebo_manifest_projects_optical_axis_downward() -> None:
         source_frame = entry["source_frame"]
         camera_x, camera_y, camera_z = expected_centers[source_frame]
         optical_axis_point = np.asarray([0.0, 0.0, camera_z - 1.02, 1.0])
-        world_point = (
-            np.asarray(entry["target_from_camera_transform"])
-            @ optical_axis_point
-        )
+        world_point = np.asarray(entry["target_from_camera_transform"]) @ optical_axis_point
         np.testing.assert_allclose(
             world_point,
             [camera_x, camera_y, 1.02, 1.0],
@@ -253,15 +235,11 @@ def _write_camera_location_pose(
     interaction_root: Path,
     source_frame: str,
 ) -> Path:
-    path = (
-        interaction_root
-        / "products/grounding/rgb_d_cad_grounding/pose_0001/pose_record.json"
-    )
+    path = interaction_root / "products/grounding/rgb_d_cad_grounding/pose_0001/pose_record.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
-                "schema_version": 3,
                 "record_type": "CADPoseEstimationRecord",
                 "CAD_correspondence": "accepted",
                 "location": "available",
@@ -276,7 +254,7 @@ def _write_camera_location_pose(
 
 def _write_manifest(path: Path, entries: list[dict[str, object]]) -> Path:
     path.write_text(
-        json.dumps({"schema_version": 1, "calibrations": entries}),
+        json.dumps({"calibrations": entries}),
         encoding="utf-8",
     )
     return path

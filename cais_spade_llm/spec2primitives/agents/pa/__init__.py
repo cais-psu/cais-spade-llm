@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Spec2Primitives PA context-interaction boundary."""
 
 from cais_spade_llm.spec2primitives.agents.pa.context_assessment import (
@@ -18,16 +20,9 @@ from cais_spade_llm.spec2primitives.agents.pa.context_serving import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingProducerDescriptor,
-    PAContextGroundingCompletionV2,
-    PAContextGroundingCompletionV3,
-    PAContextGroundingCompletionV4,
-    PAContextGroundingCompletionV5,
-    PAContextGroundingCompletionV6,
-    PAContextGroundingCompletionV7,
-    PAContextGroundingCompletionV8,
+    PAContextGroundingCompletion,
     ProductContextView,
     TypedContextBinding,
-    TypedGroundingContract,
     load_completed_product_context_view,
     load_pa_context_grounding_completion,
 )
@@ -49,26 +44,19 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     ProductionProductContextGroundingRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
-    CartesianReachabilityRequest,
-    CartesianStateEvidence,
     ReachabilityCheckRecord,
     ResourceGroundingError,
     ResourceSelectionRecord,
     RobotFrameLocationEvidenceError,
-    StateReachEvidence,
     candidate_resource_catalog,
-    check_resource_reachability,
+    check_live_resource_reachability,
     commit_resource_assignment,
-    persist_cartesian_reachability,
     persist_pa_resource_selection,
-    prepare_cartesian_reachability,
 )
 
 __all__ = [
     "ProductAgentContextRuntime",
     "CameraToWorldCalibrationRuntime",
-    "CartesianReachabilityRequest",
-    "CartesianStateEvidence",
     "ReachabilityCheckRecord",
     "GroundingProducerDescriptor",
     "AllocationEvidenceEntry",
@@ -78,13 +66,7 @@ __all__ = [
     "EvidencePresentationEntry",
     "EvidencePresentationRecord",
     "PAOntologyConfig",
-    "PAContextGroundingCompletionV2",
-    "PAContextGroundingCompletionV3",
-    "PAContextGroundingCompletionV4",
-    "PAContextGroundingCompletionV5",
-    "PAContextGroundingCompletionV6",
-    "PAContextGroundingCompletionV7",
-    "PAContextGroundingCompletionV8",
+    "PAContextGroundingCompletion",
     "ProductContextView",
     "ProductContextGroundingRuntime",
     "ProductionProductContextGroundingRuntime",
@@ -92,12 +74,10 @@ __all__ = [
     "ResourceGroundingError",
     "ResourceSelectionRecord",
     "RobotFrameLocationEvidenceError",
-    "StateReachEvidence",
     "TypedContextBinding",
-    "TypedGroundingContract",
     "cancel_pa_context_interaction",
     "candidate_resource_catalog",
-    "check_resource_reachability",
+    "check_live_resource_reachability",
     "continue_pa_context_interaction",
     "commit_resource_assignment",
     "load_completed_product_context_view",
@@ -107,8 +87,6 @@ __all__ = [
     "load_or_create_evidence_presentation",
     "load_pa_context_grounding_completion",
     "persist_pa_resource_selection",
-    "persist_cartesian_reachability",
-    "prepare_cartesian_reachability",
     "serve_pa_requested_context",
     "start_pa_context_interaction",
     "submit_pa_clarification_reply",

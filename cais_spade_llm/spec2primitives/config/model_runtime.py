@@ -1,9 +1,11 @@
-"""Load the model choices used by the isolated Spec2Primitives runtime."""
-
 from __future__ import annotations
+
+"""Load model choices and grounding limits for the isolated Spec2Primitives runtime."""
+
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,12 +13,13 @@ from typing import Any
 DEFAULT_MODEL_RUNTIME_CONFIG_PATH = Path(__file__).with_name("model_runtime.json")
 
 _ROOT_KEYS = {
-    "schema_version",
     "product_agent_llm",
     "robot_agent_llm",
     "document_vlm",
     "observation_vlm",
+    "grounding_limits",
 }
+_GROUNDING_LIMIT_KEYS = {"max_evidence_operations", "max_proposals"}
 _PRODUCT_AGENT_KEYS = {"model", "reasoning_effort"}
 _ROBOT_AGENT_KEYS = {"model", "reasoning_effort"}
 _DOCUMENT_VLM_KEYS = {
@@ -70,14 +73,27 @@ class ObservationVLMConfig:
 
 
 @dataclass(frozen=True)
-class ModelRuntimeConfig:
-    """Hold all package-local model configuration."""
+class GroundingLimits:
+    """Bound one PA investigation between user clarification replies."""
 
-    schema_version: int
+    max_evidence_operations: int = 24
+    max_proposals: int = 6
+
+    def __post_init__(self) -> None:
+        """Reject invalid limits, including boolean values."""
+        _positive_int(self.max_evidence_operations, "grounding_limits.max_evidence_operations")
+        _positive_int(self.max_proposals, "grounding_limits.max_proposals")
+
+
+@dataclass(frozen=True)
+class ModelRuntimeConfig:
+    """Hold package-local model configuration and PA investigation limits."""
+
     product_agent_llm: ProductAgentModelConfig
     robot_agent_llm: RobotAgentModelConfig
     document_vlm: DocumentVLMConfig
     observation_vlm: ObservationVLMConfig
+    grounding_limits: GroundingLimits
 
 
 def load_model_runtime_config(
@@ -86,7 +102,7 @@ def load_model_runtime_config(
     """Read and strictly validate a model runtime JSON file.
 
     Args:
-        config_path: JSON file containing only the supported model settings.
+        config_path: JSON file containing only supported model settings and grounding limits.
 
     Returns:
         Immutable validated model configuration.
@@ -100,8 +116,6 @@ def load_model_runtime_config(
         value = json.load(stream)
     if not isinstance(value, dict) or set(value) != _ROOT_KEYS:
         raise ValueError("Model config fields are invalid.")
-    if value["schema_version"] != 4:
-        raise ValueError("Model config schema_version must be 4.")
 
     product_agent = _required_mapping(
         value["product_agent_llm"],
@@ -123,6 +137,9 @@ def load_model_runtime_config(
         _DOCUMENT_VLM_KEYS,
         "observation_vlm",
     )
+    grounding_limits = _required_mapping(
+        value["grounding_limits"], _GROUNDING_LIMIT_KEYS, "grounding_limits"
+    )
     product_agent_model = _nonempty_string(product_agent["model"], "product_agent_llm.model")
     product_agent_reasoning_effort = _nonempty_string(
         product_agent["reasoning_effort"],
@@ -137,9 +154,10 @@ def load_model_runtime_config(
         "xhigh",
     }:
         raise ValueError("product_agent_llm.reasoning_effort is invalid.")
-    if product_agent_model.startswith(
-        ("gpt-5.4", "gpt-5.6")
-    ) and product_agent_reasoning_effort != "none":
+    if (
+        product_agent_model.startswith(("gpt-5.4", "gpt-5.6"))
+        and product_agent_reasoning_effort != "none"
+    ):
         raise ValueError(
             "product_agent_llm.reasoning_effort must be none for GPT-5.4 or GPT-5.6 "
             "function tools through Chat Completions."
@@ -167,7 +185,6 @@ def load_model_runtime_config(
         "observation_vlm",
     )
     return ModelRuntimeConfig(
-        schema_version=4,
         product_agent_llm=ProductAgentModelConfig(
             model=product_agent_model,
             reasoning_effort=product_agent_reasoning_effort,
@@ -182,6 +199,7 @@ def load_model_runtime_config(
         observation_vlm=ObservationVLMConfig(
             **observation_values,
         ),
+        grounding_limits=GroundingLimits(**grounding_limits),
     )
 
 

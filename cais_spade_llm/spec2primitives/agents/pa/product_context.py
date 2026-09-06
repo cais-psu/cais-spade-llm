@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Maintain the Phase 4.0 PA-owned product context.
 
 The immutable TBox constrains vocabulary. Each interaction receives an
@@ -6,7 +8,6 @@ Controlled evidence tools propose JSON-shaped deltas; this module validates and
 persists them without deciding context completeness or composing primitives.
 """
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -36,7 +37,6 @@ _ABOX_NAME = "interaction_abox.ttl"
 _MANIFEST_NAME = "abox_manifest.json"
 _PROVENANCE_NAME = "assertion_provenance.json"
 _REQUIREMENT_EVIDENCE_REF = "products/user_requirement/product_requirement.json"
-_SCHEMA_VERSION = 1
 
 _PROHIBITED_PA_PROPERTIES = frozenset(
     {
@@ -62,7 +62,6 @@ _DELTA_KEYS = frozenset(
 _ASSERTION_KEYS = frozenset({"subject", "predicate", "object", "evidence_refs"})
 _MANIFEST_KEYS = frozenset(
     {
-        "schema_version",
         "status",
         "interaction_namespace",
         "specification_iri",
@@ -72,7 +71,7 @@ _MANIFEST_KEYS = frozenset(
         "accepted_assertion_count",
     }
 )
-_PROVENANCE_KEYS = frozenset({"schema_version", "tbox_fingerprint", "assertions"})
+_PROVENANCE_KEYS = frozenset({"tbox_fingerprint", "assertions"})
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]*$")
 
 
@@ -192,7 +191,6 @@ def initialize_interaction_abox(
     graph.add((specification_iri, RDF.value, Literal(product_requirement)))
 
     manifest = {
-        "schema_version": _SCHEMA_VERSION,
         "status": "unresolved",
         "interaction_namespace": interaction_namespace,
         "specification_iri": str(specification_iri),
@@ -202,7 +200,6 @@ def initialize_interaction_abox(
         "accepted_assertion_count": 0,
     }
     provenance = {
-        "schema_version": _SCHEMA_VERSION,
         "tbox_fingerprint": tbox.fingerprint,
         "assertions": _initializer_provenance(
             str(specification_iri),
@@ -282,9 +279,7 @@ def validate_and_merge_triple_delta(
         abox.delta_count != validated.abox.delta_count
         or abox.accepted_assertion_count != validated.abox.accepted_assertion_count
     ):
-        raise OntologyPersistenceError(
-            "ABox changed between delta validation and persistence."
-        )
+        raise OntologyPersistenceError("ABox changed between delta validation and persistence.")
     return _persist_validated_delta(
         abox,
         validated.abox.graph,
@@ -405,9 +400,7 @@ def commit_host_resource_assignment(
     if not configured_resource_iris:
         raise TripleDeltaError("resource_iris must not be empty.")
     if len(assertions) != 4:
-        raise TripleDeltaError(
-            "Host resource assignment requires exactly four assertions."
-        )
+        raise TripleDeltaError("Host resource assignment requires exactly four assertions.")
 
     root = Path(interaction_root).resolve()
     abox, manifest, provenance = _load_persisted_abox(root, tbox)
@@ -420,22 +413,15 @@ def commit_host_resource_assignment(
         raise TripleDeltaError("The interaction already has a process execution.")
 
     coerced = tuple(
-        _coerce_assertion(assertion, index)
-        for index, assertion in enumerate(assertions)
+        _coerce_assertion(assertion, index) for index, assertion in enumerate(assertions)
     )
     triples: dict[tuple[URIRef, URIRef, URIRef], TripleAssertion] = {}
     for assertion in coerced:
         if not assertion.evidence_refs:
-            raise TripleDeltaError(
-                "Every host assignment assertion requires evidence_refs."
-            )
+            raise TripleDeltaError("Every host assignment assertion requires evidence_refs.")
         if any(ref not in authorized_refs for ref in assertion.evidence_refs):
-            raise TripleDeltaError(
-                "Host assignment assertion contains unauthorized evidence."
-            )
-        if assertion.object.kind != "iri" or not isinstance(
-            assertion.object.value, str
-        ):
+            raise TripleDeltaError("Host assignment assertion contains unauthorized evidence.")
+        if assertion.object.kind != "iri" or not isinstance(assertion.object.value, str):
             raise TripleDeltaError("Host assignment objects must be IRIs.")
         triple = (
             URIRef(assertion.subject),
@@ -447,17 +433,10 @@ def commit_host_resource_assignment(
         triples[triple] = assertion
 
     resource_triples = [
-        triple
-        for triple in triples
-        if triple[0] == execution and triple[1] == ppr.runsOnResource
+        triple for triple in triples if triple[0] == execution and triple[1] == ppr.runsOnResource
     ]
-    if (
-        len(resource_triples) != 1
-        or str(resource_triples[0][2]) not in configured_resource_iris
-    ):
-        raise TripleDeltaError(
-            "System assignment must select exactly one configured resource."
-        )
+    if len(resource_triples) != 1 or str(resource_triples[0][2]) not in configured_resource_iris:
+        raise TripleDeltaError("System assignment must select exactly one configured resource.")
     expected = {
         (specification, ppr.hasProcessExecution, execution),
         (execution, RDF.type, ppr.processExecution),
@@ -761,8 +740,7 @@ def _validated_assertion(
     _require_absolute_iri(assertion.predicate, "assertion predicate", TripleDeltaError)
     ppr = Namespace(tbox.ppr_namespace)
     authorized_external_process = (
-        assertion.subject in authorized_processes
-        and assertion.predicate == str(ppr.realizes)
+        assertion.subject in authorized_processes and assertion.predicate == str(ppr.realizes)
     )
     if not assertion.subject.startswith(abox.namespace) and not authorized_external_process:
         raise TripleDeltaError(
@@ -1038,9 +1016,7 @@ def _validate_process_execution(
 ) -> None:
     """Validate the optional system-authored current assignment."""
     ppr = Namespace(tbox.ppr_namespace)
-    expected_execution = URIRef(
-        f"{str(specification).rsplit('/', 1)[0]}/process_execution_0001"
-    )
+    expected_execution = URIRef(f"{str(specification).rsplit('/', 1)[0]}/process_execution_0001")
     linked = list(graph.objects(specification, ppr.hasProcessExecution))
     all_links = list(graph.subject_objects(ppr.hasProcessExecution))
     typed = set(graph.subjects(RDF.type, ppr.processExecution))
@@ -1050,9 +1026,7 @@ def _validate_process_execution(
         if all_links or typed or runs_process or runs_resource:
             raise TripleDeltaError("ABox contains an incomplete process execution.")
         return
-    if linked != [expected_execution] or all_links != [
-        (specification, expected_execution)
-    ]:
+    if linked != [expected_execution] or all_links != [(specification, expected_execution)]:
         raise TripleDeltaError("ABox must contain one current process execution.")
     if typed != {expected_execution}:
         raise TripleDeltaError("ABox process execution type is incomplete.")
@@ -1061,17 +1035,13 @@ def _validate_process_execution(
         or runs_process[0][0] != expected_execution
         or not isinstance(runs_process[0][1], URIRef)
     ):
-        raise TripleDeltaError(
-            "ABox process execution must run one configured process."
-        )
+        raise TripleDeltaError("ABox process execution must run one configured process.")
     if (
         len(runs_resource) != 1
         or runs_resource[0][0] != expected_execution
         or not isinstance(runs_resource[0][1], URIRef)
     ):
-        raise TripleDeltaError(
-            "ABox process execution must run on one configured resource."
-        )
+        raise TripleDeltaError("ABox process execution must run on one configured resource.")
     process_iri = runs_process[0][1]
     realized = set(graph.objects(process_iri, ppr.realizes))
     if not realized or not realized.issubset(defined_features):
@@ -1104,17 +1074,18 @@ def _load_persisted_abox(
     ) as exc:
         raise OntologyPersistenceError("Persisted ontology context could not be read.") from exc
     if not isinstance(manifest_value, dict) or set(manifest_value) != _MANIFEST_KEYS:
-        raise OntologyPersistenceError("ABox manifest shape is invalid.")
+        raise OntologyPersistenceError("ABox manifest shape is invalid. Start a fresh interaction.")
     manifest: dict[str, object] = manifest_value
     _validate_manifest(manifest, tbox, ontology_root)
     if (
-        not isinstance(provenance_value, dict)
-        or set(provenance_value) != _PROVENANCE_KEYS
-        or provenance_value.get("schema_version") != _SCHEMA_VERSION
-        or provenance_value.get("tbox_fingerprint") != tbox.fingerprint
-        or not isinstance(provenance_value.get("assertions"), list)
+        (not isinstance(provenance_value, dict))
+        or (set(provenance_value) != _PROVENANCE_KEYS)
+        or (provenance_value.get("tbox_fingerprint") != tbox.fingerprint)
+        or (not isinstance(provenance_value.get("assertions"), list))
     ):
-        raise OntologyPersistenceError("Assertion provenance shape is invalid.")
+        raise OntologyPersistenceError(
+            "Assertion provenance shape is invalid. Start a fresh interaction."
+        )
     provenance: dict[str, object] = provenance_value
     expected_provenance_count = 2 + int(manifest["accepted_assertion_count"])
     if len(provenance["assertions"]) != expected_provenance_count:
@@ -1128,8 +1099,6 @@ def _validate_manifest(
     tbox: TBoxSnapshot,
     ontology_root: Path,
 ) -> None:
-    if manifest["schema_version"] != _SCHEMA_VERSION:
-        raise OntologyPersistenceError("Unsupported ABox manifest schema version.")
     if manifest["status"] != "unresolved":
         raise OntologyPersistenceError("Phase 4.0 ABox status must remain unresolved.")
     if manifest["tbox_fingerprint"] != tbox.fingerprint:
@@ -1174,7 +1143,6 @@ def _persist_validated_delta(  # noqa: PLR0913
         raise OntologyPersistenceError(f"Delta record already exists: {delta_path.name}")
     normalized = [dict(assertion) for assertion in normalized_assertions]
     delta_record = {
-        "schema_version": _SCHEMA_VERSION,
         "delta_number": next_delta_number,
         "producer": producer,
         "assertions": normalized,
@@ -1195,9 +1163,9 @@ def _persist_validated_delta(  # noqa: PLR0913
     updated_provenance["assertions"] = provenance_assertions
     updated_manifest = dict(manifest)
     updated_manifest["delta_count"] = next_delta_number
-    updated_manifest["accepted_assertion_count"] = int(
-        manifest["accepted_assertion_count"]
-    ) + len(normalized)
+    updated_manifest["accepted_assertion_count"] = int(manifest["accepted_assertion_count"]) + len(
+        normalized
+    )
     _persist_merge(
         abox,
         graph,

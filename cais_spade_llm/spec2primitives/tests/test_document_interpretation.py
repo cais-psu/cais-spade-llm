@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for evidence-first approved PDF preparation and interpretation."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -24,13 +25,11 @@ from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
 )
 from cais_spade_llm.spec2primitives.tools import exact_ref_resolver
 from cais_spade_llm.spec2primitives.tools.document_evidence import (
-    DOCUMENT_OVERVIEW_SCHEMA_VERSION,
     DocumentInterpretationError,
     DocumentQueryVisionRequest,
     DocumentVisionRequest,
     DocumentVisionResponse,
     OpenAIDocumentVisionRuntime,
-    document_overview_cache_status,
     document_query_schema,
     index_document_evidence,
     interpret_document_evidence,
@@ -197,9 +196,7 @@ def test_openai_adapter_sends_only_exact_question_and_document_pages() -> None:
     request_payload = json.loads(content[0]["text"])
     assert set(request_payload) == {"question", "document_pages"}
     assert request_payload["question"] == exact_question
-    assert request_payload["document_pages"] == [
-        {"page": 1, "extracted_text": "page 1 text"}
-    ]
+    assert request_payload["document_pages"] == [{"page": 1, "extracted_text": "page 1 text"}]
     for forbidden in (
         "product_requirement",
         "authorized_processes",
@@ -264,9 +261,7 @@ def test_source_index_is_requirement_blind_and_query_is_exact_and_document_only(
     snapshot = _read_json(source_index.source_index_record_path)
     assert snapshot["record_type"] == "DocumentSourceIndexRecord"
     assert snapshot["status"] == "accepted"
-    assert [page["page"] for page in snapshot["source_index"]["pages"]] == list(
-        range(1, 7)
-    )
+    assert [page["page"] for page in snapshot["source_index"]["pages"]] == list(range(1, 7))
     serialized_index = json.dumps(snapshot)
     assert abox.product_requirement not in serialized_index
     assert "summary" not in snapshot["source_index"]
@@ -296,9 +291,7 @@ def test_source_index_is_requirement_blind_and_query_is_exact_and_document_only(
     assert record["question"] == exact_question
     assert record["status"] == "supported"
     assert record["claims"][0]["predicate_text"] == "shown_in_order"
-    assert record["claims"][0]["evidence_refs"] == [
-        f"{_TEST_DOCUMENT_REF}#page=4"
-    ]
+    assert record["claims"][0]["evidence_refs"] == [f"{_TEST_DOCUMENT_REF}#page=4"]
 
 
 def test_historical_overview_cannot_be_used_as_a_dynamic_query_source(
@@ -310,7 +303,6 @@ def test_historical_overview_cannot_be_used_as_a_dynamic_query_source(
     overview_path.write_text(
         json.dumps(
             {
-                "schema_version": 3,
                 "record_type": "DocumentOverviewRecord",
                 "producer": "document_evidence",
                 "overview": {"pages": []},
@@ -458,30 +450,21 @@ def test_overview_cache_hit_is_assertion_free_and_model_change_invalidates(
     assert changed.record_path != first.record_path
     assert len(changed_vision.requests) == 1
 
-    monkeypatch.setattr(
-        "cais_spade_llm.spec2primitives.tools.document_evidence.interpreter."
-        "DOCUMENT_OVERVIEW_SCHEMA_VERSION",
-        DOCUMENT_OVERVIEW_SCHEMA_VERSION + 1,
-    )
-    stale_status = document_overview_cache_status(
-        _TEST_DOCUMENT_REF,
-        cache_root=cache_root,
-        config=config,
-    )
-    assert stale_status["source_status"] == "valid"
-    assert stale_status["overview_status"] == "stale"
-    schema_vision = ControlledVisionRuntime()
-    schema_changed = asyncio.run(
-        prepare_document_overview(
-            served_context=served_context,
-            cache_root=cache_root,
-            config=config,
-            vision_runtime=schema_vision,
+    incompatible = _read_json(first.record_path)
+    incompatible["schema_version"] = 1
+    first.record_path.write_text(json.dumps(incompatible), encoding="utf-8")
+    before = first.record_path.read_bytes()
+    with pytest.raises(DocumentInterpretationError):
+        asyncio.run(
+            prepare_document_overview(
+                served_context=served_context,
+                cache_root=cache_root,
+                config=config,
+                vision_runtime=ControlledVisionRuntime(),
+            )
         )
-    )
-    assert schema_changed.cache_status == "miss"
-    assert schema_changed.record_path != first.record_path
-    assert len(schema_vision.requests) == 1
+    assert first.record_path.read_bytes() == before
+    first.record_path.write_text(json.dumps(record), encoding="utf-8")
 
     interaction_root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
@@ -534,7 +517,7 @@ def test_one_document_interpretation_persists_every_ordered_page(
     )
     snapshot = _read_json(result.overview_record_path)
     overview = snapshot["overview"]
-    assert snapshot["schema_version"] == 3
+    assert "schema_version" not in snapshot
     assert [page["page"] for page in overview["pages"]] == list(range(1, 7))
     assert [page["extracted_text"] for page in overview["pages"]] == [
         page.text for page in vision.requests[0].pages
@@ -760,8 +743,10 @@ def test_prepare_command_supports_all_and_one_exact_context_ref(
     ]
 
 
+@pytest.mark.parametrize("valid", [False, True])
 def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
     tmp_path: Path,
+    valid: bool,
 ) -> None:
     class ProposalAgent:
         async def ask_llm_structured(
@@ -775,8 +760,8 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
         ) -> dict[str, Any]:
             assert "initialized_specification_iri" in prompt
             assert response_format["name"] == "spec2primitives_grounding_result"
-            assert tools == []
-            assert tool_executor is not None
+            assert tools is None
+            assert tool_executor is None
             assert max_tool_rounds == 1
             evidence_ref = f"{_TEST_DOCUMENT_REF}#page=4"
             proposal = {
@@ -801,6 +786,8 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
                     },
                 }
             }
+            if valid:
+                proposal["target_feature"]["assembly_feature_association"] = []
             return {"result": proposal}
 
     result = asyncio.run(
@@ -815,16 +802,29 @@ def test_diagnostic_keeps_overview_proposal_and_assertions_as_separate_stages(
         )
     )
 
-    assert result["status"] == "rejected"
+    assert result["status"] == ("accepted" if valid else "rejected")
     assert result["overview"]["status"] == "accepted"
-    assert result["ontology_proposal"] is None
     proposal_record = _read_json(
         tmp_path / "diagnostic/products/grounding/ontology_grounding/proposal_0001.json"
     )
-    assert proposal_record["schema_version"] == 10
-    assert proposal_record["status"] == "rejected"
-    assert result["accepted_assertions"] == []
-    assert result["failure"]["reason"] == "document_interpretation_rejected"
+    assert "schema_version" not in proposal_record
+    if valid:
+        from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+            validate_grounding_evidence,
+        )
+
+        assert proposal_record["status"] == "accepted"
+        assert result["ontology_proposal"]["status"] == "accepted"
+        assert result["accepted_assertions"]
+        assert result["failure"] is None
+        snapshot = validate_grounding_evidence(tmp_path / "diagnostic", proposal_record)
+        assert snapshot.product_requirement == "assemble Medium Gear"
+        assert not (tmp_path / "diagnostic/products/grounding/target_feature_review").exists()
+    else:
+        assert result["ontology_proposal"] is None
+        assert proposal_record["status"] == "rejected"
+        assert result["accepted_assertions"] == []
+        assert result["failure"]["reason"] == "document_interpretation_rejected"
 
 
 def _served_document(context_ref: str) -> dict[str, object]:

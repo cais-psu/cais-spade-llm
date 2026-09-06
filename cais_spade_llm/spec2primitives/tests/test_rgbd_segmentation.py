@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for minimal automatic Phase 4.2B1 RGB-D segmentation."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -133,7 +134,7 @@ def test_segmentation_applies_one_neutral_policy_to_every_observation(
     )
 
     assert result.candidate_count == 6
-    assert result.record["schema_version"] == 2
+    assert "schema_version" not in result.record
     assert result.record["candidate_count"] == 6
     assert result.record["candidate_state"] == "candidates_available"
     assert result.record["identity"] == "not_evaluated"
@@ -186,7 +187,7 @@ def test_segmentation_applies_one_neutral_policy_to_every_observation(
             assert candidate["pose"] == "not_evaluated"
 
 
-def test_openai_observation_adapter_uses_schema_3_runtime_configuration() -> None:
+def test_openai_observation_adapter_uses_current_runtime_configuration() -> None:
     class ControlledResponses:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
@@ -241,8 +242,8 @@ def test_openai_observation_adapter_uses_schema_3_runtime_configuration() -> Non
     assert all(item["detail"] == "high" for item in image_inputs)
     request_text = str(content[0]["text"])
     assert "cylindrical forms" in request_text
-    assert "without naming a candidate as a shaft, pin" in request_text
-    assert "Do not infer a part identity such as shaft or pin" in call["instructions"]
+    assert "without naming a candidate with an inferred part identity" in request_text
+    assert "Do not infer a part identity" in call["instructions"]
     schema = call["text"]["format"]["schema"]
     serialized_schema = json.dumps(schema)
     for forbidden in ("current_state", "desired_state", "CAD", "process", "resource"):
@@ -312,6 +313,10 @@ def test_segmentation_is_deterministic_and_does_not_overwrite(tmp_path: Path) ->
 def test_observation_review_covers_exact_handles_and_pins_candidate_crops(
     tmp_path: Path,
 ) -> None:
+    from cais_spade_llm.spec2primitives.tools.observation_presentation import (
+        ObservationPresentation,
+    )
+
     preprocessing = _preprocess_observation(tmp_path, _segmentation_bundle())
     segmentation = segment_preprocessed_observation(
         interaction_root=tmp_path,
@@ -334,10 +339,14 @@ def test_observation_review_covers_exact_handles_and_pins_candidate_crops(
         for camera in segmentation.record["cameras"]
         for candidate in camera["candidates"]
     ]
+    presentation = ObservationPresentation(tmp_path)
     assert [
         (candidate.observation_handle, candidate.candidate_handle)
         for candidate in vision.requests[0].candidates
-    ] == expected_handles
+    ] == sorted(
+        (presentation.handle(view), presentation.handle(candidate))
+        for view, candidate in expected_handles
+    )
     assert [
         (candidate["observation_handle"], candidate["candidate_handle"])
         for candidate in review.record["candidates"]

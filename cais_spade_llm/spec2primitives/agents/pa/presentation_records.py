@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Persist host-only blinded presentation mappings for ProductAgent interactions."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -60,7 +61,6 @@ class EvidencePresentationRecord:
     def to_record(self) -> dict[str, object]:
         """Return the exact persisted record."""
         return {
-            "schema_version": 1,
             "record_type": "EvidencePresentationRecord",
             "authority": _HOST_AUTHORITY,
             "entries": [entry.to_record() for entry in self.entries],
@@ -137,8 +137,8 @@ class AllocationEvidenceSource:
             self.record_ref,
             self.record_sha256,
             self.field_path,
-            self.observation_handle or "",
-            self.candidate_handle or "",
+            (self.observation_handle or ""),
+            (self.candidate_handle or ""),
             self.source_frame,
             _fingerprint(self.neutral_projection),
         )
@@ -190,8 +190,8 @@ class AllocationEvidenceEntry:
             self.record_ref,
             self.record_sha256,
             self.field_path,
-            self.observation_handle or "",
-            self.candidate_handle or "",
+            (self.observation_handle or ""),
+            (self.candidate_handle or ""),
             self.source_frame,
             _fingerprint(self.neutral_projection),
         )
@@ -230,15 +230,12 @@ class AllocationPresentationRecord:
         """Resolve one PA-authored neutral state-evidence handle."""
         matches = [entry for entry in self.evidence_entries if entry.pa_handle == pa_handle]
         if len(matches) != 1:
-            raise PresentationRecordError(
-                "Allocation state-evidence handle is not authorized."
-            )
+            raise PresentationRecordError("Allocation state-evidence handle is not authorized.")
         return matches[0]
 
     def to_record(self) -> dict[str, object]:
         """Return the exact immutable allocation presentation record."""
         return {
-            "schema_version": 1,
             "record_type": "AllocationPresentationRecord",
             "authority": _HOST_AUTHORITY,
             "evidence_presentation_ref": self.evidence_presentation_ref,
@@ -322,9 +319,7 @@ def load_or_create_allocation_presentation(  # noqa: PLR0913
         explicit_order=explicit_candidate_order,
         label="neutral candidate",
     )
-    resource_entries = tuple(
-        AllocationResourceEntry(*resource) for resource in ordered_resources
-    )
+    resource_entries = tuple(AllocationResourceEntry(*resource) for resource in ordered_resources)
     evidence_entries = tuple(
         _allocation_evidence_entry(source, index)
         for index, source in enumerate(ordered_evidence, start=1)
@@ -332,7 +327,6 @@ def load_or_create_allocation_presentation(  # noqa: PLR0913
     evidence_sha256 = _sha256_path(evidence_presentation.record_path)
     created_at_ns = time.time_ns()
     payload: dict[str, object] = {
-        "schema_version": 1,
         "record_type": "AllocationPresentationRecord",
         "authority": _HOST_AUTHORITY,
         "evidence_presentation_ref": evidence_presentation.record_ref,
@@ -346,9 +340,7 @@ def load_or_create_allocation_presentation(  # noqa: PLR0913
         "resources": [entry.to_record() for entry in resource_entries],
         "neutral_evidence": [entry.to_record() for entry in evidence_entries],
         "resource_presentation_order": [entry.resource_symbol for entry in resource_entries],
-        "neutral_candidate_presentation_order": [
-            entry.pa_handle for entry in evidence_entries
-        ],
+        "neutral_candidate_presentation_order": [entry.pa_handle for entry in evidence_entries],
         "created_at_ns": created_at_ns,
     }
     fingerprint = _fingerprint(payload)
@@ -463,7 +455,6 @@ def load_or_create_evidence_presentation(
         )
     created_at_ns = time.time_ns()
     payload: dict[str, object] = {
-        "schema_version": 1,
         "record_type": "EvidencePresentationRecord",
         "authority": _HOST_AUTHORITY,
         "entries": [entry.to_record() for entry in entries],
@@ -489,7 +480,6 @@ def _load_allocation_presentation(
 ) -> AllocationPresentationRecord:
     payload = _read_mapping(record_path)
     expected_keys = {
-        "schema_version",
         "record_type",
         "authority",
         "evidence_presentation_ref",
@@ -508,9 +498,8 @@ def _load_allocation_presentation(
         "fingerprint",
     }
     if set(payload) != expected_keys or (
-        payload.get("schema_version") != 1
-        or payload.get("record_type") != "AllocationPresentationRecord"
-        or payload.get("authority") != _HOST_AUTHORITY
+        (payload.get("record_type") != "AllocationPresentationRecord")
+        or (payload.get("authority") != _HOST_AUTHORITY)
     ):
         raise PresentationRecordError("AllocationPresentationRecord fields are invalid.")
     scalar_fields = (
@@ -638,10 +627,9 @@ def _load_allocation_evidence_entries(value: object) -> tuple[AllocationEvidence
                 neutral_projection=_json_clone(projection),
             )
         )
-    if (
-        len({entry.pa_handle for entry in entries}) != len(entries)
-        or len({entry.canonical_key for entry in entries}) != len(entries)
-    ):
+    if len({entry.pa_handle for entry in entries}) != len(entries) or len(
+        {entry.canonical_key for entry in entries}
+    ) != len(entries):
         raise PresentationRecordError("Allocation evidence handles must be unique.")
     return tuple(entries)
 
@@ -667,14 +655,16 @@ def _assert_allocation_authority(  # noqa: PLR0913
         expected_context != context
         or record.evidence_presentation_ref != evidence_presentation.record_ref
         or record.evidence_presentation_fingerprint != evidence_presentation.fingerprint
-        or record.evidence_presentation_sha256
-        != _sha256_path(evidence_presentation.record_path)
+        or record.evidence_presentation_sha256 != _sha256_path(evidence_presentation.record_path)
         or {tuple(entry.to_record().values()) for entry in record.resources} != set(resources)
         or {entry.identity() for entry in record.evidence_entries}
         != {source.identity() for source in evidence_sources}
     ):
         raise PresentationRecordError("Allocation authority changed after presentation.")
-    if explicit_resource_order is not None and tuple(explicit_resource_order) != record.resource_order:
+    if (
+        explicit_resource_order is not None
+        and tuple(explicit_resource_order) != record.resource_order
+    ):
         raise PresentationRecordError("Injected resource order differs from persisted order.")
     expected_candidate_keys = tuple(entry.canonical_key for entry in record.evidence_entries)
     if (
@@ -777,7 +767,6 @@ def _load_evidence_presentation(
 ) -> EvidencePresentationRecord:
     payload = _read_mapping(record_path)
     if set(payload) != {
-        "schema_version",
         "record_type",
         "authority",
         "entries",
@@ -785,9 +774,8 @@ def _load_evidence_presentation(
         "created_at_ns",
         "fingerprint",
     } or (
-        payload.get("schema_version") != 1
-        or payload.get("record_type") != "EvidencePresentationRecord"
-        or payload.get("authority") != _HOST_AUTHORITY
+        (payload.get("record_type") != "EvidencePresentationRecord")
+        or (payload.get("authority") != _HOST_AUTHORITY)
     ):
         raise PresentationRecordError("EvidencePresentationRecord fields are invalid.")
     raw_entries = payload.get("entries")
@@ -835,9 +823,8 @@ def _load_evidence_presentation(
                 source_revision=source_revision,
             )
         )
-    if (
-        len({entry.pa_handle for entry in entries}) != len(entries)
-        or tuple(raw_order) != tuple(entry.pa_handle for entry in entries)
+    if len({entry.pa_handle for entry in entries}) != len(entries) or tuple(raw_order) != tuple(
+        entry.pa_handle for entry in entries
     ):
         raise PresentationRecordError("Evidence presentation order is invalid.")
     without_fingerprint = dict(payload)
@@ -862,7 +849,10 @@ def _validated_sources(
         raise PresentationRecordError("Evidence presentation sources are invalid.")
     for canonical_ref, evidence_type, revision in values:
         if (
-            (canonical_ref is not None and (not isinstance(canonical_ref, str) or not canonical_ref))
+            (
+                canonical_ref is not None
+                and (not isinstance(canonical_ref, str) or not canonical_ref)
+            )
             or evidence_type not in {"CAD", "document", "observation"}
             or not isinstance(revision, str)
             or not revision

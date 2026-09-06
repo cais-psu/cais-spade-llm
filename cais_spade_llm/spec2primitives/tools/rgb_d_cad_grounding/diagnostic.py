@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Run controlled RGB-D preprocessing and automatic segmentation paths."""
 
-from __future__ import annotations
 
 import json
 import math
@@ -42,7 +43,7 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.segmenter import (
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondence import (
     CADSizeAssociationError,
-    associate_segmented_candidate_by_size,
+    measure_segmented_candidates_against_cad,
 )
 
 _DIAGNOSTIC_RECORD = Path("interaction_record/rgb_d_cad_preprocessing_diagnostic.json")
@@ -51,7 +52,6 @@ _LATEST_STATUS_RECORD = Path("rgbd_segmentation_status.json")
 _OBSERVATION_REF = "observation_0001"
 _AUTOMATIC_CAPTURE_TIMEOUT_SEC = 5.0
 _STATUS_KEYS = {
-    "schema_version",
     "record_type",
     "status",
     "candidate_count",
@@ -62,12 +62,6 @@ _STATUS_KEYS = {
     "robot_frame_conversion",
     "failure",
     "updated_at_ns",
-}
-_PRE_CONVERSION_STATUS_KEYS = _STATUS_KEYS - {"robot_frame_conversion"}
-_LEGACY_STATUS_KEYS = _PRE_CONVERSION_STATUS_KEYS - {"location"}
-_LEGACY_ROLE_STATUS_KEYS = (_STATUS_KEYS - {"candidate_count"}) | {
-    "source_candidate_count",
-    "assembly_candidate_count",
 }
 
 
@@ -207,29 +201,18 @@ def read_rgbd_segmentation_status(contexts_root: Path) -> dict[str, object]:
                 "message": f"{type(exc).__name__}: {exc}",
             },
         )
-    if isinstance(record, dict):
-        if set(record) == _LEGACY_ROLE_STATUS_KEYS:
-            source_count = record.pop("source_candidate_count")
-            assembly_count = record.pop("assembly_candidate_count")
-            if isinstance(source_count, int) and isinstance(assembly_count, int):
-                record["candidate_count"] = source_count + assembly_count
-                record["schema_version"] = 2
-        if set(record) == _LEGACY_STATUS_KEYS:
-            record["location"] = "not_evaluated"
-        if set(record) == _PRE_CONVERSION_STATUS_KEYS:
-            record["robot_frame_conversion"] = "not_evaluated"
     if not _valid_status_record(record):
         return _status_record(
             "failed",
             failure={
                 "reason": "status_record_invalid",
-                "message": "The persisted RGB-D status fields are invalid.",
+                "message": "The persisted RGB-D status fields are invalid. Start a fresh interaction.",
             },
         )
     return record
 
 
-def run_cad_size_association_pipeline(
+def run_cad_size_measurement_pipeline(
     *,
     contexts_root: Path,
     interaction_root: Path,
@@ -237,7 +220,7 @@ def run_cad_size_association_pipeline(
     cad_record_path: Path,
     correspondence_number: int = 1,
 ) -> dict[str, object]:
-    """Run size association and update only the compact read-only UI status."""
+    """Measure candidate sizes and update the compact read-only UI status."""
     root = Path(contexts_root).resolve()
     interaction = Path(interaction_root).resolve()
     try:
@@ -251,12 +234,10 @@ def run_cad_size_association_pipeline(
         _status_record(
             "running",
             candidate_count=candidate_count,
-            CAD_correspondence="running",
-            location="running",
         ),
     )
     try:
-        association = associate_segmented_candidate_by_size(
+        association = measure_segmented_candidates_against_cad(
             interaction_root=interaction,
             segmentation_record_path=segmentation_record_path,
             cad_record_path=cad_record_path,
@@ -292,16 +273,16 @@ def run_cad_size_association_pipeline(
         _status_record(
             "ready",
             candidate_count=candidate_count,
-            CAD_correspondence=association.CAD_correspondence,
-            location=association.location,
+            CAD_correspondence="not_evaluated",
+            location="not_evaluated",
         ),
     )
     return {
         "status": "ready",
         "interaction_root": str(interaction),
         "correspondence_record_path": str(association.record_path),
-        "CAD_correspondence": association.CAD_correspondence,
-        "location": association.location,
+        "CAD_correspondence": "not_evaluated",
+        "location": "not_evaluated",
         "pose": "not_evaluated",
         "failure": None,
     }
@@ -747,7 +728,6 @@ def _status_record(
     updated_at_ns: int | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 2,
         "record_type": "RGBDSegmentationStatus",
         "status": status,
         "candidate_count": candidate_count,
@@ -798,19 +778,18 @@ def _valid_status_record(value: object) -> bool:
         "failed",
     }
     if (
-        value["schema_version"] != 2
-        or value["record_type"] != "RGBDSegmentationStatus"
-        or not isinstance(status, str)
-        or status not in {"idle", "running", "ready", "failed"}
-        or value["identity"] != "not_evaluated"
-        or not isinstance(value["CAD_correspondence"], str)
-        or value["CAD_correspondence"] not in correspondence_states
-        or not isinstance(value["location"], str)
-        or value["location"] not in location_states
-        or not isinstance(value["pose"], str)
-        or value["pose"] not in pose_states
-        or not isinstance(value["robot_frame_conversion"], str)
-        or value["robot_frame_conversion"] not in robot_frame_conversion_states
+        (value["record_type"] != "RGBDSegmentationStatus")
+        or (not isinstance(status, str))
+        or (status not in {"idle", "running", "ready", "failed"})
+        or (value["identity"] != "not_evaluated")
+        or (not isinstance(value["CAD_correspondence"], str))
+        or (value["CAD_correspondence"] not in correspondence_states)
+        or (not isinstance(value["location"], str))
+        or (value["location"] not in location_states)
+        or (not isinstance(value["pose"], str))
+        or (value["pose"] not in pose_states)
+        or (not isinstance(value["robot_frame_conversion"], str))
+        or (value["robot_frame_conversion"] not in robot_frame_conversion_states)
     ):
         return False
     count = value["candidate_count"]

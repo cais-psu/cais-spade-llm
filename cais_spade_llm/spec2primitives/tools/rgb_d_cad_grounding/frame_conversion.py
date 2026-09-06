@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Convert one accepted camera-frame CAD pose into a requested robot frame."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -31,7 +32,6 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondenc
 )
 
 _CALIBRATION_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "calibration_number",
@@ -50,7 +50,6 @@ _CALIBRATION_RECORD_KEYS = {
     "payload_sha256",
 }
 _POSE_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "pose_number",
@@ -102,7 +101,6 @@ _CONVERSION_METHOD = "homogeneous_transform_composition"
 _LOCATION_CONVERSION_METHOD = "calibrated_candidate_center_translation"
 _TRANSFORM_ATOL = 1e-8
 _CORRESPONDENCE_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "correspondence_number",
@@ -392,129 +390,6 @@ def transform_camera_pose_to_robot_frame(
     )
 
 
-def transform_correspondence_location_to_robot_frame(
-    *,
-    interaction_root: Path,
-    correspondence_record_path: Path,
-    calibration_record_path: Path,
-    target_frame: str,
-    location_number: int = 1,
-) -> RobotFrameLocationResult:
-    """Transform an accepted observed candidate center into a robot frame."""
-    try:
-        _validate_positive_integer(location_number, "location_number")
-        requested_target = _nonempty_string(target_frame, "target_frame")
-        root = Path(interaction_root).resolve()
-        correspondence_path, relative, correspondence = _load_json_record(
-            root,
-            correspondence_record_path,
-        )
-        correspondence_number = correspondence.get("correspondence_number")
-        _validate_positive_integer(correspondence_number, "correspondence_number")
-        expected_ref = (
-            _GROUNDING_ROOT
-            / f"correspondence_{correspondence_number:04d}"
-            / "correspondence_record.json"
-        )
-        selected = correspondence.get("selected_candidate")
-        if (
-            relative != expected_ref
-            or set(correspondence) != _CORRESPONDENCE_RECORD_KEYS
-            or correspondence.get("schema_version") != 2
-            or correspondence.get("record_type") != "CADSizeCorrespondenceRecord"
-            or correspondence.get("producer") != _PRODUCER
-            or correspondence.get("CAD_correspondence") != "accepted"
-            or correspondence.get("location") != "available"
-            or correspondence.get("pose") != "not_evaluated"
-            or not isinstance(selected, Mapping)
-            or set(selected) != _CORRESPONDENCE_CANDIDATE_KEYS
-        ):
-            raise RobotFrameConversionError(
-                "Location conversion requires an accepted CAD correspondence."
-            )
-        source_frame = _nonempty_string(selected["frame"], "candidate frame")
-        camera_location = _finite_array(
-            selected["candidate_center_m"],
-            (3,),
-            "candidate center",
-        )
-        observation_timestamp_ns = _observation_timestamp_ns(root, correspondence)
-        calibration = _load_calibration(
-            root,
-            calibration_record_path,
-            observation_timestamp_ns=observation_timestamp_ns,
-        )
-        if calibration.source_frame != source_frame:
-            raise RobotFrameConversionError(
-                "Calibration source_frame does not match the observed candidate frame."
-            )
-        if calibration.target_frame != requested_target:
-            raise RobotFrameConversionError(
-                "Calibration target_frame does not match the requested target_frame."
-            )
-    except CADSizeAssociationError as exc:
-        raise RobotFrameConversionError(str(exc)) from exc
-
-    translated = (
-        calibration.target_from_camera[:3, :3] @ camera_location
-        + calibration.target_from_camera[:3, 3]
-    )
-    destination = root / _GROUNDING_ROOT / f"robot_location_{location_number:04d}"
-    if destination.exists():
-        raise RobotFrameConversionError(
-            f"Robot-frame location {location_number:04d} already exists."
-        )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_root = Path(tempfile.mkdtemp(prefix=".robot-location-", dir=destination.parent))
-    try:
-        record = {
-            "schema_version": 2,
-            "record_type": "RobotFrameLocationRecord",
-            "producer": _PRODUCER,
-            "location_number": location_number,
-            "method": _LOCATION_CONVERSION_METHOD,
-            "source_correspondence": {
-                "ref": _relative_ref(root, correspondence_path),
-                "sha256": _sha256_path(correspondence_path),
-            },
-            "source_calibration": {
-                "ref": _relative_ref(root, calibration.path),
-                "sha256": _sha256_path(calibration.path),
-                "payload_sha256": calibration.record["payload_sha256"],
-                "calibration_id": calibration.record["calibration_id"],
-            },
-            "CAD": correspondence["CAD"],
-            "segmentation": correspondence["segmentation"],
-            "candidate_reference": {
-                "observation_handle": selected["observation_handle"],
-                "candidate_handle": selected["candidate_handle"],
-            },
-            "observation_timestamp_ns": observation_timestamp_ns,
-            "source_frame": source_frame,
-            "target_frame": requested_target,
-            "translated_location_m": _float_vector(translated),
-            "CAD_correspondence": "accepted",
-            "location": "available",
-            "robot_frame_conversion": "accepted",
-        }
-        _write_json(temporary_root / "robot_frame_location_record.json", record)
-        temporary_root.rename(destination)
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        shutil.rmtree(temporary_root, ignore_errors=True)
-        if isinstance(exc, RobotFrameConversionError):
-            raise
-        raise RobotFrameConversionError(
-            f"Robot-frame location conversion failed: {type(exc).__name__}: {exc}"
-        ) from exc
-    return RobotFrameLocationResult(
-        record_path=destination / "robot_frame_location_record.json",
-        source_frame=source_frame,
-        target_frame=requested_target,
-        translated_location_m=tuple(float(value) for value in translated),
-        record=record,
-    )
-
-
 def transform_segmentation_candidate_location_to_robot_frame(  # noqa: PLR0913
     *,
     interaction_root: Path,
@@ -590,7 +465,6 @@ def transform_segmentation_candidate_location_to_robot_frame(  # noqa: PLR0913
     temporary_root = Path(tempfile.mkdtemp(prefix=".robot-location-", dir=destination.parent))
     try:
         record = {
-            "schema_version": 2,
             "record_type": "RobotFrameLocationRecord",
             "producer": _PRODUCER,
             "location_number": location_number,
@@ -641,7 +515,6 @@ def _calibration_payload(
 ) -> dict[str, object]:
     rotation = transformation[:3, :3]
     return {
-        "schema_version": 1,
         "record_type": "CameraToRobotCalibrationRecord",
         "producer": _PRODUCER,
         "calibration_number": calibration_number,
@@ -673,15 +546,14 @@ def _load_pose(interaction_root: Path, record_path: Path) -> _ValidatedPose:
     if relative != expected_ref:
         raise RobotFrameConversionError("CAD pose estimation record path is invalid.")
     if (
-        record["schema_version"] != 3
-        or record["record_type"] != "CADPoseEstimationRecord"
-        or record["producer"] != _PRODUCER
-        or record["method"] != "principal_axis_multistart_point_to_point_ICP"
-        or not isinstance(record["parameters"], Mapping)
-        or not isinstance(record["ranked_pose_hypotheses"], list)
-        or not isinstance(record["qualified_pose_hypotheses"], list)
-        or record["cross_camera_fusion"] != "not_evaluated"
-        or record["robot_frame_conversion"] != "not_evaluated"
+        (record["record_type"] != "CADPoseEstimationRecord")
+        or (record["producer"] != _PRODUCER)
+        or (record["method"] != "principal_axis_multistart_point_to_point_ICP")
+        or (not isinstance(record["parameters"], Mapping))
+        or (not isinstance(record["ranked_pose_hypotheses"], list))
+        or (not isinstance(record["qualified_pose_hypotheses"], list))
+        or (record["cross_camera_fusion"] != "not_evaluated")
+        or (record["robot_frame_conversion"] != "not_evaluated")
     ):
         raise RobotFrameConversionError("CAD pose estimation identity is invalid.")
 
@@ -849,12 +721,11 @@ def _load_calibration(
     if relative != expected_ref:
         raise RobotFrameConversionError("Camera-to-robot calibration path is invalid.")
     if (
-        record["schema_version"] != 1
-        or record["record_type"] != "CameraToRobotCalibrationRecord"
-        or record["producer"] != _PRODUCER
-        or record["method"] != _CALIBRATION_METHOD
-        or record["coordinate_convention"] != _COORDINATE_CONVENTION
-        or record["stored_units"] != "m"
+        (record["record_type"] != "CameraToRobotCalibrationRecord")
+        or (record["producer"] != _PRODUCER)
+        or (record["method"] != _CALIBRATION_METHOD)
+        or (record["coordinate_convention"] != _COORDINATE_CONVENTION)
+        or (record["stored_units"] != "m")
     ):
         raise RobotFrameConversionError("Camera-to-robot calibration identity is invalid.")
     _nonempty_string(record["calibration_id"], "calibration_id")
@@ -949,7 +820,6 @@ def _robot_frame_pose_record(
 ) -> dict[str, object]:
     pose_record = pose_input.record
     return {
-        "schema_version": 3,
         "record_type": "RobotFramePoseRecord",
         "producer": _PRODUCER,
         "conversion_number": conversion_number,

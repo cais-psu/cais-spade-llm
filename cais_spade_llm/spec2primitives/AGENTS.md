@@ -177,15 +177,15 @@ explicitly under the corresponding heading.
   explicitly requests work on that file.
 - Do not copy ProductAgent or RobotAgent into this directory.
 - Treat ProductAgent and RobotAgent as shared, read-only runtime authorities.
-- Put the future ProductAgent connection under `spec2primitives/agents/pa/` and the
-  future RobotAgent connection under `spec2primitives/agents/ra/`.
+- Keep the ProductAgent connection under `spec2primitives/agents/pa/` and the
+  RobotAgent connection under `spec2primitives/agents/ra/`.
 - Do not create folders for unused shared-agent subsystems; they are outside the
   current Spec2Primitives roadmap.
 - When a future adapter requires an existing public interface, inspect the exact
   external interface without asking. Do not modify it without explicit
   permission.
 
-## Scene-only milestone boundary
+## Current non-executing runtime boundary
 
 - The UI may start, stop, and read status for the no-hardware
   `gazebo_dual_spec2primitives` process only through
@@ -193,15 +193,22 @@ explicitly under the corresponding heading.
 - Do not import `SystemBridge` or issue direct ROS2 shell commands from this
   package. The application passes a runtime object that satisfies the narrow
   Spec2Primitives adapter protocol.
-- Do not add hardware launch, ResourceAgent, RobotAgent, or robot execution.
+- Do not add hardware launch, shared-agent changes, or robot execution. Preserve
+  the owned exact-selected-RA context-only adapter and its existing readiness gates.
 - Keep ProductAgent access behind the Spec2Primitives-owned
   `ProductAgentContextRuntime` composition boundary. Do not start its lifecycle
   or expose other shared-agent operations.
-- Keep the User ↔ ProductAgent interaction non-executing. RA communication
-  remains unavailable until its separately authorized phase.
-- `table_spec2primitives.world` may display the approved NIST CAD corpus, but no
-  recognition, VLM, planning, insertion physics, or robot execution is
-  implemented in this milestone.
+- Keep User ↔ ProductAgent interaction non-executing. Phase 5.1 may contact only
+  the selected RA after current completion and evidence validation; Phase 5.2A may
+  author only an unbound structural draft.
+- Current Phase 4 implements PA-owned evidence investigation, deterministic validation,
+  pairwise assembly relationships and required MoveIt position planning for arm
+  assignment in simulation. It does not establish grasping or assembly outcome.
+- Each owned record type has one current format without format-version markers or
+  compatibility readers. Keep saved interactions untouched; incompatible records
+  require “Start a fresh interaction” and cannot authorize RA work.
+- Use `BIAS_VALIDATION.md` for audits and live counterfactual experiments. Offline
+  fixtures establish contracts only; never claim they prove no bias.
 - Keep `NIST_assembly_instructions.pdf` in `references/products/`. Reference the
   existing NIST STL files by repository path; do not copy the STL files into
   this directory.

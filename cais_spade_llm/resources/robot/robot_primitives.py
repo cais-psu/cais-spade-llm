@@ -306,26 +306,6 @@ def _robot_target_location_for_event(outline_event: dict[str, Any]) -> str:
     )
 
 
-def _robot_pose_in_workspace(
-    pose: dict[str, Any],
-    bounds: dict[str, Any],
-) -> tuple[bool, list[str]]:
-    violations: list[str] = []
-    for axis in ("x", "y", "z"):
-        value = pose.get(axis)
-        if value is None:
-            continue
-        try:
-            coord = float(value)
-        except (TypeError, ValueError):
-            continue
-        lower = bounds.get(f"{axis}_min_m")
-        upper = bounds.get(f"{axis}_max_m")
-        if lower is not None and coord < float(lower):
-            violations.append(f"{axis}={coord:.4f} < {axis}_min_m={float(lower):.4f}")
-        if upper is not None and coord > float(upper):
-            violations.append(f"{axis}={coord:.4f} > {axis}_max_m={float(upper):.4f}")
-    return len(violations) == 0, violations
 
 
 def _robot_available_named_poses(snapshot: dict[str, Any]) -> set[str]:
@@ -767,7 +747,6 @@ def robot_primitive_sequence_validator(
         if isinstance(entry, dict) and _robot_token(entry.get("name"))
     }
     named_poses = _robot_available_named_poses(start_snapshot)
-    workspace_bounds = dict(start_snapshot.get("workspace_bounds") or {})
     trace_facts: dict[tuple[str, str], list[dict[str, Any]]] = {}
     _robot_seed_trace_facts_from_context(
         facts=trace_facts,
@@ -907,22 +886,6 @@ def robot_primitive_sequence_validator(
                         evidence={"params": deepcopy(params)},
                     )
                 )
-            elif workspace_bounds:
-                reachable, violations = _robot_pose_in_workspace(pose, workspace_bounds)
-                if not reachable:
-                    findings.append(
-                        _robot_sequence_finding(
-                            outline_event=outline_event,
-                            constraint_code="workspace_unreachable",
-                            reason=f"{primitive} target is outside {resource_jid} workspace bounds",
-                            step_result=step_result,
-                            evidence={
-                                "checked_pose": deepcopy(pose),
-                                "workspace_bounds": deepcopy(workspace_bounds),
-                                "failed_axes": deepcopy(violations),
-                            },
-                        )
-                    )
 
         fact_contract = _robot_primitive_contracts(
             primitive,

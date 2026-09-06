@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "calibration_profile": "table_spec2primitives_fixed_cameras_v1",
   "authority": "user_authorized_gazebo_simulation_calibration",
   "source_world": {

@@ -159,13 +159,6 @@ ur5e:
     insert_max_travel_m: 0.05
     insert_start_position_tolerance_m: 0.003
     insert_start_orientation_tolerance_rad: 0.0349065850
-    cartesian_workspace_bounds:
-      x_min_m: -0.7
-      x_max_m: 0.7
-      y_min_m: -0.35
-      y_max_m: 1.1
-      z_min_m: 0.85
-      z_max_m: 1.6
     cartesian_reach:
       origin_x_m: 0.0
       origin_y_m: 0.5

@@ -1,24 +1,9 @@
 # Cases
 
-This directory will contain controlled Spec2Primitives case-study inputs.
+Case descriptions supply requirements and approved evidence references, not runtime answers. The current production authority contains `assembly`, `xarm6`, and `ur5e`; this is not runtime process discovery.
 
-The starting case is:
+A case may require several pairwise assembly relationships under one `target_feature`. Current observations and desired relationship membership are separate. PA determines task roles, destination references, attachment claims and whole-goal completeness from evidence; host validation checks structure and provenance before PA assigns a capable reachable arm.
 
-```text
-product requirement: assemble Medium Gear
-```
+Use fresh interaction roots and frozen configurations for experiments. Vary candidate order/layout, ambiguous identities, missing/contradictory evidence, and arm reachability as described in [BIAS_VALIDATION.md](../BIAS_VALIDATION.md). Approved document/CAD names are legitimate evidence; expected candidates, simulator poses, evaluator labels and completed primitive recipes cannot be supplied to recognition.
 
-The implemented PA binds this requirement to evidence by authoring one v9
-`target_feature` with current and desired states, then independently choosing
-location handles and a capable reachable resource. The host commits seven
-feature/state assertions and four `processExecution`/resource assertions;
-completion v7 pins the result, and Phase 5.2A reconstructs it for the RA LLM.
-This is one blind regression case, not a hard-coded evidence sequence, primitive
-catalog size, predetermined target answer, or expected `primitive_steps` recipe.
-
-The production workcell profile intentionally configures only `assembly`,
-`xarm6`, and `ur5e`, so this deployment is an assembly case study rather than a
-runtime process-discovery claim. The target-feature and allocation contracts are
-process-independent: additional configured processes and resources can use the
-same PA/RA handoff without source-code changes once truthful evidence,
-capabilities, and validators exist.
+Finalized predictions and evaluator-only outcomes remain separate under `evaluations/`. Do not silently relabel an older run as grounded under current proposal/evidence/completion checks.

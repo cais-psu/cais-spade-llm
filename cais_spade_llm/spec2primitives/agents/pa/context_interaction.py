@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Start one native tool-using Spec2Primitives ProductAgent interaction."""
 
-from __future__ import annotations
 
 import json
 import logging
@@ -16,7 +17,7 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v8,
+    persist_pa_context_grounding_completion,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -31,10 +32,13 @@ _FIRST_TURN_PATH = Path("interaction_record/turn_0001.json")
 _GROUNDING_VALIDATION_CODES = frozenset(
     {
         "unsupported_process",
+        "grounding_budget_exhausted",
+        "grounding_no_progress",
         "invalid_target_feature",
         "evidence_reference_invalid",
         "location_evidence_unavailable",
         "no_reachable_resource",
+        "reachability_validation_unavailable",
         "invalid_resource_selection",
     }
 )
@@ -161,7 +165,7 @@ async def start_pa_context_interaction(
             )
             persist_product_context_view(root, fresh_view)
             if pa_output.get("resource_assignment_status") == "complete":
-                persist_pa_context_grounding_completion_v8(
+                persist_pa_context_grounding_completion(
                     root,
                     tbox=tbox,
                     product_requirement=product_requirement,
@@ -182,6 +186,9 @@ async def start_pa_context_interaction(
 
 
 def _native_output_validation_error(value: Mapping[str, object]) -> str | None:
+    progress_error = _grounding_progress_validation_error(value.get("grounding_progress"))
+    if progress_error is not None:
+        return progress_error
     status = value.get("grounding_status")
     if status not in {"complete", "incomplete", "clarification_required"}:
         return "Native PA output has an invalid grounding_status."
@@ -210,11 +217,52 @@ def _native_output_validation_error(value: Mapping[str, object]) -> str | None:
     return None
 
 
+def _grounding_progress_validation_error(value: object) -> str | None:
+    """Validate optional host-authored grounding counters and terminal feedback."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {
+        "evidence_operations_used",
+        "evidence_operations_limit",
+        "proposals_used",
+        "proposals_limit",
+        "last_feedback",
+        "stop_reason",
+    }:
+        return "Native grounding progress fields are invalid."
+    for used_key, limit_key in (
+        ("evidence_operations_used", "evidence_operations_limit"),
+        ("proposals_used", "proposals_limit"),
+    ):
+        used, limit = value[used_key], value[limit_key]
+        if (
+            isinstance(used, bool)
+            or not isinstance(used, int)
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or not 0 <= used <= limit
+        ):
+            return "Native grounding progress counters are invalid."
+    feedback = value["last_feedback"]
+    if not isinstance(feedback, list) or not all(isinstance(item, Mapping) for item in feedback):
+        return "Native grounding progress feedback is invalid."
+    stop_reason = value["stop_reason"]
+    if stop_reason is not None and (
+        not isinstance(stop_reason, str)
+        or stop_reason not in {"complete", "clarification_required", *_GROUNDING_VALIDATION_CODES}
+    ):
+        return "Native grounding progress stop reason is invalid."
+    return None
+
+
 def _resource_assignment_output_validation_error(
     value: Mapping[str, object],
 ) -> str | None:
     """Validate the optional resource-assignment portion of semantic completion."""
     status = value.get("resource_assignment_status")
+    if status == "deferred" and isinstance(value.get("deferred_reason"), str):
+        return None
     if status != "complete":
         return "Native completion resource-assignment status is invalid."
     resource_selection_ref = value.get("resource_selection_ref")

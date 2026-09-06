@@ -1153,12 +1153,6 @@ def _finding_state_evidence_text(
     if checked_pose:
         facts.append(f"checked_pose=({_pose_xyz_text(checked_pose)})")
 
-    workspace_bounds = dict(
-        evidence.get("workspace_bounds") or finding.get("workspace_bounds") or {}
-    )
-    if workspace_bounds:
-        facts.append(_workspace_capability_hint(workspace_bounds))
-
     changed_fields = [
         str(field).strip() for field in (evidence.get("changed_fields") or []) if str(field).strip()
     ]
@@ -1895,7 +1889,7 @@ def _candidate_rejection_learning_summary(  # noqa: C901
             else:
                 sentence += f": {reason}"
             if constraint_code == "workspace_unreachable":
-                sentence += " (persists while observed_pose and workspace_bounds are unchanged)"
+                sentence += " (requires fresh robot-model validation)"
             if key in line_by_key:
                 line_by_key.pop(key, None)
             line_by_key[key] = sentence
@@ -2024,21 +2018,6 @@ def _named_pose_tokens(value: Any) -> list[str]:
     return deduped
 
 
-def _workspace_capability_hint(bounds: dict[str, Any]) -> str:
-    if not isinstance(bounds, dict) or not bounds:
-        return "workspace not advertised"
-    axis_parts: list[str] = []
-    for axis in ("x", "y", "z"):
-        lo = bounds.get(f"{axis}_min_m")
-        hi = bounds.get(f"{axis}_max_m")
-        if lo is None and hi is None:
-            continue
-        lo_text = "?" if lo is None else f"{float(lo):.2f}"
-        hi_text = "?" if hi is None else f"{float(hi):.2f}"
-        axis_parts.append(f"{axis}[{lo_text},{hi_text}]")
-    if not axis_parts:
-        return "workspace not advertised"
-    return "workspace " + ", ".join(axis_parts)
 
 
 def _pose_xyz_text(pose: dict[str, Any]) -> str:
@@ -2593,78 +2572,8 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
-def _pose_workspace_relation_text(
-    pose: dict[str, Any],
-    bounds: dict[str, Any],
-) -> str:
-    if not isinstance(pose, dict) or not pose:
-        return "pose_unknown"
-    if not isinstance(bounds, dict) or not bounds:
-        return "workspace_bounds_unknown"
-
-    failures: list[str] = []
-    checked_axes = 0
-    for axis in ("x", "y", "z"):
-        coord = _float_or_none(pose.get(axis))
-        lo = _float_or_none(bounds.get(f"{axis}_min_m"))
-        hi = _float_or_none(bounds.get(f"{axis}_max_m"))
-        if coord is None or (lo is None and hi is None):
-            continue
-        checked_axes += 1
-        if lo is not None and coord < lo:
-            failures.append(f"{axis}={coord:.2f} < {axis}_min_m={lo:.2f}")
-        if hi is not None and coord > hi:
-            failures.append(f"{axis}={coord:.2f} > {axis}_max_m={hi:.2f}")
-    if failures:
-        return "outside workspace (" + "; ".join(failures) + ")"
-    if checked_axes == 0:
-        return "workspace_bounds_unknown"
-    return "inside workspace"
 
 
-def _observed_part_workspace_facts_summary(
-    *,
-    llm_input: dict[str, Any],
-    projected_resources: list[dict[str, Any]],
-    projected_parts: list[dict[str, Any]],
-) -> str:
-    fault_event = dict(llm_input.get("fault_event") or {})
-    affected_parts = {
-        str(part_name).strip()
-        for part_name in (fault_event.get("affected_part_names") or [])
-        if str(part_name).strip()
-    }
-
-    lines: list[str] = []
-    for part in projected_parts:
-        if not isinstance(part, dict):
-            continue
-        part_name = str(part.get("part_name") or "").strip()
-        observed_pose = dict(part.get("observed_pose") or {})
-        if not part_name or not observed_pose:
-            continue
-        if affected_parts and part_name not in affected_parts:
-            continue
-
-        resource_relations: list[str] = []
-        for resource in projected_resources:
-            if not isinstance(resource, dict):
-                continue
-            resource_jid = str(resource.get("resource_jid") or "").strip()
-            if not resource_jid:
-                continue
-            relation = _pose_workspace_relation_text(
-                observed_pose,
-                dict(resource.get("workspace_bounds") or {}),
-            )
-            resource_relations.append(f"{resource_jid}: {relation}")
-
-        if resource_relations:
-            lines.append(
-                f"- {part_name} observed_pose({_pose_xyz_text(observed_pose)}): "
-                + "; ".join(resource_relations)
-            )
-    return "\n".join(lines) if lines else "(none)"
 
 
 def _candidate_grounding_target_refs(
@@ -3109,7 +3018,6 @@ def _slim_resource_facts(resources: list[Any]) -> list[dict[str, Any]]:
         "held_part_location",
         "current_pose",
         "current_pose_ref",
-        "workspace_bounds",
     }
     rows = [
         {k: v for k, v in dict(row).items() if k in _keep}

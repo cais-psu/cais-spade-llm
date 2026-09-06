@@ -1,343 +1,78 @@
 # Spec2Primitives
 
-Spec2Primitives is the isolated ICRA 2027 case study for product-specification-
-driven dynamic primitive composition. Assembly is the current example; the
-target-feature contract is process-independent so later cases may express
-welding, painting, milling, or other desired product states. The implemented
-ProductAgent (PA) boundary performs schema-constrained, evidence-backed instance
-grounding. It does not discover or change the PPR TBox.
+Spec2Primitives is the isolated ICRA 2027 case study for product-specification-driven dynamic primitive composition. PA grounds instances under the supplied PPR TBox; it does not discover or modify the ontology schema.
 
-## Implementation status
+## Current implementation
 
-**Phase 4 is implemented as two autonomous ProductAgent decisions.** PA first
-investigates approved evidence and authors one complete `target_feature`. When
-the selected process symbol is `assembly`, that same proposal also authors one
-`assembly_feature_association`, its two mating `AssemblyFeature` endpoints,
-their owners, and each endpoint's current or desired state-value binding. The
-host validates and commits exactly 19 proposal assertions for `assembly`, or
-the existing seven assertions for another configured process. PA then chooses
-a capable resource and invokes reachability for the proposal-bound state
-locations. An accepted selection adds four `processExecution` assertions.
+Product grounding and arm assignment complete when the PA-authored goal passes deterministic structure/evidence validation and PA assigns a configured capable arm whose grounded locations pass reachability checks. The production profile contains `assembly`, `xarm6`, and `ur5e`. Capability declarations alone do not establish reachability or a primitive sequence.
 
-New simulation runs persist Cartesian `ReachabilityCheckRecord` v3 and
-`PlanOnlyFeasibilityValidationRecord` v3 from live MoveIt planning. Physical
-mode retains the conservative state-location v4 records. Both paths persist
-`ResourceSelectionRecord` v5 and `PAContextGroundingCompletion` v8. Completion
-v8 directly pins the proposal, selection, reachability and RobotAgent
-validation records, final ABox, source and tool evidence, presentation records,
-registry, and workcell. It does not create a new `TypedGroundingContract`.
-Completion v7 and earlier supported versions remain readable for audit, but v7
-cannot enter the current Phase 5 handoff; rerun Phase 4 to create v8.
+One `target_feature` represents the requirement. For assembly, `assembly_feature_association` is a collection of pairwise relationships. Each has exactly two `AssemblyFeature` endpoints and explicit `state_names`. A desired relationship can reference two currently observed objects. Document-only endpoints may remain unbound; unresolved required identities or destinations prevent completion.
 
-The exact ontology, medium-gear example, autonomy boundary, image behavior, and
-general assembly examples are documented in
-[`ASSEMBLY_ONTOLOGY.md`](ASSEMBLY_ONTOLOGY.md).
+For example, if a requirement specifies a gear over a shaft, current evidence may locate both objects. The desired state describes their required assembled relationship and references the observed shaft as the destination. An observation belongs in `desired_state.state_values` only when evidence supports its role in the required outcome; identifying the moving gear at its current location is insufficient. A source-supported observation may belong to both states when it independently supports both roles. The destination reference does not assert that assembly is already complete or that the shaft's center is the final insertion pose. A document figure alone cannot prove current installation. See [the ontology guide](ASSEMBLY_ONTOLOGY.md).
 
-Phase 5 selected-RA handoff remains partially implemented. Phase 5.1 provides
-the assignment envelope and injected-runtime state/catalog snapshots. Phase
-5.2A lets that exact selected RobotAgent author one immutable, unbound
-`PrimitiveProgramDraft`. Primitive binding, executable-program validation,
-execution, and observed outcomes remain unimplemented.
-
-## Current PA workflow
+## Grounding flow
 
 ```text
-arbitrary requirement
-→ initialize the TBox and interaction ABox
-→ present every approved source through neutral prompt-local handles
-→ PA autonomously retrieves and analyzes the evidence it chooses
-→ PA returns one complete target_feature or a genuine clarification
-→ for assembly, PA identifies two mating endpoints and binds one to each state
-→ validate structure, provenance, state-location bindings, and ontology consistency once
-→ commit the unchanged target_feature projection
-→ derive the exact current and desired location handles from the accepted proposal
-→ present all capable resources while preserving those proposal-bound locations
-→ PA chooses a resource and invokes reachability as it chooses
-→ validate the unchanged cited reachable selection once
-→ commit four processExecution/resource assertions
-→ persist PAContextGroundingCompletion v8
+exact requirement and operator clarification
+→ PA investigates approved document, CAD, and pinned RGB-D evidence
+→ PA proposes current/desired states and assembly relationships
+→ host validates structure, citations, bindings, and hashes
+→ return generic validation feedback when correction is needed
+→ continue PA investigation within shared operation/proposal budgets
+→ commit only the deterministically valid proposal
+→ derive every grounded current and destination coordinate reference
+→ PA checks every capable arm and submits its cited selection
+→ revalidate capability and live MoveIt reachability
+→ commit processExecution and runsOnResource
+→ persist current completion
 ```
 
-PA has four controlled native grounding tools: `retrieve`, `query_document`,
-`compare_cad_size`, and `analyze_candidate_layout`. Example calls include:
+PA controls `retrieve`, `query_document`, `compare_cad_size`, and `analyze_candidate_layout`. Configured `grounding_limits` default to 24 evidence operations and 6 proposals shared across the investigation. The snapshot and observation mapping stay pinned across corrections. Deterministic feedback identifies invalid structure/references without supplying a replacement answer. Budget exhaustion, repeated invalid proposals without progress, changed evidence or unavailable prerequisites leave grounding incomplete. Rejected assertions never merge.
 
-```json
-{
-  "name": "retrieve",
-  "arguments": {"evidence_id": "evidence_0001"}
-}
-```
+Document retrieval supplies a deterministic source index with page text/images; PA can author its own document question. CAD comparison reports all candidate measurements without selecting a winner. Same-view layout analysis reports geometry without a built-in task-role answer.
 
-```json
-{
-  "name": "compare_cad_size",
-  "arguments": {
-    "cad_evidence_id": "evidence_0002",
-    "observation_evidence_id": "evidence_0003"
-  }
-}
-```
+PA owns semantic interpretation, whole-goal coverage and task roles. Deterministic validators check structure, exact references, evidence lineage and ontology constraints; they cannot certify that a plausible interpretation is correct. Observation/document VLM tools remain evidence producers. A closer size match does not prove a unique task role. There is no mandatory second semantic reviewer or reviewer bypass flag.
 
-The `evidence_id` is prompt-local. PA cannot supply a filesystem path, hidden
-provider identity, ground-truth label, or arbitrary source. It may retrieve
-documents, approved CAD, and observations in any order. `query_document`
-accepts PA's exact question. `compare_cad_size` persists and returns every
-evaluated candidate's measurements in observation order; it does not rank,
-select, or label a winner. `analyze_candidate_layout` accepts any two or more
-PA-selected candidates from one frame and returns raw positions, pairwise
-displacements, distances, and collinearity measurements. It does not produce a
-built-in spatial-relation verdict.
+## Arm assignment and limits
 
-PA's target-feature response is final for that conversation. There is no
-controller evidence plan, readiness contract, semantic-review call, expected
-revision, or outer correction loop. A malformed or unsupported response fails
-without answer-shaping feedback. The only normal alternatives are one complete
-`target_feature`, a genuine `clarification_question`, or
-`unsupported_process`. The latter is accepted only when no configured process
-represents the requirement; the controller never rewrites a requirement as
-`assembly`.
+Resource assignment is part of the ontology. A supported PA choice adds specification `hasProcessExecution`, the `processExecution` type, `runsProcess`, and `runsOnResource`. All grounded coordinate-bearing state values are checked, with exact duplicates checked once per state. Multiple relationships do not require choosing one Cartesian pair or deferring allocation.
 
-New incomplete results use only the deterministic stage codes
-`unsupported_process`, `invalid_target_feature`,
-`evidence_reference_invalid`, `location_evidence_unavailable`,
-`no_reachable_resource`, and `invalid_resource_selection`. Their display text
-is controller-authored and is not sent back to PA.
+PA may choose either eligible arm when evidence gives no advantage. The host does not select by order, optimize distance, or substitute a resource. Missing locations or an unsupported/unreachable choice leave Phase 4 incomplete, while the grounded ontology and images remain visible.
 
-## Evidence and ontology boundary
+Current reachability uses approved calibration and MoveIt `GetMotionPlan` for each exact checked simulated robot, without starting or contacting a RobotAgent. The request uses its configured planning group/TCP, live robot state, joint limits and collision scene, with a configured 5 mm position tolerance and unconstrained tool orientation. Example boxes and fixed-radius estimates cannot accept or reject allocation. Missing services, incomplete results or failed planning block assignment; a failed search does not prove mathematical unreachability. `motion_validation_performed` is true for accepted position plans, while `motion_executed` remains false. Grasping, attached-part collision geometry, orientation, insertion, force and tolerance remain unvalidated.
 
-Every approved PDF and STL is registered with an expected SHA-256 in
-`references/products/approved_sources.json`. Static evidence is reused only
-when its source revision still matches. A live-observation handle creates one
-fresh capture per grounding run, reuses it for repeated requests in that run,
-and creates a new capture after clarification resume.
+## Records and UI
 
-A document retrieval creates `DocumentOverviewRecord` version 3. It contains
-every page in order, extracted text, rendered-page hashes, neutral visual
-observations that retain visible callouts, labels, and spatial relationships,
-uncertainty, and exact page citations. There is no targeted
-inspection question, preferred page, product-specific answer, RAG ranking, or
-`DocumentEvidenceRecord` in the new path.
+Each record type has one current format, without version markers or compatibility readers. [Schemas](schemas/README.md) and [artifact paths](contexts/README.md) describe the lineage. The accepted proposal pins its evidence snapshot, source hashes and typed artifacts in `grounding_evidence`.
 
-An STL retrieval creates `CADMeshRecord` with hash-pinned source provenance,
-units, CAD-local geometry, triangle and vertex counts, dimensions, and
-centroid. `Gear_Medium.STL` is therefore typed evidence; it is not a TBox class
-and does not add a product-specific RDF predicate. PA may cite it when grounding
-an ABox feature.
+The UI shows evidence-operation usage, proposal attempts, current activity, elapsed time, validation feedback and stop reasons. It also shows ontology tables/diagram, both states, relationships, source caveats, current images, desired reference images, the selected arm, and validation limits. Its grounding timeline ends with “Product grounding and arm assignment complete”. Operator labels describe RobotAgent context capture and structural primitive drafting; implementation phase numbers remain in development documentation and internal identifiers. Destination images are labeled observed references, not completed manufacturing. Source uncertainty survives persistence and reload.
 
-A live RGB-D retrieval creates hash-pinned observation, point-cloud, uniform
-neutral segmentation, stable crop, and `ObservationCandidateReview` records.
-The observation VLM describes every opaque candidate morphologically and its
-uncertainty but cannot assign a part identity, state, CAD identity, process, or
-resource. PA-facing projections omit semantic camera names and source/target
-shortcuts. Target-feature `state_values` may cite any accepted typed record. For
-`assembly`, the two association endpoints must bind to coordinate-bearing state
-values and those exact values determine the allocation locations. Other
-configured processes retain the separate neutral location choice. If PA selects
-a segmentation candidate for reachability, approved calibration converts only
-that selected candidate to a `RobotFrameLocationRecord` v2.
+Recovery revalidates the current proposal/evidence contract, source hashes, capability authority, exact location coverage, and the exact MoveIt requests, position plans and controller profile. Old reviewer-bearing or otherwise incompatible records require “Start a fresh interaction”. Existing records remain unchanged and cannot authorize new RA work; they are not upgraded or read through a compatibility path.
 
-These physical records remain outside RDF because the PPR TBox does not model
-their numeric payloads. PA's explicit state assignment gives a selected neutral
-record its current or desired meaning. In simulation, the exact PA-selected
-RobotAgent uses live TF and collision-aware MoveIt Cartesian planning for the
-complete pick and place path. Manifest `workspace_bounds` and `gripper_reach`
-cannot accept or reject that simulation path. Neither the evidence host nor the
-RobotAgent chooses or substitutes a resource.
+## Phase 5 boundary
 
-## Ontology grounding
+Phase 5.1 activates/reuses only the exact selected RobotAgent through the owned adapter and captures paired state/catalog snapshots. Phase 5.2A asks that RA for one unbound `PrimitiveProgramDraft` using exact catalog symbols. Activation, recovered context, and draft entrypoints require current completion and evidence lineage.
 
-PA authors exactly one `target_feature` in this increment. Its
-`required_process` selects one configured process and cites direct evidence. Its
-`current_state.statement` and `desired_state.statement` state the observed and
-requested feature conditions and cite direct evidence. `state_values`
-carry PA-authored semantic names,
-accepted typed-record refs, JSON Pointer field paths, and direct citations.
-There is no host enum of value names. Grounding permits zero, one, or multiple
-values from any accepted typed record. They need not be RGB-D candidates or
-locations. For `assembly`, PA must also author exactly one
-`assembly_feature_association` with exactly two distinct `AssemblyFeature`
-endpoints and owners. One endpoint binds to a coordinate-bearing
-`current_state` value and the other to a coordinate-bearing `desired_state`
-value. Other configured processes retain the base target-feature shape.
+Live SPADE delivery, context/binding exchange, executable validation, execution, and observed outcomes remain future work. Shared agents and `SystemBridge` interfaces remain unchanged.
 
-`config/model_runtime.json` schema version 4 configures `product_agent_llm` as
-`gpt-5.6` with `none` reasoning for function tools through Chat Completions.
-`robot_agent_llm` uses `gpt-5.6` with `medium` reasoning for structural
-composition through Chat Completions.
-`document_vlm` and `observation_vlm` remain `gpt-5.6` with `medium` reasoning
-through the Responses API. Both vision calls use high image detail, a 4096
-output-token limit, a 90-second timeout, and `store: false`. Document cache keys
-include the complete model configuration and overview schema, so this change
-creates a new cache entry without rewriting an older one.
+## Evidence boundary and bias checks
 
-The host generates `feature_0001`, `currentstate_0001`, and
-`desiredstate_0001`. It compiles the feature and state types,
-`specification ppr:defines feature_0001`, the selected process
-`ppr:realizes feature_0001`, and exact `ppr:hascurrentstate` and
-`ppr:hasdesiredstate` links. For `assembly`, it also generates the `Assembly`,
-owner, and endpoint individuals and their exact assembly relations. State citations back their feature-state
-relationships and process citations back the process relation. Deterministic
-validation checks process authority, citations, accepted record bindings,
-record hashes, JSON Pointers, nonempty resolved values, unique names, the exact
-two-endpoint association, and this exact RDF projection. It does not author the
-target meaning, select its state images, or select primitives.
+Recognition receives the exact requirement/clarifications, approved document content and CAD files, RGB, depth, and approved calibration. Real camera names, frames, paths, hashes, and canonical candidate pointers stay internal. Model-facing view/candidate handles and order are randomized per interaction and pinned for audit. Approved CAD filenames and document part names remain legitimate supplied evidence.
 
-A structurally invalid PA proposal is never repaired, ranked, or sent back for
-a convergence retry. Validation either accepts the unchanged response or emits
-a stage-level code before ABox mutation.
+Gazebo identities, world/SDF contents, spawn poses, entity-state services, detector answers, evaluator labels, expected answers, and resource-selection results are excluded from recognition. Evaluation uses a separate evaluator after prediction finalization.
 
-### Geometry is verifier-derived
+[BIAS_VALIDATION.md](BIAS_VALIDATION.md) explains inspection of actual model inputs and controlled experiments. Offline tests establish contracts, not model accuracy, generalization, or absence of bias.
 
-The architecture does not contain `TargetFeatureGeometryRecord`. For assembly,
-numeric location is derived from each PA-authored endpoint state value and
-approved calibration only when PA invokes reachability. That derived value
-checks the submitted resource against the accepted proposal; it does not
-provide a predetermined target answer. Document, CAD, and RGB-D retrieval order
-remains PA-controlled.
+## Reading and running
 
-## Resource grounding
+- [Implementation status](IMPLEMENTATION_PLAN.md), [research scope](ICRA_SCOPE.md), [research positioning](RESEARCH_POSITIONING.md)
+- [PA](agents/pa/README.md), [RA](agents/ra/README.md), [tools](tools/README.md), [tests](tests/README.md)
+- [Approved references](references/README.md)
 
-`config/workcell_profile.json` schema v2 is the authority for the complete
-configured process catalog, resource identities, capable-process IRIs, and
-manifest references. The registry validates
-those manifests and builds PPR `resource` and `capableOf` graph relations from
-configuration. Python routing contains no product filename rule and no
-`supports_manipulator_pick_place` task flag.
+The entrypoint remains `poetry run python -m cais_spade_llm.ui_main`; the page is `/spec2primitives`. Configuration remains in `config/model_runtime.json`, `config/workcell_profile.json`, and the approved calibration manifest. Runtime records belong under `contexts/`; evaluator-only data belongs under `evaluations/`.
 
-The grounded feature, its two states, the required process, and unresolved
-`processExecution` activate allocation directly. For `assembly`, the accepted
-proposal fixes the current and desired location handles before this call; PA
-receives every configured resource capable of the selected process and chooses
-the resource to submit to `check_reachability`. For other configured processes,
-the existing neutral location-selection path remains available. In simulation,
-one current location, one desired location, their PA-requested CAD comparisons,
-and live MoveIt are required; missing inputs return `needs_context` without a
-static workspace fallback. The controller accepts any PA-selected resource when
-its cited record is current, capability-valid, and the applicable validation is
-accepted; registry order and distance do not rank choices.
+Each owned record type uses one current format, with no format-version fields or compatibility dispatch. Start a fresh interaction after this format change; saved interactions are neither converted nor rewritten. Hashes, provenance, exact references, timestamps, operation identifiers and calibration values remain authoritative.
 
-Reachability does not certify grasping, insertion, force, tolerance, or process
-execution, and it executes no motion. A failure does not trigger automatic
-resource substitution or a controller-authored retry. Only an unchanged PA
-selection backed by an accepted reachability record commits
-`processExecution`, its process/resource links, and the state transition.
+Before PA selects an arm, it must check every resource in the capable-resource catalog against the same grounded current and desired positions. One bounded correction lists missing checks and reuses completed results. PA may choose either passing arm; there is no preferred resource or proximity objective. Completion reload verifies coverage from the pinned tool-call records.
 
-## PA-to-RA target-feature handoff
-
-New Phase 5 handoff accepts `PAContextGroundingCompletion` v8 and writes
-`SelectedRAAssignmentEnvelope` v3. Phase 5.2A hash-verifies that completion and
-its accepted v10 proposal, then reconstructs a
-transient `target_feature` containing `product_requirement`,
-`specification_iri`, host-generated `feature_iri`, the PA-authored required
-process, both current and desired states, `assembly_feature_association` when
-present, and `resolved_state_values`. Every
-included state value is reloaded from its completion-pinned typed record,
-resolved through its JSON Pointer, and projected to a bounded JSON value before
-the RobotAgent call.
-
-The RobotAgent LLM treats this target feature as the authoritative semantic
-product outcome and selects and orders only exact symbols from its current
-primitive catalog. Deterministic code validates completion authority, lineage,
-the exact feature/process/resource chain, record hashes, resolved values, and
-symbol membership; it does not solve the composition. The transient input has
-no top-level `task` section.
-
-`PrimitiveProgramDraft` remains unchanged. It pins the completion, assignment,
-robot-state, and catalog records but does not copy the target feature. The Phase
-5.2 evidence panel reconstructs the same input from those pinned authorities and
-shows the statement, state-value record/path/evidence refs, and bounded resolved
-values.
-
-## UI
-
-The `/spec2primitives` page starts with a blank requirement. A completed run
-shows only:
-
-1. `Requirement received`
-2. `Evidence investigated`
-3. `Target feature grounded`
-4. `State-location allocation validated`
-5. `Grounding complete`
-
-Tool IDs, hashes, provider mechanics, and failures remain in diagnostics. The
-final view shows both feature-state statements, optional semantic values with
-their record/path refs, the PA-selected state-location lists and resource, and
-the per-location reachability verdicts. State images resolve from the exact
-records PA assigned to each role; deterministic rendering does not decide which
-record is current or desired. Generic document uncertainty remains in its
-evidence record for audit. A validated reachability allocation does not mean
-manufacturing was completed or motion was executed.
-
-Below the final grounding result, the temporary **Phase 5 · RobotAgent
-Diagnostics** card provides operator activation and persisted inspection. Its current
-**5.1 · Assigned RA activation and context snapshot** section shows
-`xarm6@localhost` and its execution mode when selected, then paired state and
-catalog revision counts, exact primitive symbols, the catalog fingerprint, and
-expandable `robot_state` and full `primitive_catalog` after capture. A red
-fail-closed diagnostic identifies an unavailable exact RobotAgent or invalid or
-unpaired evidence. **Start Phase 5** consumes the unchanged active Phase 4
-completion and reads the exact selected live in-process RobotAgent. If that
-agent is not live and the full shared Agent System is stopped, the same action
-requires the Spec2Primitives Dual Gazebo environment, waits for simulation
-readiness, and starts only the exact Phase 4-selected RobotAgent in the selected
-context-only simulation profile. The context-only agent has no task tools,
-failure scenarios, or ROS controller and therefore does not wait for
-`/detect_all`, TF, or motion services. It never starts CCA, ProductAgents,
-UserAgent, a second RobotAgent, product orders, or `REQ_*` tasks; launches
-Gazebo; selects a fallback; or executes a primitive. **Retry Phase 5** reuses
-the same pinned assignment after a failed startup or contact. **Restart Phase
-5** preserves the same Phase 4 assignment and existing immutable evidence while
-appending a fresh paired state and synthesis-catalog snapshot. Refresh only
-rereads the active interaction. Later Phase 5 diagnostics can share this
-temporary card. After Phase 5 is complete, it is intended to be replaced by the
-primitive composition card.
-
-The existing application entry point remains:
-
-```bash
-poetry run python -m cais_spade_llm.ui_main
-```
-
-## MUST: Do not leak the answer
-
-- Allowed recognition inputs are only the user requirement, approved NIST
-  documents, approved candidate CAD files, RGB, depth, and camera calibration.
-- Forbidden recognition inputs are Gazebo model names, Gazebo entity names,
-  world or SDF contents, spawn manifests, configured spawn poses,
-  `/gazebo/model_states`, `/get_entity_state`, current detector responses, and
-  evaluator labels.
-- Candidate CAD filenames and document part names are allowed because they are
-  part of the supplied runtime corpus. Recognition must still determine which
-  observed object matches which candidate and where it belongs.
-- Ground truth may be read only by a separate evaluator after the prediction is
-  finalized.
-- Recognition code must not import, invoke, or share runtime objects with the
-  ground-truth evaluator.
-- Any experiment that violates this boundary is invalid and must not be
-  reported.
-
-## Runtime boundary
-
-Shared ProductAgent and RobotAgent implementations remain read-only authorities
-reached through package-owned adapters. The public `SystemBridge` API is
-unchanged; its shared Gazebo process classification recognizes
-`gazebo_dual_spec2primitives` for core-service simulation readiness and hardware
-interlocks. Because this world intentionally launches with
-`run_perception:=false`, it does not queue the shared perception-dependent
-controller prewarm. The current RA handoff reuses an exact compatible live agent
-or starts only the exact Phase 4-selected context-only RobotAgent, then performs
-an in-process state/catalog read. The same exact-agent adapter can then request
-an ordered structural sequence of catalog symbols with no tools or execution.
-SPADE handoff, parameter binding, IK, collision checking, robot execution, and
-outcome validation remain unavailable.
-
-Important locations:
-
-- `agents/pa/`: native PA adapter, grounding, validation, and completion.
-- `config/`: camera calibration and workcell profile authorities.
-- `ontology/`: immutable PPR TBox, configured registry, and Workcell ABox.
-- `tools/document_evidence/`: one-step full-document evidence.
-- `tools/rgb_d_cad_grounding/`: CAD, RGB-D, correspondence, and location records.
-- `contexts/`: ignored per-interaction runtime records.
-- `evaluations/`: isolated post-prediction ground truth and evaluation.
-- `references/products/`: approved documents and CAD source authority.
+State cards show the exact grounded statement once in a four-line preview, with “Show more” when it exceeds the available space. Visible caveat counts lead to expandable caveats, sources, endpoints and raw records. Desired State displays only directly bound images; cross-state relationship images remain under evidence details and identify their source state. The resource comparison distinguishes reachable, rejected, unavailable and unchecked results. Responsive grids and wrapping contain long paths and expanded records.

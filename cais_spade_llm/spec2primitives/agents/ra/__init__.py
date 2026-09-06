@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Spec2Primitives selected-RA integration boundary."""
 
 from .context_handoff import (
@@ -12,12 +14,7 @@ from .context_handoff import (
     load_selected_ra_context_snapshot,
     read_phase_5_1_diagnostic,
 )
-from .feasibility_validation import (
-    PlanOnlyFeasibilityValidation,
-    RobotAgentFeasibilityError,
-    RobotAgentFeasibilityRuntime,
-    validate_provisional_allocation,
-)
+from .feasibility_validation import RobotAgentFeasibilityRuntime
 from .primitive_draft import (
     Phase52Diagnostic,
     PrimitiveDraftError,
@@ -30,14 +27,12 @@ from .primitive_draft import (
 __all__ = [
     "Phase51Diagnostic",
     "Phase52Diagnostic",
-    "PlanOnlyFeasibilityValidation",
     "PrimitiveCatalogSnapshot",
     "PrimitiveDraftError",
     "PrimitiveProgramDraft",
     "RAContextHandoffError",
     "RobotAgentCompositionRuntime",
     "RobotAgentDraftRuntime",
-    "RobotAgentFeasibilityError",
     "RobotAgentFeasibilityRuntime",
     "RobotStateSnapshot",
     "SelectedRAAssignmentEnvelope",
@@ -47,5 +42,4 @@ __all__ = [
     "load_selected_ra_context_snapshot",
     "read_phase_5_1_diagnostic",
     "read_phase_5_2_diagnostic",
-    "validate_provisional_allocation",
 ]

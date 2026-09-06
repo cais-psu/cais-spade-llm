@@ -28,36 +28,13 @@ closed rather than reinterpret the requirement as assembly.
 
 ## Proposed-versus-implemented status
 
-The end-to-end workflow in this document is proposed architecture. **The Phase 4
-runtime is implemented through Phase 4.4 under the current framework.** PA uses
-native `retrieve`, `query_document`, `compare_cad_size`, and
-`analyze_candidate_layout` tools in any dependency-valid order and then returns
-one complete target feature, a genuine requirement clarification, or
-`unsupported_process`. The controller validates the final v9 proposal once and
-commits its seven assertions without semantic ranking or correction feedback.
+The end-to-end composition/execution architecture in this document remains proposed. Current product grounding accepts one complete target and a collection of pairwise assembly relationships. Current observations and desired relationship membership are separate. PA owns semantic interpretation and corrections. Deterministic contract feedback permits up to six proposals sharing 24 evidence operations and one pinned observation per grounding invocation; exact repeated failures stop the loop earlier.
 
-A second native PA conversation receives all capable resources and neutral
-location handles. PA may invoke `check_reachability` for any resource and one or
-more locations per state, then returns one cited selection or
-`no_reachable_resource`. The controller validates that unchanged selection once.
-An accepted v4 reachability record and v5 selection add four
-`processExecution` and resource-assignment assertions and produce completion v7.
-The production profile configures only
-`assembly`, `xarm6`, and `ur5e`; this is an assembly case study, not runtime
-process discovery. Their identities and configured capabilities remain pinned
-to the workcell profile and manifests; broad `capableOf assembly` assertions
-do not encode reach or a primitive sequence. No
-live SPADE Phase 5 delivery or execution path is connected.
-Phase 5.1 implements the contract-first assignment envelope and injected-runtime
-state/catalog snapshot boundary. Phase 5.2A implements one RA-LLM-authored
-structural `PrimitiveProgramDraft` from a reconstructed target feature and exact
-catalog symbols.
+PA checks every configured capable arm using the same bound current/destination coordinate references and live MoveIt position planning, then selects an arm with an accepted check. Missing arm checks retain their separate single correction; unavailable results remain distinct from rejected planning. Selection and completion record that ontology assignment with position-planning evidence and explicit unvalidated grasp/insertion constraints. Multiple relationships do not force a unique Cartesian pair. Required locations are checked before target commit; unresolved inputs or assignment prevent completion. Contract acceptance does not establish semantic correctness.
 
-Phase 4 completion is the implemented grounded, no-motion resource-assignment
-boundary. Cross-camera fusion, object-pose estimation,
-grasp/contact/tolerance/insertion validation, parameter binding,
-primitive-level robot validation, execution, and observed outcomes are not part
-of the completed Phase 4 claim.
+Phase 5.1 requires current completion before exact selected-RA envelope and paired context snapshots. Phase 5.2A creates one unbound structural draft. Live SPADE delivery, binding/context exchange, primitive-level validation, execution and observed outcomes remain future work. Older supported records remain immutable history and cannot authorize new RA work.
+
+See [implementation status](IMPLEMENTATION_PLAN.md), [ontology semantics](ASSEMBLY_ONTOLOGY.md) and [bias experiments](BIAS_VALIDATION.md). Generic deterministic checks and offline tests do not establish model accuracy or absence of bias.
 
 ## Fundamental research challenge
 
@@ -100,35 +77,17 @@ execution
 observation-backed realized outcome
 ```
 
-The implemented PA outcome contract is process-independent even though the
-current controlled case is assembly. For one requirement, PA authors one
-`target_feature` with an evidence-cited authorized process, complete
-evidence-cited current- and desired-state statements, and generic typed
-state-value references. The generic ontology proposal permits zero, one, or
-multiple state values from any accepted typed record. PA chooses the text,
-process, value count and
-names, record refs, JSON Pointer paths, and citations from retrieved evidence;
-deterministic code validates the template and evidence integrity but does not
-fill or rank their semantics. Location evidence is selected separately and does
-not constrain state-value type or count. Information not represented by the
-target-feature schema cannot become an ad hoc Phase 4 blocker. Later
-welding, painting, milling, or other processes may use the same shape when
-their evidence, providers, and primitive contracts exist; those process cases
-are not implemented claims.
+The implemented contract supports one complete requirement transition with generic typed state values and zero or more pairwise assembly relationships. Each relationship states current/desired membership independently of endpoint observation bindings. The host preserves exact identities and compiles associations separately under their Assembly owners. PA interprets goal coverage, task roles, current attachment and intended relationships. Deterministic checks establish valid bindings and evidence integrity; citations alone do not prove meaning.
 
-The host generates `feature_0001`, `currentstate_0001`, and
-`desiredstate_0001`; compiles their types; links both states to the feature;
-and adds specification `ppr:defines` plus selected process `ppr:realizes`.
-The rich state meaning stays in the accepted v9 proposal. There is no separate
-semantic reviewer or controller-guided target-feature revision loop.
+All bound coordinate-bearing state references determine the required arm check. Non-coordinate state values remain semantic evidence. PA chooses among configured capable arms; the host cannot substitute one. Current completion records contract-validated product grounding and live MoveIt reachability-backed assignment. Primitive-program validity, semantic correctness and assembly outcome remain separate claims.
 
 The research contribution is not that PA and RA exchange messages. It is the
 combination of:
 
 1. PA dynamically grounding an incomplete product requirement from only the
    relevant approved document, CAD, and RGB-D evidence, followed by an
-   evidence-backed PA selection from the configured capable resources and live
-   Cartesian validation of that exact choice.
+   evidence-backed PA selection from the configured capable resources and configured
+   workspace/gripper reachability of that exact choice.
 2. RA, where RA means RobotAgent, interpreting that required transition against
    fresh selected-resource state and the complete current semantic primitive
    catalog with partial local executable contracts, then agentically authoring
@@ -150,11 +109,10 @@ question whenever it judges that source relevant; the bounded document VLM sees
 only that question and the selected document pages. Retrieval is not globally
 document-first, no vector database is required for the current manual, and no
 controller-authored question prescribes a component, destination, evidence
-modality, or expected answer. Deterministic validation checks only the final
-shape, process authority, reference authorization, hashes, and JSON Pointer
-resolution. A PA does not author an insufficiency or validation reason; the
-controller emits only a stage-level code and never sends it back as
-answer-shaping feedback.
+modality, or expected answer. Deterministic validation checks shape, authority, references, hashes and bindings.
+Missing planning inputs and unissued references return concrete deterministic
+feedback within the shared grounding budget. PA authors each correction; the host
+does not supply an expected answer or judge complete goal coverage.
 
 Automatic RGB-D capture, deprojection, support-plane segmentation, exact-CAD
 size comparison, and camera-frame candidate-center measurement are also
@@ -183,13 +141,13 @@ The ontology split is:
 - PA proposes one per-interaction target feature only from the requirement and
   authorized, hash-pinned evidence. The host generates `feature_0001`,
   `currentstate_0001`, and `desiredstate_0001` and compiles their exact
-  seven-assertion ABox projection under the current TBox.
+  variable-size feature/state/association ABox projection under the current TBox.
 - The workcell-profile-derived ABox records the configured process and resource
   individuals plus each resource's explicit process capabilities. The production
   profile currently yields `xarm6` and `ur5e` broadly `capableOf assembly`.
   Only the system adds the selected `processExecution` after PA-cited two-state
   reach evidence and exact selected-RobotAgent plan-only validation.
-- The selected RA later supplies a separate versioned typed primitive-catalog
+- The selected RA later supplies a separate typed primitive-catalog
   snapshot. It pins exact symbols, fingerprint, and cardinality without
   publishing primitive implementations through `capableOf` assertions.
 
@@ -225,7 +183,7 @@ The requirement and TBox are understood together, while PA dynamically chooses
 which approved document, file, observation, or existing record to retrieve.
 The TBox defines legal shared meaning; it does not prescribe a document, CAD,
 observation, calibration, or primitive recipe. After allocation, the selected
-RA's future `PrimitiveProgramDraft` and primitive interfaces expose further
+RA's `PrimitiveProgramDraft` and primitive interfaces expose further
 runtime inputs.
 
 ```text
@@ -236,20 +194,20 @@ retrieve only currently relevant approved evidence
 PA authors one cited target_feature with current and desired states
         ↓
 validate the final shape, process authority, references, hashes,
-and exact seven-assertion projection once
+and exact ontology projection plus required planning inputs;
+return repairable contract failures to PA within the shared budget
         ↓
 commit the accepted feature-state ABox
         ↓
 present every capable resource and neutral location handle
         ↓
-PA chooses one or more locations for each state and one resource
+derive all bound coordinate references; PA checks and chooses one capable resource
         ↓
 check_reachability reports each submitted location independently
         ↓
 validate the unchanged cited selection once
         ↓
-commit the four processExecution/resource assertions and completion v7
-```
+commit the four processExecution/resource assertions and completion ```
 
 Provider-owned `GroundingProducerDescriptor` values declare exact IDs,
 descriptions, accepted evidence types, produced record types, prerequisites,
@@ -269,21 +227,24 @@ stale and reopens the need. Manifest or authority failures remain terminal and
 do not masquerade as a reason to recapture the scene.
 
 For the current sole approved six-page NIST PDF, one document retrieval supplies
-pages 1 through 6 together and in order. It uses neither a targeted question,
-page ranking, nor RAG; large-document retrieval remains outside this scope.
+pages 1 through 6 together and in order. PA may ask its own bounded document question after retrieval;
+there is no page ranking or RAG, and large-document retrieval remains outside this scope.
 
 The model never manages hidden host-authored information-need state. The system
 validates native tool calls, exact replay keys, citations, hashes, and TBox
-signatures. After the seven target-feature assertions commit, PA separately
-chooses its state-location lists and resource. Missing location evidence,
-invalid provenance, missing capability, and failed reachability stop fail-closed
-without a manufactured assertion or correction prompt.
+signatures. Before feature/association assertions commit, the host checks required
+location inputs. Missing locations or unissued references receive generic feedback
+for PA correction within the shared budget. Invalid provenance remains terminal.
+PA then checks/selects a capable resource using all bound locations. Unresolved
+inputs, missing capability or failed reachability prevent completion without
+the host manufacturing an assertion.
 
-When allocation succeeds, `PAContextGroundingCompletion` v7 pins the accepted
-v9 proposal, both feature states, evidence and allocation presentation records,
-PA-selected location lists and resource, registry and workcell snapshots,
-per-location reachability, RobotAgent validation, the post-assignment ontology
-projection, `ResourceSelectionRecord` v5, and referenced typed records without
+When allocation succeeds, `PAContextGroundingCompletion` pins the accepted
+proposal with its pre-commit context and complete evidence manifest, both feature states,
+evidence and allocation presentation records, bound location lists and PA-selected resource,
+registry and workcell snapshots,
+persisted MoveIt position-planning results, the post-assignment ontology
+projection, `ResourceSelectionRecord`, and referenced typed records without
 copying the target feature or creating a new-run `TypedGroundingContract`. There
 is no separate `TaskTransitionContract`. The
 selected RA then receives a reconstructed transient `target_feature`, bounded
@@ -310,7 +271,7 @@ resource identity is a registry-order default, retrieval rule, or ontology
 entailment.
 
 PA may service one batch through several existing single-source audited
-operations, then returns one new versioned `CompositionContextBundle`. There is
+operations, then returns one new `CompositionContextBundle`. There is
 no fixed semantic round count. Another batch round is allowed only after a new
 accepted binding, changed need classification, or structurally different RA
 draft demonstrates progress. Ambiguous or unavailable evidence, an unsupported
@@ -319,9 +280,9 @@ stops fail-closed. `context understanding complete` means readiness for Phase 5,
 not that every later primitive input is already available.
 
 Phase 4.4 candidate discovery is a semantic join over the pinned workcell-profile
-v2 and registry snapshots for the process selected from the authorized catalog.
-Live Cartesian checks are deterministic evidence providers in simulation;
-the retained physical path continues to use its configured safety checks. PA
+and registry snapshots for the process selected from the authorized catalog.
+Configured workspace/gripper reach checks are deterministic evidence providers
+for current Phase 4; position plans are validated; grasping and insertion remain unvalidated. PA
 remains the allocation authority and no optimality claim is made. Both
 nominal and recovery cases consume the selected exact
 `resource_jid` and use unicast; Spec2Primitives does not broadcast or reallocate
@@ -426,33 +387,11 @@ physical execution remain distinct claims.
 
 ### Phase 4 PA bounded-autonomy experiments
 
-The Phase 4 study begins with fresh interaction roots and no records copied from
-earlier runs. The development requirement is used as a blind regression, then
-at least one held-out supported requirement changes wording, component identity,
-candidate count/layout, presentation ordering, and valid evidence path. Results
-are reported as counts and traces, not as a statistical generality claim.
+Use the preregistered audit and paired-trial protocol in [BIAS_VALIDATION.md](BIAS_VALIDATION.md). Test presentation permutations, physical destination changes, ambiguous task roles, missing/contradictory evidence, installation uncertainty, whole-goal coverage, changed arm reachability and held-out scenes. Use fresh interactions, preserve every attempt and compare canonical source identities only in the separate evaluator after prediction finalization.
 
-`interaction_d93d297a1ddc4bdc85cbbe60579a2b57` is excluded from every baseline
-count and retained only as an immutable contaminated-prompt ablation. Fresh study
-runs begin only after the scoped Phase 4 smoke run passes.
+Audit PA requests/projected tool results, deterministic feedback, proposal attempts, evidence manifests, reachability, selection and completion. Record the shared operation/proposal budgets and stop reasons; the host never supplies a preferred candidate or substitutes an arm. Evaluate semantic correctness separately after finalization. Report all outcomes, correct abstention, false acceptance, sample sizes and uncertainty. Offline tests establish contracts only, and neither five successful examples nor a fixed assertion count is an accuracy/generalization result.
 
-| ID | Condition | Required observation |
-| --- | --- | --- |
-| 1 | Blind development regression with independently pinned presentation orders | Every semantic choice is traceable to a PA response or PA tool call; controller records contain only integrity, ontology, capability, or reachability decisions. |
-| 2 | Permute source, candidate, location, and capable-resource presentation orders | No first-item, nearest-candidate, expected-relation, or expected-resource policy explains the accepted choices. |
-| 3 | Run candidate layouts containing 2, 3, and 5 PA-selected same-frame candidates | The tool returns raw measurements for all selections and never emits a built-in `between` relation. |
-| 4 | Make one PA-selected capable resource unreachable while another remains reachable | The stage fails for the unchanged cited choice; the controller does not substitute the other resource or re-prompt PA. |
-| 5 | Held-out supported requirement with different wording, component, layout, and evidence path | The identical runtime path commits eleven assertions without a process- or component-specific branch. |
-| 6 | Requirement whose process is absent from the configured TBox/workcell authority | The run returns `unsupported_process`; it is never rewritten as `assembly`. |
-
-The study audits `EvidencePresentationRecord`, `ProductAgentToolCall`,
-`OntologyGroundingProposal`,
-`AllocationPresentationRecord`, `ProductAgentAllocationToolCall`,
-`ReachabilityCheckRecord`, `ResourceSelectionRecord`, and
-`PAContextGroundingCompletion` in creation order. Ground-truth evaluation may
-start only after the PA prediction is finalized. The experiment does not claim
-that RGB-D segmentation, reachability, RobotAgent validation, or the Phase 4
-stage order is PA-authored.
+Previously identified contaminated-prompt runs remain excluded from baseline counts and retained only as explicitly labeled historical ablations. Frozen evaluator answers never enter runtime recognition.
 
 ## Starting case
 
@@ -490,19 +429,20 @@ PA returns one complete cited target_feature, genuine clarification,
 or unsupported_process
         ↓
 validate the final shape, process authority, evidence, hashes,
-and seven-assertion projection once
+and exact ontology projection plus required planning inputs;
+return repairable contract failures to PA within the shared budget
         ↓
 commit the accepted feature-state ABox
         ↓
 present all capable resources and neutral location handles
         ↓
-PA chooses one or more locations per state and one capable resource
+derive all bound coordinate references; PA checks and chooses one capable resource
         ↓
 check_reachability reports each submitted location independently
         ↓
 validate the unchanged cited selection once
         ↓
-system commits four assignment assertions and v7 completion
+system commits four assignment assertions and completion
         ↓
 Phase 5.1 activates the selected exact resource_jid through the current adapter
         ↓
@@ -517,7 +457,7 @@ binding preflight gathers every currently unbound input
                                       ↓
                          PA runs required controlled producers
                                       ↓
-                         versioned CompositionContextBundle
+                         CompositionContextBundle
         ↓
 RA LLM authors a fully bound primitive_steps candidate
         ↓

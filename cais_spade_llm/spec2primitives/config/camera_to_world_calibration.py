@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Load operator-approved camera-to-world calibration manifests."""
 
-from __future__ import annotations
 
 import json
 import math
@@ -16,7 +17,7 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     record_camera_to_robot_calibration,
 )
 
-_ROOT_KEYS = {"schema_version", "calibrations"}
+_ROOT_KEYS = {"calibrations"}
 _CALIBRATION_KEYS = {
     "calibration_id",
     "source_frame",
@@ -91,35 +92,18 @@ class ApprovedCameraToWorldCalibrationRuntime:
                 "Grounding record cannot support the requested calibration."
             )
         record_type = grounding_record.get("record_type")
-        selected = grounding_record.get("selected_candidate")
         cameras = grounding_record.get("cameras")
         segmentation_frames = (
             [camera.get("frame") for camera in cameras if isinstance(camera, Mapping)]
             if isinstance(cameras, list)
             else []
         )
-        if record_type == "CADSizeCorrespondenceRecord" and isinstance(
-            selected,
-            Mapping,
-        ):
-            record_frame = selected.get("frame")
-        elif record_type == "RGBDSegmentationRecord":
+        if record_type == "RGBDSegmentationRecord":
             record_frame = source_frame if source_frame in segmentation_frames else None
         else:
             record_frame = grounding_record.get("coordinate_frame")
-        valid_identity = (
-            (
-                record_type == "CADSizeCorrespondenceRecord"
-                and grounding_record.get("schema_version") == 2
-            )
-            or (
-                record_type == "CADPoseEstimationRecord"
-                and grounding_record.get("schema_version") == 3
-            )
-            or (
-                record_type == "RGBDSegmentationRecord"
-                and grounding_record.get("schema_version") == 2
-            )
+        valid_identity = (record_type == "CADPoseEstimationRecord") or (
+            record_type == "RGBDSegmentationRecord"
         )
         accepted_geometry = (
             grounding_record.get("candidate_state") == "candidates_available"
@@ -170,7 +154,7 @@ def load_camera_to_world_calibration_runtime(
     """Read and strictly validate one approved calibration manifest.
 
     Args:
-        manifest_path: Operator-supplied versioned calibration manifest.
+        manifest_path: Operator-supplied current calibration manifest.
 
     Returns:
         An immutable runtime containing the approved frame transforms.
@@ -186,8 +170,6 @@ def load_camera_to_world_calibration_runtime(
         raise ValueError("Camera-to-world calibration manifest is malformed.") from exc
     if not isinstance(value, Mapping) or set(value) != _ROOT_KEYS:
         raise ValueError("Camera-to-world calibration manifest fields are invalid.")
-    if value["schema_version"] != 1:
-        raise ValueError("Camera-to-world calibration manifest schema_version must be 1.")
     entries = value["calibrations"]
     if not isinstance(entries, list):
         raise ValueError("Camera-to-world calibrations must be a list.")

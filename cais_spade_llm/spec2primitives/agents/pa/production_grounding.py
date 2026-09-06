@@ -1,15 +1,16 @@
-"""Run native tool-using ProductAgent grounding through approved evidence."""
-
 from __future__ import annotations
+
+"""Run native tool-using ProductAgent grounding through approved evidence."""
 
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from rdflib import URIRef
 
@@ -21,6 +22,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     TypedContextBinding,
     build_product_context_view,
     persist_product_context_view,
+    validate_grounding_evidence,
 )
 from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingError,
@@ -28,6 +30,7 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingProposal,
     commit_ontology_grounding_candidate,
     propose_ontology_grounding,
+    reject_ontology_grounding_candidate,
     validate_ontology_grounding_attempt,
 )
 from cais_spade_llm.spec2primitives.agents.pa.presentation_records import (
@@ -45,18 +48,18 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
     ReachabilityCheckRecord,
     candidate_resource_catalog,
-    check_resource_reachability,
+    check_live_resource_reachability,
     commit_resource_assignment,
-    persist_cartesian_reachability,
     persist_pa_resource_selection,
-    prepare_cartesian_reachability,
 )
 from cais_spade_llm.spec2primitives.agents.ra.feasibility_validation import (
-    PlanOnlyFeasibilityValidation,
     RobotAgentFeasibilityRuntime,
-    validate_provisional_allocation,
 )
-from cais_spade_llm.spec2primitives.config import DocumentVLMConfig, ObservationVLMConfig
+from cais_spade_llm.spec2primitives.config import (
+    DocumentVLMConfig,
+    GroundingLimits,
+    ObservationVLMConfig,
+)
 from cais_spade_llm.spec2primitives.ontology import (
     TBoxSnapshot,
     load_predefined_resource_registry,
@@ -72,6 +75,8 @@ from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import (
     approved_context_ref_evidence_types,
     approved_document_metadata,
 )
+from cais_spade_llm.spec2primitives.tools.observation_context import CAMERA_IDS
+from cais_spade_llm.spec2primitives.tools.observation_presentation import ObservationPresentation
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     CameraToRobotCalibrationResult,
     ObservationVisionRuntime,
@@ -82,6 +87,8 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     segment_preprocessed_observation,
     transform_segmentation_candidate_location_to_robot_frame,
 )
+
+logger = logging.getLogger(__name__)
 
 _DOCUMENT_PRODUCER = "document_evidence"
 _GEOMETRY_PRODUCER = "rgb_d_cad_grounding"
@@ -96,19 +103,25 @@ _TOOL_ROUND_LIMIT_MESSAGE = "Exceeded max tool rounds"
 _GROUNDING_VALIDATION_CODES = frozenset(
     {
         "unsupported_process",
+        "grounding_budget_exhausted",
+        "grounding_no_progress",
         "invalid_target_feature",
         "evidence_reference_invalid",
         "location_evidence_unavailable",
         "no_reachable_resource",
+        "reachability_validation_unavailable",
         "invalid_resource_selection",
     }
 )
 _GROUNDING_VALIDATION_MESSAGES = {
+    "grounding_budget_exhausted": "The ProductAgent investigation budget is exhausted; required evidence or valid references remain missing.",
+    "grounding_no_progress": "The ProductAgent repeated the same unmet contract with the same proposal and evidence.",
     "unsupported_process": "No configured process supports the submitted requirement.",
     "invalid_target_feature": "The ProductAgent returned an invalid target feature.",
     "evidence_reference_invalid": "The target feature cites invalid evidence.",
     "location_evidence_unavailable": "No valid state-location evidence is available.",
-    "no_reachable_resource": "No ProductAgent-selected resource passed reachability.",
+    "no_reachable_resource": "MoveIt did not find a valid position plan for every bound location of a ProductAgent-selected resource.",
+    "reachability_validation_unavailable": "Live MoveIt reachability validation is unavailable or incomplete; robot reachability has not been established.",
     "invalid_resource_selection": "The ProductAgent returned an invalid resource selection.",
 }
 
@@ -171,6 +184,46 @@ def _incomplete_result(
     }
 
 
+def _grounding_incomplete(
+    investigation: _NativeEvidenceInvestigation, code: str
+) -> dict[str, object]:
+    """Preserve budget and contract feedback with a terminal grounding result."""
+    return {
+        **_incomplete_result(
+            code, stage="target_feature", tool_call_refs=investigation.tool_call_refs
+        ),
+        "grounding_progress": investigation.grounding_progress(stop_reason=code),
+    }
+
+
+def _grounding_failure_fingerprint(
+    investigation: _NativeEvidenceInvestigation, proposal: Mapping[str, object]
+) -> str:
+    """Compare exact failures and evidence without judging semantic progress."""
+    view = build_product_context_view(
+        investigation.root,
+        investigation.abox,
+        attempted_evidence=tuple(investigation.retrieved_handle_ids),
+        assessed_at_ns=time.time_ns(),
+    )
+    records = []
+    for binding in view.typed_bindings:
+        if binding.status == "stale":
+            raise ProductionGroundingError("Issued evidence changed during grounding.")
+        if binding.status != "accepted":
+            continue
+        investigation._pin_issued_record(binding.record_ref)
+        records.append((binding.record_ref, binding.record_sha256))
+    return _json_fingerprint(
+        {
+            "validation_feedback": investigation.validation_feedback,
+            "proposal": proposal,
+            "issued_evidence_refs": sorted(investigation.authorized_evidence_refs),
+            "records": sorted(records),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class _CADComparisonBinding:
     """Pin one PA-requested CAD comparison to its exact typed inputs."""
@@ -201,10 +254,13 @@ class _NativeEvidenceInvestigation:
         self.requirement = requirement
         self.presentation = presentation
         self.presentation.assert_unchanged()
+        # The first retrieval must be blinded before any proposal is produced.
+        ObservationPresentation(self.root, create=True)
         self.handles = {handle.evidence_id: handle for handle in handles}
         self.authorized_evidence_refs: set[str] = {"requirement_0001"}
         self._canonical_by_pa_ref: dict[str, str] = {"requirement_0001": "requirement_0001"}
         self._pa_by_canonical_ref: dict[str, str] = {"requirement_0001": "requirement_0001"}
+        self._issued_record_hashes: dict[str, str] = {}
         self.tool_call_refs: list[str] = []
         self.retrieved_results: dict[str, Mapping[str, object]] = {}
         self.document_query_results: dict[tuple[str, str], Mapping[str, object]] = {}
@@ -215,6 +271,8 @@ class _NativeEvidenceInvestigation:
         self.prior_evidence: list[Mapping[str, object]] = []
         self._served_observation_context: Mapping[str, object] | None = None
         self.run_tool_call_count = 0
+        self.proposals_used = 0
+        self.validation_feedback: list[Mapping[str, object]] = []
         self._tool_call_number = _latest_number(
             self.root / "interaction_record", "tool_call_*.json", "tool_call_"
         )
@@ -222,6 +280,27 @@ class _NativeEvidenceInvestigation:
             self.root / "interaction_record", "retrieval_*.json", "retrieval_"
         )
         self._load_prior_evidence()
+
+    def grounding_progress(self, *, stop_reason: str | None = None) -> dict[str, object]:
+        """Report host-owned budget use and the latest deterministic contract feedback."""
+        return {
+            "evidence_operations_used": self.run_tool_call_count,
+            "evidence_operations_limit": self.runtime._grounding_limits.max_evidence_operations,
+            "proposals_used": self.proposals_used,
+            "proposals_limit": self.runtime._grounding_limits.max_proposals,
+            "last_feedback": list(self.validation_feedback),
+            "stop_reason": stop_reason,
+        }
+
+    def _pin_issued_record(self, record_ref: str) -> None:
+        """Retain the first issued bytes instead of treating changed bytes as new evidence."""
+        path = (self.root / record_ref).resolve()
+        if not path.is_relative_to(self.root):
+            raise ProductionGroundingError("Issued evidence escapes the interaction.")
+        actual = _sha256_path(path)
+        previous = self._issued_record_hashes.setdefault(record_ref, actual)
+        if previous != actual:
+            raise ProductionGroundingError("Issued evidence changed during grounding.")
 
     def _load_prior_evidence(self) -> None:
         """Restore hash-verified evidence state for a clarification resume."""
@@ -289,16 +368,43 @@ class _NativeEvidenceInvestigation:
         tool_name: str,
         arguments: Mapping[str, object],
     ) -> Mapping[str, object]:
+        """Present only randomized observation metadata at the model tool boundary."""
+        presentation = ObservationPresentation(self.root)
+        try:
+            canonical = presentation.resolve(arguments)
+        except ValueError:
+            canonical = {"invalid_observation_reference": True}
+        result = await self._execute(tool_name, canonical)
+        projected = ObservationPresentation(self.root).project(result)
+        _assert_blinded_pa_projection(projected, self.presentation)
+        _write_json_exclusive(
+            self.root
+            / "interaction_record"
+            / f"model_tool_exchange_{self._tool_call_number:04d}.json",
+            {
+                "record_type": "ModelToolExchange",
+                "tool_name": tool_name,
+                "arguments": dict(arguments),
+                "result": projected,
+            },
+        )
+        return projected
+
+    async def _execute(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
         """Execute one fail-closed ProductAgent tool call."""
         self._tool_call_number += 1
         call_id = f"tool_call_{self._tool_call_number:04d}"
-        if self.run_tool_call_count >= _MAX_TOOL_ROUNDS:
+        if self.run_tool_call_count >= self.runtime._grounding_limits.max_evidence_operations:
             return self._record_failure(
                 call_id,
                 tool_name,
                 arguments,
                 "tool_budget_exhausted",
-                "The bounded grounding tool budget is exhausted; return a final result.",
+                "The evidence operation budget is exhausted; use the evidence already issued.",
             )
         self.run_tool_call_count += 1
         if tool_name == _RETRIEVE_TOOL_NAME:
@@ -839,7 +945,6 @@ class _NativeEvidenceInvestigation:
         self._persist_tool_call(
             call_id,
             {
-                "schema_version": 1,
                 "record_type": "ProductAgentToolCall",
                 "tool_call_id": call_id,
                 "tool_name": _RETRIEVE_TOOL_NAME,
@@ -871,7 +976,6 @@ class _NativeEvidenceInvestigation:
         self._persist_tool_call(
             call_id,
             {
-                "schema_version": 1,
                 "record_type": "ProductAgentToolCall",
                 "tool_call_id": call_id,
                 "tool_name": tool_name,
@@ -889,7 +993,8 @@ class _NativeEvidenceInvestigation:
                 "failure": {"reason": reason, "message": message},
             },
         )
-        return {"error": {"reason": reason, "message": message}}
+        # Detailed provider failures remain internal; metadata must not teach scene roles.
+        return {"error": {"reason": reason, "message": "The evidence operation failed."}}
 
     def _record_comparison_success(
         self,
@@ -904,7 +1009,6 @@ class _NativeEvidenceInvestigation:
         self._persist_tool_call(
             call_id,
             {
-                "schema_version": 1,
                 "record_type": "ProductAgentCADComparisonToolCall",
                 "tool_call_id": call_id,
                 "tool_name": _COMPARE_CAD_SIZE_TOOL_NAME,
@@ -933,7 +1037,6 @@ class _NativeEvidenceInvestigation:
         self._persist_tool_call(
             call_id,
             {
-                "schema_version": 1,
                 "record_type": record_type,
                 "tool_call_id": call_id,
                 "tool_name": tool_name,
@@ -948,7 +1051,7 @@ class _NativeEvidenceInvestigation:
 
     def _persist_tool_call(self, call_id: str, record: Mapping[str, object]) -> None:
         path = self.root / "interaction_record" / f"{call_id}.json"
-        _write_json_exclusive(path, record)
+        _write_json_exclusive(path, {**record, "grounding_progress": self.grounding_progress()})
         self.tool_call_refs.append(path.relative_to(self.root).as_posix())
 
     def resolve_typed_record(self, record_ref: str) -> Mapping[str, object]:
@@ -1014,6 +1117,7 @@ class _NativeEvidenceInvestigation:
         for canonical_ref in sorted(source_refs):
             self._register_reference(canonical_ref, kind="citation")
         for canonical_ref in record_refs:
+            self._pin_issued_record(canonical_ref)
             self._register_reference(canonical_ref, kind="typed_record")
 
     def _register_reference(self, canonical_ref: str, *, kind: str) -> None:
@@ -1043,9 +1147,7 @@ class _PAAllocationInvestigation:
         view: ProductContextView,
         allocation_presentation: AllocationPresentationRecord,
         target_frame: str,
-        fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
-        current_cad_correspondence_path: Path | None = None,
-        desired_cad_correspondence_path: Path | None = None,
+        fixed_state_locations: Mapping[str, tuple[str, ...]],
     ) -> None:
         self.runtime = runtime
         self.investigation = investigation
@@ -1057,19 +1159,9 @@ class _PAAllocationInvestigation:
         self.allocation_presentation.assert_unchanged()
         self.target_frame = target_frame
         self.fixed_state_locations = fixed_state_locations
-        self.current_cad_correspondence_path = (
-            Path(current_cad_correspondence_path).resolve()
-            if current_cad_correspondence_path is not None
-            else None
-        )
-        self.desired_cad_correspondence_path = (
-            Path(desired_cad_correspondence_path).resolve()
-            if desired_cad_correspondence_path is not None
-            else None
-        )
         self.reachability_checks: dict[str, ReachabilityCheckRecord] = {}
-        self.validations: dict[str, PlanOnlyFeasibilityValidation] = {}
         self._location_paths: dict[str, Path] = {}
+        self.completed_results: dict[str, Mapping[str, object]] = {}
 
     async def execute(
         self,
@@ -1083,29 +1175,19 @@ class _PAAllocationInvestigation:
         )
         call_id = f"allocation_tool_call_{call_number:04d}"
         try:
-            expected_fields = (
-                {"resource_symbol"}
-                if self.fixed_state_locations is not None
-                else {"resource_symbol", "state_locations"}
-            )
+            expected_fields = {"resource_symbol"}
             if tool_name != "check_reachability" or set(arguments) != expected_fields:
                 raise ProductionGroundingError("PA allocation tool call fields are invalid.")
             resource_symbol = _allocation_text(
                 arguments["resource_symbol"],
                 "resource_symbol",
             )
-            submitted = (
-                self.fixed_state_locations
-                if self.fixed_state_locations is not None
-                else arguments["state_locations"]
-            )
+            submitted = self.fixed_state_locations
             if not isinstance(submitted, Mapping) or set(submitted) != {
                 "current_state",
                 "desired_state",
             }:
-                raise ProductionGroundingError(
-                    "PA allocation state-location fields are invalid."
-                )
+                raise ProductionGroundingError("PA allocation state-location fields are invalid.")
             state_entries: dict[str, tuple[AllocationEvidenceEntry, ...]] = {}
             for state_name in ("current_state", "desired_state"):
                 handles = submitted[state_name]
@@ -1120,8 +1202,7 @@ class _PAAllocationInvestigation:
                         f"PA allocation {state_name} locations are invalid."
                     )
                 state_entries[state_name] = tuple(
-                    self.allocation_presentation.evidence_for_handle(handle)
-                    for handle in handles
+                    self.allocation_presentation.evidence_for_handle(handle) for handle in handles
                 )
             catalog = candidate_resource_catalog(
                 self.abox,
@@ -1133,6 +1214,11 @@ class _PAAllocationInvestigation:
                 raise ProductionGroundingError(
                     "PA allocation resource is not an authorized capable resource."
                 )
+            existing = self.completed_results.get(resource_symbol)
+            if existing is not None:
+                check = self.reachability_checks[str(existing["reachability_check_ref"])]
+                check.assert_unchanged()
+                return existing
             location_inputs: dict[str, list[tuple[str, Path]]] = {
                 "current_state": [],
                 "desired_state": [],
@@ -1142,135 +1228,41 @@ class _PAAllocationInvestigation:
                     location_inputs[state_name].append(
                         (entry.pa_handle, await self._location_for(entry))
                     )
-            feasibility_runtime = self.runtime._robot_agent_feasibility_runtime
-            if feasibility_runtime is None:
-                feasibility_runtime = _UnavailableRobotAgentFeasibilityRuntime()
-            if resource.get("execution_mode") == "simulation":
-                if (
-                    len(state_entries["current_state"]) != 1
-                    or len(state_entries["desired_state"]) != 1
-                    or self.current_cad_correspondence_path is None
-                    or self.desired_cad_correspondence_path is None
-                ):
-                    raise ProductionGroundingError(
-                        "Live Cartesian reachability requires one current location, one "
-                        "desired location, and both PA-requested CAD comparison records."
-                    )
-                current_entry = state_entries["current_state"][0]
-                desired_entry = state_entries["desired_state"][0]
-                prepared = prepare_cartesian_reachability(
-                    interaction_root=self.root,
-                    tbox=self.tbox,
-                    registry=self.runtime._registry,
-                    workcell=self.runtime._workcell,
-                    resource_symbol=resource_symbol,
-                    allocation_presentation=self.allocation_presentation,
-                    current_state_evidence_handle=current_entry.pa_handle,
-                    desired_state_evidence_handle=desired_entry.pa_handle,
-                    current_location_record_path=location_inputs["current_state"][0][1],
-                    desired_location_record_path=location_inputs["desired_state"][0][1],
-                    current_cad_correspondence_record_path=(
-                        self.current_cad_correspondence_path
-                    ),
-                    desired_cad_correspondence_record_path=(
-                        self.desired_cad_correspondence_path
-                    ),
-                )
-                validation = await validate_provisional_allocation(
-                    feasibility_runtime,
-                    interaction_root=self.root,
-                    workcell=self.runtime._workcell,
-                    reachability=prepared,
-                    validation_number=_next_number(
-                        self.root,
-                        "resources/*/validation/plan_only_validation_*",
-                    ),
-                )
-                reachability = persist_cartesian_reachability(
-                    interaction_root=self.root,
-                    prepared=prepared,
-                    robot_agent_validation_path=validation.record_path,
-                    check_number=_next_number(
-                        self.root,
-                        "products/grounding/reachability/check_*",
-                    ),
-                )
-                state_result = {
-                    "current_state": [
-                        {
-                            "evidence_handle": current_entry.pa_handle,
-                            "robot_agent_status": validation.status,
-                        }
-                    ],
-                    "desired_state": [
-                        {
-                            "evidence_handle": desired_entry.pa_handle,
-                            "robot_agent_status": validation.status,
-                        }
-                    ],
-                }
-                status = reachability.status
-            else:
-                reachability = check_resource_reachability(
-                    interaction_root=self.root,
-                    tbox=self.tbox,
-                    registry=self.runtime._registry,
-                    workcell=self.runtime._workcell,
-                    resource_symbol=resource_symbol,
-                    allocation_presentation=self.allocation_presentation,
-                    state_location_record_paths=location_inputs,
-                    check_number=_next_number(
-                        self.root,
-                        "products/grounding/reachability/check_*",
-                    ),
-                )
-                validation = await validate_provisional_allocation(
-                    feasibility_runtime,
-                    interaction_root=self.root,
-                    workcell=self.runtime._workcell,
-                    reachability=reachability,
-                    validation_number=_next_number(
-                        self.root,
-                        "resources/*/validation/plan_only_validation_*",
-                    ),
-                )
-                status = (
-                    "accepted"
-                    if reachability.status == "accepted" and validation.status == "accepted"
-                    else (
-                        "rejected"
-                        if "rejected" in {reachability.status, validation.status}
-                        else "needs_context"
-                    )
-                )
-                if reachability.state_locations is None or validation.state_locations is None:
-                    raise ProductionGroundingError(
-                        "Physical state-location validation did not return every location."
-                    )
-                state_result = {
-                    state_name: [
-                        {
-                            "evidence_handle": item.evidence_handle,
-                            "manifest_reachable": item.reachable,
-                            "robot_agent_status": validation_item["status"],
-                        }
-                        for item, validation_item in zip(
-                            reachability.state_locations[state_name],
-                            validation.state_locations[state_name],
-                            strict=True,
-                        )
-                    ]
-                    for state_name in ("current_state", "desired_state")
-                }
+            reachability = await check_live_resource_reachability(
+                runtime=self.runtime._robot_agent_feasibility_runtime,
+                interaction_root=self.root,
+                tbox=self.tbox,
+                registry=self.runtime._registry,
+                workcell=self.runtime._workcell,
+                resource_symbol=resource_symbol,
+                allocation_presentation=self.allocation_presentation,
+                state_location_record_paths=location_inputs,
+                check_number=_next_number(self.root, "products/grounding/reachability/check_*"),
+            )
+            status = reachability.status
+            state_result = {
+                state_name: [
+                    {
+                        "evidence_handle": item["evidence_handle"],
+                        "status": item["status"],
+                        "moveit_reachable": None
+                        if item["status"] == "needs_context"
+                        else item["status"] == "accepted",
+                    }
+                    for item in reachability.validation["response"]["state_locations"][state_name]
+                ]
+                for state_name in ("current_state", "desired_state")
+            }
             reachability_handle = f"reachability_check_{reachability.check_number:04d}"
             self.reachability_checks[reachability_handle] = reachability
-            self.validations[reachability_handle] = validation
             result = {
                 "reachability_check_ref": reachability_handle,
                 "resource_symbol": reachability.resource_symbol,
                 "status": status,
                 "state_locations": state_result,
                 "motion_executed": False,
+                "validation_scope": "moveit_state_location_reachability",
+                "motion_validation_performed": True,
                 "selection_made_by_tool": False,
             }
             _assert_blinded_pa_projection(result, self.investigation.presentation)
@@ -1283,6 +1275,7 @@ class _PAAllocationInvestigation:
                 result=result,
                 failure=None,
             )
+            self.completed_results[resource_symbol] = result
             return result
         except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
             result = {
@@ -1294,6 +1287,8 @@ class _PAAllocationInvestigation:
                 "status": "needs_context",
                 "feedback": "The submitted reachability inputs could not be validated.",
                 "motion_executed": False,
+                "validation_scope": "moveit_state_location_reachability",
+                "motion_validation_performed": False,
                 "selection_made_by_tool": False,
             }
             _assert_blinded_pa_projection(result, self.investigation.presentation)
@@ -1402,7 +1397,6 @@ class _PAAllocationInvestigation:
         _write_json_exclusive(
             path,
             {
-                "schema_version": 1,
                 "record_type": "ProductAgentAllocationToolCall",
                 "tool_call_id": call_id,
                 "tool_name": tool_name,
@@ -1416,17 +1410,6 @@ class _PAAllocationInvestigation:
         self.investigation.tool_call_refs.append(path.relative_to(self.root).as_posix())
 
 
-class _UnavailableRobotAgentFeasibilityRuntime:
-    """Return a closed needs-context verdict through the validation boundary."""
-
-    async def validate_plan_only_allocation(
-        self,
-        request: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        del request
-        raise RuntimeError("Exact RobotAgent feasibility validation is unavailable.")
-
-
 class ProductionProductContextGroundingRuntime:
     """Resolve PA context using one native retrieve tool and deterministic providers."""
 
@@ -1438,6 +1421,7 @@ class ProductionProductContextGroundingRuntime:
         document_vision_runtime: DocumentVisionRuntime,
         observation_config: ObservationVLMConfig | None = None,
         observation_vision_runtime: ObservationVisionRuntime | None = None,
+        grounding_limits: GroundingLimits | None = None,
         camera_to_world_calibration_runtime: CameraToWorldCalibrationRuntime | None = None,
         camera_to_world_calibration_unavailable_reason: str | None = None,
         robot_agent_feasibility_runtime: RobotAgentFeasibilityRuntime | None = None,
@@ -1453,6 +1437,7 @@ class ProductionProductContextGroundingRuntime:
         self._document_vision_runtime = document_vision_runtime
         self._observation_config = observation_config
         self._observation_vision_runtime = observation_vision_runtime
+        self._grounding_limits = grounding_limits if grounding_limits is not None else GroundingLimits()
         self._camera_to_world_calibration_runtime = camera_to_world_calibration_runtime
         self._camera_to_world_calibration_unavailable_reason = (
             camera_to_world_calibration_unavailable_reason
@@ -1492,7 +1477,7 @@ class ProductionProductContextGroundingRuntime:
         max_pa_turns: int,
         clarification_history: tuple[Mapping[str, object], ...] = (),
     ) -> Mapping[str, object]:
-        """Run the two linear ProductAgent decisions that complete Phase 4."""
+        """Investigate within owned budgets, validate evidence, then assign an arm."""
         del product_context, max_pa_turns
         self._validate_authorities(tbox)
         if abox.tbox_fingerprint != tbox.fingerprint:
@@ -1518,76 +1503,155 @@ class ProductionProductContextGroundingRuntime:
             clarification_history,
             investigation,
         )
-        evidence_catalog = _current_evidence_catalog(handles, investigation)
-        evidence_catalog.extend(clarification_evidence)
-        try:
-            outcome = await propose_ontology_grounding(
-                product_agent,
-                interaction_root=interaction_root,
-                tbox=tbox,
-                abox=investigation.abox,
-                workcell=self._workcell,
-                evidence_catalog=evidence_catalog,
-                tools=[
+        previous_proposal: Mapping[str, object] | None = None
+        seen_failures: set[str] = set()
+        for _ in range(self._grounding_limits.max_proposals):
+            investigation.proposals_used += 1
+            evidence_catalog = _current_evidence_catalog(handles, investigation)
+            evidence_catalog.extend(clarification_evidence)
+            remaining_operations = (
+                self._grounding_limits.max_evidence_operations - investigation.run_tool_call_count
+            )
+            tools = (
+                [
                     _retrieve_tool(handles),
                     _query_document_tool(handles),
                     _compare_cad_size_tool(handles),
                     _analyze_candidate_layout_tool(),
-                ],
-                tool_executor=investigation.execute,
-                max_tool_rounds=_MAX_TOOL_ROUNDS,
+                ]
+                if remaining_operations > 0
+                else []
             )
-        except OntologyGroundingError:
-            return _incomplete_result(
-                "invalid_target_feature",
-                stage="target_feature",
-                tool_call_refs=investigation.tool_call_refs,
-            )
-
-        if isinstance(outcome, OntologyGroundingInterruption):
-            if outcome.kind == "unsupported_process":
-                return _incomplete_result(
-                    "unsupported_process",
-                    stage="target_feature",
-                    tool_call_refs=investigation.tool_call_refs,
+            try:
+                outcome = await propose_ontology_grounding(
+                    product_agent,
+                    interaction_root=interaction_root,
+                    tbox=tbox,
+                    abox=investigation.abox,
+                    workcell=self._workcell,
+                    evidence_catalog=ObservationPresentation(investigation.root).project(
+                        evidence_catalog
+                    ),
+                    tools=tools,
+                    tool_executor=investigation.execute,
+                    max_tool_rounds=remaining_operations,
+                    validation_feedback=investigation.validation_feedback,
+                    previous_proposal=previous_proposal,
+                    grounding_progress=investigation.grounding_progress(),
                 )
-            return {
-                "grounding_status": "clarification_required",
-                "clarification_question": outcome.message,
-                "tool_call_refs": list(investigation.tool_call_refs),
-            }
+            except OntologyGroundingError:
+                return _grounding_incomplete(investigation, "invalid_target_feature")
 
-        try:
-            candidate = validate_ontology_grounding_attempt(
-                outcome,
-                interaction_root=interaction_root,
-                tbox=tbox,
-                abox=investigation.abox,
-                workcell=self._workcell,
-                authorized_evidence_refs=investigation.authorized_evidence_refs,
-                typed_record_resolver=investigation.resolve_typed_record,
-                pa_reference_resolver=investigation.resolve_pa_reference,
-            )
-        except OntologyGroundingError as exc:
-            return _incomplete_result(
-                exc.validation_code,
-                stage="target_feature",
-                tool_call_refs=investigation.tool_call_refs,
-            )
+            if isinstance(outcome, OntologyGroundingInterruption):
+                if outcome.kind == "unsupported_process":
+                    return _grounding_incomplete(investigation, "unsupported_process")
+                return {
+                    "grounding_status": "clarification_required",
+                    "clarification_question": outcome.message,
+                    "tool_call_refs": list(investigation.tool_call_refs),
+                    "grounding_progress": investigation.grounding_progress(
+                        stop_reason="clarification_required"
+                    ),
+                }
 
-        try:
-            evidence_is_intact = self._proposal_evidence_is_intact(
-                investigation=investigation,
-                proposal=candidate.proposal,
-            )
-        except (OSError, RuntimeError, TypeError, ValueError):
-            evidence_is_intact = False
-        if not evidence_is_intact:
-            return _incomplete_result(
-                "evidence_reference_invalid",
-                stage="target_feature",
-                tool_call_refs=investigation.tool_call_refs,
-            )
+            try:
+                candidate = validate_ontology_grounding_attempt(
+                    outcome,
+                    interaction_root=interaction_root,
+                    tbox=tbox,
+                    abox=investigation.abox,
+                    workcell=self._workcell,
+                    authorized_evidence_refs=investigation.authorized_evidence_refs,
+                    typed_record_resolver=investigation.resolve_typed_record,
+                    pa_reference_resolver=investigation.resolve_pa_reference,
+                    observation_reference_resolver=ObservationPresentation(
+                        investigation.root
+                    ).resolve,
+                )
+            except OntologyGroundingError as exc:
+                if not exc.unissued_reference:
+                    return _grounding_incomplete(investigation, exc.validation_code)
+                # The host reports an exact-reference contract, never a replacement answer.
+                investigation.validation_feedback = [
+                    {
+                        "validation_code": exc.validation_code,
+                        "message": (
+                            "A citation or typed-record reference was not issued. "
+                            "Copy exact references from the evidence catalog or tool results."
+                        ),
+                        "authorized_evidence_refs": sorted(
+                            investigation.project_canonical_reference(ref)
+                            for ref in investigation.authorized_evidence_refs
+                        ),
+                    }
+                ]
+            else:
+                try:
+                    evidence_is_intact = self._proposal_evidence_is_intact(
+                        investigation=investigation, proposal=candidate.proposal
+                    )
+                except (OSError, ValueError, ProductionGroundingError):
+                    evidence_is_intact = False
+                if not evidence_is_intact:
+                    reject_ontology_grounding_candidate(
+                        candidate, failure="The target feature cites changed or invalid evidence."
+                    )
+                    return _grounding_incomplete(investigation, "evidence_reference_invalid")
+                candidate_view = build_product_context_view(
+                    investigation.root,
+                    investigation.abox,
+                    attempted_evidence=tuple(investigation.retrieved_handle_ids),
+                    assessed_at_ns=time.time_ns(),
+                )
+                try:
+                    evidence_sources = _allocation_evidence_sources(
+                        investigation.root, candidate_view
+                    )
+                    state_sources = _proposal_state_location_sources(
+                        candidate.proposal, evidence_sources
+                    )
+                except ProductionGroundingError:
+                    reject_ontology_grounding_candidate(
+                        candidate, failure="The target feature cites invalid planning evidence."
+                    )
+                    return _grounding_incomplete(investigation, "evidence_reference_invalid")
+                missing_states = [state for state, sources in state_sources.items() if not sources]
+                if not missing_states:
+                    investigation.validation_feedback = []
+                    context_view_path = persist_product_context_view(
+                        investigation.root, candidate_view
+                    )
+                    break
+                investigation.validation_feedback = [
+                    {
+                        "validation_code": "location_evidence_unavailable",
+                        "missing_states": missing_states,
+                        "message": (
+                            "Simulation arm assignment requires at least one accepted "
+                            "coordinate-bearing state value in each listed state. "
+                            "Use an exact complete observation candidate or "
+                            "RobotFrameLocationRecord /translated_location_m reference "
+                            "only when the evidence supports that state role."
+                        ),
+                    }
+                ]
+                reject_ontology_grounding_candidate(
+                    candidate,
+                    failure="Required planning locations are missing: " + ", ".join(missing_states),
+                )
+
+            _assert_blinded_pa_projection(investigation.validation_feedback, investigation.presentation)
+            previous_proposal = outcome.output
+            _assert_blinded_pa_projection(previous_proposal, investigation.presentation)
+            try:
+                failure_state = _grounding_failure_fingerprint(investigation, previous_proposal)
+            except ProductionGroundingError:
+                return _grounding_incomplete(investigation, "evidence_reference_invalid")
+            if failure_state in seen_failures:
+                return _grounding_incomplete(investigation, "grounding_no_progress")
+            seen_failures.add(failure_state)
+        else:
+            return _grounding_incomplete(investigation, "grounding_budget_exhausted")
 
         try:
             accepted = commit_ontology_grounding_candidate(
@@ -1597,13 +1661,10 @@ class ProductionProductContextGroundingRuntime:
                 abox=investigation.abox,
                 workcell=self._workcell,
                 authorized_evidence_refs=investigation.authorized_evidence_refs,
+                context_view_ref=context_view_path.relative_to(investigation.root).as_posix(),
             )
-        except OntologyGroundingError:
-            return _incomplete_result(
-                "invalid_target_feature",
-                stage="target_feature",
-                tool_call_refs=investigation.tool_call_refs,
-            )
+        except OntologyGroundingError as exc:
+            return _grounding_incomplete(investigation, exc.validation_code)
 
         investigation.abox = accepted.merge.abox
         accepted_view = build_product_context_view(
@@ -1613,9 +1674,7 @@ class ProductionProductContextGroundingRuntime:
             assessed_at_ns=time.time_ns(),
         )
         persist_product_context_view(investigation.root, accepted_view)
-        ontology_projection_ref = accepted.proposal_path.relative_to(
-            investigation.root
-        ).as_posix()
+        ontology_projection_ref = accepted.proposal_path.relative_to(investigation.root).as_posix()
         allocation_result = await self._complete_resource_assignment(
             product_agent=product_agent,
             investigation=investigation,
@@ -1624,11 +1683,15 @@ class ProductionProductContextGroundingRuntime:
             abox=investigation.abox,
             view=accepted_view,
             proposal=accepted.proposal,
+            ontology_projection_ref=ontology_projection_ref,
         )
         return {
             **allocation_result,
             "ontology_projection_ref": ontology_projection_ref,
             "tool_call_refs": list(investigation.tool_call_refs),
+            "grounding_progress": investigation.grounding_progress(
+                stop_reason=str(allocation_result.get("grounding_validation_code", "complete"))
+            ),
         }
 
     async def interpret_retrieved_evidence(
@@ -1698,6 +1761,8 @@ class ProductionProductContextGroundingRuntime:
         proposal: OntologyGroundingProposal,
     ) -> bool:
         """Verify cited typed records without prescribing semantic choices."""
+        for record_ref in tuple(investigation._issued_record_hashes):
+            investigation._pin_issued_record(record_ref)
         view = build_product_context_view(
             investigation.root,
             investigation.abox,
@@ -1720,8 +1785,19 @@ class ProductionProductContextGroundingRuntime:
         abox: ABoxSnapshot,
         view: ProductContextView,
         proposal: OntologyGroundingProposal,
+        ontology_projection_ref: str,
     ) -> Mapping[str, object]:
-        """Run one autonomous PA location-and-resource decision."""
+        """Assign an arm only after bound product and destination locations pass reachability."""
+        projection = _read_json(root / ontology_projection_ref)
+        validate_grounding_evidence(root, projection)
+        if (
+            proposal.target_feature != projection["output"]["target_feature"]
+            or proposal.feature_iri != projection["feature_iri"]
+        ):
+            raise ProductionGroundingError(
+                "Allocation proposal differs from its pinned source claims."
+            )
+
         evidence_sources = _allocation_evidence_sources(root, view)
         if not evidence_sources:
             return _incomplete_result(
@@ -1790,16 +1866,6 @@ class ProductionProductContextGroundingRuntime:
                 stage="resource_assignment",
                 tool_call_refs=investigation.tool_call_refs,
             )
-        current_cad_correspondence_path = _proposal_state_comparison_path(
-            investigation,
-            proposal,
-            state_name="current_state",
-        )
-        desired_cad_correspondence_path = _proposal_state_comparison_path(
-            investigation,
-            proposal,
-            state_name="desired_state",
-        )
         allocation = _PAAllocationInvestigation(
             runtime=self,
             investigation=investigation,
@@ -1810,103 +1876,95 @@ class ProductionProductContextGroundingRuntime:
             allocation_presentation=allocation_presentation,
             target_frame=_configured_target_frame(self._workcell),
             fixed_state_locations=fixed_state_locations,
-            current_cad_correspondence_path=current_cad_correspondence_path,
-            desired_cad_correspondence_path=desired_cad_correspondence_path,
         )
-        try:
-            response = await product_agent.ask_llm_structured(
-                _pa_allocation_prompt(
-                    requirement=abox.product_requirement,
-                    target_feature=_pa_target_feature_projection(
-                        proposal.target_feature,
-                        investigation,
-                    ),
-                    resource_catalog=resource_catalog,
-                    allocation_presentation=allocation_presentation,
-                    investigation=investigation,
-                    fixed_state_locations=fixed_state_locations,
-                ),
-                response_format=_pa_allocation_response_format(
-                    allocation_presentation.resource_order,
-                    allocation_presentation.neutral_candidate_order,
-                    fixed_state_locations=fixed_state_locations,
-                ),
-                tools=[
-                    _check_reachability_tool(
-                        allocation_presentation.resource_order,
-                        allocation_presentation.neutral_candidate_order,
+        unchecked: tuple[str, ...] = ()
+        for selection_attempt in range(2):
+            try:
+                response = await product_agent.ask_llm_structured(
+                    _pa_allocation_prompt(
+                        unchecked_resources=unchecked,
+                        existing_results=allocation.completed_results,
+                        requirement=abox.product_requirement,
+                        target_feature=_pa_target_feature_projection(
+                            proposal.target_feature,
+                            investigation,
+                        ),
+                        resource_catalog=resource_catalog,
+                        allocation_presentation=allocation_presentation,
+                        investigation=investigation,
                         fixed_state_locations=fixed_state_locations,
-                    )
-                ],
-                tool_executor=allocation.execute,
-                max_tool_rounds=_MAX_TOOL_ROUNDS,
-            )
-            choice = _validated_pa_allocation_response(
-                response,
-                fixed_state_locations=fixed_state_locations,
-            )
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return _incomplete_result(
-                "invalid_resource_selection",
-                stage="resource_assignment",
-                tool_call_refs=investigation.tool_call_refs,
-            )
+                    ),
+                    response_format=_pa_allocation_response_format(
+                        allocation_presentation.resource_order,
+                    ),
+                    tools=[
+                        _check_reachability_tool(
+                            allocation_presentation.resource_order,
+                        )
+                    ],
+                    tool_executor=allocation.execute,
+                    max_tool_rounds=_MAX_TOOL_ROUNDS,
+                )
+                unchecked = tuple(
+                    symbol
+                    for symbol in allocation_presentation.resource_order
+                    if symbol not in allocation.completed_results
+                )
+                if unchecked:
+                    if selection_attempt == 0:
+                        continue
+                    raise ProductionGroundingError("PA omitted capable-resource checks.")
+                choice = _validated_pa_allocation_response(
+                    response,
+                )
+                break
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return _incomplete_result(
+                    "invalid_resource_selection",
+                    stage="resource_assignment",
+                    tool_call_refs=investigation.tool_call_refs,
+                )
         if choice is None:
+            if any(check.status == "accepted" for check in allocation.reachability_checks.values()):
+                return _incomplete_result(
+                    "invalid_resource_selection",
+                    stage="resource_assignment",
+                    tool_call_refs=investigation.tool_call_refs,
+                )
+            unavailable = not allocation.reachability_checks or any(
+                check.status == "needs_context" for check in allocation.reachability_checks.values()
+            )
             return _incomplete_result(
-                "no_reachable_resource",
+                "reachability_validation_unavailable" if unavailable else "no_reachable_resource",
                 stage="resource_assignment",
                 tool_call_refs=investigation.tool_call_refs,
             )
 
         reachability_ref = str(choice["reachability_check_ref"])
         reachability = allocation.reachability_checks.get(reachability_ref)
-        validation = allocation.validations.get(reachability_ref)
         if (
-            reachability is None
-            or validation is None
-            or reachability.schema_version not in {3, 4}
-            or reachability.resource_symbol != choice["resource_symbol"]
-            or reachability.status != "accepted"
-            or validation.status != "accepted"
+            (reachability is None)
+            or (reachability.resource_symbol != choice["resource_symbol"])
+            or (reachability.status != "accepted")
         ):
             return _incomplete_result(
                 "invalid_resource_selection",
                 stage="resource_assignment",
                 tool_call_refs=investigation.tool_call_refs,
             )
-        submitted_locations = (
-            {
-                state_name: list(handles)
-                for state_name, handles in fixed_state_locations.items()
-            }
-            if fixed_state_locations is not None
-            else choice["state_locations"]
-        )
-        if reachability.schema_version == 3:
-            if reachability.current_state is None or reachability.desired_state is None:
-                return _incomplete_result(
-                    "invalid_resource_selection",
-                    stage="resource_assignment",
-                    tool_call_refs=investigation.tool_call_refs,
-                )
-            checked_locations = {
-                "current_state": [reachability.current_state.evidence_handle],
-                "desired_state": [reachability.desired_state.evidence_handle],
-            }
-        else:
-            if reachability.state_locations is None:
-                return _incomplete_result(
-                    "invalid_resource_selection",
-                    stage="resource_assignment",
-                    tool_call_refs=investigation.tool_call_refs,
-                )
-            checked_locations = {
-                state_name: [
-                    item.evidence_handle
-                    for item in reachability.state_locations[state_name]
-                ]
-                for state_name in ("current_state", "desired_state")
-            }
+        submitted_locations = {
+            state_name: list(handles) for state_name, handles in fixed_state_locations.items()
+        }
+        if reachability.state_locations is None:
+            return _incomplete_result(
+                "invalid_resource_selection",
+                stage="resource_assignment",
+                tool_call_refs=investigation.tool_call_refs,
+            )
+        checked_locations = {
+            state_name: [item.evidence_handle for item in reachability.state_locations[state_name]]
+            for state_name in ("current_state", "desired_state")
+        }
         if submitted_locations != checked_locations:
             return _incomplete_result(
                 "invalid_resource_selection",
@@ -1921,10 +1979,8 @@ class ProductionProductContextGroundingRuntime:
                 workcell=self._workcell,
                 reachability=reachability,
                 allocation_presentation=allocation_presentation,
-                robot_agent_validation_path=validation.record_path,
                 state_location_handles={
-                    state_name: tuple(handles)
-                    for state_name, handles in checked_locations.items()
+                    state_name: tuple(handles) for state_name, handles in checked_locations.items()
                 },
                 selection_number=_next_number(
                     root,
@@ -1962,11 +2018,8 @@ class ProductionProductContextGroundingRuntime:
             "resource_assignment_status": "complete",
             "resource_selection_ref": selection.record_ref,
             "resource_assignment_delta_count": assignment.abox.delta_count,
-            "allocation_label": (
-                "validated Cartesian pick-place allocation"
-                if reachability.schema_version == 3
-                else "validated state-location resource allocation"
-            ),
+            "allocation_label": "resource assignment validated by MoveIt",
+            "motion_validation_performed": True,
         }
 
     def _validate_authorities(self, tbox: TBoxSnapshot) -> None:
@@ -2010,63 +2063,53 @@ def _allocation_evidence_sources(
     return tuple(sources)
 
 
-def _proposal_state_location_handles(
+_LocationSource = TypeVar("_LocationSource", AllocationEvidenceSource, AllocationEvidenceEntry)
+
+
+def _proposal_state_location_sources(
     proposal: OntologyGroundingProposal,
-    allocation_presentation: AllocationPresentationRecord,
-) -> Mapping[str, tuple[str, ...]] | None:
-    """Resolve PA-authored assembly state bindings to their exact opaque handles."""
-    if proposal.assembly_feature_association is None:
-        return None
-    state_refs = proposal.assembly_state_value_refs
-    if set(state_refs) != {"current_state", "desired_state"}:
-        raise ProductionGroundingError(
-            "Assembly proposal does not bind both state locations."
-        )
-    resolved: dict[str, tuple[str, ...]] = {}
+    evidence_sources: Sequence[_LocationSource],
+) -> Mapping[str, tuple[_LocationSource, ...]]:
+    """Match exact coordinate bindings without selecting candidates or interpreting roles."""
+    resolved: dict[str, tuple[_LocationSource, ...]] = {}
     for state_name in ("current_state", "desired_state"):
-        state_ref = state_refs[state_name]
-        if set(state_ref) != {"record_ref", "record_sha256", "field_path"}:
-            raise ProductionGroundingError(
-                f"Assembly proposal {state_name} location binding is invalid."
-            )
-        matches = [
-            entry
-            for entry in allocation_presentation.evidence_entries
-            if entry.record_ref == state_ref["record_ref"]
-            and entry.record_sha256 == state_ref["record_sha256"]
-            and entry.field_path == state_ref["field_path"]
-        ]
-        if len(matches) != 1:
-            raise ProductionGroundingError(
-                f"Assembly proposal {state_name} location is not one presented candidate."
-            )
-        resolved[state_name] = (matches[0].pa_handle,)
+        sources: list[_LocationSource] = []
+        for value in proposal.resolved_state_values:
+            if value["state"] != state_name or value["record_type"] not in {
+                "RGBDSegmentationRecord",
+                "RobotFrameLocationRecord",
+            }:
+                continue
+            ref = value["value_ref"]
+            matches = [
+                entry
+                for entry in evidence_sources
+                if entry.record_ref == ref["record_ref"]
+                and entry.record_sha256 == value["record_sha256"]
+                and entry.field_path == ref["field_path"]
+            ]
+            if len(matches) != 1:
+                raise ProductionGroundingError(
+                    "State location is not one exact accepted coordinate source."
+                )
+            if matches[0] not in sources:
+                sources.append(matches[0])
+        resolved[state_name] = tuple(sources)
     return resolved
 
 
-def _proposal_state_comparison_path(
-    investigation: _NativeEvidenceInvestigation,
+def _proposal_state_location_handles(
     proposal: OntologyGroundingProposal,
-    *,
-    state_name: str,
-) -> Path | None:
-    """Resolve the one PA-requested CAD comparison cited by one state value."""
-    state = proposal.target_feature.get(state_name)
-    state_values = state.get("state_values") if isinstance(state, Mapping) else None
-    if not isinstance(state_values, list) or len(state_values) != 1:
-        return None
-    state_value = state_values[0]
-    evidence_refs = (
-        state_value.get("evidence_refs") if isinstance(state_value, Mapping) else None
-    )
-    if not isinstance(evidence_refs, list):
-        return None
-    matches = [
-        investigation.root / record_ref
-        for record_ref in investigation.comparison_bindings
-        if record_ref in evidence_refs
-    ]
-    return matches[0] if len(matches) == 1 else None
+    allocation_presentation: AllocationPresentationRecord,
+) -> Mapping[str, tuple[str, ...]]:
+    """Bind every product and destination reference without inferring endpoint roles."""
+    resolved = _proposal_state_location_sources(proposal, allocation_presentation.evidence_entries)
+    for sources in resolved.values():
+        if not sources:
+            raise ProductionGroundingError(
+                "Product and destination locations are required for reachability."
+            )
+    return {state: tuple(source.pa_handle for source in sources) for state, sources in resolved.items()}
 
 
 def _register_allocation_references(
@@ -2092,11 +2135,7 @@ def _segmentation_evidence_sources(
 ) -> tuple[AllocationEvidenceSource, ...]:
     """Project all candidates from one neutral segmentation record."""
     cameras = record.get("cameras")
-    if (
-        record.get("schema_version") != 2
-        or record.get("record_type") != "RGBDSegmentationRecord"
-        or not isinstance(cameras, list)
-    ):
+    if (record.get("record_type") != "RGBDSegmentationRecord") or (not isinstance(cameras, list)):
         raise ProductionGroundingError("Neutral segmentation record is invalid.")
     sources: list[AllocationEvidenceSource] = []
     for camera_index, camera in enumerate(cameras):
@@ -2164,18 +2203,18 @@ def _robot_location_evidence_source(
     target_frame = record.get("target_frame")
     translated_location = record.get("translated_location_m")
     if (
-        record.get("schema_version") != 2
-        or record.get("record_type") != "RobotFrameLocationRecord"
-        or not isinstance(source_frame, str)
-        or not source_frame
-        or not isinstance(target_frame, str)
-        or not target_frame
-        or not isinstance(translated_location, list)
-        or len(translated_location) != 3
-        or any(
-            isinstance(coordinate, bool)
-            or not isinstance(coordinate, (int, float))
-            for coordinate in translated_location
+        (record.get("record_type") != "RobotFrameLocationRecord")
+        or (not isinstance(source_frame, str))
+        or (not source_frame)
+        or (not isinstance(target_frame, str))
+        or (not target_frame)
+        or (not isinstance(translated_location, list))
+        or (len(translated_location) != 3)
+        or (
+            any(
+                isinstance(coordinate, bool) or not isinstance(coordinate, (int, float))
+                for coordinate in translated_location
+            )
         )
         or (observation_handle is not None and not isinstance(observation_handle, str))
         or (candidate_handle is not None and not isinstance(candidate_handle, str))
@@ -2294,7 +2333,7 @@ def _pa_target_feature_projection(
             return [project(item, parent_key=parent_key) for item in value]
         return value
 
-    projected = project(target_feature)
+    projected = ObservationPresentation(investigation.root).project(project(target_feature))
     if not isinstance(projected, Mapping):
         raise ProductionGroundingError("Target-feature PA projection is invalid.")
     _assert_blinded_pa_projection(projected, investigation.presentation)
@@ -2308,7 +2347,9 @@ def _pa_allocation_prompt(
     resource_catalog: Mapping[str, Mapping[str, str]],
     allocation_presentation: AllocationPresentationRecord,
     investigation: _NativeEvidenceInvestigation,
-    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
+    unchecked_resources: tuple[str, ...] = (),
+    existing_results: Mapping[str, Mapping[str, object]] | None = None,
+    fixed_state_locations: Mapping[str, tuple[str, ...]],
 ) -> str:
     """Describe a neutral location-and-resource decision without ranking choices."""
     prompt_input: dict[str, object] = {
@@ -2325,36 +2366,35 @@ def _pa_allocation_prompt(
         ],
         "presentation_order_has_no_priority": True,
     }
-    if fixed_state_locations is not None:
-        prompt_input["proposal_bound_state_locations"] = {
-            state_name: list(handles)
-            for state_name, handles in fixed_state_locations.items()
+    prompt_input["proposal_bound_state_locations"] = {
+        state_name: list(handles) for state_name, handles in fixed_state_locations.items()
+    }
+    instruction = (
+        "The PA proposal identifies the product locations and assembly destination references. Check every referenced location. MoveIt checks whether the selected simulated robot can plan to each position using its current state, joint limits and collision scene. Orientation remains unconstrained; these plans do not validate grasping or insertion. Use the location "
+        "evidence for each state. Those proposal-bound state locations are fixed; "
+        "do not select, replace, or repeat them. Select only a capable resource, "
+        "call check_reachability for every resource in capable_resource_catalog using these same bound current and desired locations before selecting, and return one resource "
+        "with an accepted result created in this conversation or return "
+        "no_reachable_resource. "
+    )
+    if unchecked_resources:
+        prompt_input["correction"] = {
+            "unchecked_resources": list(unchecked_resources),
+            "existing_results": dict(existing_results or {}),
+            "instruction": "Check every unchecked resource before selecting. Existing checks are reused. This is the only correction attempt.",
         }
-        instruction = (
-            "The accepted assembly_feature_association already binds the location "
-            "evidence for each state. Those proposal-bound state locations are fixed; "
-            "do not select, replace, or repeat them. Select only a capable resource, "
-            "call check_reachability for any resources you choose, and return one resource "
-            "with an accepted result created in this conversation or return "
-            "no_reachable_resource. "
-        )
-    else:
-        instruction = (
-            "Independently select one or more location evidence handles for each state "
-            "and a resource. You may call check_reachability for any combinations you "
-            "choose. Return one resource only with an accepted reachability result created "
-            "in this conversation and repeat the exact checked state_locations, or return "
-            "no_reachable_resource. "
-        )
+    prompt_input = ObservationPresentation(investigation.root).project(prompt_input)
+    _assert_blinded_pa_projection(prompt_input, investigation.presentation)
     return (
-        "Act as the ProductAgent authority for the second Phase 4 decision. "
+        "Act as the ProductAgent authority for resource assignment. "
         "Using the exact requirement, grounded target feature, approved evidence, "
         "and capable resources, "
         + instruction
         + "The tool validates the submitted locations for only the selected resource "
         "and never selects a semantic state, location, or resource. "
         "Reachability does not certify grasping, insertion, process execution, force, "
-        "or tolerance. Presentation order has no priority. Do not "
+        "or tolerance. If multiple resources pass with no evidenced advantage, either may be "
+        "selected; do not invent a preference. Presentation order has no priority. Do not "
         "claim that motion or manufacturing executed.\n\n"
         f"Allocation input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
@@ -2381,30 +2421,15 @@ def _allocation_evidence_prompt_projection(
                 },
             }
         )
+    projection = ObservationPresentation(investigation.root).project(projection)
     _assert_blinded_pa_projection(projection, investigation.presentation)
     return projection
 
 
 def _check_reachability_tool(
     resource_symbols: tuple[str, ...],
-    location_handles: tuple[str, ...],
-    *,
-    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     """Describe the neutral reachability operation for one selected resource."""
-    state_locations = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["current_state", "desired_state"],
-        "properties": {
-            state_name: {
-                "type": "array",
-                "items": {"type": "string", "enum": list(location_handles)},
-                "minItems": 1,
-            }
-            for state_name in ("current_state", "desired_state")
-        },
-    }
     properties: dict[str, Any] = {
         "resource_symbol": {
             "type": "string",
@@ -2412,9 +2437,6 @@ def _check_reachability_tool(
         }
     }
     required = ["resource_symbol"]
-    if fixed_state_locations is None:
-        properties["state_locations"] = state_locations
-        required.append("state_locations")
     return {
         "type": "function",
         "function": {
@@ -2436,24 +2458,8 @@ def _check_reachability_tool(
 
 def _pa_allocation_response_format(
     resource_symbols: tuple[str, ...],
-    location_handles: tuple[str, ...],
-    *,
-    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     """Require one cited PA choice or a code-only no-resource result."""
-    state_locations = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["current_state", "desired_state"],
-        "properties": {
-            state_name: {
-                "type": "array",
-                "items": {"type": "string", "enum": list(location_handles)},
-                "minItems": 1,
-            }
-            for state_name in ("current_state", "desired_state")
-        },
-    }
     accepted_required = ["resource_symbol", "reachability_check_ref"]
     accepted_properties: dict[str, Any] = {
         "resource_symbol": {
@@ -2465,9 +2471,6 @@ def _pa_allocation_response_format(
             "minLength": 1,
         },
     }
-    if fixed_state_locations is None:
-        accepted_required.append("state_locations")
-        accepted_properties["state_locations"] = state_locations
     return {
         "name": "spec2primitives_pa_resource_allocation",
         "strict": True,
@@ -2503,8 +2506,6 @@ def _pa_allocation_response_format(
 
 def _validated_pa_allocation_response(
     value: object,
-    *,
-    fixed_state_locations: Mapping[str, tuple[str, ...]] | None = None,
 ) -> Mapping[str, object] | None:
     """Validate shape only; selection acceptance is checked against tool records."""
     if (
@@ -2517,47 +2518,13 @@ def _validated_pa_allocation_response(
     if set(result) == {"no_reachable_resource"} and result["no_reachable_resource"] is True:
         return None
     expected_fields = {"resource_symbol", "reachability_check_ref"}
-    if fixed_state_locations is None:
-        expected_fields.add("state_locations")
     if set(result) != expected_fields:
         raise ProductionGroundingError("PA allocation result fields are invalid.")
-    if fixed_state_locations is not None:
-        return {
-            "resource_symbol": _allocation_text(
-                result["resource_symbol"],
-                "resource_symbol",
-            ),
-            "reachability_check_ref": _allocation_text(
-                result["reachability_check_ref"],
-                "reachability_check_ref",
-            ),
-        }
-    submitted = result["state_locations"]
-    if not isinstance(submitted, Mapping) or set(submitted) != {
-        "current_state",
-        "desired_state",
-    }:
-        raise ProductionGroundingError("PA allocation state locations are invalid.")
-    state_locations: dict[str, list[str]] = {}
-    for state_name in ("current_state", "desired_state"):
-        handles = submitted[state_name]
-        if (
-            not isinstance(handles, Sequence)
-            or isinstance(handles, (str, bytes))
-            or not handles
-            or any(not isinstance(handle, str) or not handle for handle in handles)
-            or len(set(handles)) != len(handles)
-        ):
-            raise ProductionGroundingError(
-                f"PA allocation {state_name} locations are invalid."
-            )
-        state_locations[state_name] = list(handles)
     return {
         "resource_symbol": _allocation_text(
             result["resource_symbol"],
             "resource_symbol",
         ),
-        "state_locations": state_locations,
         "reachability_check_ref": _allocation_text(
             result["reachability_check_ref"],
             "reachability_check_ref",
@@ -2592,9 +2559,7 @@ def _producer_descriptors(
                 "description": "Answer a PA-authored question from an indexed document.",
                 "accepted_evidence_types": ["existing_record"],
                 "produced_record_types": ["DocumentQueryRecord"],
-                "prerequisites": {
-                    "DocumentQueryRecord": ["DocumentSourceIndexRecord"]
-                },
+                "prerequisites": {"DocumentQueryRecord": ["DocumentSourceIndexRecord"]},
                 "availability": True,
                 "estimated_cost": 2,
             }
@@ -2722,9 +2687,7 @@ def _retrieve_tool(handles: Sequence[_EvidenceHandle]) -> dict[str, Any]:
 
 def _query_document_tool(handles: Sequence[_EvidenceHandle]) -> dict[str, Any]:
     """Expose exact PA-authored questions without prescribing their subject."""
-    document_ids = [
-        handle.evidence_id for handle in handles if handle.evidence_type == "document"
-    ]
+    document_ids = [handle.evidence_id for handle in handles if handle.evidence_type == "document"]
     return {
         "type": "function",
         "function": {
@@ -2794,7 +2757,8 @@ def _analyze_candidate_layout_tool() -> dict[str, Any]:
             "description": (
                 "Return positions, pairwise displacement vectors, distances, and "
                 "collinearity measurements for two or more selected candidates from "
-                "the same observation frame."
+                "the same observation frame. Copy each exact candidate_value_ref.field_path "
+                "from the returned observation evidence."
             ),
             "strict": True,
             "parameters": {
@@ -2810,7 +2774,7 @@ def _analyze_candidate_layout_tool() -> dict[str, Any]:
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "pattern": "^/cameras/[0-9]+/candidates/[0-9]+$",
+                            "pattern": "^/candidates/observation_[0-9a-f]{24}$",
                         },
                         "minItems": 2,
                     },
@@ -2880,11 +2844,7 @@ def _restored_source_refs(
         source_index = document_record.get("source_index")
         overview = document_record.get("overview")
         document_content = source_index if isinstance(source_index, Mapping) else overview
-        pages = (
-            document_content.get("pages")
-            if isinstance(document_content, Mapping)
-            else None
-        )
+        pages = document_content.get("pages") if isinstance(document_content, Mapping) else None
         if isinstance(pages, list):
             refs.update(
                 evidence_ref
@@ -2993,8 +2953,7 @@ def _document_query_projection(
     """Project cited open claims without provider or canonical source metadata."""
     if (
         record.get("record_type") != "DocumentQueryRecord"
-        or record.get("status")
-        not in {"supported", "contradicted", "insufficient_evidence"}
+        or record.get("status") not in {"supported", "contradicted", "insufficient_evidence"}
         or not isinstance(record.get("claims"), list)
         or not isinstance(record.get("uncertainty"), list)
     ):
@@ -3032,12 +2991,11 @@ def _candidate_layout_projection(
     pairwise = record.get("pairwise_measurements")
     collinearity = record.get("collinearity_measurements")
     if (
-        record.get("schema_version") != 2
-        or record.get("record_type") != "CandidateSpatialRelationRecord"
-        or record.get("status") != "measured"
-        or not isinstance(candidates, list)
-        or not isinstance(pairwise, list)
-        or not isinstance(collinearity, list)
+        (record.get("record_type") != "CandidateSpatialRelationRecord")
+        or (record.get("status") != "measured")
+        or (not isinstance(candidates, list))
+        or (not isinstance(pairwise, list))
+        or (not isinstance(collinearity, list))
     ):
         raise ProductionGroundingError("Candidate layout projection is invalid.")
     projected_candidates = []
@@ -3047,7 +3005,6 @@ def _candidate_layout_projection(
         projected_candidates.append(
             {
                 **_project_candidate_relation_reference(investigation, candidate),
-                "frame": candidate.get("frame"),
                 "center_m": candidate.get("center_m"),
             }
         )
@@ -3401,6 +3358,9 @@ def _assert_blinded_pa_projection(
         "assembly_target",
         "cad_identity",
         "camera_name",
+        "frame",
+        "camera_id",
+        "calibration_frame",
         "display_name",
         "document_name",
         "evaluator_label",
@@ -3430,7 +3390,9 @@ def _assert_blinded_pa_projection(
                     raise ProductionGroundingError(
                         "PA-facing evidence contains a forbidden semantic shortcut."
                     )
-                inspect(nested)
+                inspect(str(key))
+                if key != "extracted_text":
+                    inspect(nested)
             return
         if isinstance(item, list | tuple):
             for nested in item:
@@ -3440,13 +3402,17 @@ def _assert_blinded_pa_projection(
             return
         if item in allowed_cad_refs:
             return
-        folded = item.casefold()
+        inspected = item
+        for cad_ref in allowed_cad_refs:
+            inspected = inspected.replace(cad_ref, "approved CAD")
+        folded = inspected.casefold()
         if (
-            any(ref in item for ref in canonical_refs)
+            any(ref in inspected for ref in canonical_refs)
             or "/home/" in folded
             or "file://" in folded
             or ".stl" in folded
             or ".pdf" in folded
+            or any(sensor in folded for sensor in CAMERA_IDS)
             or "gazebo_ground_truth" in folded
         ):
             raise ProductionGroundingError(
@@ -3558,12 +3524,16 @@ def _proposal_evidence_is_intact(
             return False
 
     for value in proposal.resolved_state_values:
-        record_ref = value.get("value_ref", {}).get("record_ref") if isinstance(
-            value.get("value_ref"), Mapping
-        ) else None
-        field_path = value.get("value_ref", {}).get("field_path") if isinstance(
-            value.get("value_ref"), Mapping
-        ) else None
+        record_ref = (
+            value.get("value_ref", {}).get("record_ref")
+            if isinstance(value.get("value_ref"), Mapping)
+            else None
+        )
+        field_path = (
+            value.get("value_ref", {}).get("field_path")
+            if isinstance(value.get("value_ref"), Mapping)
+            else None
+        )
         record_type = value.get("record_type")
         record_sha256 = value.get("record_sha256")
         if not all(

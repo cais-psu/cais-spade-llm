@@ -189,7 +189,6 @@ def _apply_hardware_arms_config(config_path: Path) -> None:  # noqa: PLR0915
     global UR5E_RTDE_CARTESIAN_ORIENTATION_TOLERANCE_RAD
     global UR5E_RTDE_CARTESIAN_WORLD_BASE
     global UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR
-    global UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
     global UR5E_RTDE_CARTESIAN_REACH_ORIGIN
     global UR5E_RTDE_CARTESIAN_REACH_RADIUS_M
     global UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S
@@ -460,16 +459,6 @@ def _apply_hardware_arms_config(config_path: Path) -> None:  # noqa: PLR0915
     except ValueError as exc:
         UR5E_RTDE_CARTESIAN_WORLD_BASE = None
         UR5E_RTDE_CARTESIAN_WORLD_BASE_CONFIG_ERROR = str(exc)
-    bounds = _nested(config, ("ur5e", "rtde", "cartesian_workspace_bounds"), {})
-    if isinstance(bounds, dict):
-        UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS = {
-            key: _float(
-                bounds,
-                (key,),
-                UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS[key],
-            )
-            for key in UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
-        }
     reach = _nested(config, ("ur5e", "rtde", "cartesian_reach"), {})
     if isinstance(reach, dict):
         UR5E_RTDE_CARTESIAN_REACH_ORIGIN = (
@@ -761,14 +750,6 @@ UR5E_RTDE_CARTESIAN_JOG_ORIENTATION_DRIFT_RAD = math.radians(1.0)
 UR5E_RTDE_CARTESIAN_JOG_MAX_STEP_M = 0.10
 UR5E_RTDE_CARTESIAN_JOG_MIN_WATCHDOG_SEC = 0.10
 UR5E_RTDE_CARTESIAN_JOG_MAX_WATCHDOG_SEC = 0.50
-UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS = {
-    "x_min_m": -0.7,
-    "x_max_m": 0.7,
-    "y_min_m": -0.35,
-    "y_max_m": 1.1,
-    "z_min_m": 0.85,
-    "z_max_m": 1.6,
-}
 UR5E_RTDE_CARTESIAN_REACH_ORIGIN = (0.0, 0.5, 1.021)
 UR5E_RTDE_CARTESIAN_REACH_RADIUS_M = 0.7
 UR5E_RTDE_INSERT_MAX_CONTACT_SPEED_M_S: float | None = None
@@ -1463,14 +1444,8 @@ def _transform_status_payload(value: RigidTransform | None) -> dict[str, float] 
 def _workspace_error(target_world_tool0: RigidTransform) -> str | None:
     translation, _rotation = target_world_tool0
     x, y, z = translation
-    bounds = UR5E_RTDE_CARTESIAN_WORKSPACE_BOUNDS
-    for axis, value in (("x", x), ("y", y), ("z", z)):
-        minimum = float(bounds[f"{axis}_min_m"])
-        maximum = float(bounds[f"{axis}_max_m"])
-        if not minimum <= value <= maximum:
-            return (
-                f"world -> tool0 {axis}={value:.6f} m is outside [{minimum:.6f}, {maximum:.6f}] m"
-            )
+    if not all(math.isfinite(value) for value in translation):
+        return "world -> tool0 translation must be finite"
     origin_x, origin_y, _origin_z = UR5E_RTDE_CARTESIAN_REACH_ORIGIN
     xy_radius = math.hypot(x - origin_x, y - origin_y)
     if xy_radius > UR5E_RTDE_CARTESIAN_REACH_RADIUS_M:

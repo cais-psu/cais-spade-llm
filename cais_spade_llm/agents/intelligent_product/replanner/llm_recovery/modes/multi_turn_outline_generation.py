@@ -1854,7 +1854,6 @@ async def _agent_filtered_recovery_enabledness(
                                 )
                                 for evidence_key in (
                                     "checked_pose",
-                                    "workspace_bounds",
                                 )
                                 if dict(finding.get("evidence") or {}).get(
                                     evidence_key
@@ -1865,7 +1864,7 @@ async def _agent_filtered_recovery_enabledness(
                         if any(
                             dict(finding.get("evidence") or {}).get(evidence_key)
                             not in (None, "", [], {})
-                            for evidence_key in ("checked_pose", "workspace_bounds")
+                            for evidence_key in ("checked_pose",)
                         )
                         else {}
                     )

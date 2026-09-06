@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Phase 4.2 preprocessing, segmentation, correspondence, and pose boundaries."""
 
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.candidate_layout import (
@@ -11,7 +13,7 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.diagnostic import 
     read_rgbd_segmentation_status,
     run_automatic_rgbd_segmentation_pipeline,
     run_cad_pose_estimation_pipeline,
-    run_cad_size_association_pipeline,
+    run_cad_size_measurement_pipeline,
     run_rgbd_cad_preprocessing_diagnostic,
     run_robot_frame_pose_conversion_pipeline,
 )
@@ -23,7 +25,6 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.frame_conversion i
     RobotFramePoseResult,
     record_camera_to_robot_calibration,
     transform_camera_pose_to_robot_frame,
-    transform_correspondence_location_to_robot_frame,
     transform_segmentation_candidate_location_to_robot_frame,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.observation_review import (
@@ -53,15 +54,12 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.segmenter import (
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondence import (
     CADSizeAssociationError,
-    CADSizeAssociationResult,
     CADSizeMeasurementResult,
-    associate_segmented_candidate_by_size,
     measure_segmented_candidates_against_cad,
 )
 
 __all__ = [
     "CADSizeAssociationError",
-    "CADSizeAssociationResult",
     "CADSizeMeasurementResult",
     "CandidateLayoutError",
     "CandidateSpatialRelationResult",
@@ -85,7 +83,6 @@ __all__ = [
     "RobotFrameLocationResult",
     "RobotFramePoseResult",
     "analyze_candidate_layout",
-    "associate_segmented_candidate_by_size",
     "estimate_camera_frame_pose",
     "measure_segmented_candidates_against_cad",
     "preprocess_served_geometry",
@@ -94,12 +91,11 @@ __all__ = [
     "record_camera_to_robot_calibration",
     "run_automatic_rgbd_segmentation_pipeline",
     "run_cad_pose_estimation_pipeline",
-    "run_cad_size_association_pipeline",
+    "run_cad_size_measurement_pipeline",
     "run_robot_frame_pose_conversion_pipeline",
     "run_rgbd_cad_preprocessing_diagnostic",
     "segment_preprocessed_observation",
     "review_observation_candidates",
     "transform_camera_pose_to_robot_frame",
-    "transform_correspondence_location_to_robot_frame",
     "transform_segmentation_candidate_location_to_robot_frame",
 ]

@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Author and persist one structural RobotAgent primitive-program draft."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -13,10 +14,7 @@ from typing import Protocol
 
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingContractError,
-    PAContextGroundingCompletionV4,
-    PAContextGroundingCompletionV5,
-    PAContextGroundingCompletionV6,
-    PAContextGroundingCompletionV8,
+    PAContextGroundingCompletion,
     ProductContextView,
     load_completed_product_context_view,
     load_pa_context_grounding_completion,
@@ -45,7 +43,6 @@ _PPR_SPECIFICATION = "http://PAonto.com#specification"
 _RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 _RDF_VALUE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#value"
 _RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "draft_status",
     "pa_completion_ref",
@@ -146,7 +143,7 @@ async def author_primitive_program_draft(
     catalog_ref = context.primitive_catalog_path.relative_to(root).as_posix()
     if any(draft.record["primitive_catalog_ref"] == catalog_ref for draft in existing):
         raise PrimitiveDraftError(
-            "The latest Phase 5.1 context already has a PrimitiveProgramDraft."
+            "The latest RobotAgent context already has a PrimitiveProgramDraft."
         )
 
     composition_input = _composition_input(root, context, completion)
@@ -176,7 +173,6 @@ async def author_primitive_program_draft(
         for index, symbol in enumerate(model_output["primitive_symbols"], start=1)
     ]
     payload: dict[str, object] = {
-        "schema_version": 1,
         "record_type": "PrimitiveProgramDraft",
         "draft_status": model_output["draft_status"],
         "pa_completion_ref": completion_ref,
@@ -208,12 +204,12 @@ def read_phase_5_2_diagnostic(interaction_root: Path) -> Phase52Diagnostic:
         if phase_5_1.status == "blocked":
             return Phase52Diagnostic(
                 status="blocked",
-                message="Phase 5.1 evidence is blocked.",
+                message="RobotAgent context evidence is blocked.",
                 failure=phase_5_1.failure,
             )
         return Phase52Diagnostic(
             status="waiting_for_context",
-            message="Capture one valid Phase 5.1 RobotAgent context first.",
+            message="Capture one valid RobotAgent context first.",
         )
     try:
         context = load_selected_ra_context_snapshot(root)
@@ -299,10 +295,10 @@ def _composition_input(
     root: Path,
     context: SelectedRAContextSnapshot,
     completion: (
-        PAContextGroundingCompletionV4
-        | PAContextGroundingCompletionV5
-        | PAContextGroundingCompletionV6
-        | PAContextGroundingCompletionV8
+        PAContextGroundingCompletion
+        | PAContextGroundingCompletion
+        | PAContextGroundingCompletion
+        | PAContextGroundingCompletion
     ),
 ) -> dict[str, object]:
     assignment = context.assignment
@@ -358,25 +354,21 @@ def _reconstructed_target_feature(  # noqa: C901
     """Reconstruct and resolve the PA target feature from completion-pinned records."""
     proposal_path = _resolve_ref(root, str(completion["ontology_projection_ref"]))
     proposal = _read_json_mapping(proposal_path, "OntologyGroundingProposal")
-    proposal_schema_version = proposal.get("schema_version")
     output = proposal.get("output")
     if (
-        proposal_schema_version not in {6, 7, 8, 9, 10}
-        or proposal.get("status") != "accepted"
-        or proposal.get("initialized_specification_iri") != assignment.specification_iri
-        or proposal.get("feature_iri") != assignment.feature_iri
-        or not isinstance(output, Mapping)
-        or set(output) != {"target_feature"}
+        (proposal.get("status") != "accepted")
+        or (proposal.get("initialized_specification_iri") != assignment.specification_iri)
+        or (proposal.get("feature_iri") != assignment.feature_iri)
+        or (not isinstance(output, Mapping))
+        or (set(output) != {"target_feature"})
     ):
         raise PrimitiveDraftError(
             "The completion-pinned target feature does not match the RA assignment."
         )
-    state_names = (
-        ("desired_state",) if proposal_schema_version == 6 else ("current_state", "desired_state")
-    )
+    state_names = ("current_state", "desired_state")
     authored = output["target_feature"]
     target_feature_keys = {"required_process", *state_names}
-    if proposal_schema_version == 10 and completion.get("process_symbol") == "assembly":
+    if completion.get("process_symbol") == "assembly":
         target_feature_keys.add("assembly_feature_association")
     if not isinstance(authored, Mapping) or set(authored) != target_feature_keys:
         raise PrimitiveDraftError("The PA-authored target_feature is invalid.")
@@ -411,7 +403,7 @@ def _reconstructed_target_feature(  # noqa: C901
                 state,
                 pinned_hashes=pinned_hashes,
                 binding_types=binding_types,
-                include_state_role=proposal_schema_version in {7, 8, 9, 10},
+                include_state_role=True,
             )
         )
         assert isinstance(state, Mapping)
@@ -550,12 +542,7 @@ def _validated_ontology_projection(
         assertions,
         subject=assignment.feature_iri,
         predicate=_RDF_TYPE,
-        expected_object=(
-            _PPR_ASSEMBLY_FEATURE_ASSOCIATION
-            if completion.get("schema_version") == 8
-            and completion.get("process_symbol") == "assembly"
-            else _PPR_FEATURE
-        ),
+        expected_object=(_PPR_FEATURE),
         label="feature type",
     )
     _require_iri_relation(
@@ -848,31 +835,19 @@ def _validate_model_output(
     }
 
 
-def _load_completion(
-    root: Path,
-) -> tuple[
-    PAContextGroundingCompletionV4
-    | PAContextGroundingCompletionV5
-    | PAContextGroundingCompletionV6
-    | PAContextGroundingCompletionV8,
-    Path,
-]:
+def _load_completion(root: Path) -> tuple[PAContextGroundingCompletion, Path]:
+    """Require current validated completion before primitive drafting."""
     completion = load_pa_context_grounding_completion(root)
-    if not isinstance(
-        completion,
-        (
-            PAContextGroundingCompletionV4,
-            PAContextGroundingCompletionV5,
-            PAContextGroundingCompletionV6,
-            PAContextGroundingCompletionV8,
-        ),
-    ):
+    if not isinstance(completion, PAContextGroundingCompletion):
         raise PrimitiveDraftError(
-            "Phase 5.2 requires a supported PA completion; version 7 is audit-only."
+            "Historical grounding has an incompatible completion contract. "
+            "Start a fresh interaction before primitive drafting."
         )
     paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
     if len(paths) != 1:
-        raise PrimitiveDraftError("Phase 5.2 requires exactly one PA completion.")
+        raise PrimitiveDraftError(
+            "Structural primitive drafting requires exactly one PA completion."
+        )
     return completion, paths[0]
 
 
@@ -903,10 +878,9 @@ def _load_draft(root: Path, path: Path) -> PrimitiveProgramDraft:
     payload = dict(value)
     fingerprint = payload.pop("fingerprint", None)
     if (
-        value.get("schema_version") != 1
-        or value.get("record_type") != "PrimitiveProgramDraft"
-        or not isinstance(fingerprint, str)
-        or fingerprint != _fingerprint(payload)
+        (value.get("record_type") != "PrimitiveProgramDraft")
+        or (not isinstance(fingerprint, str))
+        or (fingerprint != _fingerprint(payload))
     ):
         raise PrimitiveDraftError("PrimitiveProgramDraft identity is invalid.")
     pinned = (

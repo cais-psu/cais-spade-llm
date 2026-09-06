@@ -2464,7 +2464,6 @@ class RecoverySessionMixin:
                 "current_pose",
                 "current_pose_ref",
                 "named_poses",
-                "workspace_bounds",
             ):
                 optional_value = deepcopy(recovery_snapshot.get(optional_field))
                 if optional_value not in (None, "", [], {}):
@@ -2668,9 +2667,6 @@ class RecoverySessionMixin:
                 recovery_snapshot.get("named_poses")
                 if "named_poses" in recovery_snapshot
                 else manipulator.get("named_poses")
-            ),
-            "workspace_bounds": deepcopy(
-                dict(resource_entry.get("static_capabilities") or {}).get("workspace_bounds")
             ),
         }
         return {

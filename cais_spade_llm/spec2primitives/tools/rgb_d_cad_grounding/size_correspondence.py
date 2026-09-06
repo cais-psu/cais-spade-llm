@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Measure segmented RGB-D candidates against one approved CAD size."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -42,7 +43,6 @@ _SEGMENTATION_PARAMETERS = {
 }
 
 _CAD_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "operation_number",
@@ -60,7 +60,6 @@ _CAD_RECORD_KEYS = {
     "pose",
 }
 _SEGMENTATION_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "segmentation_number",
@@ -107,17 +106,6 @@ _SEGMENTATION_CANDIDATE_KEYS = {
 
 class CADSizeAssociationError(ValueError):
     """Raised when size association input or persistence is invalid."""
-
-
-@dataclass(frozen=True)
-class CADSizeAssociationResult:
-    """Return one persisted size-based correspondence result."""
-
-    record_path: Path
-    CAD_correspondence: str
-    location: str
-    selected_candidate: Mapping[str, object] | None
-    record: Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -175,7 +163,6 @@ def measure_segmented_candidates_against_cad(
     try:
         measurements = _measure_candidates(candidate_inputs, cad_input.dimensions_m)
         record = {
-            "schema_version": 3,
             "record_type": "CADSizeCorrespondenceRecord",
             "producer": _PRODUCER,
             "correspondence_number": correspondence_number,
@@ -234,104 +221,6 @@ def measure_segmented_candidates_against_cad(
     )
 
 
-def associate_segmented_candidate_by_size(
-    *,
-    interaction_root: Path,
-    segmentation_record_path: Path,
-    cad_record_path: Path,
-    correspondence_number: int = 1,
-) -> CADSizeAssociationResult:
-    """Associate one approved CAD size with segmented camera-local candidates.
-
-    The result contains a measured candidate center, not a robot pick point.
-    Rotation and complete pose remain unevaluated.
-    """
-    _validate_positive_integer(correspondence_number, "correspondence_number")
-    root = Path(interaction_root).resolve()
-    cad_input = _load_cad_input(root, cad_record_path)
-    segmentation_path, segmentation_record, candidate_inputs = _load_candidates(
-        root,
-        segmentation_record_path,
-    )
-    destination = root / _GROUNDING_ROOT / f"correspondence_{correspondence_number:04d}"
-    if destination.exists():
-        raise CADSizeAssociationError(
-            f"CAD size correspondence {correspondence_number:04d} already exists."
-        )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        temporary_root = Path(tempfile.mkdtemp(prefix=".correspondence-", dir=destination.parent))
-    except OSError as exc:
-        raise CADSizeAssociationError(
-            "CAD size correspondence temporary directory could not be created."
-        ) from exc
-
-    try:
-        ranked_candidates = _rank_candidates(candidate_inputs, cad_input.dimensions_m)
-        correspondence, location, selected, plausible = _association_decision(ranked_candidates)
-        record = {
-            "schema_version": 2,
-            "record_type": "CADSizeCorrespondenceRecord",
-            "producer": _PRODUCER,
-            "correspondence_number": correspondence_number,
-            "method": "two_largest_principal_dimensions",
-            "parameters": {
-                "dimension_error_limit": _DIMENSION_ERROR_LIMIT,
-                "uniqueness_margin": _UNIQUENESS_MARGIN,
-                "minimum_measured_dimension_m": _MINIMUM_MEASURED_DIMENSION_M,
-            },
-            "CAD": {
-                "context_ref": cad_input.context_ref,
-                "record": {
-                    "ref": _relative_ref(root, cad_input.record_path),
-                    "sha256": _sha256_path(cad_input.record_path),
-                },
-                "source_sha256": cad_input.source_sha256,
-                "mesh": {
-                    "ref": cad_input.mesh_ref,
-                    "sha256": cad_input.mesh_sha256,
-                },
-                "compared_dimensions_m": _float_list(cad_input.dimensions_m),
-            },
-            "segmentation": {
-                "observation_ref": segmentation_record["observation_ref"],
-                "record": {
-                    "ref": _relative_ref(root, segmentation_path),
-                    "sha256": _sha256_path(segmentation_path),
-                },
-            },
-            "ranked_candidates": ranked_candidates,
-            "plausible_candidates": plausible,
-            "selected_candidate": selected,
-            "CAD_correspondence": correspondence,
-            "location": location,
-            "pose": "not_evaluated",
-            "cross_camera_fusion": "not_evaluated",
-        }
-        _write_json(temporary_root / "correspondence_record.json", record)
-        if destination.exists():
-            raise CADSizeAssociationError(
-                f"CAD size correspondence {correspondence_number:04d} already exists."
-            )
-        temporary_root.rename(destination)
-    except CADSizeAssociationError:
-        shutil.rmtree(temporary_root, ignore_errors=True)
-        raise
-    except (OSError, TypeError, ValueError, np.linalg.LinAlgError) as exc:
-        shutil.rmtree(temporary_root, ignore_errors=True)
-        raise CADSizeAssociationError(
-            f"CAD size correspondence failed: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    return CADSizeAssociationResult(
-        record_path=destination / "correspondence_record.json",
-        CAD_correspondence=correspondence,
-        location=location,
-        selected_candidate=selected,
-        record=record,
-    )
-
-
 def _load_cad_input(interaction_root: Path, record_path: Path) -> _CADInput:
     path, relative, record = _load_json_record(interaction_root, record_path)
     if path.name != "geometry_record.json" or set(record) != _CAD_RECORD_KEYS:
@@ -344,14 +233,13 @@ def _load_cad_input(interaction_root: Path, record_path: Path) -> _CADInput:
     if relative != expected_record_ref:
         raise CADSizeAssociationError("CAD preprocessing record path is invalid.")
     if (
-        record["schema_version"] != 1
-        or record["record_type"] != "CADMeshRecord"
-        or record["producer"] != _PRODUCER
-        or record["evidence_type"] != "CAD"
-        or record["coordinate_frame"] != "CAD_local"
-        or record["stored_units"] != "m"
-        or record["correspondence"] != "not_evaluated"
-        or record["pose"] != "not_evaluated"
+        (record["record_type"] != "CADMeshRecord")
+        or (record["producer"] != _PRODUCER)
+        or (record["evidence_type"] != "CAD")
+        or (record["coordinate_frame"] != "CAD_local")
+        or (record["stored_units"] != "m")
+        or (record["correspondence"] != "not_evaluated")
+        or (record["pose"] != "not_evaluated")
     ):
         raise CADSizeAssociationError("CAD preprocessing record identity is invalid.")
 
@@ -484,14 +372,13 @@ def _load_candidates(
     if relative != expected_record_ref:
         raise CADSizeAssociationError("Segmentation record path is invalid.")
     if (
-        record["schema_version"] != 2
-        or record["record_type"] != "RGBDSegmentationRecord"
-        or record["producer"] != _PRODUCER
-        or record["cross_camera_fusion"] != "not_evaluated"
-        or record["identity"] != "not_evaluated"
-        or record["CAD_correspondence"] != "not_evaluated"
-        or record["pose"] != "not_evaluated"
-        or record["parameters"] != _SEGMENTATION_PARAMETERS
+        (record["record_type"] != "RGBDSegmentationRecord")
+        or (record["producer"] != _PRODUCER)
+        or (record["cross_camera_fusion"] != "not_evaluated")
+        or (record["identity"] != "not_evaluated")
+        or (record["CAD_correspondence"] != "not_evaluated")
+        or (record["pose"] != "not_evaluated")
+        or (record["parameters"] != _SEGMENTATION_PARAMETERS)
     ):
         raise CADSizeAssociationError("Segmentation record identity is invalid.")
     source_record = record["source_record"]
@@ -834,25 +721,6 @@ def _validate_candidate_summary(
     )
 
 
-def _rank_candidates(
-    candidates: list[dict[str, object]],
-    cad_dimensions_m: np.ndarray,
-) -> list[dict[str, object]]:
-    ranked = _measure_candidates(candidates, cad_dimensions_m)
-    ranked.sort(
-        key=lambda item: (
-            item["mean_dimension_error"] is None,
-            math.inf if item["mean_dimension_error"] is None else item["mean_dimension_error"],
-            item["camera_order"],
-            item["candidate_id"],
-        )
-    )
-    for rank, candidate in enumerate(ranked, start=1):
-        candidate["rank"] = rank
-        candidate.pop("camera_order")
-    return ranked
-
-
 def _measure_candidates(
     candidates: list[dict[str, object]],
     cad_dimensions_m: np.ndarray,
@@ -919,37 +787,6 @@ def _measure_candidate(points_m: np.ndarray) -> tuple[np.ndarray, np.ndarray] | 
     return dimensions, center
 
 
-def _association_decision(
-    ranked_candidates: list[dict[str, object]],
-) -> tuple[str, str, dict[str, object] | None, list[dict[str, object]]]:
-    reliable = [
-        candidate
-        for candidate in ranked_candidates
-        if isinstance(candidate["mean_dimension_error"], float)
-    ]
-    plausible = [candidate for candidate in reliable if candidate["within_size_tolerance"]]
-    if not plausible:
-        return "rejected", "unavailable", None, []
-    best = plausible[0]
-    if len(reliable) > 1:
-        best_score = float(best["mean_dimension_error"])
-        second_score = float(reliable[1]["mean_dimension_error"])
-        if second_score - best_score < _UNIQUENESS_MARGIN:
-            return "ambiguous", "ambiguous", None, plausible
-    selected = {
-        "observation_handle": best["observation_handle"],
-        "camera_id": best["camera_id"],
-        "frame": best["frame"],
-        "candidate_handle": best["candidate_handle"],
-        "candidate_id": best["candidate_id"],
-        "candidate_center_m": best["candidate_center_m"],
-        "observed_dimensions_m": best["observed_dimensions_m"],
-        "dimension_errors": best["dimension_errors"],
-        "mean_dimension_error": best["mean_dimension_error"],
-    }
-    return "accepted", "available", selected, plausible
-
-
 def _load_json_record(
     interaction_root: Path,
     record_path: Path,
@@ -965,8 +802,10 @@ def _load_json_record(
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CADSizeAssociationError("Geometry record could not be read.") from exc
-    if not isinstance(record, dict):
-        raise CADSizeAssociationError("Geometry record must be an object.")
+    if not isinstance(record, dict) or "schema_version" in record:
+        raise CADSizeAssociationError(
+            "Geometry record has incompatible fields. Start a fresh interaction."
+        )
     return path, relative, record
 
 

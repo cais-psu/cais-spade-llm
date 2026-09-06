@@ -1,9 +1,7 @@
-# Ground truth
+# Evaluator-only ground truth
 
-Ground truth may be read only by the separate evaluator after a prediction is
-finalized. It must never be exposed through product references, resource
-references, runtime contexts, agent adapters, or controlled tools.
+Frozen reference answers and annotations are available only to a separate evaluator after the prediction is finalized. PA, retrieval, recognition and runtime prompts cannot read this directory's answers or simulator identity/pose information.
 
-In particular, PA may not use evaluator data to author or semantically review
-`target_feature`, and RA may not receive it while composing a structural
-`PrimitiveProgramDraft`. Ground truth remains post-prediction evidence only.
+Reference answers are historical evaluation artifacts, not current framework instructions. They are not rewritten when schemas change. Score new proposal/evidence/completion runs under preregistered criteria, including uncertainty and correct abstention, and label old runs separately.
+
+See [the evaluation protocol](../README.md) and [bias experiments](../../BIAS_VALIDATION.md). No ground-truth file is an approved recognition source.

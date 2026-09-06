@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for the predefined flat resource registry."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -224,7 +225,6 @@ def _write_profile(
     profile_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
                 "processes": [
                     {
                         "symbol": "assembly",

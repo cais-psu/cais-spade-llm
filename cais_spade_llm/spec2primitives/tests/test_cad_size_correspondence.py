@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for Phase 4.2B2A CAD-size candidate association."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -28,11 +29,10 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     CADSizeAssociationError,
     CandidateLayoutError,
     analyze_candidate_layout,
-    associate_segmented_candidate_by_size,
     measure_segmented_candidates_against_cad,
     preprocess_served_geometry,
     read_rgbd_segmentation_status,
-    run_cad_size_association_pipeline,
+    run_cad_size_measurement_pipeline,
     segment_preprocessed_observation,
 )
 
@@ -56,11 +56,9 @@ def test_phase4_cad_comparison_measures_all_candidates_without_selecting(
 
     record = result.record
     assert result.measurement == "accepted"
-    assert record["schema_version"] == 3
+    assert "schema_version" not in record
     assert record["CAD_correspondence"] == "not_evaluated"
-    assert [
-        candidate["candidate_handle"] for candidate in record["candidate_measurements"]
-    ] == [
+    assert [candidate["candidate_handle"] for candidate in record["candidate_measurements"]] == [
         "candidate_0001_0001",
         "candidate_0001_0002",
         "candidate_0001_0003",
@@ -73,18 +71,12 @@ def test_phase4_cad_comparison_measures_all_candidates_without_selecting(
         "selected_candidate",
     ):
         assert forbidden not in serialized
-    assert (
-        grounding_contracts._binding_status("CADSizeCorrespondenceRecord", record)
-        == "accepted"
-    )
+    assert grounding_contracts._binding_status("CADSizeCorrespondenceRecord", record) == "accepted"
     record["candidate_measurements"][0]["candidate_center_m"][0] += 0.01
-    assert (
-        grounding_contracts._binding_status("CADSizeCorrespondenceRecord", record)
-        == "rejected"
-    )
+    assert grounding_contracts._binding_status("CADSizeCorrespondenceRecord", record) == "rejected"
 
 
-def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
+def test_medium_gear_measurements_preserve_42_mm_candidate_location(
     tmp_path: Path,
 ) -> None:
     segmentation_path, cad_path = _prepare_inputs(
@@ -92,15 +84,17 @@ def test_medium_gear_selects_42_mm_candidate_and_reports_camera_location(
         _size_bundle((0.022, 0.042, 0.062)),
     )
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,
     )
 
-    assert result.CAD_correspondence == "accepted"
-    assert result.location == "available"
-    selected = result.selected_candidate
+    assert result.measurement == "accepted"
+    assert result.record["location"] == "not_evaluated"
+    selected = next(
+        item for item in result.record["candidate_measurements"] if item["within_size_tolerance"]
+    )
     assert selected is not None
     assert selected["camera_id"] == "cam_mk3"
     assert selected["frame"] == "cam_mk3_optical_frame"
@@ -148,11 +142,13 @@ def test_candidate_layout_measures_any_two_or_more_selected_candidates(
     assert result.record["status"] == "measured"
     assert result.record["candidate_count"] == candidate_count
     assert len(result.record["candidates"]) == candidate_count
-    assert len(result.record["pairwise_measurements"]) == candidate_count * (
-        candidate_count - 1
-    ) // 2
+    assert (
+        len(result.record["pairwise_measurements"]) == candidate_count * (candidate_count - 1) // 2
+    )
     assert len(result.record["collinearity_measurements"]) == (
-        0 if candidate_count == 2 else candidate_count * (candidate_count - 1) * (candidate_count - 2) // 6
+        0
+        if candidate_count == 2
+        else candidate_count * (candidate_count - 1) * (candidate_count - 2) // 6
     )
     assert "relations" not in result.record
     assert "between" not in json.dumps(result.record).lower()
@@ -238,15 +234,15 @@ def test_measurement_noise_within_fifteen_percent_is_accepted(tmp_path: Path) ->
         _size_bundle((0.044,)),
     )
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,
     )
 
-    assert result.CAD_correspondence == "accepted"
-    assert result.selected_candidate is not None
-    assert max(result.selected_candidate["dimension_errors"]) <= 0.15
+    assert result.measurement == "accepted"
+    assert any(item["within_size_tolerance"] for item in result.record["candidate_measurements"])
+    assert max(result.record["candidate_measurements"][0]["dimension_errors"]) <= 0.15
 
 
 def test_large_assembly_candidate_summary_is_order_stable(tmp_path: Path) -> None:
@@ -259,14 +255,14 @@ def test_large_assembly_candidate_summary_is_order_stable(tmp_path: Path) -> Non
         camera for camera in segmentation_record["cameras"] if camera["camera_id"] == "cam_assembly"
     )
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,
     )
 
     assert assembly_camera["candidates"][0]["point_count"] > 200_000
-    assert result.CAD_correspondence == "accepted"
+    assert result.measurement == "accepted"
 
 
 def test_tampered_candidate_centroid_rejects_without_partial_output(
@@ -288,7 +284,7 @@ def test_tampered_candidate_centroid_rejects_without_partial_output(
         CADSizeAssociationError,
         match="candidate summary is inconsistent",
     ):
-        associate_segmented_candidate_by_size(
+        measure_segmented_candidates_against_cad(
             interaction_root=tmp_path,
             segmentation_record_path=segmentation_path,
             cad_record_path=cad_path,
@@ -299,22 +295,31 @@ def test_tampered_candidate_centroid_rejects_without_partial_output(
     assert list(grounding_root.glob(".correspondence-*")) == []
 
 
-def test_duplicate_size_candidates_are_ambiguous(tmp_path: Path) -> None:
+def test_duplicate_size_candidates_both_remain_available(tmp_path: Path) -> None:
     segmentation_path, cad_path = _prepare_inputs(
         tmp_path,
         _size_bundle((0.042, 0.042)),
     )
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,
     )
 
-    assert result.CAD_correspondence == "ambiguous"
-    assert result.location == "ambiguous"
-    assert result.selected_candidate is None
-    assert len(result.record["plausible_candidates"]) == 2
+    assert result.record["CAD_correspondence"] == "not_evaluated"
+    assert result.record["location"] == "not_evaluated"
+    assert "selected_candidate" not in result.record
+    assert (
+        len(
+            [
+                item
+                for item in result.record["candidate_measurements"]
+                if item["within_size_tolerance"]
+            ]
+        )
+        == 2
+    )
 
 
 def test_shaft_size_keeps_three_mounted_candidates_and_rejects_45_mm_pins(
@@ -332,19 +337,21 @@ def test_shaft_size_keeps_three_mounted_candidates_and_rejects_45_mm_pins(
         operation_number=3,
     )
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=shaft.record_path,
     )
 
-    assert result.CAD_correspondence == "ambiguous"
-    plausible = result.record["plausible_candidates"]
+    assert result.record["CAD_correspondence"] == "not_evaluated"
+    plausible = [
+        item for item in result.record["candidate_measurements"] if item["within_size_tolerance"]
+    ]
     assert len(plausible) == 3
     assert all(candidate["within_size_tolerance"] is True for candidate in plausible)
     rejected = [
         candidate
-        for candidate in result.record["ranked_candidates"]
+        for candidate in result.record["candidate_measurements"]
         if candidate["within_size_tolerance"] is False
         and candidate["observed_dimensions_m"] is not None
     ]
@@ -360,15 +367,17 @@ def test_no_matching_or_zero_candidates_are_rejected(
     bundle = _size_bundle(diameters_m, zero_candidates=not diameters_m)
     segmentation_path, cad_path = _prepare_inputs(tmp_path, bundle)
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,
     )
 
-    assert result.CAD_correspondence == "rejected"
-    assert result.location == "unavailable"
-    assert result.selected_candidate is None
+    assert not any(
+        item["within_size_tolerance"] for item in result.record["candidate_measurements"]
+    )
+    assert result.record["location"] == "not_evaluated"
+    assert "selected_candidate" not in result.record
 
 
 def test_candidate_touching_image_boundary_fails_closed_as_partial_visibility(
@@ -379,17 +388,19 @@ def test_candidate_touching_image_boundary_fails_closed_as_partial_visibility(
         _size_bundle((0.042,), clipped_candidate=True),
     )
 
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=tmp_path,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,
     )
 
-    assert result.CAD_correspondence == "rejected"
-    assert result.location == "unavailable"
+    assert not any(
+        item["within_size_tolerance"] for item in result.record["candidate_measurements"]
+    )
+    assert result.record["location"] == "not_evaluated"
     partial = [
         candidate
-        for candidate in result.record["ranked_candidates"]
+        for candidate in result.record["candidate_measurements"]
         if candidate["camera_id"] == "cam_mk3"
         and candidate["measurement_status"] == "partial_visibility"
     ]
@@ -398,28 +409,28 @@ def test_candidate_touching_image_boundary_fails_closed_as_partial_visibility(
     assert partial[0]["observed_dimensions_m"] is None
 
 
-def test_ranking_is_deterministic_and_existing_record_is_not_overwritten(
+def test_measurement_order_is_deterministic_and_existing_record_is_not_overwritten(
     tmp_path: Path,
 ) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
     first_inputs = _prepare_inputs(first_root, _size_bundle((0.022, 0.042, 0.062)))
     second_inputs = _prepare_inputs(second_root, _size_bundle((0.022, 0.042, 0.062)))
-    first = associate_segmented_candidate_by_size(
+    first = measure_segmented_candidates_against_cad(
         interaction_root=first_root,
         segmentation_record_path=first_inputs[0],
         cad_record_path=first_inputs[1],
     )
-    second = associate_segmented_candidate_by_size(
+    second = measure_segmented_candidates_against_cad(
         interaction_root=second_root,
         segmentation_record_path=second_inputs[0],
         cad_record_path=second_inputs[1],
     )
 
-    assert first.record["ranked_candidates"] == second.record["ranked_candidates"]
+    assert first.record["candidate_measurements"] == second.record["candidate_measurements"]
     before = first.record_path.read_bytes()
     with pytest.raises(CADSizeAssociationError, match="already exists"):
-        associate_segmented_candidate_by_size(
+        measure_segmented_candidates_against_cad(
             interaction_root=first_root,
             segmentation_record_path=first_inputs[0],
             cad_record_path=first_inputs[1],
@@ -438,7 +449,7 @@ def test_tampered_label_mask_rejects_without_partial_output(tmp_path: Path) -> N
     label_path.write_bytes(tampered)
 
     with pytest.raises(CADSizeAssociationError, match="hash"):
-        associate_segmented_candidate_by_size(
+        measure_segmented_candidates_against_cad(
             interaction_root=tmp_path,
             segmentation_record_path=segmentation_path,
             cad_record_path=cad_path,
@@ -456,7 +467,7 @@ def test_status_wrapper_exposes_only_compact_association_states(tmp_path: Path) 
         _size_bundle((0.042,)),
     )
 
-    result = run_cad_size_association_pipeline(
+    result = run_cad_size_measurement_pipeline(
         contexts_root=tmp_path,
         interaction_root=interaction_root,
         segmentation_record_path=segmentation_path,
@@ -467,8 +478,8 @@ def test_status_wrapper_exposes_only_compact_association_states(tmp_path: Path) 
         "status": "ready",
         "interaction_root": str(interaction_root.resolve()),
         "correspondence_record_path": result["correspondence_record_path"],
-        "CAD_correspondence": "accepted",
-        "location": "available",
+        "CAD_correspondence": "not_evaluated",
+        "location": "not_evaluated",
         "pose": "not_evaluated",
         "failure": None,
     }
@@ -476,8 +487,8 @@ def test_status_wrapper_exposes_only_compact_association_states(tmp_path: Path) 
     assert "candidate_center_m" not in result
     status = read_rgbd_segmentation_status(tmp_path)
     assert status["identity"] == "not_evaluated"
-    assert status["CAD_correspondence"] == "accepted"
-    assert status["location"] == "available"
+    assert status["CAD_correspondence"] == "not_evaluated"
+    assert status["location"] == "not_evaluated"
     assert status["pose"] == "not_evaluated"
 
 
@@ -697,7 +708,6 @@ def _write_layout_inputs(
     segmentation_path.parent.mkdir(parents=True, exist_ok=True)
     handles = [f"candidate_{chr(ord('a') + index)}" for index in range(len(centers))]
     segmentation = {
-        "schema_version": 2,
         "record_type": "RGBDSegmentationRecord",
         "producer": "rgb_d_cad_grounding",
         "cameras": [
@@ -725,3 +735,30 @@ def _write_layout_inputs(
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("loader", ["geometry", "layout", "observation"])
+def test_evidence_readers_reject_old_records_without_rewriting(tmp_path, loader):
+    from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondence import (
+        _load_json_record,
+    )
+    from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.candidate_layout import (
+        _load_local_record,
+    )
+    from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.observation_review import (
+        _load_segmentation,
+    )
+
+    path, _ = _write_layout_inputs(tmp_path, ((0.0, 0.0, 0.5), (0.1, 0.0, 0.5)))
+    value = json.loads(path.read_text())
+    value["schema_version"] = 1
+    path.write_text(json.dumps(value))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="Start a fresh interaction"):
+        if loader == "layout":
+            _load_local_record(tmp_path, path, "segmentation")
+        elif loader == "observation":
+            _load_segmentation(tmp_path, path)
+        else:
+            _load_json_record(tmp_path, path)
+    assert path.read_bytes() == before

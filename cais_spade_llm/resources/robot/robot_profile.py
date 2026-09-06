@@ -273,26 +273,6 @@ def _robot_event_contract_validator(
     return None
 
 
-def _robot_pose_in_workspace(
-    pose: dict[str, Any],
-    bounds: dict[str, Any],
-) -> tuple[bool, list[str]]:
-    violations: list[str] = []
-    for axis in ("x", "y", "z"):
-        value = pose.get(axis)
-        if value is None:
-            continue
-        try:
-            coord = float(value)
-        except (TypeError, ValueError):
-            continue
-        lower = bounds.get(f"{axis}_min_m")
-        upper = bounds.get(f"{axis}_max_m")
-        if lower is not None and coord < float(lower):
-            violations.append(f"{axis}={coord:.4f} < {axis}_min_m={float(lower):.4f}")
-        if upper is not None and coord > float(upper):
-            violations.append(f"{axis}={coord:.4f} > {axis}_max_m={float(upper):.4f}")
-    return len(violations) == 0, violations
 
 
 def _robot_state_projector(

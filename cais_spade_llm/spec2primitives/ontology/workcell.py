@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Project configured process capabilities into an immutable Workcell ABox."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -80,7 +81,6 @@ class PredefinedWorkcellSnapshot:
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe identity and provenance projection."""
         return {
-            "schema_version": 2,
             "record_type": "PredefinedWorkcellSnapshot",
             "processes": [
                 {"process_symbol": symbol, "process_iri": iri} for symbol, iri in self.processes
@@ -192,7 +192,6 @@ def load_predefined_workcell(
         graph.add(triple)
 
     payload: dict[str, object] = {
-        "schema_version": 2,
         "record_type": "PredefinedWorkcellSnapshot",
         "processes": [{"process_symbol": symbol, "process_iri": iri} for symbol, iri in processes],
         "resource_iris": list(resource_iris),

@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 """Tests for selected-RA context capture and structural primitive drafts."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -252,6 +253,14 @@ class _PlanOnlyRuntime:
     def __init__(self) -> None:
         self.requests: list[dict[str, object]] = []
 
+    async def validate_state_locations(self, request):
+        from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
+            OfflineMoveItPlanning,
+        )
+
+        self.requests.append(deepcopy(request))
+        return await OfflineMoveItPlanning().validate_plan_only_allocation(request)
+
     def validate(self, request: dict[str, object]) -> dict[str, object]:
         self.requests.append(deepcopy(request))
         endpoint = {
@@ -268,7 +277,7 @@ class _PlanOnlyRuntime:
 
 
 def _plan_only_request(resource_jid: str) -> dict[str, object]:
-    return {
+    request = {
         "process_symbol": "assembly",
         "process_iri": "https://cais-spade-llm.local/process/assembly",
         "feature_iri": "https://example.local/feature_0001",
@@ -312,38 +321,55 @@ def _plan_only_request(resource_jid: str) -> dict[str, object]:
         "request_fingerprint": "2" * 64,
     }
 
+    request["state_locations"] = {
+        state: [request.pop(state)] for state in ("current_state", "desired_state")
+    }
+    for field in ("checked_constraints", "unvalidated_constraints", "request_fingerprint"):
+        request.pop(field)
+    request.update(
+        validation_scope="moveit_state_location_reachability",
+        motion_plan_service="/plan_kinematic_path",
+        position_tolerance_m=0.005,
+    )
+    return request
 
-def test_plan_only_adapter_contacts_only_the_pa_selected_robot_agent() -> None:
-    xarm6 = _LiveRobotAgent(jid="xarm6@localhost")
-    ur5e = _LiveRobotAgent(jid="ur5e@localhost")
-    host = _LiveRobotAgentHost([xarm6, ur5e])
+
+@pytest.mark.parametrize("resource_jid", ["xarm6@localhost", "ur5e@localhost"])
+def test_plan_only_adapter_checks_each_arm_without_robot_agent_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    resource_jid: str,
+) -> None:
+    host = _LiveRobotAgentHost([], system_running=False, gazebo_state="running")
+    host.execution_mode = "physical"
+    host.robot_env = "unchanged"
     moveit = _PlanOnlyRuntime()
     runtime = InProcessRobotAgentCompositionRuntime(
         host,
         moveit_plan_only_runtime=moveit,
     )
 
-    response = asyncio.run(
-        runtime.validate_plan_only_allocation(_plan_only_request("ur5e@localhost"))
-    )
+    def _forbidden_lookup(_resource_jid: str) -> None:
+        raise AssertionError("Planning must not look up a RobotAgent.")
+
+    monkeypatch.setattr(runtime, "_selected_agent_or_none", _forbidden_lookup)
+    request = _plan_only_request(resource_jid)
+    response = asyncio.run(runtime.validate_plan_only_allocation(request))
 
     assert response["status"] == "accepted"
-    assert xarm6.feasibility_calls == []
-    assert len(ur5e.feasibility_calls) == 2
-    assert [call["grounded_action"]["target"]["pose"] for call in ur5e.feasibility_calls] == [
-        {"x": 0.1, "y": 0.2, "z": 0.3},
-        {"x": 0.4, "y": 0.5, "z": 0.6},
-    ]
-    assert len(moveit.requests) == 1
-    assert moveit.requests[0]["resource_jid"] == "ur5e@localhost"
-    assert moveit.requests[0]["motion_executed"] is False
+    assert moveit.requests == [request]
+    assert host.resource_agents == []
+    assert host.start_calls == host.full_system_start_calls == 0
+    assert host.runtime_calls == host.readiness_calls == 0
+    assert host.system_running is False
+    assert host.execution_mode == "physical"
+    assert host.robot_env == "unchanged"
 
 
-def test_robot_agent_precheck_rejection_never_invokes_moveit() -> None:
+def test_location_planning_bypasses_static_robot_agent_precheck() -> None:
     selected = _LiveRobotAgent(feasibility_allowed=False)
     moveit = _PlanOnlyRuntime()
     runtime = InProcessRobotAgentCompositionRuntime(
-        _LiveRobotAgentHost([selected]),
+        _LiveRobotAgentHost([selected], gazebo_state="running"),
         moveit_plan_only_runtime=moveit,
     )
 
@@ -351,13 +377,74 @@ def test_robot_agent_precheck_rejection_never_invokes_moveit() -> None:
         runtime.validate_plan_only_allocation(_plan_only_request("xarm6@localhost"))
     )
 
-    assert response["status"] == "rejected"
-    assert response["current_state"]["status"] == "rejected"
-    assert response["desired_state"]["status"] == "rejected"
+    assert response["status"] == "accepted"
+    assert selected.feasibility_calls == []
+    assert len(moveit.requests) == 1
+
+
+@pytest.mark.parametrize("variant", ["stopped", "status_error"])
+def test_plan_only_adapter_requires_running_spec2primitives_gazebo(
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+) -> None:
+    host = _LiveRobotAgentHost([], system_running=False)
+    moveit = _PlanOnlyRuntime()
+    runtime = InProcessRobotAgentCompositionRuntime(host, moveit_plan_only_runtime=moveit)
+
+    if variant == "status_error":
+
+        def _unavailable_status(_name: str) -> str:
+            raise RuntimeError("Process status is unavailable.")
+
+        monkeypatch.setattr(host, "ros2_proc_status", _unavailable_status)
+
+    with pytest.raises(RAContextHandoffError, match="Dual Gazebo"):
+        asyncio.run(runtime.validate_plan_only_allocation(_plan_only_request("xarm6@localhost")))
+
     assert moveit.requests == []
+    assert host.resource_agents == []
+    assert host.start_calls == host.full_system_start_calls == 0
+    assert host.runtime_calls == host.readiness_calls == 0
+    assert host.system_running is False
+    assert host.execution_mode == "simulation"
+    assert host.robot_env == "gazebo"
 
 
-def test_cartesian_simulation_bypasses_static_robot_agent_precheck() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("execution_mode", "physical"),
+        ("mode", "execute"),
+        ("motion_executed", True),
+        ("validation_scope", "cartesian_pick_place"),
+        ("resource_jid", ""),
+    ],
+)
+def test_plan_only_adapter_rejects_invalid_request_before_runtime_access(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    host = _LiveRobotAgentHost([], system_running=False, gazebo_state="running")
+    moveit = _PlanOnlyRuntime()
+    runtime = InProcessRobotAgentCompositionRuntime(host, moveit_plan_only_runtime=moveit)
+
+    def _forbidden_status(_name: str) -> str:
+        raise AssertionError("Invalid requests must not read runtime status.")
+
+    monkeypatch.setattr(host, "ros2_proc_status", _forbidden_status)
+    request = _plan_only_request("xarm6@localhost")
+    request[field] = value
+
+    with pytest.raises(ValueError):
+        asyncio.run(runtime.validate_plan_only_allocation(request))
+
+    assert moveit.requests == []
+    assert host.start_calls == host.full_system_start_calls == 0
+    assert host.runtime_calls == host.readiness_calls == 0
+
+
+def test_retired_cartesian_request_is_rejected_before_planning() -> None:
     xarm6 = _LiveRobotAgent(jid="xarm6@localhost", feasibility_allowed=False)
     ur5e = _LiveRobotAgent(jid="ur5e@localhost", feasibility_allowed=False)
     moveit = _PlanOnlyRuntime()
@@ -367,15 +454,12 @@ def test_cartesian_simulation_bypasses_static_robot_agent_precheck() -> None:
     )
     request = _plan_only_request("xarm6@localhost")
     request["motion_mode"] = "cartesian_pick_place"
+    request["validation_scope"] = "cartesian_pick_place"
 
-    response = asyncio.run(runtime.validate_plan_only_allocation(request))
-
-    assert response["status"] == "accepted"
-    assert xarm6.feasibility_calls == []
-    assert ur5e.feasibility_calls == []
-    assert len(moveit.requests) == 1
-    assert moveit.requests[0]["resource_jid"] == "xarm6@localhost"
-    assert moveit.requests[0]["motion_mode"] == "cartesian_pick_place"
+    with pytest.raises(ValueError):
+        asyncio.run(runtime.validate_plan_only_allocation(request))
+    assert moveit.requests == []
+    assert xarm6.feasibility_calls == ur5e.feasibility_calls == []
 
 
 def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
@@ -551,19 +635,19 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
     assert target_feature["desired_state"]["statement"]["text"] == (
         "The medium gear is assembled as requested."
     )
-    assert target_feature["current_state"]["state_values"][0]["name"] == (
-        "medium_gear_location"
-    )
+    assert target_feature["current_state"]["state_values"][0]["name"] == ("medium_gear_location")
     assert target_feature["desired_state"]["state_values"][0]["name"] == (
         "assembly_board_shaft_location"
     )
-    assert {
-        item["name"] for item in target_feature["resolved_state_values"]
-    } == {"medium_gear_location", "assembly_board_shaft_location"}
-    association = target_feature["assembly_feature_association"]
-    assert [
-        item["state_name"] for item in association["assembly_features"]
-    ] == ["current_state", "desired_state"]
+    assert {item["name"] for item in target_feature["resolved_state_values"]} == {
+        "medium_gear_location",
+        "assembly_board_shaft_location",
+    }
+    association = target_feature["assembly_feature_association"][0]
+    assert [item["state_name"] for item in association["assembly_features"]] == [
+        "current_state",
+        "current_state",
+    ]
     assert "task" not in composition_input
     assert all(
         set(record) == {"record_type", "record_ref"} for record in grounded_context["typed_records"]
@@ -861,7 +945,7 @@ def test_in_process_ra_adapter_startup_failures_preserve_phase_4(
 
     assert completion_path.read_bytes() == completion_bytes
     resource_root = tmp_path / "resources/xarm6@localhost"
-    assert (resource_root / "validation").is_dir()
+    assert not (resource_root / "validation").exists()
     assert not (resource_root / "robot_state").exists()
     assert not (resource_root / "primitive_catalog_snapshot").exists()
     assert read_phase_5_1_diagnostic(tmp_path).status == "waiting_for_ra"
@@ -1043,7 +1127,7 @@ def test_phase_5_1_rejects_audit_only_completion_v7_before_assignment(
     completion["fingerprint"] = _record_fingerprint(completion)
     _write_json(completion_path, completion)
 
-    with pytest.raises(RAContextHandoffError, match="version 7 is audit-only"):
+    with pytest.raises(RAContextHandoffError, match="Start a fresh interaction"):
         asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
 
     assert not (tmp_path / "composition/selected_ra_assignments").exists()
@@ -1081,13 +1165,11 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
 
     assignment_record = _read_json(first.assignment_path)
     catalog_record = _read_json(first.primitive_catalog_path)
-    assert assignment_record["schema_version"] == 3
+    assert "schema_version" not in assignment_record
     assert assignment_record["process_symbol"] == "assembly"
     assert assignment_record["selected_resource_symbol"] == "xarm6"
-    assert assignment_record["allocation_label"] == (
-        "validated state-location resource allocation"
-    )
-    assert assignment_record["validation_scope"] == "state_location_reachability"
+    assert assignment_record["allocation_label"] == ("resource assignment validated by MoveIt")
+    assert assignment_record["validation_scope"] == "moveit_state_location_reachability"
     assert assignment_record["motion_executed"] is False
     assert assignment_record["current_state_evidence"]["location_handles"]
     assert assignment_record["desired_state_evidence"]["location_handles"]
@@ -1122,8 +1204,8 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
             "*/plan_only_feasibility_validation_record.json"
         )
     )
-    assert len(validation_records) == 1
-    assert _read_json(validation_records[0])["motion_executed"] is False
+    assert validation_records == []
+    assert assignment_record["motion_validation_performed"] is True
 
     diagnostic = read_phase_5_1_diagnostic(tmp_path).to_view()
     assert diagnostic["status"] == "context_captured"
@@ -1140,12 +1222,20 @@ def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
     assert diagnostic["catalog_fingerprint"] == (second.primitive_catalog.catalog_fingerprint)
 
 
-def test_phase_5_assignment_schema_accepts_cartesian_validation_contract(
+def test_phase_5_assignment_rejects_retired_cartesian_contract(
     tmp_path: Path,
 ) -> None:
     persist_native_completion_fixture(tmp_path)
     capture = asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
     assignment = _read_json(capture.assignment_path)
+    # Exercise the historical schema reader without permitting historical RA activation.
+    assignment["schema_version"] = 3
+    assignment.pop("motion_validation_performed")
+    assignment.update(
+        robot_agent_validation_ref="resources/xarm6@localhost/validation/historical.json",
+        robot_agent_validation_sha256="a" * 64,
+        robot_agent_validation_fingerprint="b" * 64,
+    )
     assignment["allocation_label"] = "validated Cartesian pick-place allocation"
     assignment["validation_scope"] = "cartesian_pick_place"
     assignment["checked_constraints"] = [
@@ -1164,11 +1254,8 @@ def test_phase_5_assignment_schema_accepts_cartesian_validation_contract(
     ]
     assignment["fingerprint"] = _record_fingerprint(assignment)
 
-    parsed = context_handoff._assignment_from_mapping(assignment)
-
-    assert parsed.validation_scope == "cartesian_pick_place"
-    assert parsed.allocation_label == "validated Cartesian pick-place allocation"
-    assert parsed.checked_constraints == tuple(assignment["checked_constraints"])
+    with pytest.raises(RAContextHandoffError, match="Start a fresh interaction"):
+        context_handoff._assignment_from_mapping(assignment)
 
 
 def test_phase_5_1_restart_preserves_legacy_catalog_and_exposes_latest_synthesis(
@@ -1244,7 +1331,7 @@ def test_changed_phase_4_selection_prevents_ra_dispatch(tmp_path: Path) -> None:
         "allocation_presentation",
     ],
 )
-def test_assignment_envelope_v3_rejects_altered_authority_lineage(
+def test_assignment_envelope_rejects_altered_authority_lineage(
     tmp_path: Path,
     variant: str,
 ) -> None:
@@ -1514,7 +1601,7 @@ def _write_json(path: Path, value: object) -> None:
 def _assert_no_ra_context_snapshots(root: Path) -> None:
     """Allow Phase 4 validation evidence but no Phase 5 RA context capture."""
     resource_root = root / "resources/xarm6@localhost"
-    assert (resource_root / "validation").is_dir()
+    assert not (resource_root / "validation").exists()
     assert not (resource_root / "robot_state").exists()
     assert not (resource_root / "primitive_catalog_snapshot").exists()
 
@@ -1543,3 +1630,27 @@ def _composition_input_from_prompt(value: object) -> dict[str, Any]:
     composition_input = json.loads(serialized)
     assert isinstance(composition_input, dict)
     return composition_input
+
+
+@pytest.mark.parametrize("artifact", ["completion", "proposal"])
+@pytest.mark.parametrize("retired_field", ["schema_version", "semantic_review_ref"])
+def test_incompatible_completion_cannot_activate_ra_or_draft(tmp_path, artifact, retired_field):
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    path = tmp_path / (
+        "interaction_record/context_completion_0001.json"
+        if artifact == "completion"
+        else completion["ontology_projection_ref"]
+    )
+    record = _read_json(path)
+    record[retired_field] = 1 if retired_field == "schema_version" else "old/review.json"
+    _write_json(path, record)
+
+    class UncalledRuntime:
+        async def request_assigned_context(self, assignment):
+            raise AssertionError("Historical completion must not contact RA.")
+
+    with pytest.raises(RAContextHandoffError, match="requires"):
+        asyncio.run(activate_selected_ra_context(UncalledRuntime(), tmp_path))
+    with pytest.raises((RAContextHandoffError, PrimitiveDraftError)):
+        asyncio.run(author_primitive_program_draft(UncalledRuntime(), tmp_path))
+    assert not (tmp_path / "composition").exists()

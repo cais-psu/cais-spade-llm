@@ -1,12 +1,11 @@
+from __future__ import annotations
+
 """OpenAI-backed document evidence interpretation boundary."""
 
 from cais_spade_llm.spec2primitives.tools.document_evidence.diagnostic import (
     run_document_interpretation_diagnostic,
 )
 from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
-    DOCUMENT_OVERVIEW_SCHEMA_VERSION,
-    DOCUMENT_QUERY_SCHEMA_VERSION,
-    DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION,
     DocumentInterpretationError,
     DocumentInterpretationResult,
     DocumentOverviewRecord,
@@ -28,9 +27,6 @@ from cais_spade_llm.spec2primitives.tools.document_evidence.interpreter import (
 )
 
 __all__ = [
-    "DOCUMENT_OVERVIEW_SCHEMA_VERSION",
-    "DOCUMENT_QUERY_SCHEMA_VERSION",
-    "DOCUMENT_SOURCE_INDEX_SCHEMA_VERSION",
     "DocumentInterpretationError",
     "DocumentInterpretationResult",
     "DocumentOverviewRecord",

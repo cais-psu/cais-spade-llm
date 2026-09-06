@@ -4,6 +4,8 @@ This directory records paths and provenance for the controlled local corpus.
 NIST STL source files remain in their existing repository locations and are not
 copied.
 
+This README includes engineering scene setup notes and is **not** an approved recognition source. PA/review receive only allowlisted documents/CAD and captured observations, never the scene roles or installation configuration described below. Approved filenames alone do not identify an observed task role.
+
 ## Existing sources
 
 - NIST STL catalog:
@@ -80,3 +82,5 @@ own direct evidence refs. The corpus does not supply a predetermined target
 answer, pose, or tolerance. PA assigns neutral observations to feature states,
 and verifiers derive only the numeric geometry they need. All use must obey the
 MUST do-not-leak boundary in `../../AGENTS.md`.
+
+Current proposal separates current observations from desired relationship membership. Source-first review must support task roles, attachment claims and the complete goal. Source caveats persist in the UI. Required arm assignment uses all reviewed coordinates and live MoveIt reachability before completion; only position planning is validated; grasping and insertion remain unvalidated. See [bias validation](../../BIAS_VALIDATION.md).

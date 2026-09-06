@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 """Read Phase 5.1 context from the exact live in-process RobotAgent."""
 
-from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
-from inspect import isawaitable
 from typing import Any, Protocol
 
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
@@ -147,300 +147,33 @@ class InProcessRobotAgentCompositionRuntime:
             )
         return response
 
-    async def validate_plan_only_allocation(  # noqa: C901, PLR0915
+    async def validate_plan_only_allocation(
         self,
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
-        """Contact the exact provisional RobotAgent, then run no-motion MoveIt."""
-        resource_jid = _required_text(
-            request.get("resource_jid"),
-            "plan-only resource_jid",
-        )
-        execution_mode = _required_text(
-            request.get("execution_mode"),
-            "plan-only execution_mode",
-        )
-        process_symbol = _required_text(
-            request.get("process_symbol"),
-            "plan-only process_symbol",
-        )
-        process_iri = _required_text(
-            request.get("process_iri"),
-            "plan-only process_iri",
-        )
-        feature_iri = _required_text(
-            request.get("feature_iri"),
-            "plan-only feature_iri",
-        )
-        selected_agent = await self._selected_or_started_resource(
-            resource_jid,
-            execution_mode,
-        )
-        self._require_alive(selected_agent, resource_jid)
-        self._require_execution_mode_value(
-            selected_agent,
-            resource_jid=resource_jid,
-            execution_mode=execution_mode,
-        )
+        """Run no-motion MoveIt checks without activating a RobotAgent."""
+        from ..agents.pa.resource_grounding import validate_location_planning_request
 
-        if request.get("validation_scope") == "state_location_reachability":
-            state_locations = request.get("state_locations")
-            if not isinstance(state_locations, Mapping) or set(state_locations) != {
-                "current_state",
-                "desired_state",
-            }:
-                raise RAContextHandoffError(
-                    "Plan-only state-location inputs are invalid."
-                )
-
-            async def _location_precheck() -> Mapping[str, object]:
-                self._require_alive(selected_agent, resource_jid)
-                snapshot_reader = getattr(selected_agent, "get_recovery_snapshot", None)
-                feasibility_check = getattr(
-                    selected_agent,
-                    "check_recovery_physical_feasibility",
-                    None,
-                )
-                if not callable(snapshot_reader) or not callable(feasibility_check):
-                    raise RAContextHandoffError(
-                        "Selected RobotAgent does not expose physical validation."
-                    )
-                snapshot = snapshot_reader()
-                if not isinstance(snapshot, Mapping):
-                    raise RAContextHandoffError(
-                        "Selected RobotAgent returned an invalid validation snapshot."
-                    )
-                results: dict[str, list[Mapping[str, object]]] = {}
-                statuses: list[str] = []
-                for state_name in ("current_state", "desired_state"):
-                    submitted = state_locations[state_name]
-                    if (
-                        not isinstance(submitted, Sequence)
-                        or isinstance(submitted, (str, bytes))
-                        or not submitted
-                    ):
-                        raise RAContextHandoffError(
-                            f"Plan-only {state_name} locations are invalid."
-                        )
-                    state_results: list[Mapping[str, object]] = []
-                    for location in submitted:
-                        translation = (
-                            location.get("translation_m")
-                            if isinstance(location, Mapping)
-                            else None
-                        )
-                        state_iri = (
-                            location.get("state_iri")
-                            if isinstance(location, Mapping)
-                            else None
-                        )
-                        evidence_handle = (
-                            location.get("evidence_handle")
-                            if isinstance(location, Mapping)
-                            else None
-                        )
-                        if (
-                            not isinstance(translation, Sequence)
-                            or isinstance(translation, (str, bytes))
-                            or len(translation) != 3
-                            or not isinstance(state_iri, str)
-                            or not state_iri
-                            or not isinstance(evidence_handle, str)
-                            or not evidence_handle
-                        ):
-                            raise RAContextHandoffError(
-                                f"Plan-only {state_name} location is invalid."
-                            )
-                        pose = {
-                            axis: float(value)
-                            for axis, value in zip(
-                                ("x", "y", "z"),
-                                translation,
-                                strict=True,
-                            )
-                        }
-                        result = feasibility_check(
-                            part_context={
-                                "feature_iri": feature_iri,
-                                "process_symbol": process_symbol,
-                                "process_iri": process_iri,
-                                "state_name": state_name,
-                                "state_iri": state_iri,
-                                "state_evidence_handle": evidence_handle,
-                            },
-                            recovery_snapshot=deepcopy(dict(snapshot)),
-                            operation_kind=process_symbol,
-                            grounded_action={
-                                "task_kind": process_symbol,
-                                "process_iri": process_iri,
-                                "feature_iri": feature_iri,
-                                "state_iri": state_iri,
-                                "target": {"pose": pose},
-                            },
-                        )
-                        if not isinstance(result, Mapping):
-                            raise RAContextHandoffError(
-                                "Selected RobotAgent physical validation is invalid."
-                            )
-                        allowed = result.get("allowed") is True
-                        status = "accepted" if allowed else "rejected"
-                        statuses.append(status)
-                        reason = str(result.get("reason") or "").strip()
-                        state_results.append(
-                            {
-                                "evidence_handle": evidence_handle,
-                                "status": status,
-                                "message": reason
-                                or (
-                                    "RobotAgent workspace precheck accepted the location."
-                                    if allowed
-                                    else "RobotAgent workspace precheck rejected the location."
-                                ),
-                                "error_code": None,
-                            }
-                        )
-                    results[state_name] = state_results
-                status = "rejected" if "rejected" in statuses else "accepted"
-                return {
-                    "status": status,
-                    "state_locations": results,
-                    "feedback": (
-                        None
-                        if status == "accepted"
-                        else "One or more submitted locations are unreachable."
-                    ),
-                }
-
-            response = await self._host._run_on_agent_runtime(_location_precheck())
-            if not isinstance(response, Mapping):
-                raise RAContextHandoffError(
-                    "Selected RobotAgent state-location validation is unavailable."
-                )
-            return deepcopy(dict(response))
-
-        if request.get("motion_mode") == "cartesian_pick_place":
-            if execution_mode != "simulation":
-                raise RAContextHandoffError(
-                    "Cartesian pick-and-place allocation validation is simulation-only."
-                )
-            validate = getattr(self._moveit_plan_only_runtime, "validate", None)
-            if not callable(validate):
-                raise RAContextHandoffError(
-                    "MoveIt Cartesian plan-only validation runtime is unavailable."
-                )
-            response = validate(deepcopy(dict(request)))
-            if isawaitable(response):
-                response = await response
-            if not isinstance(response, Mapping):
-                raise RAContextHandoffError(
-                    "MoveIt Cartesian plan-only validation response is invalid."
-                )
-            return deepcopy(dict(response))
-
-        async def _robot_agent_precheck() -> Mapping[str, object]:
-            self._require_alive(selected_agent, resource_jid)
-            snapshot_reader = getattr(selected_agent, "get_recovery_snapshot", None)
-            feasibility_check = getattr(
-                selected_agent,
-                "check_recovery_physical_feasibility",
-                None,
+        validate_location_planning_request(request)
+        try:
+            gazebo_state = self._host.ros2_proc_status(DUAL_GAZEBO_NAME)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RAContextHandoffError(
+                "Spec2Primitives Dual Gazebo status is unavailable."
+            ) from exc
+        if gazebo_state != "running":
+            raise RAContextHandoffError(
+                "Spec2Primitives Dual Gazebo Environment is not running. "
+                "Start it above, then retry arm reachability checks."
             )
-            if not callable(snapshot_reader) or not callable(feasibility_check):
-                raise RAContextHandoffError(
-                    "Selected RobotAgent does not expose physical validation."
-                )
-            snapshot = snapshot_reader()
-            if not isinstance(snapshot, Mapping):
-                raise RAContextHandoffError(
-                    "Selected RobotAgent returned an invalid validation snapshot."
-                )
-            endpoint_results: dict[str, Mapping[str, object]] = {}
-            for state_name in ("current_state", "desired_state"):
-                state = request.get(state_name)
-                translation = state.get("translation_m") if isinstance(state, Mapping) else None
-                state_iri = state.get("state_iri") if isinstance(state, Mapping) else None
-                evidence_handle = (
-                    state.get("evidence_handle") if isinstance(state, Mapping) else None
-                )
-                if (
-                    not isinstance(translation, Sequence)
-                    or isinstance(translation, (str, bytes))
-                    or len(translation) != 3
-                    or not isinstance(state_iri, str)
-                    or not state_iri
-                    or not isinstance(evidence_handle, str)
-                    or not evidence_handle
-                ):
-                    raise RAContextHandoffError(f"Plan-only {state_name} translation is invalid.")
-                pose = {
-                    axis: float(value)
-                    for axis, value in zip(("x", "y", "z"), translation, strict=True)
-                }
-                result = feasibility_check(
-                    part_context={
-                        "feature_iri": feature_iri,
-                        "process_symbol": process_symbol,
-                        "process_iri": process_iri,
-                        "state_name": state_name,
-                        "state_iri": state_iri,
-                        "state_evidence_handle": evidence_handle,
-                    },
-                    recovery_snapshot=deepcopy(dict(snapshot)),
-                    operation_kind=process_symbol,
-                    grounded_action={
-                        "task_kind": process_symbol,
-                        "process_iri": process_iri,
-                        "feature_iri": feature_iri,
-                        "state_iri": state_iri,
-                        "target": {"pose": pose},
-                    },
-                )
-                if not isinstance(result, Mapping):
-                    raise RAContextHandoffError(
-                        "Selected RobotAgent physical validation is invalid."
-                    )
-                allowed = result.get("allowed") is True
-                reason = str(result.get("reason") or "").strip()
-                endpoint_results[state_name] = {
-                    "status": "accepted" if allowed else "rejected",
-                    "message": reason
-                    or (
-                        "RobotAgent workspace precheck accepted the endpoint."
-                        if allowed
-                        else "RobotAgent workspace precheck rejected the endpoint."
-                    ),
-                    "error_code": None,
-                }
-            return endpoint_results
 
-        precheck = await self._host._run_on_agent_runtime(_robot_agent_precheck())
-        if not isinstance(precheck, Mapping):
-            raise RAContextHandoffError("Selected RobotAgent physical validation is unavailable.")
-        if any(
-            isinstance(precheck.get(state_name), Mapping)
-            and precheck[state_name].get("status") == "rejected"
-            for state_name in ("current_state", "desired_state")
-        ):
-            current_state = precheck["current_state"]
-            desired_state = precheck["desired_state"]
-            return {
-                "status": "rejected",
-                "current_state": dict(current_state),
-                "desired_state": dict(desired_state),
-                "feedback": " ".join(
-                    str(item.get("message") or "")
-                    for item in (current_state, desired_state)
-                    if item.get("status") == "rejected"
-                ),
-            }
-        validate = getattr(self._moveit_plan_only_runtime, "validate", None)
-        if not callable(validate):
-            raise RAContextHandoffError("MoveIt plan-only validation runtime is unavailable.")
-        response = validate(deepcopy(dict(request)))
-        if isawaitable(response):
-            response = await response
+        # MoveIt supplies planning readiness and live state; RobotAgent startup
+        # belongs to the later explicit selected-RA context capture.
+        response = await self._moveit_plan_only_runtime.validate_state_locations(
+            deepcopy(dict(request))
+        )
         if not isinstance(response, Mapping):
-            raise RAContextHandoffError("MoveIt plan-only validation response is invalid.")
+            raise RAContextHandoffError("MoveIt location planning response is invalid.")
         return deepcopy(dict(response))
 
     async def _selected_or_started_agent(
@@ -474,7 +207,7 @@ class InProcessRobotAgentCompositionRuntime:
         if execution_mode != "simulation":
             raise RAContextHandoffError(
                 "Spec2Primitives can start a context RobotAgent only for the "
-                "Phase 4 simulation execution mode."
+                "validated simulation execution mode."
             )
 
         try:
@@ -486,7 +219,7 @@ class InProcessRobotAgentCompositionRuntime:
         if gazebo_state != "running":
             raise RAContextHandoffError(
                 "Spec2Primitives Dual Gazebo Environment is not running. "
-                "Start it above, then retry Phase 5."
+                "Start it above, then retry selected RobotAgent context capture."
             )
 
         # Phase 4 remains the sole authority for the mode used to create agents.

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Validated package-local runtime configuration."""
 
 from cais_spade_llm.spec2primitives.config.camera_to_world_calibration import (
@@ -8,6 +10,7 @@ from cais_spade_llm.spec2primitives.config.camera_to_world_calibration import (
 from cais_spade_llm.spec2primitives.config.model_runtime import (
     DEFAULT_MODEL_RUNTIME_CONFIG_PATH,
     DocumentVLMConfig,
+    GroundingLimits,
     ModelRuntimeConfig,
     ObservationVLMConfig,
     ProductAgentModelConfig,
@@ -28,6 +31,7 @@ __all__ = [
     "DEFAULT_MODEL_RUNTIME_CONFIG_PATH",
     "DEFAULT_WORKCELL_PROFILE_PATH",
     "DocumentVLMConfig",
+    "GroundingLimits",
     "ModelRuntimeConfig",
     "ObservationVLMConfig",
     "ProductAgentModelConfig",

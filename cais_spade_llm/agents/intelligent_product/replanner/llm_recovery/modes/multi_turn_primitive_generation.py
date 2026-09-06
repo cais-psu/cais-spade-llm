@@ -568,7 +568,6 @@ def _resource_snapshot_with_caps(
         "resource_type",
         "current_pose",
         "current_pose_ref",
-        "workspace_bounds",
         "named_poses",
         "available_named_poses",
         "reachability",

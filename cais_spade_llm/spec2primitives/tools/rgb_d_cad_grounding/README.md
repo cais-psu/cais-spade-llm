@@ -1,124 +1,21 @@
-# Phase 4.2 preprocessing through location and pose frame conversion
+# RGB-D and CAD grounding
 
-`gazebo_observation_provider.py` implements the Phase 1.2 demand-driven live
-capture boundary. `capture_gazebo_observation(...)` creates request-owned ROS2
-subscriptions only for the duration of one explicit call, captures the exact
-`cam_mk3`, `cam_mk4_1`, `cam_mk4_2`, and `cam_assembly` RGB-D evidence, and
-writes one existing Phase 1.1 `ObservationBundle` with evidence label `live`.
+The demand-driven capture provider writes approved RGB/depth/calibration evidence into one pinned observation bundle. Preprocessing verifies source hashes, converts CAD millimetres to metres, and deprojects valid depth into calibrated camera-local colored points.
 
-Every successful bundle contains one lossless `<camera>_rgb.png` image and one
-original metric `<camera>_depth_m.npy` array for each camera. The caller can
-inspect the PNG files under
-`contexts/<interaction_identifier>/products/observations/<observation_ref>/`.
+`segmenter.py` uses uniform fixed support-plane/foreground and connected-region rules for every view. It records neutral candidates, bounds, centroids, masks and provenance. These rules can miss or merge objects; no general segmentation accuracy is claimed.
 
-`preprocessor.py` loads only exact approved binary STL refs, verifies the hash
-bound to the served ref, converts every triangle vertex from millimetres to
-metres, and atomically persists compressed triangles and facet normals with a
-typed `CADMeshRecord`. It also reloads a complete validated four-camera bundle
-and deprojects every finite positive metric-depth pixel with that camera's
-intrinsics and supported distortion model. Each compressed point-cloud artifact
-retains full valid-resolution `points_m`, `colors_rgb`, and `pixels_uv` arrays
-in its independent optical frame.
+`observation_review.py` creates hash-pinned candidate crops and submits all views/crops through configured observation VLM settings. `ObservationCandidateReview` 1 covers exact candidates with morphology and uncertainty, without state/CAD/process/resource assignments. `ObservationPresentationRecord` randomizes view/candidate handles and ordering before the VLM and PA receive them. Canonical metadata remains internal for exact geometry/provenance joins.
 
-`segmenter.py` accepts only an intact Phase 4.2A observation record. It verifies
-every referenced point-cloud hash and array contract, then uses deterministic
-fixed internal parameters. Every view applies the same neutral one-sided
-dominant-plane filter and retains only camera-side foreground points before
-depth-connected region extraction. If no reliable plane is available, that
-view produces no candidates. Each successful call atomically persists one compact
-`RGBDSegmentationRecord` and four `uint16` label masks. Zero candidates are
-recorded as unresolved; identity, `CAD_correspondence`, pose, and cross-camera
-fusion remain `not_evaluated`.
+`size_correspondence.py` exposes active `measure_segmented_candidates_against_cad`, writing `CADSizeCorrespondenceRecord` 3 with every evaluated candidate's dimensions. It does not rank/select a winner or establish task role. Canonical record order is retained internally; model presentation order is independently randomized.
 
-`observation_review.py` creates one stable hash-pinned crop for every valid
-candidate and submits the source views and crops to the configured observation
-VLM. The strict `ObservationCandidateReview` version 1 output covers the exact
-opaque handles once and stores only visible descriptions and uncertainty. It
-cannot add `current_state`, `desired_state`, CAD, process, or resource decisions.
+`candidate_layout.py` returns positions, displacements, distances and collinearity for any two or more PA-selected same-view candidates. It does not emit a built-in destination or relationship verdict. Cross-camera fusion is not implemented.
 
-`size_correspondence.py` accepts one validated segmentation record and one
-already-preprocessed exact approved CAD record. It revalidates their paths,
-hashes, arrays, bounds, masks, frames, summaries, and counts; reconstructs each
-candidate's camera-local points; and compares the two largest principal
-dimensions with the two largest CAD dimensions. The active Phase 4
-`measure_segmented_candidates_against_cad` path atomically persists
-`CADSizeCorrespondenceRecord` v3 with every candidate measurement in observation
-order. It records no rank, plausible subset, winner, or correspondence verdict.
-Rotation, complete pose, cross-camera fusion, and robot-frame conversion remain
-`not_evaluated`. The older selecting association function remains available only
-to historical pose/diagnostic consumers; Phase 4 does not call it.
+`frame_conversion.py` validates approved calibration against exact source/target frames and observation time, then writes a neutral `RobotFrameLocationRecord` 2 for the selected candidate. Real sensor names and transforms stay internal. A location's semantic role comes from reviewed PA state values, not its camera or tool name.
 
-`candidate_layout.py` accepts any two or more unique PA-selected candidates from
-one view and frame. It persists their positions, pairwise displacement vectors,
-distances, and triple collinearity measurements in
-`CandidateSpatialRelationRecord` v2. The fixed record name is retained for
-compatibility, but the tool emits no relation label or built-in `between`
-verdict.
+Historical selecting size-correspondence, `pose_estimation.py`, and orientation-sensitive frame-conversion diagnostics remain explicit separate consumers. A clear pose fit and ambiguous symmetric alternatives retain their existing statuses. They are not prerequisites for current arm assignment.
 
-`pose_estimation.py` consumes one intact `CADSizeCorrespondenceRecord`,
-revalidates its complete CAD, segmentation, point-cloud, mask, and hash chain,
-and considers only size-plausible loose `source` candidates. It deterministically
-samples the CAD surface, creates 24 principal-axis orientation hypotheses, and
-refines each with trimmed point-to-point ICP using NumPy and SciPy. A clear fit
-persists translation, rotation matrix, quaternion, and the complete
-camera-from-CAD transform; competing candidates or rotations remain
-`ambiguous`, and weak fits are `rejected`.
+Phase 4 review checks part identities separately from task roles, destination bindings, current attachment and intended relations. Figures alone cannot prove installation, and a small dimension advantage cannot resolve several plausible destinations. Existing source uncertainty is preserved; missing meaning prevents completion.
 
-Each successful call atomically persists one `CADPoseEstimationRecord` with the
-exact source-correspondence hash, complete upstream provenance, fixed
-parameters, all ranked and qualified hypotheses, and any selected camera
-optical frame. The result is not a robot-frame pose or pick point. It does not
-search the CAD inventory, use a learned detector, or read simulator identity,
-configured pose, detector response, or evaluator data.
+PA's required arm check covers every reviewed current/destination coordinate using live MoveIt position planning. It does not call Cartesian planning, infer a final insertion pose, or execute motion. Tools never access world/SDF contents, spawn poses, entity state, detector answers or evaluator labels. Internal calibration is allowed authority, not a recognition answer.
 
-`frame_conversion.py` atomically records one injected
-`CameraToRobotCalibrationRecord` with exact source and target frames, validity,
-approved-source provenance, derived rotation representations, and a
-deterministic payload hash. For allocation, it checks calibration at the
-originating observation timestamp, requires the declared target frame, and
-translates only the PA-selected neutral candidate into that frame.
-
-An accepted location conversion atomically persists one
-`RobotFrameLocationRecord` version 2 with the translated 3D location and exact
-input hashes. A separate orientation-sensitive consumer may activate the
-retained `CADPoseEstimationRecord` and `RobotFramePoseRecord` path. Ambiguous or
-rejected inputs preserve their state without accepted robot-frame coordinates.
-`RobotFrameLocationRecord` and `RobotFramePoseRecord` have no embedded semantic
-source/target role. PA's allocation request provides their state role. These
-paths perform no robot selection, RA call, planning, or execution and
-read no world, spawn, entity-state, detector, or evaluator input.
-
-`diagnostic.py` exposes the injected `ObservationCaptureRuntime`, retains the
-controlled Phase 4.2A preprocessing diagnostic, and adds
-`run_automatic_rgbd_segmentation_pipeline(...)`. The automatic entrypoint has no
-operator processing parameters and performs one capture → validation →
-observation preprocessing → segmentation sequence. CAD is not loaded by this
-path. The production capture adapter delegates only to
-`capture_gazebo_observation(...)`. Every geometry operation is exclusive and
-atomic under `products/grounding/rgb_d_cad_grounding/`; Phase 4.2A generic
-deltas contain no RDF assertions. `run_cad_size_association_pipeline(...)`
-updates only the compact read-only status after a controlled caller supplies
-the required records. `run_cad_pose_estimation_pipeline(...)` similarly exposes
-only `CAD_correspondence`, `location`, and `pose` states.
-The frame-conversion diagnostics expose only compact status and never return
-coordinates through the UI status boundary.
-
-The tools have no background stream, general identity recognition,
-cross-camera fusion, PA-loop connection, planning, or
-robot execution. The UI reads only the compact automatic status
-(`idle`, `running`, `ready`, or `failed`), candidate counts, CAD-correspondence
-state, location state, pose state, and robot-frame conversion state; it exposes
-no CAD, coordinate,
-score, timeout, camera-role, threshold, mask, or artifact controls. Capture,
-preprocessing, segmentation, size association, pose estimation, and frame
-conversion are
-supporting infrastructure, not the research contribution, and cannot authorize
-context completion.
-
-These components expose neutral candidates, not semantic source/target labels.
-The architecture has no `TargetFeatureGeometryRecord`. PA decides which
-approved evidence to retrieve and may cite any accepted record in target-feature
-`state_values`. In the separate allocation decision, PA selects one or more
-neutral location handles for each state; the frame converter derives locations
-only for submitted segmentation handles. This README prescribes no document,
-RGB-D, CAD, candidate, camera, or resource order.
+Standalone diagnostics keep compact status and no operator segmentation controls. Production PA retrieval is connected to these evidence tools. See [bias experiments](../../BIAS_VALIDATION.md), [schemas](../../schemas/README.md), and [tests](../../tests/README.md).

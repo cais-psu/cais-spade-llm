@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Describe neutral RGB-D candidates without assigning product-state roles."""
 
-from __future__ import annotations
 
 import base64
 import hashlib
@@ -10,12 +11,14 @@ import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from openai import AsyncOpenAI, OpenAIError
 from PIL import Image
+
+from ..observation_presentation import PRESENTATION_REF, ObservationPresentation
 
 if TYPE_CHECKING:
     from cais_spade_llm.spec2primitives.config.model_runtime import ObservationVLMConfig
@@ -198,20 +201,34 @@ async def review_observation_candidates(
             raise ObservationCandidateReviewError(
                 "Observation candidate review requires at least one segmented candidate."
             )
+        presentation = ObservationPresentation(root, create=True)
+        presented = sorted(
+            (
+                replace(
+                    item,
+                    observation_handle=presentation.handle(item.observation_handle),
+                    candidate_handle=presentation.handle(item.candidate_handle),
+                )
+                for item in candidates
+            ),
+            key=lambda item: (item.observation_handle, item.candidate_handle),
+        )
         response = await vision_runtime.review_candidates(
-            ObservationCandidateReviewRequest(candidates=tuple(candidates))
+            ObservationCandidateReviewRequest(candidates=tuple(presented))
         )
         if not _response_model_matches_config(response.model, config.model):
             raise ObservationCandidateReviewError(
                 "Observation review response model does not match configured model."
             )
-        reviewed = _validated_output(response.output, candidates)
-        for candidate_record, output in zip(candidate_records, reviewed, strict=True):
+        reviewed = _validated_output(response.output, presented)
+        outputs = {item["candidate_handle"]: item for item in reviewed}
+        for candidate_record in candidate_records:
+            output = outputs[presentation.handle(candidate_record["candidate_handle"])]
             candidate_record["description"] = output["description"]
             candidate_record["uncertainty"] = output["uncertainty"]
+        presentation.assert_unchanged()
         segmentation_ref = segmentation_path.relative_to(root).as_posix()
         record: dict[str, object] = {
-            "schema_version": 1,
             "record_type": "ObservationCandidateReview",
             "producer": _PRODUCER,
             "review_number": review_number,
@@ -219,6 +236,10 @@ async def review_observation_candidates(
             "source_segmentation": {
                 "ref": segmentation_ref,
                 "sha256": _sha256_path(segmentation_path),
+            },
+            "observation_presentation": {
+                "ref": PRESENTATION_REF,
+                "sha256": _sha256_path(presentation.path),
             },
             "provider": config.provider,
             "configured_model": config.model,
@@ -357,13 +378,15 @@ def _load_segmentation(root: Path, record_path: Path) -> tuple[Path, Mapping[str
             "RGBDSegmentationRecord could not be read from this interaction."
         ) from exc
     if (
-        not isinstance(value, Mapping)
-        or value.get("schema_version") != 2
-        or value.get("record_type") != "RGBDSegmentationRecord"
-        or value.get("producer") != _PRODUCER
-        or relative.parts[:3] != _GROUNDING_ROOT.parts
+        (not isinstance(value, Mapping))
+        or "schema_version" in value
+        or (value.get("record_type") != "RGBDSegmentationRecord")
+        or (value.get("producer") != _PRODUCER)
+        or (relative.parts[:3] != _GROUNDING_ROOT.parts)
     ):
-        raise ObservationCandidateReviewError("RGBDSegmentationRecord is invalid.")
+        raise ObservationCandidateReviewError(
+            "RGBDSegmentationRecord has incompatible fields. Start a fresh interaction."
+        )
     return path, value
 
 
@@ -442,7 +465,7 @@ def _request_text(candidates: Sequence[ObservationCandidateImage]) -> str:
         "provides spatial context and the following image is the candidate crop. Report "
         "only visible shape, relative size, color, openings, cylindrical forms, surfaces, "
         "and support contacts or relationships. Describe morphology without naming a "
-        "candidate as a shaft, pin, peg, gear, or any other inferred part identity. "
+        "candidate with an inferred part identity. "
         "Preserve the opaque handles exactly. Do not assign current_state, desired_state, "
         "a process, a CAD identity, or a resource. State uncertainty rather than guessing. "
         f"Expected handles:\n{json.dumps(handles, indent=2)}"
@@ -452,7 +475,7 @@ def _request_text(candidates: Sequence[ObservationCandidateImage]) -> str:
 _OPENAI_INSTRUCTIONS = (
     "You are the ontology-neutral observation reviewer for Spec2Primitives. Use only "
     "the supplied images and opaque handles. Describe only morphology, dimensions, "
-    "surfaces, and support contacts. Do not infer a part identity such as shaft or pin, "
+    "surfaces, and support contacts. Do not infer a part identity, "
     "and do not choose a product state, CAD file, process, robot, or execution action."
 )
 

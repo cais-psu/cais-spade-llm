@@ -1,6 +1,6 @@
-"""Compose the runtime values required by the Spec2Primitives PA UI."""
-
 from __future__ import annotations
+
+"""Compose the runtime values required by the Spec2Primitives PA UI."""
 
 import os
 from collections.abc import Awaitable, Callable, Mapping
@@ -181,6 +181,7 @@ def create_spec2primitives_ui_runtime(
             document_vision_runtime=vision_runtime,
             observation_config=model_config.observation_vlm,
             observation_vision_runtime=observation_vision_runtime,
+            grounding_limits=model_config.grounding_limits,
             camera_to_world_calibration_runtime=calibration_runtime,
             camera_to_world_calibration_unavailable_reason=(calibration_unavailable_reason),
             robot_agent_feasibility_runtime=robot_agent_runtime,

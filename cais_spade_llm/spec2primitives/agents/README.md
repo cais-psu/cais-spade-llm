@@ -1,20 +1,10 @@
 # Agents
 
-Only PA and RA are agents in the Spec2Primitives roadmap. Their shared ProductAgent
-and RobotAgent implementations remain outside this package and read-only.
+Spec2Primitives owns adapters for PA and RA; their shared ProductAgent and RobotAgent implementations remain read-only.
 
-- `pa/` owns the implemented narrow ProductAgent context adapter, single
-  evidence-grounded two-state `target_feature`, independent PA-controlled
-  state-location/resource allocation, exact RobotAgent reachability validation,
-  v7 completion contracts, and production grounding workflow through Phase 4.4.
-- `ra/` owns the implemented Phase 5.1 contract-first assignment and resource
-  context boundary plus the implemented Phase 5.2A structural primitive draft.
-  Primitive binding, primitive-level validation, and execution remain future work.
+- `pa/`: evidence investigation, proposal with pairwise relationships, deterministic structure/provenance validation, required evidence-based arm choice, live MoveIt reachability and completion.
+- `ra/`: selected-RA envelope, paired context snapshots and one unbound structural primitive draft per pair. Current completion/evidence gates apply to activation, recovery and drafting.
 
-The PA boundary delegates only structured context calls and does not own the
-shared ProductAgent lifecycle. The RA adapter can reuse or start only the exact
-Phase 4-selected context-only RobotAgent under its documented simulation gate;
-it does not change the shared RobotAgent implementation. The same adapter
-performs exact-resource no-motion allocation validation. Live SPADE delivery,
-binding, execution validation, and execution require later separately
-authorized implementation phases.
+PA chooses semantics and the arm; host code checks evidence provenance, exact identities, capability and all grounded locations. Resource assignment is an ontology relation, not a motion-plan or execution result. Historical records remain readable but cannot authorize new RA work.
+
+The context-only RA adapter retains its existing readiness/lifecycle boundary. Live SPADE delivery, parameter binding, primitive-level validation and execution remain future work. See [bias validation](../BIAS_VALIDATION.md).

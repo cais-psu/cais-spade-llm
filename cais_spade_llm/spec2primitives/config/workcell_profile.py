@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Load the validated Spec2Primitives workcell profile."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -66,10 +67,8 @@ def load_workcell_profile(
         value = json.loads(source.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkcellProfileError("Workcell profile is not readable JSON.") from exc
-    if not isinstance(value, dict) or set(value) != {"schema_version", "processes", "resources"}:
+    if not isinstance(value, dict) or set(value) != {"processes", "resources"}:
         raise WorkcellProfileError("Workcell profile fields are invalid.")
-    if value["schema_version"] != 2:
-        raise WorkcellProfileError("Workcell profile schema version is unsupported.")
     processes = _process_profiles(value["processes"])
     process_iris = {process.iri for process in processes}
     raw_resources = value["resources"]

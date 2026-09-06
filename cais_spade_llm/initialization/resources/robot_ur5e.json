@@ -23,14 +23,6 @@
           "prusa-mk3",
           "assembly_board-v1"
         ],
-        "workspace_bounds": {
-          "x_min_m": -0.7,
-          "x_max_m": 0.7,
-          "y_min_m": -0.35,
-          "y_max_m": 1.1,
-          "z_min_m": 0.85,
-          "z_max_m": 1.6
-        },
         "gripper_reach": {
           "frame": "world",
           "origin_pose": {
@@ -85,6 +77,7 @@
           "group_name": "ur5e_ur_manipulator",
           "ee_link": "ur5e_tool0",
           "tcp_link": "ur5e_rg2_gripper_tcp",
+          "position_tolerance_m": 0.005,
           "frame_id": "world"
         },
         "gripper": {
@@ -99,6 +92,7 @@
         },
         "services": {
           "detect_all": "/detect_all",
+          "motion_plan": "/plan_kinematic_path",
           "cartesian_path": "/compute_cartesian_path",
           "execute_trajectory": "/execute_trajectory",
           "attach": "/ATTACHLINK",
@@ -169,14 +163,6 @@
           "prusa-mk3",
           "assembly_board-v1"
         ],
-        "workspace_bounds": {
-          "x_min_m": -0.7,
-          "x_max_m": 0.7,
-          "y_min_m": -0.35,
-          "y_max_m": 1.1,
-          "z_min_m": 0.85,
-          "z_max_m": 1.6
-        },
         "gripper_reach": {
           "frame": "world",
           "origin_pose": {

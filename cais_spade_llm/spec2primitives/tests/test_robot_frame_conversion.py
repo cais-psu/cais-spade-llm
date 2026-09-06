@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for dynamic camera-to-robot CAD pose conversion."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -24,7 +25,7 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     record_camera_to_robot_calibration,
     run_robot_frame_pose_conversion_pipeline,
     transform_camera_pose_to_robot_frame,
-    transform_correspondence_location_to_robot_frame,
+    transform_segmentation_candidate_location_to_robot_frame,
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     frame_conversion as conversion_module,
@@ -44,15 +45,19 @@ def test_correspondence_center_becomes_location_without_pose_estimation(
 ) -> None:
     correspondence_path = _prepare_correspondence(tmp_path, (0.042,))
     correspondence = _read_json(correspondence_path)
-    selected = correspondence["selected_candidate"]
+    selected = next(
+        item for item in correspondence["candidate_measurements"] if item["within_size_tolerance"]
+    )
     robot_from_camera = np.eye(4)
     robot_from_camera[:3, :3] = Rotation.from_euler("z", 30.0, degrees=True).as_matrix()
     robot_from_camera[:3, 3] = [0.8, -0.2, 0.4]
     calibration = _calibration(tmp_path, robot_from_camera)
 
-    result = transform_correspondence_location_to_robot_frame(
+    result = transform_segmentation_candidate_location_to_robot_frame(
         interaction_root=tmp_path,
-        correspondence_record_path=correspondence_path,
+        segmentation_record_path=tmp_path / correspondence["segmentation"]["record"]["ref"],
+        observation_handle=selected["observation_handle"],
+        candidate_handle=selected["candidate_handle"],
         calibration_record_path=calibration.record_path,
         target_frame=_ROBOT_FRAME,
     )
@@ -64,16 +69,19 @@ def test_correspondence_center_becomes_location_without_pose_estimation(
     np.testing.assert_allclose(result.translated_location_m, expected, atol=1e-12)
     assert result.record["robot_frame_conversion"] == "accepted"
     assert result.record["record_type"] == "RobotFrameLocationRecord"
-    assert result.record["schema_version"] == 2
+    assert "schema_version" not in result.record
     assert result.record["candidate_reference"] == {
         "observation_handle": selected["observation_handle"],
         "candidate_handle": selected["candidate_handle"],
     }
-    assert result.record["CAD_correspondence"] == "accepted"
+    assert "CAD_correspondence" not in result.record
     assert result.record["location"] == "available"
     assert "pose" not in result.record
     assert "rotation_matrix" not in result.record
-    assert result.record["source_correspondence"]["sha256"] == _sha256(correspondence_path)
+    assert (
+        result.record["source_segmentation"]["sha256"]
+        == correspondence["segmentation"]["record"]["sha256"]
+    )
     assert result.record["source_calibration"]["sha256"] == _sha256(calibration.record_path)
 
 
@@ -126,7 +134,7 @@ def test_rotated_camera_transform_recovers_known_robot_frame_pose(
     )
     record = _read_json(result.record_path)
     assert record == result.record
-    assert record["schema_version"] == 3
+    assert "schema_version" not in record
     assert record["record_type"] == "RobotFramePoseRecord"
     assert record["source_frame"] == _CAMERA_FRAME
     assert record["target_frame"] == _ROBOT_FRAME

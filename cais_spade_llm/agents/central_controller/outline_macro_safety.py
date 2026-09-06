@@ -669,7 +669,6 @@ def validate_outline_macro_recovery_safety(
                 "part_name": _effective_task_part_name(task, signature) or None,
                 "pose_source": "recovery_safety_rule",
                 "pose": None,
-                "workspace_bounds": None,
                 "failed_axes": ["safety_rule_violation"],
                 "constraint_owner": "cca",
                 "constraint_family": "safety",

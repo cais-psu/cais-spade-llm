@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for starting one native ProductAgent grounding interaction."""
 
-from __future__ import annotations
 
 import asyncio
 import json
@@ -82,6 +83,8 @@ class _GroundingRuntime:
             }
             for code in (
                 "unsupported_process",
+                "grounding_budget_exhausted",
+                "grounding_no_progress",
                 "invalid_target_feature",
                 "evidence_reference_invalid",
                 "location_evidence_unavailable",
@@ -286,3 +289,122 @@ def _descriptors() -> tuple[GroundingProducerDescriptor, ...]:
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("clarify_first", [False, True])
+def test_initial_and_clarification_resume_use_current_completion_writer(tmp_path, clarify_first):
+    from cais_spade_llm.spec2primitives.agents.pa.context_assessment import (
+        submit_pa_clarification_reply,
+    )
+    from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
+        PAContextGroundingCompletion,
+        load_pa_context_grounding_completion,
+    )
+    from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
+        prepare_native_completion_fixture,
+    )
+
+    class CompletingRuntime(_GroundingRuntime):
+        def __init__(self):
+            super().__init__([])
+            self.asked = False
+
+        async def ground_product_context(self, product_agent, **kwargs):
+            if clarify_first and not self.asked:
+                self.asked = True
+                return {
+                    "grounding_status": "clarification_required",
+                    "clarification_question": "Which variant is intended?",
+                    "tool_call_refs": [],
+                }
+            refs = ("requirement_0001",)
+            if clarify_first:
+                refs += ("interaction_record/clarification_0001.json",)
+            prepared = await prepare_native_completion_fixture(
+                kwargs["interaction_root"], evidence_refs=refs
+            )
+            return prepared["output"]
+
+    async def run():
+        runtime = CompletingRuntime()
+        agent = _UnusedProductAgent()
+        result = await start_pa_context_interaction(
+            agent,
+            tmp_path,
+            "assemble medium gear",
+            ontology_config=ontology_config(),
+            grounding_runtime=runtime,
+        )
+        if clarify_first:
+            assert result["grounding_status"] == "clarification_required"
+            result = await submit_pa_clarification_reply(
+                agent,
+                tmp_path,
+                "Medium Gear",
+                ontology_config=ontology_config(),
+                grounding_runtime=runtime,
+            )
+        return result
+
+    result = asyncio.run(run())
+    assert result["grounding_status"] == "complete", result
+    completion = load_pa_context_grounding_completion(tmp_path)
+    assert isinstance(completion, PAContextGroundingCompletion)
+    record = completion.to_record()
+    assert "schema_version" not in record
+    assert record["completion_turn"] == (2 if clarify_first else 1)
+    assert len(record["tool_call_refs"]) == 2
+    assert len(list((tmp_path / "interaction_record").glob("context_completion_*.json"))) == 1
+
+
+@pytest.mark.parametrize("code", ["grounding_budget_exhausted", "grounding_no_progress"])
+def test_grounding_progress_is_preserved_in_terminal_interaction(tmp_path: Path, code: str) -> None:
+    output = {
+        "grounding_status": "incomplete",
+        "grounding_stage": "target_feature",
+        "insufficient_evidence": "The required evidence remains unavailable.",
+        "grounding_validation_code": code,
+        "tool_call_refs": [],
+        "grounding_progress": {
+            "evidence_operations_used": 24,
+            "evidence_operations_limit": 24,
+            "proposals_used": 6,
+            "proposals_limit": 6,
+            "last_feedback": [{"validation_code": "location_evidence_unavailable", "missing_states": ["desired_state"]}],
+            "stop_reason": code,
+        },
+    }
+    result = asyncio.run(start_pa_context_interaction(
+        _UnusedProductAgent(), tmp_path, "assemble product",
+        ontology_config=ontology_config(), grounding_runtime=_GroundingRuntime([output]),
+    ))
+    assert result == output
+    assert _read_json(tmp_path / "interaction_record/turn_0001.json")["PA_output"] == output
+
+
+@pytest.mark.parametrize("mutation", [
+    {"evidence_operations_used": 25},
+    {"proposals_used": True},
+    {"proposals_limit": 0},
+    {"stop_reason": []},
+    {"last_feedback": "missing"},
+    {"extra": 1},
+])
+def test_initial_and_resumed_interactions_reject_invalid_grounding_progress(mutation) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa.context_assessment import _native_output_error
+    from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
+        _native_output_validation_error,
+    )
+
+    output = {
+        "grounding_status": "incomplete",
+        "insufficient_evidence": "Required evidence is missing.",
+        "grounding_validation_code": "grounding_no_progress",
+        "grounding_progress": {
+            "evidence_operations_used": 2, "evidence_operations_limit": 24,
+            "proposals_used": 2, "proposals_limit": 6,
+            "last_feedback": [], "stop_reason": "grounding_no_progress", **mutation,
+        },
+    }
+    assert _native_output_validation_error(output) is not None
+    assert _native_output_error(output) is not None

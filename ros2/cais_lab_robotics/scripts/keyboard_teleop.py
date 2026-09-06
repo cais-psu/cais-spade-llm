@@ -406,9 +406,6 @@ class KeyboardTeleop(Node):
                 )
             ),
         )
-        self.xarm6_hardware_workspace_bounds = dict(
-            xarm6_real.get('static_capabilities', {}).get('workspace_bounds', {})
-        )
         self._xarm6_cartesian_motion_attempted = False
         self.ur5e_hardware_cartesian_action = str(
             ur5e_controller.get(
@@ -1897,7 +1894,7 @@ class KeyboardTeleop(Node):
         world_target.position.x += float(world_delta_m[0])
         world_target.position.y += float(world_delta_m[1])
         world_target.position.z += float(world_delta_m[2])
-        target_ready, target_message = self._xarm6_target_within_workspace(world_target)
+        target_ready, target_message = self._xarm6_target_is_finite(world_target)
         if not target_ready:
             return False, target_message
         try:
@@ -2033,27 +2030,14 @@ class KeyboardTeleop(Node):
             f'orientation_drift={orientation_drift:.6f} rad'
         )
 
-    def _xarm6_target_within_workspace(self, target):
-        bounds = getattr(self, 'xarm6_hardware_workspace_bounds', {})
-        required = {
-            'x_min_m', 'x_max_m', 'y_min_m',
-            'y_max_m', 'z_min_m', 'z_max_m',
-        }
-        if not isinstance(bounds, dict) or not required.issubset(bounds):
-            return False, 'xArm6 hardware workspace bounds are unavailable'
-        coordinates = {
-            'x': float(target.position.x),
-            'y': float(target.position.y),
-            'z': float(target.position.z),
-        }
-        for axis, value in coordinates.items():
-            lower = float(bounds[f'{axis}_min_m'])
-            upper = float(bounds[f'{axis}_max_m'])
-            if not math.isfinite(value) or value < lower or value > upper:
-                return False, (
-                    f'xArm6 Cartesian target {axis}={value:.6f} m is outside '
-                    f'[{lower:.6f}, {upper:.6f}] m'
-                )
+    def _xarm6_target_is_finite(self, target):
+        """Reject malformed targets before the hardware driver's motion checks."""
+        try:
+            coordinates = (target.position.x, target.position.y, target.position.z)
+            if not all(math.isfinite(float(value)) for value in coordinates):
+                return False, 'xArm6 Cartesian target coordinates must be finite'
+        except (AttributeError, TypeError, ValueError):
+            return False, 'xArm6 Cartesian target coordinates are invalid'
         return True, 'OK'
 
     def _move_xarm6_hardware_cartesian(self, target, velocity_scale):
@@ -2062,7 +2046,7 @@ class KeyboardTeleop(Node):
             return False, 'xArm6 MoveCartesian service type is unavailable'
         if not client.wait_for_service(timeout_sec=2.0):
             return False, f'{self.xarm6_hardware_cartesian_service} is not available'
-        target_ready, target_message = self._xarm6_target_within_workspace(target)
+        target_ready, target_message = self._xarm6_target_is_finite(target)
         if not target_ready:
             return False, target_message
 

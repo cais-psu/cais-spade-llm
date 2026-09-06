@@ -23,14 +23,6 @@
           "prusa-mk3",
           "assembly_board-v1"
         ],
-        "workspace_bounds": {
-          "x_min_m": -0.6,
-          "x_max_m": 0.6,
-          "y_min_m": -1.0,
-          "y_max_m": 0.1,
-          "z_min_m": 0.9,
-          "z_max_m": 1.5
-        },
         "gripper_reach": {
           "frame": "world",
           "origin_pose": {
@@ -85,6 +77,7 @@
           "group_name": "xarm6_xarm6",
           "ee_link": "xarm6_link_eef",
           "tcp_link": "xarm6_link_tcp",
+          "position_tolerance_m": 0.005,
           "frame_id": "world"
         },
         "gripper": {
@@ -100,6 +93,7 @@
         },
         "services": {
           "detect_all": "/detect_all",
+          "motion_plan": "/plan_kinematic_path",
           "cartesian_path": "/compute_cartesian_path",
           "execute_trajectory": "/execute_trajectory",
           "attach": "/ATTACHLINK",
@@ -168,14 +162,6 @@
           "prusa-mk3",
           "assembly_board-v1"
         ],
-        "workspace_bounds": {
-          "x_min_m": -0.6,
-          "x_max_m": 0.6,
-          "y_min_m": -1.0,
-          "y_max_m": 0.1,
-          "z_min_m": 0.9,
-          "z_max_m": 1.6
-        },
         "gripper_reach": {
           "frame": "world",
           "origin_pose": {

@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Resume native ProductAgent grounding after operator clarification."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -18,11 +19,12 @@ from cais_spade_llm.spec2primitives.agents.pa.context_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     ProductAgentContextRuntime,
+    _grounding_progress_validation_error,
     _resource_assignment_output_validation_error,
 )
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     build_product_context_view,
-    persist_pa_context_grounding_completion_v8,
+    persist_pa_context_grounding_completion,
     persist_product_context_view,
 )
 from cais_spade_llm.spec2primitives.agents.pa.product_context import (
@@ -36,10 +38,13 @@ _RECORD_ROOT = Path("interaction_record")
 _GROUNDING_VALIDATION_CODES = frozenset(
     {
         "unsupported_process",
+        "grounding_budget_exhausted",
+        "grounding_no_progress",
         "invalid_target_feature",
         "evidence_reference_invalid",
         "location_evidence_unavailable",
         "no_reachable_resource",
+        "reachability_validation_unavailable",
         "invalid_resource_selection",
     }
 )
@@ -312,7 +317,6 @@ def _clarification_record(
     reply: str | None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema_version": 1,
         "record_type": "PAClarification",
         "product_requirement": product_requirement,
         "question_turn": question_turn,
@@ -335,14 +339,13 @@ def _read_clarification(path: Path) -> tuple[dict[str, Any] | None, str | None]:
         return None, "Clarification must be an object."
     payload = {key: item for key, item in value.items() if key != "fingerprint"}
     if (
-        value.get("schema_version") != 1
-        or value.get("record_type") != "PAClarification"
-        or value.get("action") not in {"answered", "cancelled"}
-        or not isinstance(value.get("product_requirement"), str)
-        or not isinstance(value.get("question"), str)
-        or not isinstance(value.get("question_turn"), int)
-        or isinstance(value.get("question_turn"), bool)
-        or value.get("fingerprint") != _fingerprint(payload)
+        (value.get("record_type") != "PAClarification")
+        or (value.get("action") not in {"answered", "cancelled"})
+        or (not isinstance(value.get("product_requirement"), str))
+        or (not isinstance(value.get("question"), str))
+        or (not isinstance(value.get("question_turn"), int))
+        or (isinstance(value.get("question_turn"), bool))
+        or (value.get("fingerprint") != _fingerprint(payload))
     ):
         return None, "Clarification is invalid or changed."
     reply = value.get("reply")
@@ -400,6 +403,9 @@ def _tool_call_refs(root: Path) -> tuple[str, ...]:
 
 
 def _native_output_error(value: Mapping[str, object]) -> str | None:
+    progress_error = _grounding_progress_validation_error(value.get("grounding_progress"))
+    if progress_error is not None:
+        return progress_error
     status = value.get("grounding_status")
     if status not in {"complete", "incomplete", "clarification_required"}:
         return "Native ProductAgent output has an invalid grounding_status."
@@ -438,10 +444,10 @@ def _persist_resource_assignment_completion(
     product_context: object,
     output: Mapping[str, object],
 ) -> None:
-    """Persist v8 only after both autonomous Phase 4 decisions complete."""
+    """Persist only after target grounding and resource assignment complete."""
     if output.get("resource_assignment_status") != "complete":
         return
-    persist_pa_context_grounding_completion_v8(
+    persist_pa_context_grounding_completion(
         root,
         tbox=tbox,
         product_requirement=product_requirement,
@@ -451,9 +457,7 @@ def _persist_resource_assignment_completion(
         ontology_projection_ref=str(output["ontology_projection_ref"]),
         resource_selection_ref=str(output["resource_selection_ref"]),
         tool_call_refs=tuple(
-            item
-            for item in output.get("tool_call_refs", [])
-            if isinstance(item, str)
+            item for item in output.get("tool_call_refs", []) if isinstance(item, str)
         ),
     )
 

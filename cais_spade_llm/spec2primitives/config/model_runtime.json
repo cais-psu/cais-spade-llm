@@ -1,5 +1,8 @@
 {
-  "schema_version": 4,
+  "grounding_limits": {
+    "max_evidence_operations": 24,
+    "max_proposals": 6
+  },
   "product_agent_llm": {
     "model": "gpt-5.6",
     "reasoning_effort": "none"

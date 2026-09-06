@@ -1,12 +1,12 @@
-"""Validate one PA-authored target feature and compile its minimal ABox view."""
-
 from __future__ import annotations
+
+"""Validate one PA-authored target feature and compile its minimal ABox view."""
 
 import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,15 +30,14 @@ _PRODUCER = "ontology_grounding"
 _PROPOSAL_ROOT = Path("products/grounding/ontology_grounding")
 _PROPOSAL_KEYS = {"target_feature"}
 _TARGET_FEATURE_BASE_KEYS = {"required_process", "current_state", "desired_state"}
-_ASSEMBLY_TARGET_FEATURE_KEYS = _TARGET_FEATURE_BASE_KEYS | {
-    "assembly_feature_association"
-}
+_ASSEMBLY_TARGET_FEATURE_KEYS = _TARGET_FEATURE_BASE_KEYS | {"assembly_feature_association"}
 _REQUIRED_PROCESS_KEYS = {"process_iri", "evidence_refs"}
 _STATE_KEYS = {"statement", "state_values"}
 _STATEMENT_KEYS = {"text", "evidence_refs"}
 _STATE_VALUE_KEYS = {"name", "value_ref", "evidence_refs"}
 _VALUE_REF_KEYS = {"record_ref", "field_path"}
 _ASSEMBLY_ASSOCIATION_KEYS = {"assembly", "assembly_features", "evidence_refs"}
+_STATE_ASSOCIATION_KEYS = _ASSEMBLY_ASSOCIATION_KEYS | {"state_names"}
 _ASSEMBLY_KEYS = {"name", "evidence_refs"}
 _ASSEMBLY_FEATURE_KEYS = {
     "name",
@@ -49,12 +48,8 @@ _ASSEMBLY_FEATURE_KEYS = {
 }
 _ASSEMBLY_FEATURE_OWNER_KEYS = {"name", "type", "evidence_refs"}
 _ASSEMBLY_FEATURE_OWNER_TYPES = ("Part", "Assembly")
-_LOCATION_RECORD_TYPES = frozenset(
-    {"RGBDSegmentationRecord", "RobotFrameLocationRecord"}
-)
-_SEGMENTATION_CANDIDATE_PATH = re.compile(
-    r"/cameras/[0-9]+/candidates/[0-9]+"
-)
+_LOCATION_RECORD_TYPES = frozenset({"RGBDSegmentationRecord", "RobotFrameLocationRecord"})
+_SEGMENTATION_CANDIDATE_PATH = re.compile(r"/cameras/[0-9]+/candidates/[0-9]+")
 
 TypedRecordResolver = Callable[[str], Mapping[str, object]]
 PAReferenceTranslator = Callable[[str], str]
@@ -68,9 +63,12 @@ class OntologyGroundingError(ValueError):
         message: str,
         *,
         validation_code: str = "invalid_target_feature",
+        unissued_reference: bool = False,
     ) -> None:
+        """Distinguish a correctable citation handle from invalid source provenance."""
         super().__init__(message)
         self.validation_code = validation_code
+        self.unissued_reference = unissued_reference
 
 
 @dataclass(frozen=True)
@@ -81,10 +79,8 @@ class OntologyGroundingProposal:
     feature_iri: str
     resolved_state_values: tuple[Mapping[str, object], ...]
     evidence_refs: tuple[str, ...]
-    assembly_feature_association: Mapping[str, object] | None = None
-    assembly_state_value_refs: Mapping[str, Mapping[str, str]] = field(
-        default_factory=dict
-    )
+    assembly_feature_association: Mapping[str, object] | list[Mapping[str, object]] | None = None
+    assembly_state_value_refs: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -136,6 +132,9 @@ async def propose_ontology_grounding(  # noqa: PLR0913
     tools: list[dict[str, Any]],
     tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]],
     max_tool_rounds: int,
+    validation_feedback: Sequence[Mapping[str, object]] = (),
+    previous_proposal: Mapping[str, object] | None = None,
+    grounding_progress: Mapping[str, object] | None = None,
 ) -> OntologyGroundingAttempt | OntologyGroundingInterruption:
     """Let PA investigate and return one canonical candidate or clarification."""
     root = Path(interaction_root).resolve()
@@ -153,6 +152,9 @@ async def propose_ontology_grounding(  # noqa: PLR0913
         )
     prompt_input: dict[str, object] = {
         "exact_requirement": abox.product_requirement,
+        "validation_feedback": list(validation_feedback),
+        "grounding_progress": dict(grounding_progress or {}),
+        "previous_proposal": previous_proposal,
         "approved_evidence_catalog": [dict(item) for item in evidence_catalog],
         "initialized_specification_iri": abox.specification_iri,
         "authorized_processes": [
@@ -168,9 +170,9 @@ async def propose_ontology_grounding(  # noqa: PLR0913
             "value_names": "PA_authored_without_host_enum",
             "assembly_process": {
                 "process_symbol": "assembly",
-                "association_cardinality": "exactly_one",
+                "association_cardinality": "zero_or_more",
                 "assembly_feature_cardinality": "exactly_two",
-                "state_location_binding": "one_current_and_one_desired",
+                "state_location_binding": "evidence_supported_or_both_null",
             },
         },
     }
@@ -180,7 +182,7 @@ async def propose_ontology_grounding(  # noqa: PLR0913
         "Choose evidence and tools at your discretion; their presentation order has no "
         "priority. This investigation also supplies the neutral evidence pool for the "
         "later independent resource decision, so retrieve any approved "
-        "context you judge necessary for Phase 4 before returning. No source type or "
+        "context you judge necessary for grounding and resource assignment before returning. No source type or "
         "tool is mandatory. Never use hidden case knowledge, evaluator information, or an "
         "interpretation supplied by these instructions. Return exactly one result: one "
         "complete target_feature, one genuine requirement-meaning clarification_question, "
@@ -189,12 +191,20 @@ async def propose_ontology_grounding(  # noqa: PLR0913
         "Author the target_feature directly from the evidence you selected. Use an empty "
         "or multi-valued state_values list when evidence supports zero or multiple values. "
         "Choose a process_iri only from authorized_processes and cite its direct evidence. "
-        "Write positive, open-world current and desired product-state statements and cite "
+        "Write evidence-supported current and desired product-state statements and cite "
         "their direct evidence. Unlisted relations are unknown rather than false. The "
         "current_state describes the evidenced state now and the desired_state describes "
         "the requested outcome. Add "
         "state_values only when accepted typed records returned by controlled tools "
-        "support values belonging to those states. For each state value, author a "
+        "support values belonging to those states. Current values locate the product now. "
+        "Desired values may reference observed assembly destinations: explain their role "
+        "in the desired statement and cite evidence connecting them to the required outcome. "
+        "An observed destination is a reference for the goal, not a measured final product pose. "
+        "Product identity alone does not support a desired location. Keep observations used "
+        "only to identify the product in current_state or relationship evidence. Use the same "
+        "exact observation in both states only when evidence supports its location role in "
+        "the requested outcome, including a location that should remain unchanged. "
+        "For each state value, author a "
         "unique semantic name within that state, exact "
         "record_ref, JSON Pointer field_path, and direct evidence_refs. The same "
         "record may supply multiple values through different paths. Do not invent a "
@@ -202,13 +212,25 @@ async def propose_ontology_grounding(  # noqa: PLR0913
         "host-defined value-name vocabulary. Do not infer a current/desired role "
         "from sensor names, camera identity, candidate order, or provider metadata; "
         "assign state values only from the approved evidence. When the selected process "
-        "symbol is assembly, author exactly one neutral assembly_feature_association. "
+        "symbol is assembly, author a collection of zero or more assembly_feature_association relationships. "
         "Name its Assembly and exactly two mating AssemblyFeature endpoints, name each "
-        "endpoint's owning Part or Assembly, and bind one endpoint to a current_state "
-        "state value and the other to a desired_state state value. Each bound state value "
+        "endpoint's owning Part or Assembly. Set association state_names to current_state, "
+        "desired_state, or both according to when that relationship is supported. Endpoint "
+        "bindings identify observations independently of the relationship's state membership. "
+        "A desired relationship may use two endpoints observed in the current state. "
+        "Support each exact candidate's role in this task, not just its part type. A small "
+        "dimensional-error advantage cannot establish task role among similar instances. "
+        "Choose an interchangeable instance only when requirement and evidence establish "
+        "interchangeability; otherwise preserve ambiguity. "
+        "Distinctive visual features, CAD measurements and source relationships may jointly "
+        "support identity; measurement tools do not need to select a winner for you. "
+        "Bind an endpoint only when its identity and coordinates are supported; otherwise "
+        "set both state_name and state_value_name to null. A document figure can support "
+        "an intended relationship but cannot establish current physical attachment. "
+        "Preserve the source's qualifications without upgrading certainty. Each bound state value "
         "must cite an accepted coordinate-bearing observation or robot-frame location. "
         "For RGBDSegmentationRecord, bind the complete candidate path "
-        "/cameras/<index>/candidates/<index>; for RobotFrameLocationRecord, bind "
+        "using its exact presented opaque field_path; for RobotFrameLocationRecord, bind "
         "/translated_location_m. "
         "You choose the endpoint meanings and exact evidence; the controller does not. "
         "Do not output ontology IRIs, RDF assertions, "
@@ -216,16 +238,45 @@ async def propose_ontology_grounding(  # noqa: PLR0913
         "primitive choices, resource choices, or execution details. The controller "
         "creates all interaction-local individuals and the exact ontology "
         "assertions after validation. Cite only requirement_0001 or evidence refs actually "
-        "returned by a controlled tool.\n\n"
+        "returned by a controlled tool or supplied as exact clarification evidence. "
+        "Copy reference strings exactly; do not reconstruct them from similar handles.\n\n"
+        "If validation_feedback is nonempty, use the remaining interaction budget to "
+        "address its deterministic contract findings. The feedback identifies structural "
+        "or evidence-reference problems and does not supply semantic answers or new evidence. "
+        "grounding_progress reports cumulative evidence operations and proposal limits; "
+        "remaining operations and proposals are their limits minus the used counts. "
+        "A revised proposal does not reset either budget. The pinned observation is unchanged. "
+        "Keep supported claims and bindings; deleting required bindings does not resolve "
+        "missing goal evidence. For an unissued citation, select the exact reference from "
+        "the supplied authorized references and its source content. Never guess a replacement "
+        "from spelling similarity. User clarifications define the requested scope; a document's "
+        "broader final assembly does not by itself add tasks to that scope.\n\n"
         f"Grounding input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
     )
     proposal_number = _next_number(root / _PROPOSAL_ROOT, "proposal_")
     proposal_path = root / _PROPOSAL_ROOT / f"proposal_{proposal_number:04d}.json"
+    response_format = _proposal_response_format(workcell.processes)
+    request_path = (
+        root
+        / _PROPOSAL_ROOT
+        / f"request_{proposal_number:04d}_{len(tuple((root / _PROPOSAL_ROOT).glob('request_*.json'))) + 1:04d}.json"
+    )
+    _write_json_exclusive(
+        request_path,
+        {
+            "record_type": "ProductAgentGroundingRequest",
+            "prompt": prompt,
+            "response_format": response_format,
+            "tools": tools,
+            "max_tool_rounds": max_tool_rounds,
+            "grounding_progress": dict(grounding_progress or {}),
+        },
+    )
     transport_output = await product_agent.ask_llm_structured(
         prompt,
-        response_format=_proposal_response_format(workcell.processes),
-        tools=tools,
-        tool_executor=tool_executor,
+        response_format=response_format,
+        tools=tools or None,
+        tool_executor=tool_executor if tools else None,
         max_tool_rounds=max_tool_rounds,
     )
     if (
@@ -251,7 +302,7 @@ async def propose_ontology_grounding(  # noqa: PLR0913
     )
 
 
-def validate_ontology_grounding_attempt(  # noqa: PLR0913
+def validate_ontology_grounding_attempt(
     attempt: OntologyGroundingAttempt,
     *,
     interaction_root: Path,
@@ -261,6 +312,7 @@ def validate_ontology_grounding_attempt(  # noqa: PLR0913
     authorized_evidence_refs: set[str],
     typed_record_resolver: TypedRecordResolver | None = None,
     pa_reference_resolver: PAReferenceTranslator | None = None,
+    observation_reference_resolver: Callable[[object], Any] | None = None,
 ) -> OntologyGroundingCandidate:
     """Strictly validate one complete attempt without committing its ABox delta."""
     root = Path(interaction_root).resolve()
@@ -271,9 +323,17 @@ def validate_ontology_grounding_attempt(  # noqa: PLR0913
         raise OntologyGroundingError("Ontology grounding attempt path is invalid.")
     canonical_output = _json_clone(attempt.output)
     try:
+        if observation_reference_resolver is not None:
+            try:
+                canonical_output = observation_reference_resolver(canonical_output)
+            except ValueError as exc:
+                raise OntologyGroundingError(
+                    "PA observation reference is invalid.",
+                    validation_code="evidence_reference_invalid",
+                ) from exc
         if pa_reference_resolver is not None:
             canonical_output = _translate_pa_references(
-                attempt.output,
+                canonical_output,
                 pa_reference_resolver,
             )
         proposal = _validated_proposal(
@@ -283,7 +343,10 @@ def validate_ontology_grounding_attempt(  # noqa: PLR0913
             authorized_evidence_refs=authorized_evidence_refs,
             typed_record_resolver=typed_record_resolver,
         )
-        delta = _compile_proposal_delta(proposal, abox=abox, tbox=tbox)
+        delta = _compile_proposal_delta(
+            proposal, namespace=abox.namespace, specification_iri=abox.specification_iri,
+            ppr_namespace=tbox.ppr_namespace,
+        )
         validated_delta = validate_triple_delta(
             root,
             tbox,
@@ -313,6 +376,7 @@ def validate_ontology_grounding_attempt(  # noqa: PLR0913
         raise OntologyGroundingError(
             f"OntologyGroundingProposal is invalid: {failure}",
             validation_code=validation_code,
+            unissued_reference=isinstance(exc, OntologyGroundingError) and exc.unissued_reference,
         ) from exc
 
     return OntologyGroundingCandidate(
@@ -325,7 +389,7 @@ def validate_ontology_grounding_attempt(  # noqa: PLR0913
     )
 
 
-async def propose_and_validate_ontology_grounding(  # noqa: PLR0913
+async def propose_and_validate_ontology_grounding(
     product_agent: ProductAgentContextRuntime,
     *,
     interaction_root: Path,
@@ -374,13 +438,61 @@ def commit_ontology_grounding_candidate(
     abox: ABoxSnapshot,
     workcell: PredefinedWorkcellSnapshot,
     authorized_evidence_refs: set[str],
+    context_view_ref: str,
 ) -> OntologyGroundingResult:
-    """Revalidate and persist one PA-authored target feature without repair."""
+    """Accept a PA proposal only while its original evidence snapshot remains intact."""
+    from .grounding_contracts import (
+        GroundingContractError,
+        ProductContextView,
+        build_grounding_evidence,
+        build_product_context_view,
+        validate_grounding_evidence,
+    )
+
     root = Path(interaction_root).resolve()
     _validate_authorities(root, tbox, abox, workcell)
     _validate_candidate(candidate, root, abox)
     if not set(candidate.proposal.evidence_refs).issubset(authorized_evidence_refs):
         raise OntologyGroundingError("Ontology grounding evidence authority changed before commit.")
+    try:
+        evidence, caveats = build_grounding_evidence(
+            root,
+            context_view_ref=context_view_ref,
+            target_feature=candidate.proposal.target_feature,
+            proposal_number=candidate.proposal_number,
+        )
+        snapshot = ProductContextView.from_mapping(
+            json.loads((root / context_view_ref).read_text())
+        )
+        current = build_product_context_view(
+            root,
+            abox,
+            attempted_evidence=snapshot.attempted_evidence,
+            assessed_at_ns=snapshot.assessed_at_ns,
+        )
+        if snapshot.to_record() != current.to_record():
+            raise GroundingContractError(
+                "Grounding context is not the current pre-commit snapshot."
+            )
+        candidate = replace(
+            candidate, compiled_delta={**candidate.compiled_delta, "uncertainty": caveats}
+        )
+        projection = {
+            "record_type": "OntologyGroundingProposal",
+            "proposal_number": candidate.proposal_number,
+            "initialized_specification_iri": abox.specification_iri,
+            "feature_iri": candidate.proposal.feature_iri,
+            "output": candidate.output,
+            "compiled_delta": candidate.compiled_delta,
+            "status": "accepted",
+            "failure": None,
+            "grounding_evidence": evidence,
+        }
+        validate_grounding_evidence(root, projection, require_committed=False)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise OntologyGroundingError(
+            "Grounding source provenance is invalid.", validation_code="evidence_reference_invalid"
+        ) from exc
     merge = validate_and_merge_triple_delta(
         root,
         tbox,
@@ -400,11 +512,28 @@ def commit_ontology_grounding_candidate(
         compiled_delta=candidate.compiled_delta,
         status="accepted",
         failure=None,
+        grounding_evidence=evidence,
     )
     return OntologyGroundingResult(
-        merge=merge,
-        proposal_path=candidate.proposal_path,
-        proposal=candidate.proposal,
+        merge=merge, proposal_path=candidate.proposal_path, proposal=candidate.proposal
+    )
+
+
+def reject_ontology_grounding_candidate(
+    candidate: OntologyGroundingCandidate,
+    *,
+    failure: str,
+) -> None:
+    """Retain a rejected attempt for diagnosis without merging any assertions."""
+    _write_proposal_record(
+        candidate.proposal_path,
+        proposal_number=candidate.proposal_number,
+        specification_iri=candidate.provisional_abox.specification_iri,
+        feature_iri=candidate.proposal.feature_iri,
+        output=candidate.output,
+        compiled_delta=candidate.compiled_delta,
+        status="rejected",
+        failure=failure,
     )
 
 
@@ -497,8 +626,10 @@ def target_feature_evidence_refs(target_feature: Mapping[str, object]) -> tuple[
             for item in state_values:
                 if isinstance(item, Mapping):
                     _append_string_refs(refs, item.get("evidence_refs"))
-    association = target_feature.get("assembly_feature_association")
-    if isinstance(association, Mapping):
+    associations = target_feature.get("assembly_feature_association", [])
+    if isinstance(associations, Mapping):
+        associations = [associations]
+    for association in associations or []:
         _append_string_refs(refs, association.get("evidence_refs"))
         assembly = association.get("assembly")
         if isinstance(assembly, Mapping):
@@ -554,18 +685,24 @@ def _validated_proposal(
             )
         )
     process_symbol = workcell.process_symbol_for_iri(str(required_process["process_iri"]))
-    association: Mapping[str, object] | None = None
+    association: Mapping[str, object] | list[Mapping[str, object]] | None = None
     assembly_state_value_refs: Mapping[str, Mapping[str, str]] = {}
     if process_symbol == "assembly":
         if set(target_feature) != _ASSEMBLY_TARGET_FEATURE_KEYS:
             raise OntologyGroundingError(
                 "assembly target_feature must contain one assembly_feature_association."
             )
-        association, assembly_state_value_refs = _validated_assembly_feature_association(
-            target_feature["assembly_feature_association"],
-            resolved_state_values=resolved_values,
-            authorized_evidence_refs=authorized_evidence_refs,
-        )
+        raw_associations = target_feature["assembly_feature_association"]
+        if not isinstance(raw_associations, list):
+            raise OntologyGroundingError("assembly_feature_association must be a collection.")
+        association = [
+            _validated_assembly_feature_association(
+                item,
+                resolved_state_values=resolved_values,
+                authorized_evidence_refs=authorized_evidence_refs,
+            )[0]
+            for item in raw_associations
+        ]
     elif set(target_feature) != _TARGET_FEATURE_BASE_KEYS:
         raise OntologyGroundingError("target_feature fields are invalid.")
     cloned_target = _json_clone(target_feature)
@@ -574,9 +711,7 @@ def _validated_proposal(
         target_feature=cloned_target,
         feature_iri=f"{abox.namespace}feature_0001",
         resolved_state_values=tuple(resolved_values),
-        assembly_feature_association=(
-            None if association is None else _json_clone(association)
-        ),
+        assembly_feature_association=(None if association is None else _json_clone(association)),
         assembly_state_value_refs=_json_clone(assembly_state_value_refs),
         evidence_refs=evidence_refs,
     )
@@ -589,8 +724,17 @@ def _validated_assembly_feature_association(  # noqa: C901
     authorized_evidence_refs: set[str],
 ) -> tuple[Mapping[str, object], Mapping[str, Mapping[str, str]]]:
     """Validate one PA-authored neutral assembly-feature association."""
-    if not isinstance(value, Mapping) or set(value) != _ASSEMBLY_ASSOCIATION_KEYS:
+    expected_keys = _STATE_ASSOCIATION_KEYS
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
         raise OntologyGroundingError("assembly_feature_association fields are invalid.")
+    membership = value["state_names"]
+    if (
+        not isinstance(membership, list)
+        or not membership
+        or any(item not in ("current_state", "desired_state") for item in membership)
+        or len(membership) != len(set(membership))
+    ):
+        raise OntologyGroundingError("Association state_names must identify distinct valid states.")
     _validated_evidence_refs(
         value.get("evidence_refs"),
         "assembly_feature_association.evidence_refs",
@@ -615,10 +759,10 @@ def _validated_assembly_feature_association(  # noqa: C901
             "assembly_feature_association must contain exactly two assembly_features."
         )
     resolved_by_state_and_name = {
-        (item.get("state"), item.get("name")): item
-        for item in resolved_state_values
+        (item.get("state"), item.get("name")): item for item in resolved_state_values
     }
     feature_names: set[str] = set()
+    feature_identities: set[tuple[str, str, str]] = set()
     owner_names: set[str] = set()
     state_names: set[str] = set()
     state_refs: dict[str, Mapping[str, str]] = {}
@@ -628,8 +772,6 @@ def _validated_assembly_feature_association(  # noqa: C901
         if set(feature_value) != _ASSEMBLY_FEATURE_KEYS:
             raise OntologyGroundingError(f"{label} fields are invalid.")
         feature_name = _validated_name(feature_value.get("name"), f"{label}.name")
-        if feature_name in feature_names:
-            raise OntologyGroundingError("AssemblyFeature names must be distinct.")
         feature_names.add(feature_name)
         _validated_evidence_refs(
             feature_value.get("evidence_refs"),
@@ -640,11 +782,15 @@ def _validated_assembly_feature_association(  # noqa: C901
         if not isinstance(owner, Mapping) or set(owner) != _ASSEMBLY_FEATURE_OWNER_KEYS:
             raise OntologyGroundingError(f"{label}.owner fields are invalid.")
         owner_name = _validated_name(owner.get("name"), f"{label}.owner.name")
-        if owner_name in owner_names:
-            raise OntologyGroundingError("AssemblyFeature owners must be distinct.")
         owner_names.add(owner_name)
         if owner.get("type") not in _ASSEMBLY_FEATURE_OWNER_TYPES:
             raise OntologyGroundingError(f"{label}.owner.type is invalid.")
+        identity = (str(owner["type"]), owner_name, feature_name)
+        if identity in feature_identities:
+            raise OntologyGroundingError(
+                "AssemblyFeature endpoints must be distinct exact identities."
+            )
+        feature_identities.add(identity)
         _validated_evidence_refs(
             owner.get("evidence_refs"),
             f"{label}.owner.evidence_refs",
@@ -652,12 +798,10 @@ def _validated_assembly_feature_association(  # noqa: C901
         )
         state_name = feature_value.get("state_name")
         state_value_name = feature_value.get("state_value_name")
+        if (state_name is None) and (state_value_name is None):
+            continue
         if state_name not in {"current_state", "desired_state"}:
             raise OntologyGroundingError(f"{label}.state_name is invalid.")
-        if state_name in state_names:
-            raise OntologyGroundingError(
-                "AssemblyFeature endpoints must bind one current_state and one desired_state."
-            )
         state_names.add(str(state_name))
         state_value_name = _validated_name(
             state_value_name,
@@ -665,9 +809,7 @@ def _validated_assembly_feature_association(  # noqa: C901
         )
         resolved = resolved_by_state_and_name.get((state_name, state_value_name))
         if resolved is None:
-            raise OntologyGroundingError(
-                f"{label} does not reference an accepted state value."
-            )
+            raise OntologyGroundingError(f"{label} does not reference an accepted state value.")
         if resolved.get("record_type") not in _LOCATION_RECORD_TYPES:
             raise OntologyGroundingError(
                 f"{label} state value is not coordinate-bearing location evidence."
@@ -694,11 +836,100 @@ def _validated_assembly_feature_association(  # noqa: C901
             "field_path": str(field_path),
             "record_sha256": str(resolved["record_sha256"]),
         }
-    if state_names != {"current_state", "desired_state"}:
-        raise OntologyGroundingError(
-            "AssemblyFeature endpoints must bind one current_state and one desired_state."
-        )
     return _json_clone(value), state_refs
+
+
+def eligible_allocation_pairs(
+    associations: Sequence[Mapping[str, object]],
+    resolved_state_values: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, Mapping[str, str]], ...]:
+    """Return distinct exact coordinate pairs without selecting by presentation order."""
+    resolved = {(item["state"], item["name"]): item for item in resolved_state_values}
+    pairs: dict[str, Mapping[str, Mapping[str, str]]] = {}
+    for association in associations:
+        endpoints = association["assembly_features"]
+        if {item["state_name"] for item in endpoints} != {"current_state", "desired_state"}:
+            continue
+        pair = {}
+        for endpoint in endpoints:
+            value = resolved[(endpoint["state_name"], endpoint["state_value_name"])]
+            pair[endpoint["state_name"]] = {
+                **value["value_ref"],
+                "record_sha256": value["record_sha256"],
+            }
+        pairs.setdefault(_fingerprint(pair), pair)
+    return tuple(pairs.values())
+
+
+def _compile_associations(
+    associations: Sequence[Mapping[str, object]],
+    *,
+    namespace: str,
+    ppr_namespace: str,
+) -> list[dict[str, object]]:
+    assertions: list[dict[str, object]] = []
+    owners: dict[tuple[str, str], str] = {}
+    features: dict[tuple[str, str, str], str] = {}
+    counts = {"Part": 0, "Assembly": 0}
+
+    def triple(subject: str, predicate: str, value: str, refs: object) -> None:
+        entry = {
+            "subject": subject,
+            "predicate": predicate,
+            "object": {"kind": "iri", "value": value},
+            "evidence_refs": list(refs),
+        }
+        if entry not in assertions:
+            assertions.append(entry)
+
+    def owner_iri(owner: Mapping[str, object]) -> str:
+        key = (str(owner["type"]), str(owner["name"]))
+        if key not in owners:
+            counts[key[0]] += 1
+            prefix = {"Part": "part", "Assembly": "assembly"}[key[0]]
+            owners[key] = f"{namespace}{prefix}_{counts[key[0]]:04d}"
+        iri = owners[key]
+        triple(iri, str(RDF.type), f"{ppr_namespace}{key[0]}", owner["evidence_refs"])
+        return iri
+
+    for index, association in enumerate(associations, 1):
+        assembly = association["assembly"]
+        assembly_iri = owner_iri({**assembly, "type": "Assembly"})
+        iri = f"{namespace}assemblyfeatureassociation_{index:04d}"
+        refs = association["evidence_refs"]
+        triple(iri, str(RDF.type), f"{ppr_namespace}AssemblyFeatureAssociation", refs)
+        triple(assembly_iri, f"{ppr_namespace}hasAssemblyFeatureAssociation", iri, refs)
+        for state_name in association.get("state_names", []):
+            predicate, state = {
+                "current_state": ("hascurrentstate", "currentstate_0001"),
+                "desired_state": ("hasdesiredstate", "desiredstate_0001"),
+            }[state_name]
+            triple(iri, f"{ppr_namespace}{predicate}", f"{namespace}{state}", refs)
+        for endpoint in association["assembly_features"]:
+            owner = endpoint["owner"]
+            owning_iri = owner_iri(owner)
+            key = (str(owner["type"]), str(owner["name"]), str(endpoint["name"]))
+            if key not in features:
+                features[key] = f"{namespace}assemblyfeature_{len(features) + 1:04d}"
+            feature_iri = features[key]
+            if owning_iri != assembly_iri:
+                triple(
+                    assembly_iri, f"{ppr_namespace}hasPart", owning_iri, owner["evidence_refs"]
+                )
+            triple(
+                feature_iri,
+                str(RDF.type),
+                f"{ppr_namespace}AssemblyFeature",
+                endpoint["evidence_refs"],
+            )
+            triple(
+                owning_iri,
+                f"{ppr_namespace}hasAssemblyFeature",
+                feature_iri,
+                endpoint["evidence_refs"],
+            )
+            triple(iri, f"{ppr_namespace}relatesAssemblyFeature", feature_iri, refs)
+    return assertions
 
 
 def _validated_name(value: object, label: str) -> str:
@@ -818,8 +1049,9 @@ def _validated_state(  # noqa: C901
 def _compile_proposal_delta(
     proposal: OntologyGroundingProposal,
     *,
-    abox: ABoxSnapshot,
-    tbox: TBoxSnapshot,
+    namespace: str,
+    specification_iri: str,
+    ppr_namespace: str,
 ) -> dict[str, object]:
     target = proposal.target_feature
     process = target["required_process"]
@@ -835,32 +1067,28 @@ def _compile_proposal_delta(
     current_refs = list(current_statement["evidence_refs"])
     desired_refs = list(desired_statement["evidence_refs"])
     process_refs = list(process["evidence_refs"])
-    current_state_iri = f"{abox.namespace}currentstate_0001"
-    desired_state_iri = f"{abox.namespace}desiredstate_0001"
-    target_class = (
-        "AssemblyFeatureAssociation"
-        if proposal.assembly_feature_association is not None
-        else "feature"
-    )
+    current_state_iri = f"{namespace}currentstate_0001"
+    desired_state_iri = f"{namespace}desiredstate_0001"
+    target_class = "feature"
     assertions: list[dict[str, object]] = [
         {
             "subject": proposal.feature_iri,
             "predicate": str(RDF.type),
             "object": {
                 "kind": "iri",
-                "value": f"{tbox.ppr_namespace}{target_class}",
+                "value": f"{ppr_namespace}{target_class}",
             },
             "evidence_refs": desired_refs,
         },
         {
-            "subject": abox.specification_iri,
-            "predicate": f"{tbox.ppr_namespace}defines",
+            "subject": specification_iri,
+            "predicate": f"{ppr_namespace}defines",
             "object": {"kind": "iri", "value": proposal.feature_iri},
             "evidence_refs": desired_refs,
         },
         {
             "subject": str(process["process_iri"]),
-            "predicate": f"{tbox.ppr_namespace}realizes",
+            "predicate": f"{ppr_namespace}realizes",
             "object": {"kind": "iri", "value": proposal.feature_iri},
             "evidence_refs": process_refs,
         },
@@ -869,7 +1097,7 @@ def _compile_proposal_delta(
             "predicate": str(RDF.type),
             "object": {
                 "kind": "iri",
-                "value": f"{tbox.ppr_namespace}state",
+                "value": f"{ppr_namespace}state",
             },
             "evidence_refs": current_refs,
         },
@@ -878,36 +1106,38 @@ def _compile_proposal_delta(
             "predicate": str(RDF.type),
             "object": {
                 "kind": "iri",
-                "value": f"{tbox.ppr_namespace}state",
+                "value": f"{ppr_namespace}state",
             },
             "evidence_refs": desired_refs,
         },
         {
             "subject": proposal.feature_iri,
-            "predicate": f"{tbox.ppr_namespace}hascurrentstate",
+            "predicate": f"{ppr_namespace}hascurrentstate",
             "object": {"kind": "iri", "value": current_state_iri},
             "evidence_refs": current_refs,
         },
         {
             "subject": proposal.feature_iri,
-            "predicate": f"{tbox.ppr_namespace}hasdesiredstate",
+            "predicate": f"{ppr_namespace}hasdesiredstate",
             "object": {"kind": "iri", "value": desired_state_iri},
             "evidence_refs": desired_refs,
         },
     ]
     association = proposal.assembly_feature_association
-    if association is not None:
+    if isinstance(association, list):
+        assertions.extend(_compile_associations(association, namespace=namespace, ppr_namespace=ppr_namespace))
+    elif association is not None:
         association_refs = list(association["evidence_refs"])
         assembly = association["assembly"]
         assembly_features = association["assembly_features"]
         assert isinstance(assembly, Mapping)
         assert isinstance(assembly_features, list)
-        assembly_iri = f"{abox.namespace}assembly_0001"
+        assembly_iri = f"{namespace}assembly_0001"
         assertions.append(
             {
                 "subject": assembly_iri,
                 "predicate": str(RDF.type),
-                "object": {"kind": "iri", "value": f"{tbox.ppr_namespace}Assembly"},
+                "object": {"kind": "iri", "value": f"{ppr_namespace}Assembly"},
                 "evidence_refs": list(assembly["evidence_refs"]),
             }
         )
@@ -922,10 +1152,9 @@ def _compile_proposal_delta(
             owner_type = str(owner["type"])
             owner_type_counts[owner_type] += 1
             owner_iri = (
-                f"{abox.namespace}{owner_type.casefold()}_"
-                f"{owner_type_counts[owner_type]:04d}"
+                f"{namespace}{owner_type.casefold()}_{owner_type_counts[owner_type]:04d}"
             )
-            assembly_feature_iri = f"{abox.namespace}assemblyfeature_{feature_index:04d}"
+            assembly_feature_iri = f"{namespace}assemblyfeature_{feature_index:04d}"
             owner_refs = list(owner["evidence_refs"])
             feature_refs = list(feature_value["evidence_refs"])
             assertions.extend(
@@ -935,13 +1164,13 @@ def _compile_proposal_delta(
                         "predicate": str(RDF.type),
                         "object": {
                             "kind": "iri",
-                            "value": f"{tbox.ppr_namespace}{owner_type}",
+                            "value": f"{ppr_namespace}{owner_type}",
                         },
                         "evidence_refs": owner_refs,
                     },
                     {
                         "subject": assembly_iri,
-                        "predicate": f"{tbox.ppr_namespace}hasPart",
+                        "predicate": f"{ppr_namespace}hasPart",
                         "object": {"kind": "iri", "value": owner_iri},
                         "evidence_refs": owner_refs,
                     },
@@ -950,30 +1179,28 @@ def _compile_proposal_delta(
                         "predicate": str(RDF.type),
                         "object": {
                             "kind": "iri",
-                            "value": f"{tbox.ppr_namespace}AssemblyFeature",
+                            "value": f"{ppr_namespace}AssemblyFeature",
                         },
                         "evidence_refs": feature_refs,
                     },
                     {
                         "subject": owner_iri,
-                        "predicate": f"{tbox.ppr_namespace}hasAssemblyFeature",
+                        "predicate": f"{ppr_namespace}hasAssemblyFeature",
                         "object": {"kind": "iri", "value": assembly_feature_iri},
                         "evidence_refs": feature_refs,
                     },
                     {
                         "subject": proposal.feature_iri,
-                        "predicate": f"{tbox.ppr_namespace}relatesAssemblyFeature",
+                        "predicate": f"{ppr_namespace}relatesAssemblyFeature",
                         "object": {"kind": "iri", "value": assembly_feature_iri},
-                        "evidence_refs": list(
-                            dict.fromkeys((*association_refs, *feature_refs))
-                        ),
+                        "evidence_refs": list(dict.fromkeys((*association_refs, *feature_refs))),
                     },
                 ]
             )
         assertions.append(
             {
                 "subject": assembly_iri,
-                "predicate": f"{tbox.ppr_namespace}hasAssemblyFeatureAssociation",
+                "predicate": f"{ppr_namespace}hasAssemblyFeatureAssociation",
                 "object": {"kind": "iri", "value": proposal.feature_iri},
                 "evidence_refs": association_refs,
             }
@@ -1089,18 +1316,24 @@ def _proposal_response_format(
                     "name": {"type": "string", "minLength": 1},
                     "owner": owner,
                     "state_name": {
-                        "type": "string",
-                        "enum": ["current_state", "desired_state"],
+                        "type": ["string", "null"],
+                        "enum": ["current_state", "desired_state", None],
                     },
-                    "state_value_name": {"type": "string", "minLength": 1},
+                    "state_value_name": {"type": ["string", "null"]},
                     "evidence_refs": evidence_refs,
                 },
             }
             properties["assembly_feature_association"] = {
                 "type": "object",
                 "additionalProperties": False,
-                "required": sorted(_ASSEMBLY_ASSOCIATION_KEYS),
+                "required": sorted(_STATE_ASSOCIATION_KEYS),
                 "properties": {
+                    "state_names": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["current_state", "desired_state"]},
+                        "minItems": 1,
+                        "maxItems": 2,
+                    },
                     "assembly": {
                         "type": "object",
                         "additionalProperties": False,
@@ -1118,6 +1351,10 @@ def _proposal_response_format(
                     },
                     "evidence_refs": evidence_refs,
                 },
+            }
+            properties["assembly_feature_association"] = {
+                "type": "array",
+                "items": properties["assembly_feature_association"],
             }
         return {
             "type": "object",
@@ -1177,9 +1414,7 @@ def _proposal_response_format(
                             "type": "object",
                             "additionalProperties": False,
                             "required": ["unsupported_process"],
-                            "properties": {
-                                "unsupported_process": {"type": "boolean"}
-                            },
+                            "properties": {"unsupported_process": {"type": "boolean"}},
                         },
                     ]
                 }
@@ -1287,6 +1522,7 @@ def _translate_pa_references(
                         raise OntologyGroundingError(
                             "PA evidence reference is not authorized.",
                             validation_code="evidence_reference_invalid",
+                            unissued_reference=True,
                         ) from exc
                 translated[key] = refs
             elif key == "record_ref" and parent_key == "value_ref" and isinstance(item, str):
@@ -1296,6 +1532,7 @@ def _translate_pa_references(
                     raise OntologyGroundingError(
                         "PA typed-record reference is not authorized.",
                         validation_code="evidence_reference_invalid",
+                        unissued_reference=True,
                     ) from exc
             else:
                 translated[key] = _translate_pa_references(
@@ -1342,7 +1579,7 @@ def _is_empty_resolved_value(value: object) -> bool:
     return False
 
 
-def _write_proposal_record(  # noqa: PLR0913
+def _write_proposal_record(
     path: Path,
     *,
     proposal_number: int,
@@ -1352,9 +1589,9 @@ def _write_proposal_record(  # noqa: PLR0913
     compiled_delta: Mapping[str, object] | None,
     status: str,
     failure: str | None,
+    grounding_evidence: Mapping[str, object] | None = None,
 ) -> None:
     record = {
-        "schema_version": 10,
         "record_type": "OntologyGroundingProposal",
         "proposal_number": proposal_number,
         "initialized_specification_iri": specification_iri,
@@ -1364,6 +1601,8 @@ def _write_proposal_record(  # noqa: PLR0913
         "status": status,
         "failure": failure,
     }
+    if grounding_evidence is not None:
+        record["grounding_evidence"] = _json_clone(grounding_evidence)
     _write_json_exclusive(path, record)
 
 

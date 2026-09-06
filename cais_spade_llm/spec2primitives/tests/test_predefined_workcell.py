@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for the immutable predefined assembly Workcell projection."""
 
-from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -67,7 +68,7 @@ def test_predefined_workcell_record_is_deterministic_and_configuration_free() ->
     assert first.fingerprint == second.fingerprint
     assert first.to_record() == second.to_record()
     record = first.to_record()
-    assert record["schema_version"] == 2
+    assert "schema_version" not in record
     assert record["record_type"] == "PredefinedWorkcellSnapshot"
     assert record["tbox_fingerprint"] == tbox.fingerprint
     assert record["registry_fingerprint"] == registry.fingerprint
@@ -103,7 +104,6 @@ def test_workcell_projects_multiple_configured_process_capabilities(tmp_path: Pa
     profile_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
                 "processes": [
                     {"symbol": symbol, "iri": iri} for symbol, iri in process_iris.items()
                 ],

@@ -2372,16 +2372,6 @@ def _resolved_cartesian_pose_error(
     if agent is None:
         return ""
 
-    workspace_check = getattr(agent, "_is_pose_in_workspace", None)
-    if not callable(workspace_check):
-        return f"{task.name}.{step.id} workspace validation is unavailable"
-    try:
-        workspace_ready, workspace_reason = workspace_check(position)
-    except (AttributeError, TypeError, ValueError) as exc:
-        return f"{task.name}.{step.id} workspace validation failed: {exc}"
-    if not workspace_ready:
-        return f"{task.name}.{step.id} {workspace_reason}"
-
     capabilities = dict(getattr(agent, "static_capabilities", {}) or {})
     gripper_reach = capabilities.get("gripper_reach")
     if not isinstance(gripper_reach, dict) or not gripper_reach:

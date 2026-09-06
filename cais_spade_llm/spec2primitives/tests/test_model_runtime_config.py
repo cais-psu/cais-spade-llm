@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for package-local PA, document, and observation model configuration."""
 
-from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from cais_spade_llm.spec2primitives.config import (
     DEFAULT_MODEL_RUNTIME_CONFIG_PATH,
+    GroundingLimits,
     load_model_runtime_config,
 )
 
@@ -16,11 +18,12 @@ from cais_spade_llm.spec2primitives.config import (
 def test_default_model_configuration_uses_compatible_gpt_5_6_efforts() -> None:
     config = load_model_runtime_config()
 
-    assert config.schema_version == 4
+    assert not hasattr(config, "schema_version")
     assert config.product_agent_llm.model == "gpt-5.6"
     assert config.product_agent_llm.reasoning_effort == "none"
     assert config.robot_agent_llm.model == "gpt-5.6"
     assert config.robot_agent_llm.reasoning_effort == "medium"
+    assert config.grounding_limits == GroundingLimits(max_evidence_operations=24, max_proposals=6)
     for vision_config in (config.document_vlm, config.observation_vlm):
         assert vision_config.provider == "openai"
         assert vision_config.model == "gpt-5.6"
@@ -83,6 +86,9 @@ def test_models_can_be_changed_only_through_the_validated_config_file(
         lambda value: value["document_vlm"].__setitem__("max_output_tokens", 0),
         lambda value: value["document_vlm"].__setitem__("timeout_seconds", True),
         lambda value: value["observation_vlm"].__setitem__("provider", "other"),
+        lambda value: value["grounding_limits"].__setitem__("unknown", 1),
+        lambda value: value["grounding_limits"].__setitem__("max_evidence_operations", 0),
+        lambda value: value["grounding_limits"].__setitem__("max_proposals", True),
     ],
 )
 def test_invalid_or_unknown_model_configuration_is_rejected(
@@ -100,3 +106,20 @@ def test_invalid_or_unknown_model_configuration_is_rejected(
 
 def _default_value() -> dict[str, object]:
     return json.loads(DEFAULT_MODEL_RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "6", None])
+@pytest.mark.parametrize("field", ["max_evidence_operations", "max_proposals"])
+def test_grounding_limits_require_positive_integers(field, value) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        GroundingLimits(**{field: value})
+
+
+def test_grounding_limits_are_loaded_without_changing_model_settings(tmp_path: Path) -> None:
+    value = _default_value()
+    value["grounding_limits"] = {"max_evidence_operations": 9, "max_proposals": 4}
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    loaded = load_model_runtime_config(path)
+    assert loaded.grounding_limits == GroundingLimits(9, 4)
+    assert loaded.product_agent_llm == load_model_runtime_config().product_agent_llm

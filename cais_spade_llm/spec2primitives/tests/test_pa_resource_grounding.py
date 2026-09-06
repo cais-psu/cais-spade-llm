@@ -1,25 +1,21 @@
+from __future__ import annotations
+
 """Tests for PA-driven two-state resource grounding."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from rdflib import Namespace, URIRef
+from rdflib import Namespace
 from rdflib.namespace import RDF
 
-from cais_spade_llm.spec2primitives.adapters.moveit_plan_only import (
-    _cartesian_waypoints,
-)
 from cais_spade_llm.spec2primitives.agents.pa import resource_grounding
 from cais_spade_llm.spec2primitives.agents.pa.presentation_records import (
     AllocationEvidenceSource,
-    load_allocation_presentation,
     load_or_create_allocation_presentation,
     load_or_create_evidence_presentation,
 )
@@ -30,22 +26,10 @@ from cais_spade_llm.spec2primitives.agents.pa.product_context import (
     validate_and_merge_triple_delta,
 )
 from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
-    CartesianReachabilityRequest,
-    ReachabilityCheckRecord,
     ResourceGroundingError,
-    RobotFrameLocationEvidenceError,
     candidate_resource_catalog,
-    commit_resource_assignment,
-    persist_cartesian_reachability,
-    persist_pa_resource_selection,
-    prepare_cartesian_reachability,
 )
-from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
-    check_resource_reachability as _runtime_check_resource_reachability,
-)
-from cais_spade_llm.spec2primitives.agents.ra.feasibility_validation import (
-    validate_provisional_allocation,
-)
+
 from cais_spade_llm.spec2primitives.config import load_workcell_profile
 from cais_spade_llm.spec2primitives.ontology import (
     PredefinedWorkcellSnapshot,
@@ -62,98 +46,6 @@ PPR_NAMESPACE = "http://PAonto.com#"
 PROCESS_IRI = "https://cais-spade-llm.local/process/assembly"
 RESOURCE_NAMESPACE = "https://cais-spade-llm.local/resource/"
 EVIDENCE_REF = "products/user_requirement/product_requirement.json"
-
-
-class _CapturingFeasibilityRuntime:
-    def __init__(self) -> None:
-        self.requests: list[Mapping[str, object]] = []
-
-    async def validate_plan_only_allocation(
-        self,
-        request: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        self.requests.append(dict(request))
-        state_locations = request["state_locations"]
-        return {
-            "status": "accepted",
-            "state_locations": {
-                state_name: [
-                    {
-                        "evidence_handle": item["evidence_handle"],
-                        "status": "accepted",
-                        "message": "arbitrary-profile location accepted",
-                        "error_code": 1,
-                    }
-                    for item in locations
-                ]
-                for state_name, locations in state_locations.items()
-            },
-            "feedback": None,
-        }
-
-
-class _CapturingCartesianRuntime:
-    def __init__(self, *, status: str = "accepted") -> None:
-        self.status = status
-        self.requests: list[Mapping[str, object]] = []
-
-    async def validate_plan_only_allocation(
-        self,
-        request: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        self.requests.append(dict(request))
-        live_start_pose = {
-            "frame_id": "world",
-            "link_name": str(request["end_effector_link"]),
-            "position_m": [0.0, -0.5, 1.3],
-            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
-        }
-        ee_to_tcp = {
-            "parent_link": str(request["end_effector_link"]),
-            "child_link": str(request["tcp_link"]),
-            "translation_m": [0.0, 0.0, -0.17],
-            "rotation_xyzw": [0.0, 0.0, 0.0, 1.0],
-        }
-        waypoints = _cartesian_waypoints(
-            request,
-            live_start_pose=live_start_pose,
-            ee_to_tcp=ee_to_tcp,
-        )
-
-        def phase(name: str, roles: list[str]) -> Mapping[str, object]:
-            phase_status = (
-                "accepted" if self.status == "rejected" and name == "pick" else self.status
-            )
-            fraction = 1.0 if phase_status == "accepted" else 0.5
-            error_code = 1 if phase_status == "accepted" else -1
-            return {
-                "phase": name,
-                "status": phase_status,
-                "waypoint_roles": roles,
-                "fraction": fraction,
-                "moveit_error_code": error_code,
-                "terminal_state_available": phase_status == "accepted",
-                "message": f"{name} Cartesian path {phase_status}",
-            }
-
-        return {
-            "status": self.status,
-            "live_start_pose": live_start_pose,
-            "ee_to_tcp_transform": ee_to_tcp,
-            "waypoints": waypoints,
-            "phases": {
-                "pick": phase(
-                    "pick",
-                    ["pick_approach", "grasp", "pick_retreat"],
-                ),
-                "place": phase(
-                    "place",
-                    ["transfer", "place_approach", "placement", "place_retreat"],
-                ),
-            },
-            "feedback": (None if self.status == "accepted" else "Cartesian path rejected"),
-            "motion_executed": False,
-        }
 
 
 def test_removed_need_and_automatic_selection_are_not_exported() -> None:
@@ -216,725 +108,39 @@ def test_arbitrary_process_and_resource_symbols_flow_without_code_dependencies(
 
     assert tuple(catalog) == ("alpha_bot", "beta_bot")
     assert "gamma_bot" not in catalog
-    reachability = _runtime_check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol="beta_bot",
-        allocation_presentation=presentation,
-        state_location_record_paths={
-            "current_state": [
-                (handles[_location_candidate_key(root, current_path)], current_path),
-                (
-                    handles[_location_candidate_key(root, current_extra_path)],
-                    current_extra_path,
-                ),
-            ],
-            "desired_state": [
-                (handles[_location_candidate_key(root, desired_path)], desired_path),
-                (
-                    handles[_location_candidate_key(root, desired_extra_path)],
-                    desired_extra_path,
-                ),
-            ],
-        },
-    )
-    runtime = _CapturingFeasibilityRuntime()
-    validation = asyncio.run(
-        validate_provisional_allocation(
-            runtime,
-            interaction_root=root,
-            workcell=workcell,
-            reachability=reachability,
-        )
-    )
-    selection = persist_pa_resource_selection(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        reachability=reachability,
-        allocation_presentation=presentation,
-        robot_agent_validation_path=validation.record_path,
-    )
-    committed = commit_resource_assignment(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        selection=selection,
-    )
+    from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import OfflineMoveItPlanning
 
-    assert len(runtime.requests) == 1
-    request = runtime.requests[0]
-    assert request["process_symbol"] == "joining"
-    assert request["process_iri"] == process_iri
-    assert request["feature_iri"].endswith("feature_0001")
-    assert request["resource_symbol"] == "beta_bot"
-    assert len(request["state_locations"]["current_state"]) == 2
-    assert len(request["state_locations"]["desired_state"]) == 2
-    assert request["validation_scope"] == "state_location_reachability"
-    serialized_request = json.dumps(request, sort_keys=True)
-    assert "assembly" not in serialized_request
-    assert "xarm6" not in serialized_request
-    assert "ur5e" not in serialized_request
-    assert selection.process_symbol == "joining"
-    assert selection.process_iri == process_iri
-    assert selection.schema_version == 5
-    assert selection.state_location_handles is not None
-    assert selection.candidate_resource_symbols == ("alpha_bot", "beta_bot")
-    assert committed.abox.accepted_assertion_count == 11
-    assert (
-        URIRef(f"{abox.namespace}process_execution_0001"),
-        Namespace(PPR_NAMESPACE).runsOnResource,
-        URIRef("https://example.local/resource/beta_bot"),
-    ) in committed.abox.graph
-
-
-@pytest.mark.parametrize(
-    ("resource_symbol", "current", "desired", "expected_status"),
-    [
-        ("xarm6", (0.0, -0.7, 1.1), (0.0, -0.2, 1.1), "accepted"),
-        ("ur5e", (0.0, 0.2, 1.1), (0.0, 0.8, 1.1), "accepted"),
-        ("xarm6", (0.0, -0.7, 1.1), (0.0, 0.8, 1.1), "rejected"),
-    ],
-)
-def test_reachability_checks_both_states_for_the_explicit_pa_resource(
-    tmp_path: Path,
-    resource_symbol: str,
-    current: tuple[float, float, float],
-    desired: tuple[float, float, float],
-    expected_status: str,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    current_path = _write_world_location(root, "current", current)
-    desired_path = _write_world_location(root, "desired", desired)
-
-    check = check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol=resource_symbol,
-        current_location_record_path=current_path,
-        desired_location_record_path=desired_path,
-    )
-
-    assert check.resource_symbol == resource_symbol
-    assert check.status == expected_status
-    assert check.current_state.state_name == "current_state"
-    assert check.desired_state.state_name == "desired_state"
-    assert check.current_state.location_record_ref != (check.desired_state.location_record_ref)
-    assert check.current_state.distance_from_reach_origin_m >= 0.0
-    assert check.desired_state.distance_from_reach_origin_m >= 0.0
-    assert "selected_resource" not in check.to_record()
-    check.assert_unchanged()
-
-
-def test_live_cartesian_reachability_ignores_static_workspace_box(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, manifest_paths = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    fixture = _cartesian_grounding_fixture(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        desired_y=0.144,
-    )
-
-    prepared = prepare_cartesian_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol="xarm6",
-        allocation_presentation=fixture["presentation"],
-        current_state_evidence_handle=fixture["current_handle"],
-        desired_state_evidence_handle=fixture["desired_handle"],
-        current_location_record_path=fixture["current_location"],
-        desired_location_record_path=fixture["desired_location"],
-        current_cad_correspondence_record_path=fixture["current_correspondence"],
-        desired_cad_correspondence_record_path=fixture["desired_correspondence"],
-    )
-    runtime = _CapturingCartesianRuntime()
-    validation = asyncio.run(
-        validate_provisional_allocation(
-            runtime,
-            interaction_root=root,
-            workcell=workcell,
-            reachability=prepared,
-        )
-    )
-    reachability = persist_cartesian_reachability(
-        interaction_root=root,
-        prepared=prepared,
-        robot_agent_validation_path=validation.record_path,
-    )
-    selection = persist_pa_resource_selection(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        reachability=reachability,
-        allocation_presentation=fixture["presentation"],
-        robot_agent_validation_path=validation.record_path,
-        state_location_handles={
-            "current_state": (fixture["current_handle"],),
-            "desired_state": (fixture["desired_handle"],),
-        },
-    )
-
-    assert isinstance(prepared, CartesianReachabilityRequest)
-    xarm_manifest = json.loads(manifest_paths["xarm6"].read_text(encoding="utf-8"))
-    assert (
-        xarm_manifest["xarm6"]["gazebo"]["static_capabilities"]["workspace_bounds"]["y_max_m"]
-        == 0.1
-    )
-    assert prepared.desired_state.translation_m[1] == pytest.approx(0.144)
-    assert prepared.cartesian_targets["place_object_center_m"] != list(
-        prepared.desired_state.translation_m
-    )
-    assert runtime.requests[0]["motion_mode"] == "cartesian_pick_place"
-    assert runtime.requests[0]["cartesian_parameters"] == {
-        "max_step_m": 0.01,
-        "jump_threshold": 0.0,
-        "avoid_collisions": True,
-        "minimum_fraction": 0.999,
-    }
-    assert reachability.schema_version == 3
-    assert reachability.status == "accepted"
-    assert "in_workspace" not in reachability.to_record()["desired_state"]
-    assert "gripper_reach" not in json.dumps(reachability.to_record())
-    assert validation.schema_version == 3
-    assert validation.status == "accepted"
-    assert validation.to_record()["motion_executed"] is False
-    assert selection.schema_version == 5
-    assert selection.state_location_handles == {
-        "current_state": (fixture["current_handle"],),
-        "desired_state": (fixture["desired_handle"],),
-    }
-    assert selection.selected_resource_symbol == "xarm6"
-    assert selection.allocation_status == "accepted"
-
-
-@pytest.mark.parametrize("resource_symbol", ["xarm6", "ur5e"])
-def test_cartesian_request_uses_pa_chosen_resource_controller_profile(
-    tmp_path: Path,
-    resource_symbol: str,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    fixture = _cartesian_grounding_fixture(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        desired_y=0.144,
-    )
-
-    prepared = prepare_cartesian_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol=resource_symbol,
-        allocation_presentation=fixture["presentation"],
-        current_state_evidence_handle=fixture["current_handle"],
-        desired_state_evidence_handle=fixture["desired_handle"],
-        current_location_record_path=fixture["current_location"],
-        desired_location_record_path=fixture["desired_location"],
-        current_cad_correspondence_record_path=fixture["current_correspondence"],
-        desired_cad_correspondence_record_path=fixture["desired_correspondence"],
-    )
-
-    assert prepared.resource_symbol == resource_symbol
-    assert prepared.resource_jid == f"{resource_symbol}@localhost"
-    assert prepared.controller.moveit_group == f"{resource_symbol}_manipulator"
-    assert prepared.controller.end_effector_link == f"{resource_symbol}_ee"
-    assert prepared.controller.tcp_link == f"{resource_symbol}_tcp"
-    assert prepared.controller.cartesian_path_service == "/compute_cartesian_path"
-
-
-def test_cartesian_reachability_fails_closed_without_support_plane(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    fixture = _cartesian_grounding_fixture(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        desired_y=0.144,
-        support_status="unavailable",
-    )
-
-    with pytest.raises(ResourceGroundingError, match="support-plane evidence"):
-        prepare_cartesian_reachability(
+    reachability = asyncio.run(
+        resource_grounding.check_live_resource_reachability(
+            runtime=OfflineMoveItPlanning(),
             interaction_root=root,
             tbox=tbox,
             registry=registry,
             workcell=workcell,
-            resource_symbol="xarm6",
-            allocation_presentation=fixture["presentation"],
-            current_state_evidence_handle=fixture["current_handle"],
-            desired_state_evidence_handle=fixture["desired_handle"],
-            current_location_record_path=fixture["current_location"],
-            desired_location_record_path=fixture["desired_location"],
-            current_cad_correspondence_record_path=fixture["current_correspondence"],
-            desired_cad_correspondence_record_path=fixture["desired_correspondence"],
-        )
-
-
-def test_cartesian_reachability_rejects_tampered_robot_frame_location(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    fixture = _cartesian_grounding_fixture(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        desired_y=0.144,
-    )
-    current_location = fixture["current_location"]
-    assert isinstance(current_location, Path)
-    record = json.loads(current_location.read_text(encoding="utf-8"))
-    record["translated_location_m"][0] += 0.1
-    current_location.write_text(json.dumps(record), encoding="utf-8")
-
-    with pytest.raises(ResourceGroundingError, match="calibrated candidate"):
-        prepare_cartesian_reachability(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            resource_symbol="xarm6",
-            allocation_presentation=fixture["presentation"],
-            current_state_evidence_handle=fixture["current_handle"],
-            desired_state_evidence_handle=fixture["desired_handle"],
-            current_location_record_path=current_location,
-            desired_location_record_path=fixture["desired_location"],
-            current_cad_correspondence_record_path=fixture["current_correspondence"],
-            desired_cad_correspondence_record_path=fixture["desired_correspondence"],
-        )
-
-
-def test_rejected_cartesian_plan_cannot_commit_or_substitute_resource(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    fixture = _cartesian_grounding_fixture(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        desired_y=0.144,
-    )
-    prepared = prepare_cartesian_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol="xarm6",
-        allocation_presentation=fixture["presentation"],
-        current_state_evidence_handle=fixture["current_handle"],
-        desired_state_evidence_handle=fixture["desired_handle"],
-        current_location_record_path=fixture["current_location"],
-        desired_location_record_path=fixture["desired_location"],
-        current_cad_correspondence_record_path=fixture["current_correspondence"],
-        desired_cad_correspondence_record_path=fixture["desired_correspondence"],
-    )
-    validation = asyncio.run(
-        validate_provisional_allocation(
-            _CapturingCartesianRuntime(status="rejected"),
-            interaction_root=root,
-            workcell=workcell,
-            reachability=prepared,
-        )
-    )
-    reachability = persist_cartesian_reachability(
-        interaction_root=root,
-        prepared=prepared,
-        robot_agent_validation_path=validation.record_path,
-    )
-
-    assert reachability.status == "rejected"
-    assert validation.status == "rejected"
-    with pytest.raises(ResourceGroundingError, match="accepted reachability"):
-        persist_pa_resource_selection(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            reachability=reachability,
-            allocation_presentation=fixture["presentation"],
-            robot_agent_validation_path=validation.record_path,
-        )
-    assert not (root / "products/grounding/resource_selection").exists()
-
-
-@pytest.mark.parametrize(
-    ("resource_order", "resource_symbol", "current_y", "desired_y"),
-    [
-        (("xarm6", "ur5e"), "ur5e", 0.2, 0.8),
-        (("ur5e", "xarm6"), "xarm6", -0.7, -0.2),
-    ],
-)
-def test_resource_presentation_order_cannot_override_the_pa_choice(
-    tmp_path: Path,
-    resource_order: tuple[str, str],
-    resource_symbol: str,
-    current_y: float,
-    desired_y: float,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(
-        tmp_path,
-        resource_order=resource_order,
-    )
-    _grounded_abox(root, tbox)
-    current_path = _write_world_location(root, "current", (0.0, current_y, 1.1))
-    desired_path = _write_world_location(root, "desired", (0.0, desired_y, 1.1))
-    presentation, handles = _allocation_presentation_for_locations(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        location_paths=(desired_path, current_path),
-    )
-
-    check = _runtime_check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol=resource_symbol,
-        allocation_presentation=presentation,
-        state_location_record_paths={
-            "current_state": [
-                (handles[_location_candidate_key(root, current_path)], current_path)
-            ],
-            "desired_state": [
-                (handles[_location_candidate_key(root, desired_path)], desired_path)
-            ],
-        },
-    )
-    validation = asyncio.run(
-        validate_provisional_allocation(
-            _CapturingFeasibilityRuntime(),
-            interaction_root=root,
-            workcell=workcell,
-            reachability=check,
-        )
-    )
-    selection = persist_pa_resource_selection(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        reachability=check,
-        allocation_presentation=presentation,
-        robot_agent_validation_path=validation.record_path,
-    )
-
-    assert check.status == "accepted"
-    assert check.schema_version == 4
-    assert check.resource_symbol == resource_symbol
-    assert selection.schema_version == 5
-    assert selection.selected_resource_symbol == resource_symbol
-
-
-def test_v4_selection_rejects_any_unreachable_submitted_location_without_substitution(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    before = _grounded_abox(root, tbox)
-    current_path = _write_world_location(root, "current", (0.0, -0.7, 1.1))
-    desired_path = _write_world_location(root, "desired", (0.0, 0.8, 1.1))
-    presentation, handles = _allocation_presentation_for_locations(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        location_paths=(current_path, desired_path),
-    )
-
-    check = _runtime_check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol="xarm6",
-        allocation_presentation=presentation,
-        state_location_record_paths={
-            "current_state": [
-                (handles[_location_candidate_key(root, current_path)], current_path)
-            ],
-            "desired_state": [
-                (handles[_location_candidate_key(root, desired_path)], desired_path)
-            ],
-        },
-    )
-
-    assert check.status == "rejected"
-    assert check.state_locations is not None
-    assert check.state_locations["current_state"][0].reachable is True
-    assert check.state_locations["desired_state"][0].reachable is False
-    with pytest.raises(ResourceGroundingError, match="accepted reachability"):
-        persist_pa_resource_selection(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            reachability=check,
+            resource_symbol="beta_bot",
             allocation_presentation=presentation,
-            robot_agent_validation_path=root / "missing_validation.json",
+            state_location_record_paths={
+                "current_state": [
+                    (handles[_location_candidate_key(root, current_path)], current_path),
+                    (
+                        handles[_location_candidate_key(root, current_extra_path)],
+                        current_extra_path,
+                    ),
+                ],
+                "desired_state": [
+                    (handles[_location_candidate_key(root, desired_path)], desired_path),
+                    (
+                        handles[_location_candidate_key(root, desired_extra_path)],
+                        desired_extra_path,
+                    ),
+                ],
+            },
         )
-    assert set(load_interaction_abox(root, tbox).graph) == set(before.graph)
-    assert not (root / "products/grounding/resource_selection").exists()
-
-
-def test_neutral_location_requires_an_intact_hash_chain(tmp_path: Path) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    current = _write_world_location(root, "current", (0.0, -0.7, 1.1))
-    desired = _write_world_location(root, "desired", (0.0, -0.2, 1.1))
-    record = json.loads(current.read_text(encoding="utf-8"))
-    record.pop("source_evidence")
-    current.write_text(json.dumps(record), encoding="utf-8")
-
-    with pytest.raises(RobotFrameLocationEvidenceError, match="hash references"):
-        check_resource_reachability(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            resource_symbol="xarm6",
-            current_location_record_path=current,
-            desired_location_record_path=desired,
-        )
-
-
-def test_rejected_robot_agent_validation_does_not_commit_or_substitute(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    before = _grounded_abox(root, tbox)
-    check = _accepted_check(root, tbox, registry, workcell, "xarm6")
-    validation_path = _write_validation(root, check, status="rejected")
-
-    selection = persist_pa_resource_selection(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        reachability=check,
-        allocation_presentation=load_allocation_presentation(root),
-        robot_agent_validation_path=validation_path,
     )
-
-    assert selection.provisional_resource_symbol == "xarm6"
-    assert selection.robot_agent_validation_status == "rejected"
-    assert selection.selected_resource_symbol is None
-    assert selection.selected_resource_iri is None
-    with pytest.raises(ResourceGroundingError, match="accepted PA choice"):
-        commit_resource_assignment(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            selection=selection,
-        )
-    assert set(load_interaction_abox(root, tbox).graph) == set(before.graph)
-
-
-def test_accepted_validation_commits_exactly_one_assignment_without_motion(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    before = _grounded_abox(root, tbox)
-    check = _accepted_check(root, tbox, registry, workcell, "ur5e")
-    validation_path = _write_validation(root, check, status="accepted")
-    selection = persist_pa_resource_selection(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        reachability=check,
-        allocation_presentation=load_allocation_presentation(root),
-        robot_agent_validation_path=validation_path,
-    )
-
-    result = commit_resource_assignment(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        selection=selection,
-    )
-
-    ppr = Namespace(PPR_NAMESPACE)
-    execution = URIRef(f"{before.namespace}process_execution_0001")
-    assert set(result.abox.graph) - set(before.graph) == {
-        (URIRef(before.specification_iri), ppr.hasProcessExecution, execution),
-        (execution, RDF.type, ppr.processExecution),
-        (execution, ppr.runsProcess, URIRef(PROCESS_IRI)),
-        (
-            execution,
-            ppr.runsOnResource,
-            URIRef(f"{RESOURCE_NAMESPACE}ur5e"),
-        ),
-    }
-    selection_record = selection.to_record()
-    assert selection_record["authority"] == "ProductAgent"
-    assert selection_record["current_state_iri"].endswith("currentstate_0001")
-    assert selection_record["desired_state_iri"].endswith("desiredstate_0001")
-    validation = json.loads(validation_path.read_text(encoding="utf-8"))
-    assert validation["mode"] == "plan_only"
-    assert validation["motion_executed"] is False
-    assert result.assertion_count == 4
-
-
-def test_selection_requires_accepted_reachability_and_unchanged_records(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    current_path = _write_world_location(root, "current", (0.0, -0.7, 1.1))
-    desired_path = _write_world_location(root, "desired", (0.0, 0.8, 1.1))
-    check = check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol="xarm6",
-        current_location_record_path=current_path,
-        desired_location_record_path=desired_path,
-    )
-    validation_path = _write_validation(root, check, status="rejected")
-
-    with pytest.raises(ResourceGroundingError, match="accepted reachability"):
-        persist_pa_resource_selection(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            reachability=check,
-            allocation_presentation=load_allocation_presentation(root),
-            robot_agent_validation_path=validation_path,
-        )
-
-    presentation, handles = _allocation_presentation_for_locations(
-        root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        location_paths=(current_path, desired_path),
-    )
-    desired_handle = handles[_location_candidate_key(root, desired_path)]
-    accepted = _runtime_check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol="ur5e",
-        allocation_presentation=presentation,
-        current_state_evidence_handle=desired_handle,
-        desired_state_evidence_handle=desired_handle,
-        current_location_record_path=desired_path,
-        desired_location_record_path=desired_path,
-        check_number=2,
-    )
-    accepted.record_path.write_text("{}", encoding="utf-8")
-    with pytest.raises(ResourceGroundingError, match="changed"):
-        accepted.assert_unchanged()
-
-
-def test_forged_accepted_selection_cannot_change_the_provisional_resource(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "interaction"
-    tbox, registry, workcell, _ = _authorities(tmp_path)
-    _grounded_abox(root, tbox)
-    check = _accepted_check(root, tbox, registry, workcell, "xarm6")
-    selection = persist_pa_resource_selection(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        reachability=check,
-        allocation_presentation=load_allocation_presentation(root),
-        robot_agent_validation_path=_write_validation(root, check, status="accepted"),
-    )
-    forged = replace(
-        selection,
-        selected_resource_symbol="ur5e",
-        selected_resource_iri=f"{RESOURCE_NAMESPACE}ur5e",
-        selected_resource_jid="ur5e@localhost",
-    )
-
-    with pytest.raises(ResourceGroundingError, match="changed"):
-        commit_resource_assignment(
-            interaction_root=root,
-            tbox=tbox,
-            registry=registry,
-            workcell=workcell,
-            selection=forged,
-        )
-
-
-def check_resource_reachability(  # noqa: PLR0913
-    *,
-    interaction_root: Path,
-    tbox: TBoxSnapshot,
-    registry: ResourceRegistrySnapshot,
-    workcell: PredefinedWorkcellSnapshot,
-    resource_symbol: str,
-    current_location_record_path: Path,
-    desired_location_record_path: Path,
-    check_number: int = 1,
-) -> ReachabilityCheckRecord:
-    """Exercise the v2 checker with a pinned neutral presentation fixture."""
-    presentation, handles = _allocation_presentation_for_locations(
-        interaction_root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        location_paths=(current_location_record_path, desired_location_record_path),
-    )
-    current_key = _location_candidate_key(interaction_root, current_location_record_path)
-    desired_key = _location_candidate_key(interaction_root, desired_location_record_path)
-    return _runtime_check_resource_reachability(
-        interaction_root=interaction_root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol=resource_symbol,
-        allocation_presentation=presentation,
-        current_state_evidence_handle=handles[current_key],
-        desired_state_evidence_handle=handles[desired_key],
-        current_location_record_path=current_location_record_path,
-        desired_location_record_path=desired_location_record_path,
-        check_number=check_number,
-    )
+    assert reachability.status == "accepted"
+    assert reachability.resource_symbol == "beta_bot"
+    assert len(reachability.state_locations["current_state"]) == 2
+    assert len(reachability.state_locations["desired_state"]) == 2
 
 
 def _cartesian_grounding_fixture(  # noqa: PLR0913
@@ -958,7 +164,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
     current_cad = write(
         "products/grounding/cartesian_fixture/current_cad.json",
         {
-            "schema_version": 1,
             "record_type": "CADMeshRecord",
             "stored_units": "m",
             "bounds_m": {"size": [0.042, 0.042, 0.02]},
@@ -967,7 +172,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
     desired_cad = write(
         "products/grounding/cartesian_fixture/desired_cad.json",
         {
-            "schema_version": 1,
             "record_type": "CADMeshRecord",
             "stored_units": "m",
             "bounds_m": {"size": [0.01, 0.01, 0.02]},
@@ -982,7 +186,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
     current_calibration = write(
         "products/grounding/cartesian_fixture/current_calibration.json",
         {
-            "schema_version": 1,
             "record_type": "CameraToRobotCalibrationRecord",
             "source_frame": "neutral_current_frame",
             "target_frame": "world",
@@ -992,7 +195,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
     desired_calibration = write(
         "products/grounding/cartesian_fixture/desired_calibration.json",
         {
-            "schema_version": 1,
             "record_type": "CameraToRobotCalibrationRecord",
             "source_frame": "neutral_desired_frame",
             "target_frame": "world",
@@ -1009,7 +211,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
     segmentation = write(
         "products/grounding/cartesian_fixture/segmentation.json",
         {
-            "schema_version": 2,
             "record_type": "RGBDSegmentationRecord",
             "cameras": [
                 {
@@ -1052,7 +253,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
         return write(
             f"products/grounding/cartesian_fixture/{name}_location.json",
             {
-                "schema_version": 2,
                 "record_type": "RobotFrameLocationRecord",
                 "method": "calibrated_neutral_candidate_center",
                 "source_segmentation": {
@@ -1109,7 +309,6 @@ def _cartesian_grounding_fixture(  # noqa: PLR0913
         return write(
             f"products/grounding/cartesian_fixture/{name}_correspondence.json",
             {
-                "schema_version": 3,
                 "record_type": "CADSizeCorrespondenceRecord",
                 "CAD": {
                     "record": {
@@ -1276,34 +475,6 @@ def _location_candidate_key(root: Path, path: Path) -> str:
     return f"{record_ref}#/translated_location_m"
 
 
-def _accepted_check(
-    root: Path,
-    tbox: TBoxSnapshot,
-    registry: ResourceRegistrySnapshot,
-    workcell: PredefinedWorkcellSnapshot,
-    resource_symbol: str,
-    *,
-    check_number: int = 1,
-    current_name: str = "current",
-    desired_name: str = "desired",
-):
-    locations = {
-        "xarm6": ((0.0, -0.7, 1.1), (0.0, -0.2, 1.1)),
-        "ur5e": ((0.0, 0.2, 1.1), (0.0, 0.8, 1.1)),
-    }
-    current, desired = locations[resource_symbol]
-    return check_resource_reachability(
-        interaction_root=root,
-        tbox=tbox,
-        registry=registry,
-        workcell=workcell,
-        resource_symbol=resource_symbol,
-        current_location_record_path=_write_world_location(root, current_name, current),
-        desired_location_record_path=_write_world_location(root, desired_name, desired),
-        check_number=check_number,
-    )
-
-
 def _authorities(
     root: Path,
     *,
@@ -1336,7 +507,6 @@ def _authorities(
     profile_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
                 "processes": [{"symbol": "assembly", "iri": PROCESS_IRI}],
                 "resources": [
                     {
@@ -1402,7 +572,6 @@ def _arbitrary_authorities(
     profile_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
                 "processes": [
                     {"symbol": symbol, "iri": process_iri}
                     for symbol, process_iri in process_iris.items()
@@ -1416,6 +585,71 @@ def _arbitrary_authorities(
     tbox = load_ppr_tbox(TBOX_PATH, ppr_namespace=PPR_NAMESPACE)
     registry = load_predefined_resource_registry(tbox, profile=profile)
     return tbox, registry, load_predefined_workcell(tbox, registry, profile=profile)
+
+
+@pytest.mark.parametrize(
+    "verdict", ["accepted", "rejected", "needs_context", "missing_plan", "missing_location"]
+)
+def test_live_location_planning_uses_robot_result_outside_example_limits(tmp_path, verdict):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
+        check_live_resource_reachability,
+    )
+    from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import OfflineMoveItPlanning
+
+    root = tmp_path / "interaction"
+    tbox, registry, workcell, _ = _authorities(tmp_path)
+    _grounded_abox(root, tbox)
+    fixture = _cartesian_grounding_fixture(
+        root, tbox=tbox, registry=registry, workcell=workcell, desired_y=0.144
+    )
+
+    class Planning(OfflineMoveItPlanning):
+        async def validate_plan_only_allocation(self, request):
+            assert request["moveit_group"] == "xarm6_manipulator"
+            assert request["state_locations"]["desired_state"][0]["translation_m"][
+                1
+            ] == pytest.approx(0.144)
+            assert request["motion_executed"] is False
+            assert "workspace_bounds" not in json.dumps(request)
+            assert "gripper_reach" not in json.dumps(request)
+            response = await super().validate_plan_only_allocation(request)
+            result = response["state_locations"]["desired_state"][0]
+            if verdict in {"rejected", "needs_context"}:
+                response["status"] = result["status"] = verdict
+                result["error_code"] = -1 if verdict == "rejected" else None
+                result["plan"] = None
+            elif verdict == "missing_plan":
+                result["plan"] = None
+            elif verdict == "missing_location":
+                response["state_locations"]["desired_state"] = []
+            return response
+
+    async def run():
+        return await check_live_resource_reachability(
+            runtime=Planning(),
+            interaction_root=root,
+            tbox=tbox,
+            registry=registry,
+            workcell=workcell,
+            resource_symbol="xarm6",
+            allocation_presentation=fixture["presentation"],
+            state_location_record_paths={
+                "current_state": [(fixture["current_handle"], fixture["current_location"])],
+                "desired_state": [(fixture["desired_handle"], fixture["desired_location"])],
+            },
+        )
+
+    if verdict in {"missing_plan", "missing_location"}:
+        with pytest.raises(ResourceGroundingError):
+            asyncio.run(run())
+        assert not (root / "products/grounding/reachability").exists()
+    else:
+        check = asyncio.run(run())
+        assert not hasattr(check, "schema_version")
+        assert check.status == verdict
+        assert check.state_locations["desired_state"][0].reachable is (verdict == "accepted")
+        assert "in_workspace" not in json.dumps(check.to_record())
+        check.assert_unchanged()
 
 
 def _write_manifest(
@@ -1462,9 +696,11 @@ def _write_manifest(
                                 "ee_link": f"{symbol}_ee",
                                 "tcp_link": f"{symbol}_tcp",
                                 "frame_id": "world",
+                                "position_tolerance_m": 0.005,
                             },
                             "services": {
                                 "cartesian_path": "/compute_cartesian_path",
+                                "motion_plan": "/plan_kinematic_path",
                             },
                             "motion": {
                                 "approach_height_m": 0.2,
@@ -1543,7 +779,6 @@ def _write_world_location(
     source_path.write_text('{"source":"synthetic"}', encoding="utf-8")
     source_ref = source_path.relative_to(root).as_posix()
     record = {
-        "schema_version": 2,
         "record_type": "RobotFrameLocationRecord",
         "producer": "synthetic_world_location_provider",
         "method": "neutral_fixture",
@@ -1566,85 +801,57 @@ def _write_world_location(
     return path
 
 
-def _write_validation(
-    root: Path,
-    reachability: ReachabilityCheckRecord,
-    *,
-    status: str,
-) -> Path:
-    resource_symbol = reachability.resource_symbol
-    resource_iri = reachability.resource_iri
-    resource_jid = reachability.resource_jid
-    execution_mode = reachability.execution_mode
-    target_frame = reachability.target_frame
-    request_fingerprint = reachability.fingerprint
-    endpoint_status = "accepted" if status == "accepted" else "rejected"
-    endpoint = {
-        "status": endpoint_status,
-        "message": f"fixture {endpoint_status}",
-        "error_code": 1 if endpoint_status == "accepted" else -1,
-    }
-    payload: dict[str, object] = {
-        "schema_version": 2,
-        "record_type": "PlanOnlyFeasibilityValidationRecord",
-        "validation_number": 1,
-        "validator_authority": resource_jid,
-        "process_symbol": reachability.process_symbol,
-        "process_iri": reachability.process_iri,
-        "feature_iri": reachability.feature_iri,
-        "current_state_iri": reachability.current_state.state_iri,
-        "desired_state_iri": reachability.desired_state.state_iri,
-        "resource_symbol": resource_symbol,
-        "resource_iri": resource_iri,
-        "resource_jid": resource_jid,
-        "execution_mode": execution_mode,
-        "moveit_group": f"{resource_symbol}_manipulator",
-        "end_effector_link": f"{resource_symbol}_tcp",
-        "target_frame": target_frame,
-        "validation_scope": "endpoint_motion",
-        "checked_constraints": [
-            "positional_ik",
-            "collision_aware_endpoints",
-            "path_between_endpoints",
-        ],
-        "unvalidated_constraints": [
-            "grasping",
-            "end_effector_orientation",
-            "attached_object_geometry",
-            f"{reachability.process_symbol}_tolerance",
-            "force_contact",
-            "insertion_constraints",
-        ],
-        "current_state": dict(endpoint),
-        "desired_state": dict(endpoint),
-        "mode": "plan_only",
-        "motion_executed": False,
-        "status": status,
-        "feedback": None if status == "accepted" else "fixture rejection",
-        "validated_at_ns": 12,
-        "request_fingerprint": request_fingerprint,
-    }
-    payload["fingerprint"] = _fingerprint(payload)
-    path = (
-        root
-        / "resources"
-        / resource_jid
-        / "validation"
-        / "plan_only_validation_0001"
-        / "plan_only_feasibility_validation_record.json"
+def test_direct_allocation_entrypoint_rejects_historical_pa_proposal(tmp_path):
+    from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
+        persist_native_completion_fixture,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
+
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    path = tmp_path / completion["ontology_projection_ref"]
+    proposal = json.loads(path.read_text())
+    proposal["schema_version"] = 12
+    path.write_text(json.dumps(proposal))
+    with pytest.raises(ResourceGroundingError, match="unchanged grounding evidence"):
+        resource_grounding._validate_pa_grounding_evidence(tmp_path, completion["feature_iri"])
 
 
-def _fingerprint(value: Mapping[str, object]) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+def test_direct_allocation_entrypoint_revalidates_snapshot_hash(tmp_path):
+    from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
+        persist_native_completion_fixture,
+    )
+
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    resource_grounding._validate_pa_grounding_evidence(tmp_path, completion["feature_iri"])
+    proposal = json.loads((tmp_path / completion["ontology_projection_ref"]).read_text())
+    snapshot_ref = next(
+        item["ref"] for item in proposal["grounding_evidence"]["input_artifacts"]
+        if item["ref"].startswith("products/grounding/product_context/")
+    )
+    snapshot_path = tmp_path / snapshot_ref
+    snapshot_path.write_text(snapshot_path.read_text() + " ")
+    with pytest.raises(ResourceGroundingError, match="unchanged grounding evidence"):
+        resource_grounding._validate_pa_grounding_evidence(tmp_path, completion["feature_iri"])
+
+
+def test_direct_allocation_rejects_unissued_state_value_citation_with_valid_native_hash(tmp_path):
+    from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
+        persist_native_completion_fixture,
+    )
+
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    path = tmp_path / completion["ontology_projection_ref"]
+    proposal = json.loads(path.read_text())
+    original_delta = json.dumps(proposal["compiled_delta"], sort_keys=True)
+    unissued = tmp_path / "products/grounding/unissued_local.json"
+    unissued.write_text('{"description":"Never issued to PA."}')
+    ref = unissued.relative_to(tmp_path).as_posix()
+    proposal["output"]["target_feature"]["current_state"]["state_values"][0][
+        "evidence_refs"
+    ].append(ref)
+    proposal["grounding_evidence"]["source_refs"].append(
+        {"ref": ref, "sha256": hashlib.sha256(unissued.read_bytes()).hexdigest()}
+    )
+    path.write_text(json.dumps(proposal))
+    assert json.dumps(proposal["compiled_delta"], sort_keys=True) == original_delta
+    with pytest.raises(ResourceGroundingError, match="unchanged grounding evidence"):
+        resource_grounding._validate_pa_grounding_evidence(tmp_path, completion["feature_iri"])

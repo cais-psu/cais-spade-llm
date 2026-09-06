@@ -1,142 +1,48 @@
 # Contexts
 
-Each interaction stores its runtime inputs, retrieved snapshots, messages,
-outputs, and validation evidence under its caller-owned root. Product-side PA,
-geometry, Phase 5.1 assignment/state/catalog, and Phase 5.2A structural-draft
-paths exist today. Later composition paths remain planned:
+Each caller-owned interaction root contains exact requirements, observations, typed sources, PA decisions, evidence, assignments and later RA snapshots. Saved runs are immutable evidence; do not rewrite them to fit a newer schema.
+
+## Current artifact map
 
 ```text
 contexts/<interaction_identifier>/
-├── products/
-│   ├── user_requirement/
-│   ├── observations/
-│   ├── served_references/
-│   ├── grounding/
-│   │   ├── document_evidence/overview_<number>.json
-│   │   ├── document_evidence/evidence_<number>.json  # historical recovery only
-│   │   ├── session/revision_<number>.json            # historical recovery only
-│   │   ├── ontology_grounding/proposal_<number>.json
-│   │   ├── target_feature_review/review_<number>.json
-│   │   ├── product_context/view_<number>.json
-│   │   ├── completion/typed_grounding_contract_0001.json
-│   │   └── <typed producer records>
-├── resources/                              # Phase 5.1 RA-owned snapshots
-│   └── <exact_RA_identifier>/
-│       ├── robot_state/
-│       ├── primitive_catalog_snapshot/
-│       ├── primitive_steps/                # planned
-│       └── validation/                     # planned
-├── composition/
-│   ├── selected_ra_assignments/            # Phase 5.1
-│   ├── primitive_program_drafts/            # Phase 5.2A
-│   ├── context_bundles/                    # planned
-│   ├── missing_context_batches/            # planned
-│   └── progress_decisions/                 # planned
-└── interaction_record/
-    ├── clarification_<turn>.json
-    └── context_completion_0001.json
+  products/user_requirement/product_requirement.json
+  products/observations/<observation_ref>/
+  products/served_references/
+  products/grounding/
+    document_evidence/
+    rgb_d_cad_grounding/
+    presentation/evidence_presentation_record.json
+    presentation/observation_presentation_record.json
+    presentation/allocation_presentation_record.json
+    ontology_grounding/request_<proposal>_<request>.json
+    ontology_grounding/proposal_<number>.json
+    reachability/check_<number>/reachability_check_record.json
+    resource_selection/selection_<number>/resource_selection_record.json
+    ontology/
+    product_context/view_<number>.json
+    completion/
+  interaction_record/
+    model_tool_exchange_<number>.json
+    allocation_tool_call_<number>.json
+    clarification_<turn>.json
+    context_completion_0001.json
+  composition/selected_ra_assignments/
+  composition/primitive_program_drafts/
+  resources/<exact_RA_identifier>/robot_state/
+  resources/<exact_RA_identifier>/primitive_catalog_snapshot/
 ```
 
-`contexts/source_cache/document/<source_sha256>/<cache_fingerprint>/` is a
-generated, cross-interaction overview cache outside individual interaction
-roots. The fingerprint includes the document bytes, configured VLM behavior,
-and overview-schema version. F5 reads this index without inference. Interaction
-records snapshot the validated overview and never treat a cache file as an ABox
-assertion.
+Current completion pins proposal, selection, reachability, all source/typed evidence, presentations, capability snapshots, assignment delta and final context. Proposal `grounding_evidence` pins the precommit context view and source/artifact hashes. Audit requests preserve model-facing content; internal hashes and paths remain provenance rather than model hints.
 
-New runs keep native PA turns and tool audits rather than an active
-`GroundingSession`. PA's final target candidate is validated once; source
-evidence and failures remain audited. `ProductContextView` is written only from
-the accepted ABox and typed-record view after validation; it is not PA reasoning
-state. Clarification answers or cancellation and version-7 completion records
-are append-only. The accepted v9 proposal owns the single PA-authored
-`target_feature`; completion v7 directly pins that proposal, its two states,
-evidence and allocation presentations, registry and workcell snapshots,
-PA-authored location mapping, v4 reachability, v5 resource selection,
-assignment, and final ABox without copying the target feature. It does not
-produce a new `TypedGroundingContract`. Supported older session and completion
-records remain read-only recovery inputs. Planned
-`CompositionContextBundle` versions
-will preserve task, ABox, typed-binding, catalog, and selected-resource
-fingerprints. Each deduplicated `MissingContextBatch`, PA response, progress or
-no-progress decision, fully bound candidate, and validation trace will be
-append-only and reviewable. Phase 5.1 records the minimum selected-RA assignment
-and the complete catalog returned by its injected runtime without assuming a
-fixed number of primitives. Phase 5.2A appends one RA-authored structural
-`PrimitiveProgramDraft` per captured pair. It produces no composition bundle,
-missing-context batch, bound candidate, validation trace, or execution record.
-The draft also does not persist `target_feature`. The read-only Phase 5.2
-diagnostic reconstructs it from the hash-verified proposal and resolves its
-referenced state values from the pinned typed records.
+Corrections reuse the pinned observation and mapping within the shared configured investigation budget. Rejected proposals never contribute assertions. Source uncertainty persists in accepted context. Existing requests, tool records and terminal output retain host-owned `grounding_progress` operation/proposal counts, generic validation feedback and stop reasons. A grounded result lacking accepted assignment remains inspectable without manufacturing completion.
 
-Product RGB-D observation bundles use an `observation_ref` and retain the
-existing `manifest.json`, lossless RGB PNG, and original metric `float32` depth
-`.npy` contract. Every record remains labeled `fixture`, `replay`, or `live`.
-Phase 1.1 writes and tests `fixture` and `replay`. Phase 1.2 writes `live` only
-after an explicit `capture_gazebo_observation(...)` request. It does not capture
-in the background or automatically attach observations to PA or RA. The four
-`<camera>_rgb.png` files in a successful bundle are directly inspectable.
+RGB-D bundles retain lossless RGB, metric depth and `fixture`, `replay`, or `live` labels. Canonical sensor/candidate identities, calibration frames, hashes and geometry remain internal. Randomized model-facing handles resolve back to those exact records. Calibration must match the originating observation timestamp. The approved simulation calibration may be replaced through `SPEC2PRIMITIVES_CAMERA_TO_WORLD_CALIBRATION_PATH`; recognition never reads a world or spawn manifest.
 
-When the Phase 4.2B1 automatic observation entrypoint is invoked, it creates a
-unique `rgbd_segmentation_<identifier>/` interaction and performs capture,
-Phase 4.2A observation preprocessing, and minimal segmentation without operator
-parameters. Its geometry products contain the colored point-cloud record, a
-compact segmentation record, and four camera-local label masks. The contexts
-root also holds one atomically replaced `rgbd_segmentation_status.json` for the
-read-only UI card. It contains only processing status, candidate counts,
-CAD-correspondence, camera-frame location, pose, and robot-frame conversion
-states plus failure information; it is not a context-completion or
-assembly-readiness record.
+Document source indexes and existing overview caches live under `contexts/source_cache/` outside an interaction. Interaction evidence pins its source revision. Active CAD comparison records all measurements; pose diagnostics consume the same measurement format.
 
-When a controlled caller supplies one exact preprocessed CAD record and one
-segmentation record, the implemented Phase 4.2B2A path writes
-`products/grounding/rgb_d_cad_grounding/correspondence_<number>/correspondence_record.json`
-atomically in that same interaction. It records deterministic size rankings and
-may preserve one candidate center in its camera optical frame. The status-only
-UI never exposes that coordinate. No cross-camera or robot-frame transform,
-rotation, complete pose, PA decision, planning, or execution is stored by this
-operation.
+Phase 5.1 requires current completion before writing envelope or reading recovered paired context. Phase 5.2A appends one unbound draft per context pair. It reconstructs the target from pinned authorities rather than copying it. Binding bundles, missing-context batches, bound candidates, execution validation and execution records remain future work.
 
-When a controlled caller supplies that intact size-correspondence record, the
-pose step writes
-`products/grounding/rgb_d_cad_grounding/pose_<number>/pose_record.json`
-atomically. A clear asymmetric fit stores the camera-from-CAD transform. When
-qualified symmetric rotations agree on the transformed physical CAD centroid,
-the version 2 record retains `location: available`, `pose: ambiguous`, and only
-`CAD_centroid_translation_m`; it does not reinterpret the off-center STL origin
-as the object location or fabricate a rotation. Genuinely different centroids
-remain `location: ambiguous`. No cross-camera or robot-frame transform, PA
-decision, planning, or execution is stored by this operation, and the
-status-only UI never exposes its coordinates or rotation.
+Saved interactions remain untouched. There is one current format per record type. Incompatible records require “Start a fresh interaction” and cannot authorize new RA work; no conversion or compatibility reader is provided.
 
-The simulation-only UI runtime loads the bundled, versioned
-`config/gazebo_camera_to_world_calibration.json` by default. Its four transforms
-were composed once from the fixed camera poses in the hash-pinned
-`table_spec2primitives.world` and the ROS optical-frame convention authorized
-for this Gazebo case. Runtime recognition never reads the world file and
-continues to select the active exact frame dynamically: `cam_mk3_link`,
-`cam_mk4_1_link`, `cam_mk4_2_link`, or `cam_assembly_link`. A deployment may
-replace the bundled simulation manifest through
-`SPEC2PRIMITIVES_CAMERA_TO_WORLD_CALIBRATION_PATH`. The PA panel displays
-calibration readiness and any exact actionable configuration failure.
-
-When a controlled caller supplies the matching approved extrinsic calibration,
-`calibration_<number>/calibration_record.json` stores its exact source and
-target frames, rigid transform, validity window, source details, and payload hash.
-The active frame-conversion step writes a neutral version-2
-`RobotFrameLocationRecord`, checking calibration against the originating
-observation timestamp and translating only the PA-selected candidate when a
-verifier requests it. PA's state assignment determines whether that record
-supports `current_state` or `desired_state`. Missing, invalid, stale, or
-selected-frame-missing calibration rejects that reachability check. A separate
-pose record is written only when an orientation-sensitive consumer requires
-one.
-
-`TargetFeatureGeometryRecord` is not part of the architecture. Document, CAD,
-RGB-D, calibration, and frame-conversion evidence remains typed and hash-pinned;
-numeric geometry is derived for the activated verifier rather than supplied as
-a predetermined target answer.
-
-Generated interaction directories are ignored by Git. Ground-truth evaluation
-is excluded from runtime context and belongs under `../evaluations/` so it
-cannot leak to PA or RA.
+See [schemas](../schemas/README.md) and [bias audit paths and experiments](../BIAS_VALIDATION.md). Evaluator answers belong under `evaluations/` and never enter recognition inputs.

@@ -1095,7 +1095,6 @@ def _binding_finding(
         "part_name": str(part_name or "").strip() or None,
         "pose_source": "task_contract",
         "pose": None,
-        "workspace_bounds": None,
         "failed_axes": [constraint_code],
         "constraint_owner": "binding",
         "constraint_family": "binding",
@@ -1707,7 +1706,6 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
             "reachable_locations",
             "known_locations",
             "staging_areas",
-            "workspace_bounds",
         ):
             if resource_row.get(key) not in (None, "", [], {}):
                 continue

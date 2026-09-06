@@ -1,15 +1,7 @@
 # Resource references
 
-This directory is reserved for reusable, static resource references. The
-authoritative primitive catalog remains resource-owned and is retrieved for the
-exact RA instance through the implemented Spec2Primitives-owned Phase 5.1
-adapter.
+`config/workcell_profile.json` and its referenced manifests define exact resource identities, process capabilities and MoveIt controller profiles. Keep `xarm6` and `ur5e` symbols unchanged. Robot capabilities and poses remain configuration-driven.
 
-The adapter retrieves the complete versioned snapshot supplied by
-that RA. No fixed primitive count is assumed, and every symbol remains exactly
-as supplied. A repository reference may identify an approved catalog source,
-but it never becomes a second catalog authority.
+After deterministic product grounding, PA checks every capable arm against the same grounded current/destination locations and selects an arm with accepted reachability. Neither registry order nor an unsupported preference selects the arm. Selection and completion record live MoveIt reachability with retained MoveIt position plans and no grasp/insertion validation claim.
 
-Phase 5.2A passes that exact snapshot with the reconstructed PA target feature
-to the selected RobotAgent LLM for structural symbol selection. No catalog is
-copied into this directory and no reference file becomes runtime authority.
+Resource-selection results never enter product recognition . After assignment, Phase 5 obtains only the selected RA's authoritative state and complete primitive catalog. See [catalog ownership](primitive_catalogs/README.md) and [bias experiments](../../BIAS_VALIDATION.md).

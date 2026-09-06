@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Tests for simple generalized camera-frame CAD pose estimation."""
 
-from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -16,7 +17,7 @@ from cais_spade_llm.spec2primitives.tests.test_cad_size_correspondence import (
 )
 from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     CADPoseEstimationError,
-    associate_segmented_candidate_by_size,
+    measure_segmented_candidates_against_cad,
     estimate_camera_frame_pose,
     read_rgbd_segmentation_status,
     run_cad_pose_estimation_pipeline,
@@ -90,7 +91,7 @@ def test_unique_shape_fit_persists_complete_camera_frame_pose(
     assert len(result.selected_candidate["quaternion_xyzw"]) == 4
     record = _read_json(result.record_path)
     assert record == result.record
-    assert record["schema_version"] == 3
+    assert "schema_version" not in record
     assert record["record_type"] == "CADPoseEstimationRecord"
     assert record["method"] == "principal_axis_multistart_point_to_point_ICP"
     assert record["coordinate_frame"] == "cam_mk3_optical_frame"
@@ -270,7 +271,7 @@ def test_tampered_correspondence_rejects_without_partial_pose_output(
 ) -> None:
     correspondence_path = _prepare_correspondence(tmp_path, (0.042,))
     record = _read_json(correspondence_path)
-    record["ranked_candidates"][0]["point_count"] += 1
+    record["candidate_measurements"][0]["point_count"] += 1
     correspondence_path.write_text(json.dumps(record), encoding="utf-8")
 
     with pytest.raises(CADPoseEstimationError, match="inconsistent"):
@@ -357,7 +358,7 @@ def _prepare_correspondence(
         interaction_root,
         _size_bundle(diameters_m, zero_candidates=zero_candidates),
     )
-    result = associate_segmented_candidate_by_size(
+    result = measure_segmented_candidates_against_cad(
         interaction_root=interaction_root,
         segmentation_record_path=segmentation_path,
         cad_record_path=cad_path,

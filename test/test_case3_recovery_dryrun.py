@@ -1185,7 +1185,6 @@ class FakeRecoveryRobot:
     async def _ensure_controller_prewarmed(self) -> None:
         return None
 
-    _is_pose_in_workspace = RobotAgent._is_pose_in_workspace
     recovery_physical_validation_snapshot = staticmethod(
         RobotAgent.recovery_physical_validation_snapshot
     )
@@ -3533,14 +3532,44 @@ def test_case3_runtime_context_has_no_expected_recovery_answers() -> None:
         assert forbidden_token not in serialized_context
 
 
+def test_ur5e_driver_no_longer_rejects_the_example_box_but_rejects_invalid_numbers() -> None:
+    import ast
+    import math
+
+    path = Path(__file__).resolve().parents[1] / "ros2/cais_lab_robotics/scripts/ur5e_rtde_trajectory_server.py"
+    tree = ast.parse(path.read_text())
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_workspace_error")
+    # Isolate the production numeric guard so the offline regression cannot load
+    # hardware drivers or contact RTDE. Controller safety checks stay in the driver.
+    namespace = {"math": math, "RigidTransform": tuple,
+                 "UR5E_RTDE_CARTESIAN_REACH_ORIGIN": (0.0, 0.5, 1.021),
+                 "UR5E_RTDE_CARTESIAN_REACH_RADIUS_M": 0.8}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)
+    check = namespace["_workspace_error"]
+    rotation = (0.0, 0.0, 0.0, 1.0)
+    assert check(((0.0, 0.5, 1.7), rotation)) is None
+    assert check(((0.0, 0.5, float("nan")), rotation)) is not None
+    assert check(((2.0, 0.5, 1.0), rotation)) is not None
+
+
+def test_robot_recovery_requires_live_validation_instead_of_an_example_box() -> None:
+    from types import SimpleNamespace
+
+    robot = SimpleNamespace(jid="xarm6@localhost", static_capabilities={})
+    result = RobotAgent.check_recovery_physical_feasibility(
+        robot, part_context={}, recovery_snapshot={},
+        grounded_action={"target": {"pose": {"x": 0.0, "y": 0.144, "z": 1.06}}},
+    )
+    assert result["allowed"] is False
+    assert result["feasibility_status"] == "NEEDS_CONTEXT"
+    assert result["constraint_code"] == "resource_validation_unavailable"
+    assert "workspace_bounds" not in result["evidence"]
+
+
 def test_case3_dryrun_uses_production_ra_and_cca_validator_functions() -> None:
     assert (
         FakeRecoveryRobot.check_recovery_physical_feasibility
         is RobotAgent.check_recovery_physical_feasibility
-    )
-    assert (
-        FakeRecoveryRobot._is_pose_in_workspace
-        is RobotAgent._is_pose_in_workspace
     )
     assert (
         FakeRecoveryRobot.recovery_physical_validation_snapshot
@@ -4574,7 +4603,7 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
     assert "gripper_state" not in safety_input["task"]["expected_end_state"]
 
 
-def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative() -> None:
+def test_case3_unvalidated_pose_and_nonprogressing_home_remain_authoritative() -> None:
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
         multi_turn_outline_generation,
     )
@@ -4650,7 +4679,7 @@ def test_case3_workspace_rejection_and_nonprogressing_home_remain_authoritative(
     )
     evaluations = turn_entry["candidate_evaluations"]
     assert evaluations[0]["validation_findings"][0]["constraint_code"] == (
-        "workspace_unreachable"
+        "resource_validation_unavailable"
     )
     assert evaluations[1]["valid"] is True
     assert evaluations[1]["selection_status"] == "excluded_no_progress"

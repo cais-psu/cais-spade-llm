@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Segment preprocessed RGB-D point clouds into unlabeled geometry candidates."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -35,7 +36,6 @@ _MINIMUM_CANDIDATE_POINTS = 50
 _MAXIMUM_CANDIDATES = 32
 
 _SOURCE_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "operation_number",
@@ -168,7 +168,6 @@ def segment_preprocessed_observation(
             artifact_names.append(artifact_name)
 
         record = {
-            "schema_version": 2,
             "record_type": "RGBDSegmentationRecord",
             "producer": _PRODUCER,
             "segmentation_number": segmentation_number,
@@ -233,18 +232,19 @@ def _load_source_record(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RGBDSegmentationError("Observation preprocessing record could not be read.") from exc
     if not isinstance(record, dict) or set(record) != _SOURCE_RECORD_KEYS:
-        raise RGBDSegmentationError("Observation preprocessing record fields are invalid.")
+        raise RGBDSegmentationError(
+            "Observation preprocessing record fields are invalid. Start a fresh interaction."
+        )
     if (
-        record["schema_version"] != 1
-        or record["record_type"] != "ColoredPointCloudSetRecord"
-        or record["producer"] != _PRODUCER
-        or record["evidence_type"] != "observation"
-        or record["stored_units"] != "m"
-        or record["coordinate_convention"] != "+x right, +y down, +z forward"
-        or record["extrinsics_available"] is not False
-        or record["cross_camera_fusion"] != "not_evaluated"
-        or record["correspondence"] != "not_evaluated"
-        or record["pose"] != "not_evaluated"
+        (record["record_type"] != "ColoredPointCloudSetRecord")
+        or (record["producer"] != _PRODUCER)
+        or (record["evidence_type"] != "observation")
+        or (record["stored_units"] != "m")
+        or (record["coordinate_convention"] != "+x right, +y down, +z forward")
+        or (record["extrinsics_available"] is not False)
+        or (record["cross_camera_fusion"] != "not_evaluated")
+        or (record["correspondence"] != "not_evaluated")
+        or (record["pose"] != "not_evaluated")
     ):
         raise RGBDSegmentationError("Observation preprocessing record identity is invalid.")
     operation_number = record["operation_number"]

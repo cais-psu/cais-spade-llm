@@ -1,10 +1,11 @@
-"""Focused tests for native tool-using ProductAgent grounding."""
-
 from __future__ import annotations
+
+"""Focused tests for native tool-using ProductAgent grounding."""
 
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,6 @@ from cais_spade_llm.spec2primitives.agents.pa.ontology_grounding import (
     OntologyGroundingError,
     OntologyGroundingInterruption,
     OntologyGroundingProposal,
-    OntologyGroundingResult,
     commit_ontology_grounding_candidate,
     propose_and_validate_ontology_grounding,
 )
@@ -49,13 +49,14 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
     _proposal_evidence_is_intact,
     _retrieve_tool,
 )
-from cais_spade_llm.spec2primitives.config import load_model_runtime_config
+from cais_spade_llm.spec2primitives.config import GroundingLimits, load_model_runtime_config
 from cais_spade_llm.spec2primitives.ontology import (
     load_predefined_resource_registry,
     load_predefined_workcell,
 )
 from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import (
     PPR_NAMESPACE,
+    OfflineMoveItPlanning,
     ontology_config,
 )
 
@@ -126,9 +127,7 @@ def test_pa_document_question_is_persisted_verbatim_and_scene_refs_are_rejected(
         handles=handles,
         presentation=presentation,
     )
-    source_index_path = (
-        root / "products/grounding/document_evidence/source_index_0001.json"
-    )
+    source_index_path = root / "products/grounding/document_evidence/source_index_0001.json"
     source_index_path.parent.mkdir(parents=True)
     source_index_path.write_text(
         json.dumps({"record_type": "DocumentSourceIndexRecord"}),
@@ -161,7 +160,6 @@ def test_pa_document_question_is_persisted_verbatim_and_scene_refs_are_rejected(
         captured_questions.append(question)
         query_path = root / "products/grounding/document_evidence/query_0001.json"
         record: dict[str, object] = {
-            "schema_version": 1,
             "record_type": "DocumentQueryRecord",
             "producer": "document_evidence",
             "status": "supported",
@@ -298,7 +296,9 @@ def test_pa_candidate_projection_removes_semantic_sensor_shortcuts() -> None:
         assert forbidden not in serialized
 
 
-def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candidate() -> None:
+def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candidate(
+    tmp_path,
+) -> None:
     canonical_record_ref = (
         "products/grounding/rgb_d_cad_grounding/segmentation_0001/rgbd_segmentation_record.json"
     )
@@ -330,6 +330,7 @@ def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candi
     }
     presentation = SimpleNamespace(entries=())
     investigation = SimpleNamespace(
+        root=tmp_path,
         presentation=presentation,
         prior_evidence=[
             {
@@ -390,6 +391,10 @@ def test_allocation_prompt_reuses_approved_evidence_and_links_segmentation_candi
         },
         allocation_presentation=allocation_presentation,
         investigation=investigation,
+        fixed_state_locations={
+            "current_state": (entry.pa_handle,),
+            "desired_state": (entry.pa_handle,),
+        },
     )
 
     prompt_input = json.loads(prompt.split("Allocation input:\n", maxsplit=1)[1])
@@ -422,7 +427,6 @@ class _ToolUsingProductAgent:
         self.retrieve_order = retrieve_order
         self.final_result = final_result
         self.calls: list[dict[str, object]] = []
-        self.review_calls: list[dict[str, object]] = []
 
     async def ask_llm_structured(
         self,
@@ -434,12 +438,9 @@ class _ToolUsingProductAgent:
         | None = None,
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
-        if response_format["name"] == "spec2primitives_target_feature_review":
-            self.review_calls.append({"prompt": prompt, "response_format": response_format})
-            return {"verdict": "complete", "gap": None}
-        assert tool_executor is not None
         retrieved_refs: list[str] = []
         for evidence_id in self.retrieve_order:
+            assert tool_executor is not None
             result = await tool_executor("retrieve", {"evidence_id": evidence_id})
             refs = result.get("evidence_refs")
             if isinstance(refs, list):
@@ -473,9 +474,6 @@ class _SequencedProductAgent(_ToolUsingProductAgent):
         | None = None,
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
-        if response_format["name"] == "spec2primitives_target_feature_review":
-            self.review_calls.append({"prompt": prompt, "response_format": response_format})
-            return {"verdict": "complete", "gap": None}
         self.calls.append(
             {
                 "prompt": prompt,
@@ -494,10 +492,13 @@ class _TwoStageAllocationAgent:
         *,
         current_ref: str,
         desired_ref: str,
+        omitted_attempts: int = 0,
     ) -> None:
         self.resource_symbol = resource_symbol
         self.current_ref = current_ref
         self.desired_ref = desired_ref
+        self.omitted_attempts = omitted_attempts
+        self.allocation_attempts = 0
         self.calls: list[dict[str, object]] = []
 
     async def ask_llm_structured(
@@ -530,10 +531,13 @@ class _TwoStageAllocationAgent:
         assert tool_executor is not None and tools is not None
         parameters = tools[0]["function"]["parameters"]
         assert set(parameters["properties"]) == {"resource_symbol"}
-        reachability = await tool_executor(
-            "check_reachability",
-            {"resource_symbol": self.resource_symbol},
-        )
+        self.allocation_attempts += 1
+        results = {}
+        for symbol in parameters["properties"]["resource_symbol"]["enum"]:
+            if self.allocation_attempts <= self.omitted_attempts and symbol != self.resource_symbol:
+                continue
+            results[symbol] = await tool_executor("check_reachability", {"resource_symbol": symbol})
+        reachability = results[self.resource_symbol]
         if reachability["status"] != "accepted":
             return {"result": {"no_reachable_resource": True}}
         return {
@@ -544,35 +548,30 @@ class _TwoStageAllocationAgent:
         }
 
 
-class _AcceptingStateLocationFeasibility:
-    def __init__(self) -> None:
+class _AcceptingStateLocationFeasibility(OfflineMoveItPlanning):
+    def __init__(self, available: bool = True, verdicts: Mapping[str, str] | None = None) -> None:
+        super().__init__()
+        self.available = available
+        self.verdicts = verdicts or {}
         self.requests: list[Mapping[str, object]] = []
 
-    async def validate_plan_only_allocation(
-        self,
-        request: Mapping[str, object],
-    ) -> Mapping[str, object]:
+    async def validate_plan_only_allocation(self, request):
         self.requests.append(dict(request))
-        state_locations = request["state_locations"]
-        return {
-            "status": "accepted",
-            "state_locations": {
-                state_name: [
-                    {
-                        "evidence_handle": item["evidence_handle"],
-                        "status": "accepted",
-                        "message": "selected location is reachable",
-                        "error_code": 1,
-                    }
-                    for item in locations
-                ]
-                for state_name, locations in state_locations.items()
-            },
-            "feedback": None,
-        }
+        if not self.available:
+            raise RuntimeError("Offline service-unavailable fixture.")
+        response = await super().validate_plan_only_allocation(request)
+        status = self.verdicts.get(request["resource_symbol"], "accepted")
+        if status != "accepted":
+            response["status"] = status
+            for results in response["state_locations"].values():
+                for result in results:
+                    result.update(
+                        status=status, plan=None, error_code=-1 if status == "rejected" else None
+                    )
+        return response
 
 
-def test_simulation_allocation_uses_cartesian_validation_without_static_precheck(
+def test_simulation_arm_selection_checks_locations_without_cartesian_composition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -616,30 +615,34 @@ def test_simulation_allocation_uses_cartesian_validation_without_static_precheck
     reachability_path = tmp_path / "products/grounding/reachability/record.json"
     reachability_path.parent.mkdir(parents=True)
     reachability_path.write_text("{}", encoding="utf-8")
-    prepared = object()
     captured: dict[str, object] = {}
 
-    def prepare(**kwargs: object) -> object:
+    async def check(**kwargs):
         captured.update(kwargs)
-        return prepared
-
-    async def validate(_runtime: object, **kwargs: object) -> SimpleNamespace:
-        assert kwargs["reachability"] is prepared
         return SimpleNamespace(
-            record_path=validation_path,
-            status="accepted",
-            validation_number=1,
-        )
-
-    def persist(**kwargs: object) -> SimpleNamespace:
-        assert kwargs["robot_agent_validation_path"] == validation_path
-        return SimpleNamespace(
+            validation={
+                "response": {
+                    "state_locations": {
+                        state: [
+                            {"evidence_handle": handle, "status": "accepted"}
+                            for handle, _ in values
+                        ]
+                        for state, values in kwargs["state_location_record_paths"].items()
+                    }
+                }
+            },
             check_number=1,
             resource_symbol="xarm6",
             status="accepted",
-            schema_version=3,
             record_ref=reachability_path.relative_to(tmp_path).as_posix(),
             record_path=reachability_path,
+            state_locations={
+                state: [
+                    SimpleNamespace(evidence_handle=handle, reachable=True)
+                    for handle, path in values
+                ]
+                for state, values in kwargs["state_location_record_paths"].items()
+            },
         )
 
     monkeypatch.setattr(
@@ -653,16 +656,7 @@ def test_simulation_allocation_uses_cartesian_validation_without_static_precheck
             }
         },
     )
-    monkeypatch.setattr(production_grounding, "prepare_cartesian_reachability", prepare)
-    monkeypatch.setattr(production_grounding, "validate_provisional_allocation", validate)
-    monkeypatch.setattr(production_grounding, "persist_cartesian_reachability", persist)
-    monkeypatch.setattr(
-        production_grounding,
-        "check_resource_reachability",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("static reachability must not run in simulation")
-        ),
-    )
+    monkeypatch.setattr(production_grounding, "check_live_resource_reachability", check)
     monkeypatch.setattr(production_grounding, "_assert_blinded_pa_projection", lambda *_: None)
 
     allocation = production_grounding._PAAllocationInvestigation(
@@ -682,18 +676,16 @@ def test_simulation_allocation_uses_cartesian_validation_without_static_precheck
             "current_state": ("current_handle",),
             "desired_state": ("desired_handle",),
         },
-        current_cad_correspondence_path=current_comparison,
-        desired_cad_correspondence_path=desired_comparison,
     )
 
-    result = asyncio.run(
-        allocation.execute("check_reachability", {"resource_symbol": "xarm6"})
-    )
+    result = asyncio.run(allocation.execute("check_reachability", {"resource_symbol": "xarm6"}))
 
     assert result["status"] == "accepted"
-    assert "manifest_reachable" not in json.dumps(result)
-    assert captured["current_cad_correspondence_record_path"] == current_comparison
-    assert captured["desired_cad_correspondence_record_path"] == desired_comparison
+    assert result["motion_validation_performed"] is True
+    assert captured["state_location_record_paths"] == {
+        "current_state": [("current_handle", current_path)],
+        "desired_state": [("desired_handle", desired_path)],
+    }
 
 
 @pytest.mark.parametrize(
@@ -746,9 +738,7 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
             "record_sha256": "a" * 64,
             "record": {
                 "translated_location_m": (
-                    [0.0, -0.7, 1.1]
-                    if record_ref == current_ref
-                    else [0.0, -0.2, 1.1]
+                    [0.0, -0.7, 1.1] if record_ref == current_ref else [0.0, -0.2, 1.1]
                 )
             },
         }
@@ -789,16 +779,17 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
     assert result.proposal_path.name == "proposal_0001.json"
     assert not result.proposal_path.exists()
     assert load_interaction_abox(root, tbox).delta_count == 0
-    committed = commit_ontology_grounding_candidate(
-        result,
-        interaction_root=root,
-        tbox=tbox,
-        abox=abox,
-        workcell=workcell,
-        authorized_evidence_refs=authorized,
-    )
-    assert isinstance(committed, OntologyGroundingResult)
-    assert committed.merge.abox.delta_count == 1
+    with pytest.raises(OntologyGroundingError, match="source provenance"):
+        commit_ontology_grounding_candidate(
+            result,
+            interaction_root=root,
+            tbox=tbox,
+            abox=abox,
+            workcell=workcell,
+            authorized_evidence_refs=authorized,
+            context_view_ref="products/context_view_missing.json",
+        )
+    assert load_interaction_abox(root, tbox).delta_count == 0
     ppr = Namespace(PPR_NAMESPACE)
     feature = URIRef(f"{abox.namespace}feature_0001")
     currentstate = URIRef(f"{abox.namespace}currentstate_0001")
@@ -808,8 +799,10 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
     receiving_assembly = URIRef(f"{abox.namespace}assembly_0002")
     current_feature = URIRef(f"{abox.namespace}assemblyfeature_0001")
     desired_feature = URIRef(f"{abox.namespace}assemblyfeature_0002")
-    assert set(committed.merge.abox.graph) - set(abox.graph) == {
-        (feature, RDF.type, ppr.AssemblyFeatureAssociation),
+    association = URIRef(f"{abox.namespace}assemblyfeatureassociation_0001")
+    assert set(result.provisional_abox.graph) - set(abox.graph) == {
+        (feature, RDF.type, ppr.feature),
+        (association, RDF.type, ppr.AssemblyFeatureAssociation),
         (URIRef(abox.specification_iri), ppr.defines, feature),
         (URIRef(workcell.processes[0][1]), ppr.realizes, feature),
         (currentstate, RDF.type, ppr.state),
@@ -821,13 +814,14 @@ def test_pa_can_use_zero_or_multiple_retrievals_in_any_order(
         (assembly, ppr.hasPart, part),
         (current_feature, RDF.type, ppr.AssemblyFeature),
         (part, ppr.hasAssemblyFeature, current_feature),
-        (feature, ppr.relatesAssemblyFeature, current_feature),
+        (association, ppr.relatesAssemblyFeature, current_feature),
         (receiving_assembly, RDF.type, ppr.Assembly),
         (assembly, ppr.hasPart, receiving_assembly),
         (desired_feature, RDF.type, ppr.AssemblyFeature),
         (receiving_assembly, ppr.hasAssemblyFeature, desired_feature),
-        (feature, ppr.relatesAssemblyFeature, desired_feature),
-        (assembly, ppr.hasAssemblyFeatureAssociation, feature),
+        (association, ppr.relatesAssemblyFeature, desired_feature),
+        (assembly, ppr.hasAssemblyFeatureAssociation, association),
+        (association, ppr.hasdesiredstate, desiredstate),
     }
     call = agent.calls[0]
     assert call["response_format"]["name"] == "spec2primitives_grounding_result"
@@ -891,9 +885,7 @@ def test_direct_clarification_stops_without_proposal(tmp_path: Path) -> None:
         propose_and_validate_ontology_grounding(
             _ToolUsingProductAgent(
                 retrieve_order=(),
-                final_result={
-                    "clarification_question": "Which product variant is intended?"
-                },
+                final_result={"clarification_question": "Which product variant is intended?"},
             ),
             interaction_root=tmp_path,
             tbox=tbox,
@@ -909,7 +901,9 @@ def test_direct_clarification_stops_without_proposal(tmp_path: Path) -> None:
 
     assert isinstance(result, OntologyGroundingInterruption)
     assert result.kind == "clarification_question"
-    assert not (tmp_path / "products/grounding/ontology_grounding").exists()
+    audit_root = tmp_path / "products/grounding/ontology_grounding"
+    assert not list(audit_root.glob("proposal_*.json"))
+    assert list(audit_root.glob("request_*.json"))
 
 
 @pytest.mark.parametrize(
@@ -1123,7 +1117,7 @@ def test_invalid_target_feature_fails_before_commit(
             encoding="utf-8"
         )
     )
-    assert rejected["schema_version"] == 10
+    assert "schema_version" not in rejected
     assert rejected["status"] == "rejected"
 
 
@@ -1180,6 +1174,9 @@ def test_candidate_layout_tool_metadata_is_generic_and_accepts_two_or_more() -> 
     assert tool["function"]["name"] == "analyze_candidate_layout"
     parameters = tool["function"]["parameters"]
     assert parameters["properties"]["candidate_field_paths"]["minItems"] == 2
+    pattern = parameters["properties"]["candidate_field_paths"]["items"]["pattern"]
+    assert re.fullmatch(pattern, "/candidates/observation_" + "a" * 24)
+    assert not re.fullmatch(pattern, "/cameras/1/candidates/2")
     serialized = json.dumps(tool).casefold()
     assert "same observation frame" in serialized
     assert "uniqueitems" not in serialized
@@ -1192,6 +1189,124 @@ def test_candidate_layout_tool_metadata_is_generic_and_accepts_two_or_more() -> 
         "preferred evidence",
     ):
         assert forbidden not in serialized
+
+
+def test_first_observation_projection_round_trips_through_layout(tmp_path: Path) -> None:
+    from cais_spade_llm.spec2primitives.tests.test_rgbd_segmentation import (
+        _preprocess_observation,
+        _segmentation_bundle,
+    )
+    from cais_spade_llm.spec2primitives.tools.observation_presentation import (
+        ObservationPresentation,
+    )
+    from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.segmenter import (
+        segment_preprocessed_observation,
+    )
+
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    presentation, handles = _default_handles(tmp_path)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
+    )
+    investigation = _NativeEvidenceInvestigation(
+        runtime=runtime,
+        interaction_root=tmp_path,
+        tbox=tbox,
+        abox=abox,
+        requirement=abox.product_requirement,
+        handles=handles,
+        presentation=presentation,
+    )
+    # The first observation must already be opaque before any PA proposal.
+    observation_presentation = ObservationPresentation(tmp_path)
+    assert observation_presentation.record is not None
+    preprocessing = _preprocess_observation(tmp_path, _segmentation_bundle())
+    segmentation = segment_preprocessed_observation(
+        interaction_root=tmp_path, observation_record_path=preprocessing.record_path
+    )
+    segmentation_ref = segmentation.record_path.relative_to(tmp_path).as_posix()
+    delta = dict(preprocessing.delta)
+    delta["typed_context_refs"] = [*delta["typed_context_refs"], segmentation_ref]
+    investigation.abox = validate_and_merge_triple_delta(
+        tmp_path,
+        tbox,
+        "rgb_d_cad_grounding",
+        delta,
+        authorized_evidence_refs=preprocessing.record["evidence_refs"],
+    ).abox
+    investigation._register_references(
+        source_refs=preprocessing.record["evidence_refs"], record_refs=[segmentation_ref]
+    )
+    observation_handle = next(handle for handle in handles if handle.evidence_type == "observation")
+    investigation.retrieved_results[observation_handle.evidence_id] = {
+        "segmentation": {
+            "record_ref": investigation.project_canonical_reference(segmentation_ref),
+            "views": _neutral_candidate_views(
+                segmentation.record,
+                segmentation_record_ref=investigation.project_canonical_reference(segmentation_ref),
+                review={
+                    "record_type": "ObservationCandidateReview",
+                    "status": "accepted",
+                    "candidates": [
+                        {
+                            "observation_handle": camera["observation_handle"],
+                            "candidate_handle": candidate["candidate_handle"],
+                            "description": "Observed region.",
+                            "uncertainty": "Identity unresolved.",
+                        }
+                        for camera in segmentation.record["cameras"]
+                        for candidate in camera["candidates"]
+                    ],
+                },
+            ),
+        },
+        "evidence_refs": [investigation.project_canonical_reference(segmentation_ref)],
+        "record_refs": [investigation.project_canonical_reference(segmentation_ref)],
+    }
+    first = asyncio.run(
+        investigation.execute("retrieve", {"evidence_id": observation_handle.evidence_id})
+    )
+    serialized = json.dumps(first)
+    assert "/cameras/" not in serialized
+    assert "view_0001" not in serialized
+    assert "candidate_0001_" not in serialized
+    candidates = next(
+        view["candidates"]
+        for view in first["segmentation"]["views"]
+        if observation_presentation.resolve(view)["observation_handle"] == "view_0001"
+    )
+    arguments = {
+        "segmentation_ref": investigation.project_canonical_reference(segmentation_ref),
+        "candidate_field_paths": [item["candidate_value_ref"]["field_path"] for item in candidates],
+    }
+    before = hashlib.sha256(segmentation.record_path.read_bytes()).hexdigest()
+
+    async def measure_layout():
+        return await asyncio.wait_for(
+            investigation.execute("analyze_candidate_layout", arguments), timeout=15
+        )
+
+    result = asyncio.run(measure_layout())
+    assert "error" not in result, result
+    relation = json.loads(
+        (tmp_path / investigation.resolve_pa_reference(result["relation_ref"])).read_text()
+    )
+    assert relation["status"] == "measured"
+    assert all(
+        candidate["frame"] == segmentation.record["cameras"][0]["frame"]
+        for candidate in relation["candidates"]
+    )
+    assert hashlib.sha256(segmentation.record_path.read_bytes()).hexdigest() == before
+    assert "frame" not in result
+    assert "/cameras/" not in json.dumps(result)
+    canonical_arguments = observation_presentation.resolve(arguments)
+    rejected = asyncio.run(investigation.execute("analyze_candidate_layout", canonical_arguments))
+    assert rejected["error"]["reason"] == "malformed_tool_call"
+    assert len(list(tmp_path.glob("products/grounding/rgb_d_cad_grounding/layout_*"))) == 1
 
 
 def test_compare_cad_size_rejects_unauthorized_unretrieved_and_stale_inputs(
@@ -1221,6 +1336,7 @@ def test_compare_cad_size_rejects_unauthorized_unretrieved_and_stale_inputs(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     investigation = _NativeEvidenceInvestigation(
         runtime=runtime,
@@ -1457,6 +1573,7 @@ def test_compare_cad_size_persists_result_and_audits_reuse(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     investigation = _NativeEvidenceInvestigation(
         runtime=runtime,
@@ -1551,7 +1668,6 @@ def test_compare_cad_size_persists_result_and_audits_reuse(
         )
         record_path.parent.mkdir(parents=True)
         record = {
-            "schema_version": 3,
             "record_type": "CADSizeCorrespondenceRecord",
             "CAD": {
                 "record": {"ref": cad_ref},
@@ -1621,6 +1737,7 @@ def test_unauthorized_and_stale_ids_fail_closed_and_are_audited(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     stale = _EvidenceHandle(
         evidence_id="evidence_stale",
@@ -2161,9 +2278,7 @@ def test_state_value_does_not_require_unique_size_correspondence(
                         "record_ref": segmentation_ref,
                         "field_path": field_path,
                     },
-                    "resolved_value": {
-                        "candidate_handle": candidate_handles[candidate_index]
-                    },
+                    "resolved_value": {"candidate_handle": candidate_handles[candidate_index]},
                 },
             ),
             evidence_refs=(),
@@ -2188,9 +2303,7 @@ def test_state_value_does_not_require_spatial_relation_subject_match(
                 "cameras": [
                     {
                         "observation_handle": "view_opaque",
-                        "candidates": [
-                            {"candidate_handle": candidate} for candidate in candidates
-                        ],
+                        "candidates": [{"candidate_handle": candidate} for candidate in candidates],
                     }
                 ]
             }
@@ -2228,7 +2341,6 @@ def test_state_value_does_not_require_spatial_relation_subject_match(
         }
 
     relation_record: dict[str, object] = {
-        "schema_version": 1,
         "record_type": "CandidateSpatialRelationRecord",
         "producer": "rgb_d_cad_grounding",
         "comparison": {
@@ -2255,9 +2367,7 @@ def test_state_value_does_not_require_spatial_relation_subject_match(
         ],
         "status": "accepted",
     }
-    relation_record["fingerprint"] = production_grounding._json_fingerprint(
-        relation_record
-    )
+    relation_record["fingerprint"] = production_grounding._json_fingerprint(relation_record)
     relation_path = tmp_path / relation_ref
     relation_path.write_text(json.dumps(relation_record), encoding="utf-8")
     segmentation_sha256 = hashlib.sha256(segmentation_path.read_bytes()).hexdigest()
@@ -2341,11 +2451,7 @@ def test_state_value_does_not_require_spatial_relation_subject_match(
         "sha256": "f" * 64,
     }
     relation_record["fingerprint"] = production_grounding._json_fingerprint(
-        {
-            key: value
-            for key, value in relation_record.items()
-            if key != "fingerprint"
-        }
+        {key: value for key, value in relation_record.items() if key != "fingerprint"}
     )
     relation_path.write_text(json.dumps(relation_record), encoding="utf-8")
     relation_binding.record_sha256 = hashlib.sha256(relation_path.read_bytes()).hexdigest()
@@ -2522,11 +2628,37 @@ def _allocation_entry(
     )
 
 
-def test_simulation_allocation_without_cartesian_evidence_fails_closed(
+@pytest.mark.parametrize("resource_order", [("xarm6", "ur5e"), ("ur5e", "xarm6")])
+@pytest.mark.parametrize(
+    "verdicts, selected, omitted_attempts, expected_code",
+    [
+        ({"xarm6": "accepted", "ur5e": "rejected"}, "xarm6", 0, None),
+        ({"xarm6": "rejected", "ur5e": "accepted"}, "ur5e", 0, None),
+        ({"xarm6": "accepted", "ur5e": "accepted"}, "xarm6", 0, None),
+        ({"xarm6": "accepted", "ur5e": "accepted"}, "ur5e", 0, None),
+        ({"xarm6": "rejected", "ur5e": "rejected"}, "xarm6", 0, "no_reachable_resource"),
+        (
+            {"xarm6": "needs_context", "ur5e": "rejected"},
+            "xarm6",
+            0,
+            "reachability_validation_unavailable",
+        ),
+        ({"xarm6": "accepted", "ur5e": "needs_context"}, "xarm6", 0, None),
+        ({"xarm6": "accepted", "ur5e": "accepted"}, "xarm6", 1, None),
+        ({"xarm6": "accepted", "ur5e": "accepted"}, "xarm6", 2, "invalid_resource_selection"),
+    ],
+)
+def test_simulation_arm_assignment_requires_reachability_without_cartesian_evidence(
     tmp_path: Path,
+    resource_order,
+    verdicts,
+    selected,
+    omitted_attempts,
+    expected_code,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "interaction"
+    _write_requirement(root, "assemble medium gear")
     tbox = ontology_config().load_tbox()
     initial_abox = initialize_interaction_abox(root, "assemble medium gear", tbox)
     current_path, current_source = _write_neutral_location(
@@ -2565,12 +2697,14 @@ def test_simulation_allocation_without_cartesian_evidence_fails_closed(
         },
         authorized_evidence_refs={desired_source},
     )
-    feasibility = _AcceptingStateLocationFeasibility()
+    feasibility = _AcceptingStateLocationFeasibility(verdicts=verdicts)
     runtime = ProductionProductContextGroundingRuntime(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
         robot_agent_feasibility_runtime=feasibility,
+        allocation_resource_order=resource_order,
     )
     monkeypatch.setattr(
         _NativeEvidenceInvestigation,
@@ -2578,7 +2712,8 @@ def test_simulation_allocation_without_cartesian_evidence_fails_closed(
         lambda _self, pa_ref: pa_ref,
     )
     agent = _TwoStageAllocationAgent(
-        "xarm6",
+        selected,
+        omitted_attempts=omitted_attempts,
         current_ref=current_ref,
         desired_ref=desired_ref,
     )
@@ -2594,18 +2729,37 @@ def test_simulation_allocation_without_cartesian_evidence_fails_closed(
         )
     )
 
-    assert result["grounding_status"] == "incomplete"
-    assert result["grounding_validation_code"] == "no_reachable_resource"
-    assert len(agent.calls) == 2
-    assert feasibility.requests == []
+    assert len(feasibility.requests) == (1 if omitted_attempts == 2 else 2)
+    checked = {request["resource_symbol"] for request in feasibility.requests}
+    assert checked == ({selected} if omitted_attempts == 2 else set(resource_order))
+    if len(feasibility.requests) == 2:
+        assert (
+            feasibility.requests[0]["state_locations"] == feasibility.requests[1]["state_locations"]
+        )
+    if omitted_attempts:
+        correction = agent.calls[-1]["prompt"]
+        assert '"unchecked_resources"' in correction
+        assert '"existing_results"' in correction
+    if expected_code:
+        assert result["grounding_status"] == "incomplete"
+        assert result["grounding_validation_code"] == expected_code
+        assert not (root / "products/grounding/resource_selection").exists()
+        return
+    selection = json.loads((root / result["resource_selection_ref"]).read_text())
+    assert selection["selected_resource_symbol"] == selected
+    assert result["grounding_status"] == "complete"
+    assert result["resource_assignment_status"] == "complete"
+    assert len(agent.calls) == (3 if omitted_attempts else 2)
+    assert len(feasibility.requests) == 2
+    assert feasibility.requests[0]["validation_scope"] == "moveit_state_location_reachability"
     final_abox = load_interaction_abox(root, tbox)
     assert initial_abox.accepted_assertion_count == 0
-    assert final_abox.accepted_assertion_count == 19
+    assert final_abox.accepted_assertion_count == 25
     proposal = json.loads((root / str(result["ontology_projection_ref"])).read_text())
-    assert proposal["schema_version"] == 10
-    assert len(proposal["compiled_delta"]["assertions"]) == 19
-    assert not (root / "products/grounding/reachability").exists()
-    assert not (root / "products/grounding/resource_selection").exists()
+    assert "schema_version" not in proposal
+    assert len(proposal["compiled_delta"]["assertions"]) == 21
+    assert (root / "products/grounding/reachability").exists()
+    assert (root / "products/grounding/resource_selection").exists()
     allocation_contract = json.dumps(
         {
             "response_format": agent.calls[1]["response_format"],
@@ -2619,11 +2773,11 @@ def test_simulation_allocation_without_cartesian_evidence_fails_closed(
     assert "translated_location_m" in allocation_prompt
     assert "expected_resource" not in allocation_prompt
     assert "expected_candidate" not in allocation_prompt
-    assert not (root / "products/grounding/target_feature_review").exists()
+    assert "grounding_evidence" in proposal
     assert not (root / "products/grounding/completion").exists()
 
 
-def test_grounding_accepts_empty_state_values_then_reports_missing_location_evidence(
+def test_grounding_rejects_empty_state_values_before_commit_and_reports_no_progress(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "interaction"
@@ -2633,6 +2787,7 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     agent = _ToolUsingProductAgent(retrieve_order=())
 
@@ -2648,11 +2803,12 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
     )
 
     assert result["grounding_status"] == "incomplete"
-    assert result["grounding_stage"] == "target_feature"
-    assert result["grounding_validation_code"] == "invalid_target_feature"
+    assert result["grounding_validation_code"] == "grounding_no_progress"
     assert "ontology_projection_ref" not in result
-    assert len(agent.calls) == 1
-    assert agent.review_calls == []
+    assert len(agent.calls) == 2
+    assert result["grounding_progress"]["last_feedback"][0]["missing_states"] == [
+        "current_state", "desired_state"
+    ]
     first_input = json.loads(str(agent.calls[0]["prompt"]).split("Grounding input:\n", 1)[1])
     assert first_input["target_feature_contract"] == {
         "cardinality": "exactly_one",
@@ -2660,9 +2816,9 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
         "value_names": "PA_authored_without_host_enum",
         "assembly_process": {
             "process_symbol": "assembly",
-            "association_cardinality": "exactly_one",
+            "association_cardinality": "zero_or_more",
             "assembly_feature_cardinality": "exactly_two",
-            "state_location_binding": "one_current_and_one_desired",
+            "state_location_binding": "evidence_supported_or_both_null",
         },
     }
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
@@ -2673,11 +2829,220 @@ def test_grounding_accepts_empty_state_values_then_reports_missing_location_evid
     ).exists()
 
 
+def test_budgeted_grounding_allows_reference_repairs_after_tools_are_exhausted(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox,
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+        grounding_limits=GroundingLimits(2, 4),
+    )
+
+    class BudgetPA(_SequencedProductAgent):
+        async def ask_llm_structured(self, prompt, **kwargs):
+            attempt = len(self.calls)
+            progress = json.loads(prompt.split("Grounding input:\n")[1])["grounding_progress"]
+            assert progress["evidence_operations_used"] == min(attempt, 2)
+            if attempt < 2:
+                result = await kwargs["tool_executor"]("unknown_tool", {})
+                assert result["error"]["reason"] == "malformed_tool_call"
+            else:
+                assert kwargs["tools"] is None
+                assert kwargs["tool_executor"] is None
+                assert kwargs["max_tool_rounds"] == 0
+            return await super().ask_llm_structured(prompt, **kwargs)
+
+    first = _proposal("citation_" + "a" * 24)
+    second = _proposal("citation_" + "b" * 24)
+    final = _proposal("requirement_0001")
+    agent = BudgetPA((first, second, final, final))
+    result = asyncio.run(runtime.ground_product_context(
+        agent, interaction_root=tmp_path, tbox=tbox, abox=abox,
+        product_context={}, max_pa_turns=1,
+    ))
+    assert result["grounding_validation_code"] == "grounding_no_progress"
+    assert result["grounding_progress"]["evidence_operations_used"] == 2
+    assert result["grounding_progress"]["proposals_used"] == 4
+    assert result["grounding_progress"]["last_feedback"][0]["validation_code"] == "location_evidence_unavailable"
+    assert len(agent.calls) == 4
+    assert load_interaction_abox(tmp_path, tbox).accepted_assertion_count == 0
+    proposals = sorted(tmp_path.glob("products/grounding/ontology_grounding/proposal_*.json"))
+    assert len(proposals) == 4
+    assert all(json.loads(path.read_text())["status"] == "rejected" for path in proposals)
+    first_audit = json.loads((tmp_path / "interaction_record/tool_call_0001.json").read_text())
+    assert first_audit["grounding_progress"]["evidence_operations_used"] == 1
+    second_input = json.loads(agent.calls[1]["prompt"].split("Grounding input:\n")[1])
+    assert second_input["validation_feedback"][0]["authorized_evidence_refs"] == ["requirement_0001"]
+    assert "expected_candidate" not in json.dumps(second_input)
+
+
+def test_budgeted_grounding_does_not_retry_malformed_proposals(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox, document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    malformed = _proposal("requirement_0001")
+    malformed["target_feature"]["desired_state"]["statement"]["text"] = ""
+    agent = _SequencedProductAgent((malformed,))
+    result = asyncio.run(runtime.ground_product_context(
+        agent, interaction_root=tmp_path, tbox=tbox, abox=abox,
+        product_context={}, max_pa_turns=1,
+    ))
+    assert result["grounding_validation_code"] == "invalid_target_feature"
+    assert len(agent.calls) == 1
+    assert load_interaction_abox(tmp_path, tbox).accepted_assertion_count == 0
+
+
+def test_grounding_submission_cap_bounds_wording_changes_without_semantic_judgment(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox, document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(), grounding_limits=GroundingLimits(24, 6),
+    )
+    proposals = []
+    for attempt in range(6):
+        proposal = _proposal("requirement_0001")
+        proposal["target_feature"]["desired_state"]["statement"]["text"] = f"Requested outcome wording {attempt}."
+        proposals.append(proposal)
+    agent = _SequencedProductAgent(tuple(proposals))
+    result = asyncio.run(runtime.ground_product_context(
+        agent, interaction_root=tmp_path, tbox=tbox, abox=abox,
+        product_context={}, max_pa_turns=1,
+    ))
+    assert result["grounding_validation_code"] == "grounding_budget_exhausted"
+    assert len(agent.calls) == 6
+    assert agent.calls[0]["max_tool_rounds"] == 24
+    assert result["grounding_progress"]["evidence_operations_used"] == 0
+    assert result["grounding_progress"]["proposals_used"] == 6
+    assert load_interaction_abox(tmp_path, tbox).accepted_assertion_count == 0
+
+
+def test_evidence_budget_counts_cached_and_failed_operations(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox, document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(), grounding_limits=GroundingLimits(3, 6),
+    )
+    presentation, handles = _default_handles(tmp_path)
+    investigation = _NativeEvidenceInvestigation(
+        runtime=runtime, interaction_root=tmp_path, tbox=tbox, abox=abox,
+        requirement=abox.product_requirement, handles=handles, presentation=presentation,
+    )
+    path, source = _write_neutral_location(tmp_path, "cached", (0.0, 0.0, 0.0))
+    ref = path.relative_to(tmp_path).as_posix()
+    investigation._register_references(source_refs={source}, record_refs=[ref])
+    investigation.retrieved_results[handles[0].evidence_id] = {
+        "record_refs": [investigation.project_canonical_reference(ref)],
+        "evidence_refs": [investigation.project_canonical_reference(source)],
+    }
+
+    async def run_operations():
+        results = []
+        for tool_name in ("retrieve", "unknown_tool", "retrieve", "retrieve"):
+            results.append(await investigation.execute(tool_name, {"evidence_id": handles[0].evidence_id}))
+        return results
+
+    results = asyncio.run(run_operations())
+    assert results[1]["error"]["reason"] == "malformed_tool_call"
+    assert results[-1]["error"]["reason"] == "tool_budget_exhausted"
+    assert investigation.run_tool_call_count == 3
+    audits = [json.loads((tmp_path / ref).read_text()) for ref in investigation.tool_call_refs]
+    assert [audit["reused"] for audit in audits] == [True, False, True, False]
+    assert [audit["grounding_progress"]["evidence_operations_used"] for audit in audits] == [1, 2, 3, 3]
+
+
+def test_no_progress_fingerprint_changes_with_new_evidence_and_rejects_changed_sources(tmp_path: Path) -> None:
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox, document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(),
+    )
+    presentation, handles = _default_handles(tmp_path)
+    investigation = _NativeEvidenceInvestigation(
+        runtime=runtime, interaction_root=tmp_path, tbox=tbox, abox=abox,
+        requirement=abox.product_requirement, handles=handles, presentation=presentation,
+    )
+    investigation.validation_feedback = [{"validation_code": "location_evidence_unavailable", "missing_states": ["desired_state"]}]
+    proposal = _proposal("requirement_0001")
+    before = production_grounding._grounding_failure_fingerprint(investigation, proposal)
+    assert production_grounding._grounding_failure_fingerprint(investigation, proposal) == before
+    path, source = _write_neutral_location(tmp_path, "additional", (0.0, 0.0, 0.0))
+    ref = path.relative_to(tmp_path).as_posix()
+    investigation.abox = validate_and_merge_triple_delta(
+        tmp_path, tbox, "neutral_test_location_provider",
+        {"assertions": [], "uncertainty": [], "unresolved_evidence_needs": [], "typed_context_refs": [ref]},
+        authorized_evidence_refs={source},
+    ).abox
+    investigation._register_references(source_refs={source}, record_refs=[ref])
+    investigation.authorized_evidence_refs.update({source, ref})
+    assert production_grounding._grounding_failure_fingerprint(investigation, proposal) != before
+    path.write_text(path.read_text() + " ")
+    with pytest.raises(production_grounding.ProductionGroundingError, match="Issued evidence changed"):
+        production_grounding._grounding_failure_fingerprint(investigation, proposal)
+
+
+def test_grounding_completes_after_more_than_two_proposals(tmp_path: Path, monkeypatch) -> None:
+    tbox = ontology_config().load_tbox()
+    _write_requirement(tmp_path, "assemble product")
+    abox = initialize_interaction_abox(tmp_path, "assemble product", tbox)
+    refs = []
+    for name in ("current", "desired"):
+        path, source = _write_neutral_location(tmp_path, name, (0.0, 0.0, 0.0))
+        refs.append(path.relative_to(tmp_path).as_posix())
+        abox = validate_and_merge_triple_delta(
+            tmp_path, tbox, "neutral_test_location_provider",
+            {"assertions": [], "uncertainty": [], "unresolved_evidence_needs": [], "typed_context_refs": [refs[-1]]},
+            authorized_evidence_refs={source},
+        ).abox
+    monkeypatch.setattr(_NativeEvidenceInvestigation, "resolve_pa_reference", lambda _self, ref: ref)
+    feasibility = _AcceptingStateLocationFeasibility()
+    runtime = ProductionProductContextGroundingRuntime(
+        tbox=tbox, document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=_NoDocumentVision(), robot_agent_feasibility_runtime=feasibility,
+    )
+
+    class RevisingPA(_TwoStageAllocationAgent):
+        async def ask_llm_structured(self, prompt, **kwargs):
+            attempt = len(self.calls)
+            output = await super().ask_llm_structured(prompt, **kwargs)
+            if kwargs["response_format"]["name"] == "spec2primitives_grounding_result" and attempt < 2:
+                target = output["result"]["target_feature"]
+                target["desired_state"]["state_values"] = []
+                target["desired_state"]["statement"]["text"] = f"Requested outcome attempt {attempt}."
+                for association in target["assembly_feature_association"]:
+                    for endpoint in association["assembly_features"]:
+                        if endpoint["state_name"] == "desired_state":
+                            endpoint.update(state_name=None, state_value_name=None)
+            return output
+
+    agent = RevisingPA("xarm6", current_ref=refs[0], desired_ref=refs[1])
+    result = asyncio.run(runtime.ground_product_context(
+        agent, interaction_root=tmp_path, tbox=tbox, abox=abox,
+        product_context={}, max_pa_turns=1,
+    ))
+    assert result["grounding_status"] == "complete"
+    assert result["grounding_progress"]["proposals_used"] == 3
+    assert {request["resource_symbol"] for request in feasibility.requests} == {"xarm6", "ur5e"}
+    proposals = sorted(tmp_path.glob("products/grounding/ontology_grounding/proposal_*.json"))
+    assert [json.loads(path.read_text())["status"] for path in proposals] == ["rejected", "rejected", "accepted"]
+    for call in agent.calls[1:3]:
+        feedback = json.loads(call["prompt"].split("Grounding input:\n")[1])["validation_feedback"]
+        assert feedback[0]["missing_states"] == ["desired_state"]
+        assert "medium" not in json.dumps(feedback).lower()
+
+
 def test_supported_current_statement_does_not_require_unlisted_physical_relations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "interaction"
+    _write_requirement(root, "assemble medium gear")
     tbox = ontology_config().load_tbox()
     initialize_interaction_abox(root, "assemble medium gear", tbox)
     current_path, current_source = _write_neutral_location(
@@ -2720,6 +3085,7 @@ def test_supported_current_statement_does_not_require_unlisted_physical_relation
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     partial = _assembly_proposal(
         "requirement_0001",
@@ -2754,16 +3120,17 @@ def test_supported_current_statement_does_not_require_unlisted_physical_relation
 
     assert result["grounding_status"] == "incomplete"
     assert result["grounding_validation_code"] == "invalid_resource_selection"
-    assert agent.review_calls == []
-    assert load_interaction_abox(root, tbox).accepted_assertion_count == 19
+    assert load_interaction_abox(root, tbox).accepted_assertion_count == 21
     assert (root / str(result["ontology_projection_ref"])).is_file()
     prompt = str(agent.calls[0]["prompt"])
     assert "mounting" not in prompt
     assert "meshing" not in prompt
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
 def test_transport_failure_is_not_mislabeled_as_an_invalid_target_feature(
     tmp_path: Path,
+    error_type,
 ) -> None:
     root = tmp_path / "interaction"
     tbox = ontology_config().load_tbox()
@@ -2772,6 +3139,7 @@ def test_transport_failure_is_not_mislabeled_as_an_invalid_target_feature(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
 
     class _RejectedTransport:
@@ -2781,16 +3149,14 @@ def test_transport_failure_is_not_mislabeled_as_an_invalid_target_feature(
             *,
             response_format: dict[str, Any],
             tools: list[dict[str, Any]] | None = None,
-            tool_executor: Callable[
-                [str, Mapping[str, object]], Awaitable[Mapping[str, object]]
-            ]
+            tool_executor: Callable[[str, Mapping[str, object]], Awaitable[Mapping[str, object]]]
             | None = None,
             max_tool_rounds: int = 3,
         ) -> dict[str, Any]:
             del prompt, response_format, tools, tool_executor, max_tool_rounds
-            raise RuntimeError("provider rejected the structured request")
+            raise error_type("provider rejected the structured request")
 
-    with pytest.raises(RuntimeError, match="provider rejected"):
+    with pytest.raises(error_type):
         asyncio.run(
             runtime.ground_product_context(
                 _RejectedTransport(),
@@ -2803,7 +3169,9 @@ def test_transport_failure_is_not_mislabeled_as_an_invalid_target_feature(
         )
 
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
-    assert not (root / "products/grounding/ontology_grounding").exists()
+    audit_root = root / "products/grounding/ontology_grounding"
+    assert not list(audit_root.glob("proposal_*.json"))
+    assert list(audit_root.glob("request_*.json"))
 
 
 @pytest.mark.parametrize("failure_mode", ["ambiguous", "malformed"])
@@ -2819,6 +3187,7 @@ def test_cad_correspondence_failure_remains_incomplete(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     current_ref = "products/grounding/test/current_location.json"
     desired_ref = "products/grounding/test/desired_location.json"
@@ -2835,9 +3204,7 @@ def test_cad_correspondence_failure_remains_incomplete(
             "record_sha256": "a" * 64,
             "record": {
                 "translated_location_m": (
-                    [0.0, -0.7, 1.1]
-                    if record_ref == current_ref
-                    else [0.0, -0.2, 1.1]
+                    [0.0, -0.7, 1.1] if record_ref == current_ref else [0.0, -0.2, 1.1]
                 )
             },
         },
@@ -2875,7 +3242,7 @@ def test_cad_correspondence_failure_remains_incomplete(
     assert load_interaction_abox(root, tbox).accepted_assertion_count == 0
 
 
-def test_invalid_state_evidence_stops_before_review_and_allocation(
+def test_invalid_state_evidence_stops_before_commit_and_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2886,6 +3253,7 @@ def test_invalid_state_evidence_stops_before_review_and_allocation(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     current_ref = "products/grounding/test/current_location.json"
     desired_ref = "products/grounding/test/desired_location.json"
@@ -2902,9 +3270,7 @@ def test_invalid_state_evidence_stops_before_review_and_allocation(
             "record_sha256": "a" * 64,
             "record": {
                 "translated_location_m": (
-                    [0.0, -0.7, 1.1]
-                    if record_ref == current_ref
-                    else [0.0, -0.2, 1.1]
+                    [0.0, -0.7, 1.1] if record_ref == current_ref else [0.0, -0.2, 1.1]
                 )
             },
         },
@@ -2946,11 +3312,10 @@ def test_invalid_state_evidence_stops_before_review_and_allocation(
     assert result["grounding_validation_code"] == "evidence_reference_invalid"
     assert result["insufficient_evidence"] == "The target feature cites invalid evidence."
     assert "unmet_grounding_obligation" not in result
-    assert agent.review_calls == []
     assert not (root / "products/grounding/target_feature_review").exists()
     assert len(agent.calls) == 1
     prompt = str(agent.calls[0]["prompt"]).casefold()
-    assert "validation_feedback" not in prompt
+    assert '"validation_feedback": []' in prompt
     assert "expected_revision" not in prompt
 
 
@@ -2958,9 +3323,7 @@ def test_invalid_state_evidence_stops_before_review_and_allocation(
     ("error", "expected_code"),
     [
         (
-            OntologyGroundingError(
-                "This structural message happens to contain the word evidence."
-            ),
+            OntologyGroundingError("This structural message happens to contain the word evidence."),
             "invalid_target_feature",
         ),
         (
@@ -2985,6 +3348,7 @@ def test_incomplete_code_is_typed_and_never_inferred_from_exception_prose(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
 
     def reject(*args: object, **kwargs: object) -> None:
@@ -3019,7 +3383,9 @@ def test_clarification_after_successful_retrieval_is_returned(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
+
     async def retrieve(
         investigation: _NativeEvidenceInvestigation,
         tool_name: str,
@@ -3073,6 +3439,11 @@ def test_clarification_after_successful_retrieval_is_returned(
         "grounding_status": "clarification_required",
         "clarification_question": "Which product variant is intended?",
         "tool_call_refs": [],
+        "grounding_progress": {
+            "evidence_operations_used": 0, "evidence_operations_limit": 24,
+            "proposals_used": 1, "proposals_limit": 6,
+            "last_feedback": [], "stop_reason": "clarification_required",
+        },
     }
     assert "hidden case knowledge" in str(agent.calls[0]["prompt"])
 
@@ -3085,6 +3456,7 @@ def test_genuine_clarification_is_returned_without_controller_retry(tmp_path: Pa
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     agent = _SequencedProductAgent(
         ({"clarification_question": "Which product variant is intended?"},)
@@ -3105,6 +3477,11 @@ def test_genuine_clarification_is_returned_without_controller_retry(tmp_path: Pa
         "grounding_status": "clarification_required",
         "clarification_question": "Which product variant is intended?",
         "tool_call_refs": [],
+        "grounding_progress": {
+            "evidence_operations_used": 0, "evidence_operations_limit": 24,
+            "proposals_used": 1, "proposals_limit": 6,
+            "last_feedback": [], "stop_reason": "clarification_required",
+        },
     }
     assert len(agent.calls) == 1
 
@@ -3120,6 +3497,7 @@ def test_answered_clarification_uses_persisted_record_ref(
         tbox=tbox,
         document_config=load_model_runtime_config().document_vlm,
         document_vision_runtime=_NoDocumentVision(),
+        observation_config=load_model_runtime_config().observation_vlm,
     )
     clarification = {
         "record_type": "PAClarification",
@@ -3136,16 +3514,7 @@ def test_answered_clarification_uses_persisted_record_ref(
     )
     presented_ref = presentation.opaque_reference(evidence_ref, kind="citation")
     current_ref = "products/grounding/test/current_location.json"
-    desired_ref = "products/grounding/test/desired_location.json"
-    agent = _SequencedProductAgent(
-        (
-            _assembly_proposal(
-                presented_ref,
-                current_ref=current_ref,
-                desired_ref=desired_ref,
-            ),
-        )
-    )
+    agent = _SequencedProductAgent((_proposal(presented_ref),))
     monkeypatch.setattr(
         _NativeEvidenceInvestigation,
         "resolve_pa_reference",
@@ -3159,9 +3528,7 @@ def test_answered_clarification_uses_persisted_record_ref(
             "record_sha256": "a" * 64,
             "record": {
                 "translated_location_m": (
-                    [0.0, -0.7, 1.1]
-                    if record_ref == current_ref
-                    else [0.0, -0.2, 1.1]
+                    [0.0, -0.7, 1.1] if record_ref == current_ref else [0.0, -0.2, 1.1]
                 )
             },
         },
@@ -3200,16 +3567,15 @@ def test_answered_clarification_uses_persisted_record_ref(
     target_feature = proposal["output"]["target_feature"]
     assert evidence_ref in target_feature["required_process"]["evidence_refs"]
     assert evidence_ref in target_feature["desired_state"]["statement"]["evidence_refs"]
-    assert agent.review_calls == []
 
 
 def test_production_source_has_no_task_label_or_answer_recipe() -> None:
     package_root = Path(__file__).resolve().parents[1]
     source = (package_root / "agents/pa/production_grounding.py").read_text(encoding="utf-8")
     prompt_source = (package_root / "agents/pa/ontology_grounding.py").read_text(encoding="utf-8")
-    layout_source = (
-        package_root / "tools/rgb_d_cad_grounding/candidate_layout.py"
-    ).read_text(encoding="utf-8")
+    layout_source = (package_root / "tools/rgb_d_cad_grounding/candidate_layout.py").read_text(
+        encoding="utf-8"
+    )
     active_sources = f"{source}\n{prompt_source}\n{layout_source}".casefold()
 
     assert "supports_manipulator_pick_place" not in source
@@ -3231,9 +3597,7 @@ def test_production_source_has_no_task_label_or_answer_recipe() -> None:
         "expected_resource",
         "required evidence order",
         "groundingreadinesscontract",
-        "targetfeaturesemanticreview",
         "expected_revision",
-        "semantic_review",
     ):
         assert forbidden not in active_sources
 
@@ -3244,6 +3608,12 @@ async def _unused_tool(
 ) -> Mapping[str, object]:
     del tool_name, arguments
     raise AssertionError("No tool call was expected.")
+
+
+def _write_requirement(root: Path, requirement: str) -> None:
+    path = root / "products/user_requirement/product_requirement.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"product_requirement": requirement}), encoding="utf-8")
 
 
 def _write_neutral_location(
@@ -3263,7 +3633,6 @@ def _write_neutral_location(
     location_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
                 "record_type": "RobotFrameLocationRecord",
                 "producer": "neutral_test_location_provider",
                 "method": "neutral_test_location",
@@ -3291,6 +3660,7 @@ def _write_neutral_location(
 def _proposal(evidence_ref: str) -> dict[str, object]:
     return {
         "target_feature": {
+            "assembly_feature_association": [],
             "required_process": {
                 "process_iri": "https://cais-spade-llm.local/process/assembly",
                 "evidence_refs": [evidence_ref],
@@ -3347,6 +3717,7 @@ def _assembly_proposal(
         }
     ]
     target_feature["assembly_feature_association"] = {
+        "state_names": ["desired_state"],
         "assembly": {
             "name": "requested_assembly",
             "evidence_refs": [evidence_ref],
@@ -3377,4 +3748,78 @@ def _assembly_proposal(
         ],
         "evidence_refs": [evidence_ref],
     }
+    target_feature["assembly_feature_association"] = [
+        target_feature["assembly_feature_association"]
+    ]
     return proposal
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"frame": "cam_assembly_link"},
+        {"feedback": "failed cam_mk4_2_link transform"},
+        {"nested": [{"coordinate_frame": "cam_mk3_link"}]},
+        {"cam_assembly_link": "value"},
+    ],
+)
+def test_sensor_identities_are_rejected_in_all_model_metadata(tmp_path, metadata):
+    from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+        ProductionGroundingError,
+        _assert_blinded_pa_projection,
+    )
+
+    presentation, _ = _default_handles(tmp_path)
+    with pytest.raises(ProductionGroundingError):
+        _assert_blinded_pa_projection(metadata, presentation)
+
+
+def test_source_text_and_approved_cad_names_remain_available(tmp_path):
+    from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+        _assert_blinded_pa_projection,
+    )
+
+    presentation, handles = _default_handles(tmp_path)
+    cad = next(handle.context_ref for handle in handles if handle.evidence_type == "CAD")
+    _assert_blinded_pa_projection({"context_ref": cad}, presentation)
+    _assert_blinded_pa_projection({"explanation": f"Dimensions measured from {cad}."}, presentation)
+    _assert_blinded_pa_projection(
+        {"extracted_text": "The document refers to cam_assembly_link."}, presentation
+    )
+
+
+def test_layout_projection_removes_frame_without_changing_internal_geometry(tmp_path):
+    from types import SimpleNamespace
+
+    from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+        _candidate_layout_projection,
+    )
+
+    presentation, _ = _default_handles(tmp_path)
+    investigation = SimpleNamespace(
+        presentation=presentation, project_canonical_reference=lambda ref: "typed_record_0001"
+    )
+    record = {
+        "record_type": "CandidateSpatialRelationRecord",
+        "status": "measured",
+        "candidate_count": 1,
+        "pairwise_measurements": [],
+        "collinearity_measurements": [],
+        "candidates": [
+            {
+                "frame": "cam_assembly_link",
+                "center_m": [0.0, 0.1, 0.2],
+                "observation_handle": "view_0001",
+                "candidate_handle": "candidate_0001_0001",
+                "value_ref": {
+                    "record_ref": "segmentation",
+                    "field_path": "/cameras/0/candidates/0",
+                },
+            }
+        ],
+    }
+    projection = _candidate_layout_projection(investigation, record, relation_ref="layout")
+    assert "cam_assembly_link" not in json.dumps(projection)
+    assert "frame" not in projection["candidates"][0]
+    assert projection["candidates"][0]["center_m"] == record["candidates"][0]["center_m"]
+    assert record["candidates"][0]["frame"] == "cam_assembly_link"

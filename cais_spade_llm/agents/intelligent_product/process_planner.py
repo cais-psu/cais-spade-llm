@@ -1342,7 +1342,6 @@ class ProcessPlanner(LlmRecoveryReplannerMixin):
                     "reachability": reachability,
                     "staging_areas": dict(staging) if isinstance(staging, dict) else {},
                     "gripper_reach": dict(caps.get("gripper_reach") or {}),
-                    "workspace_bounds": dict(caps.get("workspace_bounds") or {}),
                 }
             )
         return sorted(options, key=lambda item: str(item.get("resource_jid", "")))

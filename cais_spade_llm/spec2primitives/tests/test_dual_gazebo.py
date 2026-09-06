@@ -1,6 +1,6 @@
-"""Tests for the dual Gazebo adapter and streamlined ProductAgent UI."""
-
 from __future__ import annotations
+
+"""Tests for the dual Gazebo adapter and streamlined ProductAgent UI."""
 
 import ast
 from pathlib import Path
@@ -215,14 +215,14 @@ def test_phase_2_top_controls_are_full_width_and_responsive() -> None:
 @pytest.mark.parametrize(
     ("status", "available", "busy", "expected"),
     [
-        ("ready_for_assignment", True, False, ("Start Phase 5", True)),
-        ("waiting_for_ra", True, False, ("Retry Phase 5", True)),
-        ("waiting_for_ra", True, True, ("Retry Phase 5", False)),
-        ("waiting_for_phase_4", True, False, ("Start Phase 5", False)),
-        ("blocked", True, False, ("Start Phase 5", False)),
-        ("context_captured", True, False, ("Restart Phase 5", True)),
-        ("context_captured", True, True, ("Restart Phase 5", False)),
-        ("ready_for_assignment", False, False, ("Start Phase 5", False)),
+        ("ready_for_assignment", True, False, ("Capture RobotAgent context", True)),
+        ("waiting_for_ra", True, False, ("Retry context capture", True)),
+        ("waiting_for_ra", True, True, ("Retry context capture", False)),
+        ("waiting_for_phase_4", True, False, ("Capture RobotAgent context", False)),
+        ("blocked", True, False, ("Capture RobotAgent context", False)),
+        ("context_captured", True, False, ("Refresh RobotAgent context", True)),
+        ("context_captured", True, True, ("Refresh RobotAgent context", False)),
+        ("ready_for_assignment", False, False, ("Capture RobotAgent context", False)),
     ],
 )
 def test_phase_5_1_action_state_is_fail_closed(
@@ -241,13 +241,13 @@ def test_phase_5_1_action_state_is_fail_closed(
 def test_phase_5_1_ui_activates_only_from_the_persisted_interaction() -> None:
     source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
 
-    assert 'ui.button(\n                    "Start Phase 5"' in source
-    assert 'label = "Retry Phase 5"' in source
-    assert 'label = "Restart Phase 5"' in source
+    assert 'ui.button(\n                    "Capture RobotAgent context"' in source
+    assert 'label = "Retry context capture"' in source
+    assert 'label = "Refresh RobotAgent context"' in source
     assert "async def _start_phase_5_1()" in source
     assert "interaction_root = interaction.get(\"interaction_root\")" in source
     assert (
-        '"Starting or reusing only the exact RobotAgent selected by Phase 4."'
+        '"Starting or reusing only the exact RobotAgent selected by ProductAgent."'
         in source
     )
     assert 'ui.badge("temporary diagnostic")' not in source
@@ -321,7 +321,7 @@ def test_phase_5_2_composition_evidence_summary_uses_exact_input_sections() -> N
 def test_phase_5_2_ui_authors_only_from_the_active_persisted_context() -> None:
     source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
 
-    assert 'ui.label("5.2 · RA-authored structural primitive draft")' in source
+    assert 'ui.label("RA-authored structural primitive draft")' in source
     assert '"Create Primitive Draft"' in source
     assert "async def _start_phase_5_2()" in source
     assert 'interaction_root = interaction.get("interaction_root")' in source

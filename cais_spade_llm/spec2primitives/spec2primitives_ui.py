@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 """NiceGUI page for the ICRA 2027 Spec2Primitives case study."""
 
-from __future__ import annotations
 
 import asyncio
 import base64
 import hashlib
 import io
 import json
+import logging
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from html import escape
@@ -37,6 +40,10 @@ from cais_spade_llm.spec2primitives.agents.pa import (
     start_pa_context_interaction,
     submit_pa_clarification_reply,
 )
+from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
+    _GROUNDING_VALIDATION_CODES,
+    _grounding_progress_validation_error,
+)
 from cais_spade_llm.spec2primitives.agents.ra import (
     PrimitiveDraftError,
     RAContextHandoffError,
@@ -47,6 +54,10 @@ from cais_spade_llm.spec2primitives.agents.ra import (
 )
 
 _TURTLE_PREFIX_PATTERN = re.compile(r"^@prefix\s+([A-Za-z][A-Za-z0-9_-]*):\s+<([^>]+)>\s+\.\s*$")
+
+
+_GROUNDING_PROGRESS_INTERVAL_SECONDS = 1.0
+logger = logging.getLogger(__name__)
 
 
 class _PAUIRuntimeObserver:
@@ -62,6 +73,8 @@ class _PAUIRuntimeObserver:
         self._product_agent = product_agent
         self._on_pa_stage = on_pa_stage
         self._on_pa_event = on_pa_event
+        self._grounding_attempt = 0
+        self.activity = "Investigating approved evidence and authoring the target feature."
 
     async def ask_llm_structured(
         self,
@@ -74,7 +87,24 @@ class _PAUIRuntimeObserver:
         max_tool_rounds: int = 3,
     ) -> dict[str, Any]:
         """Report the response contract's semantic stage and validated result."""
-        self._on_pa_stage(_live_pa_stage(response_format))
+        if response_format.get("name") == "spec2primitives_grounding_result":
+            self._grounding_attempt += 1
+        if (
+            response_format.get("name") == "spec2primitives_grounding_result"
+            and self._grounding_attempt > 1
+        ):
+            self.activity = f"Revising the target feature · attempt {self._grounding_attempt}."
+            if self._on_pa_event is not None:
+                self._on_pa_event(
+                    _timeline_event(
+                        "running",
+                        f"ProductAgent revision · attempt {self._grounding_attempt}",
+                        "ProductAgent is revising its proposal using validation feedback.",
+                    )
+                )
+        else:
+            self.activity = _live_pa_stage(response_format)
+        self._on_pa_stage(self.activity)
         response = await self._product_agent.ask_llm_structured(
             prompt,
             response_format=response_format,
@@ -87,6 +117,133 @@ class _PAUIRuntimeObserver:
             if event is not None:
                 self._on_pa_event(event)
         return response
+
+
+def _grounding_progress_record(
+    path: Path, cache: dict[Path, tuple[int, dict[str, object]]]
+) -> dict[str, object]:
+    """Read a changed outcome once and tolerate records still being written."""
+    try:
+        modified = path.stat().st_mtime_ns
+        previous = cache.get(path)
+        if previous is not None and previous[0] == modified:
+            return previous[1]
+        record = _read_json_object(path)
+    except (OSError, ValueError):
+        return {}
+    cache[path] = (modified, record)
+    return record
+
+
+def _grounding_progress_text(progress: Mapping[str, object]) -> str:
+    """Present host-owned limits and validation feedback without interpreting evidence."""
+    if _grounding_progress_validation_error(progress) is not None:
+        return ""
+    detail = (
+        f"Evidence operations: {progress['evidence_operations_used']}/{progress['evidence_operations_limit']}"
+        f" · Proposal attempt: {progress['proposals_used']}/{progress['proposals_limit']}."
+    )
+    feedback = progress.get("last_feedback")
+    if isinstance(feedback, list) and feedback:
+        for item in feedback:
+            message = item.get("message")
+            if isinstance(message, str) and message:
+                detail += " Validation feedback: " + message
+            states = item.get("missing_states")
+            if isinstance(states, list) and all(isinstance(state, str) for state in states):
+                detail += " Affected states: " + ", ".join(states) + "."
+    reason = progress.get("stop_reason")
+    if isinstance(reason, str) and reason:
+        detail += f" Stop reason: {reason}."
+    return detail
+
+
+def _persisted_grounding_progress(records: Mapping[str, object]) -> Mapping[str, object]:
+    """Select the latest host counters without constructing a new persisted record."""
+    turns = [record for name, record in records.items() if name.startswith("turn_")]
+    if turns and isinstance(turns[-1], Mapping):
+        output = turns[-1].get("PA_output")
+        progress = output.get("grounding_progress") if isinstance(output, Mapping) else None
+        if isinstance(progress, Mapping) and _grounding_progress_text(progress):
+            return progress
+    snapshots = []
+    for record in records.values():
+        if not isinstance(record, Mapping):
+            continue
+        output = record.get("PA_output")
+        owner = output if isinstance(output, Mapping) else record
+        progress = owner.get("grounding_progress")
+        if isinstance(progress, Mapping) and _grounding_progress_text(progress):
+            snapshots.append(progress)
+    return max(
+        snapshots,
+        key=lambda item: (
+            item["proposals_used"],
+            item["evidence_operations_used"],
+            bool(item.get("stop_reason")),
+        ),
+        default={},
+    )
+
+
+async def _monitor_grounding_progress(
+    interaction_root: Path,
+    on_pa_stage: Callable[[str], None],
+    is_attached: Callable[[], bool] | None,
+    observer: _PAUIRuntimeObserver | None,
+    initial_paths: set[Path],
+) -> None:
+    """Read changed host progress snapshots while the original PA call continues."""
+    grounding = interaction_root / "products/grounding"
+    cache: dict[Path, tuple[int, dict[str, object]]] = {}
+    started = time.monotonic()
+    try:
+        while is_attached is None or is_attached():
+            paths = list((grounding / "ontology_grounding").glob("request_*.json"))
+            paths.extend((interaction_root / "interaction_record").glob("tool_call_*.json"))
+            for path in sorted(
+                set(paths) - initial_paths, key=lambda item: item.stat().st_mtime_ns, reverse=True
+            ):
+                progress = _grounding_progress_record(path, cache).get("grounding_progress")
+                if isinstance(progress, Mapping) and (detail := _grounding_progress_text(progress)):
+                    activity = (
+                        observer.activity if observer is not None else "Grounding product context."
+                    )
+                    on_pa_stage(f"{activity} {detail} Elapsed: {int(time.monotonic() - started)}s.")
+                    break
+            await asyncio.sleep(_GROUNDING_PROGRESS_INTERVAL_SECONDS)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        # Progress is observational; losing its page must never fail the producer.
+        logger.debug("Grounding progress display became unavailable.", exc_info=True)
+
+
+async def _await_with_grounding_progress(
+    operation: Awaitable[dict[str, object]],
+    interaction_root: Path,
+    on_pa_stage: Callable[[str], None] | None,
+    is_attached: Callable[[], bool] | None,
+    observer: _PAUIRuntimeObserver | None = None,
+) -> dict[str, object]:
+    """Keep monitor teardown separate from producer errors and cancellation."""
+    if on_pa_stage is None:
+        return await operation
+    initial_paths = set(
+        (interaction_root / "products/grounding/ontology_grounding").glob("request_*.json")
+    )
+    initial_paths.update((interaction_root / "interaction_record").glob("tool_call_*.json"))
+    monitor = asyncio.create_task(
+        _monitor_grounding_progress(
+            interaction_root, on_pa_stage, is_attached, observer, initial_paths
+        )
+    )
+    try:
+        return await operation
+    finally:
+        monitor.cancel()
+        # Treat monitor cancellation as a result; caller cancellation must still propagate.
+        result = (await asyncio.gather(monitor, return_exceptions=True))[0]
+        if isinstance(result, Exception):
+            logger.debug("Grounding progress monitor stopped unexpectedly.", exc_info=result)
 
 
 def _status_color(state: str) -> str:
@@ -239,6 +396,7 @@ async def _run_pa_ui_interaction(
     max_pa_turns: int = 12,
     on_pa_stage: Callable[[str], None] | None = None,
     on_pa_event: Callable[[dict[str, str]], None] | None = None,
+    is_attached: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Run one connected native ProductAgent grounding workflow."""
     del max_pa_turns
@@ -251,12 +409,18 @@ async def _run_pa_ui_interaction(
             on_pa_stage=on_pa_stage,
             on_pa_event=on_pa_event,
         )
-    phase_3_1 = await start_pa_context_interaction(
-        product_agent,
+    phase_3_1 = await _await_with_grounding_progress(
+        start_pa_context_interaction(
+            product_agent,
+            interaction_root,
+            product_requirement,
+            ontology_config=runtime.ontology_config,
+            grounding_runtime=runtime.grounding_runtime,
+        ),
         interaction_root,
-        product_requirement,
-        ontology_config=runtime.ontology_config,
-        grounding_runtime=runtime.grounding_runtime,
+        on_pa_stage,
+        is_attached,
+        product_agent if isinstance(product_agent, _PAUIRuntimeObserver) else None,
     )
     return {
         "interaction_identifier": interaction_identifier,
@@ -276,6 +440,7 @@ async def _submit_pa_ui_clarification(
     *,
     on_pa_stage: Callable[[str], None] | None = None,
     on_pa_event: Callable[[dict[str, str]], None] | None = None,
+    is_attached: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Submit one clarification reply and update the same UI interaction."""
     interaction_root = interaction.get("interaction_root")
@@ -289,12 +454,18 @@ async def _submit_pa_ui_clarification(
             on_pa_stage=on_pa_stage,
             on_pa_event=on_pa_event,
         )
-    result = await submit_pa_clarification_reply(
-        product_agent,
+    result = await _await_with_grounding_progress(
+        submit_pa_clarification_reply(
+            product_agent,
+            interaction_root,
+            user_reply,
+            ontology_config=runtime.ontology_config,
+            grounding_runtime=runtime.grounding_runtime,
+        ),
         interaction_root,
-        user_reply,
-        ontology_config=runtime.ontology_config,
-        grounding_runtime=runtime.grounding_runtime,
+        on_pa_stage,
+        is_attached,
+        product_agent if isinstance(product_agent, _PAUIRuntimeObserver) else None,
     )
     interaction["phase_3_4"] = result
     interaction["phase_3_3"] = result
@@ -323,8 +494,6 @@ def _live_pa_stage(response_format: Mapping[str, object]) -> str:
     """Describe the current structured ProductAgent task in one sentence."""
     if response_format.get("name") == "spec2primitives_grounding_result":
         return "Investigating approved evidence and authoring the target feature."
-    if response_format.get("name") == "spec2primitives_target_feature_review":
-        return "Reviewing target-feature semantic completeness."
     return "Grounding the validated product context."
 
 
@@ -355,9 +524,11 @@ def _grounding_incomplete_detail(output: Mapping[str, object]) -> str:
     """Render only controller-coded grounding diagnostics."""
     code = output.get("grounding_validation_code")
     message = output.get("insufficient_evidence")
+    if code not in _GROUNDING_VALIDATION_CODES:
+        return "This record has no valid grounding result. Start a fresh interaction."
     if isinstance(code, str) and code and isinstance(message, str) and message:
         return f"{message} Validation code: {code}."
-    return "Grounding is incomplete; this legacy record has no controller validation code."
+    return "This record has no valid grounding result. Start a fresh interaction."
 
 
 def _interaction_ref_path(interaction_root: Path, ref: object) -> Path:
@@ -507,53 +678,9 @@ def _final_ontology_view(
     }
 
 
-def _unique_text(values: list[object]) -> list[str]:
-    """Return non-empty display strings once in their persisted order."""
-    result: list[str] = []
-    for value in values:
-        text = value if isinstance(value, str) else None
-        if text and text not in result:
-            result.append(text)
-    return result
-
-
-def _final_result_limitations(
-    product_context: Mapping[str, object],
-    contract: Mapping[str, object],
-) -> list[str]:
-    """Collect current proposal limits for one validated completion."""
-    missing_information = contract.get("missing_information")
-    values: list[object] = (
-        list(missing_information) if isinstance(missing_information, list) else []
-    )
-    typed_bindings = product_context.get("typed_bindings")
-    accepted_record_symbols: set[str] = set()
-    if isinstance(typed_bindings, list):
-        for binding in typed_bindings:
-            if not isinstance(binding, Mapping) or binding.get("status") != "accepted":
-                continue
-            for field in ("output_symbol", "record_type"):
-                symbol = binding.get(field)
-                if isinstance(symbol, str) and symbol:
-                    accepted_record_symbols.add(symbol)
-
-    # The proposal is authored before deterministic typed grounding. An accepted
-    # final binding therefore supersedes any absence claim naming that exact record.
-    return [
-        value
-        for value in _unique_text(values)
-        if not any(symbol in value for symbol in accepted_record_symbols)
-    ]
-
-
 def _final_result_evidence(  # noqa: C901
     *,
     product_context: Mapping[str, object],
-    contract: Mapping[str, object],
-    session: Mapping[str, object] | None,
-    selection: Mapping[str, object],
-    reachability: Mapping[str, object] | None = None,
-    validation: Mapping[str, object] | None = None,
 ) -> list[dict[str, str]]:
     """Build compact evidence badges from validated final records."""
     evidence: list[dict[str, str]] = []
@@ -565,24 +692,6 @@ def _final_result_evidence(  # noqa: C901
         if item not in evidence:
             evidence.append(item)
 
-    context_evidence_refs = contract.get("context_evidence_refs")
-    if isinstance(context_evidence_refs, list):
-        for ref in context_evidence_refs:
-            _add(ref, "accepted", "source")
-    source_refs = contract.get("source_refs")
-    if isinstance(source_refs, list):
-        for item in source_refs:
-            if isinstance(item, Mapping):
-                _add(item.get("ref"), "accepted", "source")
-    attempts = session.get("attempted_actions") if session is not None else None
-    if isinstance(attempts, list):
-        for attempt in attempts:
-            if isinstance(attempt, Mapping):
-                _add(
-                    attempt.get("source_ref"),
-                    attempt.get("status", "recorded"),
-                    "source",
-                )
     typed_bindings = product_context.get("typed_bindings")
     if isinstance(typed_bindings, list):
         for binding in typed_bindings:
@@ -592,60 +701,7 @@ def _final_result_evidence(  # noqa: C901
                     binding.get("status", "recorded"),
                     "typed record",
                 )
-    _add(
-        "ResourceSelectionRecord",
-        "accepted" if selection.get("selected_resource_symbol") else "unavailable",
-        "decision",
-    )
-    if reachability is not None:
-        _add(
-            "ReachabilityCheckRecord · grounded motion targets",
-            reachability.get("status", "unavailable"),
-            "verifier evidence",
-        )
-    if validation is not None:
-        _add(
-            "PlanOnlyFeasibilityValidationRecord",
-            validation.get("status", "unavailable"),
-            "RobotAgent evidence",
-        )
     return evidence
-
-
-def _target_context_ref(
-    pose_record: Mapping[str, object],
-    pose_binding: Mapping[str, object],
-    contract: Mapping[str, object],
-) -> str | None:
-    """Return the exact CAD reference associated with the final target."""
-    CAD = pose_record.get("CAD")
-    context_ref = CAD.get("context_ref") if isinstance(CAD, Mapping) else None
-    if isinstance(context_ref, str):
-        return context_ref
-    evidence_refs = pose_binding.get("evidence_refs")
-    if isinstance(evidence_refs, list):
-        context_ref = next(
-            (value for value in evidence_refs if isinstance(value, str) and value.endswith(".STL")),
-            None,
-        )
-    if isinstance(context_ref, str):
-        return context_ref
-    context_evidence_refs = contract.get("context_evidence_refs")
-    if not isinstance(context_evidence_refs, list):
-        source_refs = contract.get("source_refs")
-        context_evidence_refs = (
-            [item.get("ref") for item in source_refs if isinstance(item, Mapping)]
-            if isinstance(source_refs, list)
-            else []
-        )
-    return next(
-        (
-            value
-            for value in context_evidence_refs
-            if isinstance(value, str) and value.endswith(".STL")
-        ),
-        None,
-    )
 
 
 def _target_feature_evidence_refs(
@@ -726,45 +782,6 @@ def _cad_identity(
             "candidates": [candidate for _is_cited, candidate in candidates],
         }
     return None
-
-
-def _state_statement(
-    target_feature: Mapping[str, object],
-    state_name: str,
-) -> str | None:
-    """Return the PA-authored statement for one explicit feature state."""
-    state = target_feature.get(state_name)
-    statement = state.get("statement") if isinstance(state, Mapping) else None
-    text = statement.get("text") if isinstance(statement, Mapping) else None
-    return text if isinstance(text, str) and text else None
-
-
-def _state_value_name(
-    target_feature: Mapping[str, object],
-    state_name: str,
-    *,
-    location_ref: str,
-    segmentation_ref: str | None,
-) -> str | None:
-    """Return the PA-authored value name that led to the selected location."""
-    state = target_feature.get(state_name)
-    values = state.get("state_values") if isinstance(state, Mapping) else None
-    if not isinstance(values, list):
-        return None
-    fallback: str | None = None
-    for value in values:
-        if not isinstance(value, Mapping):
-            continue
-        name = value.get("name")
-        value_ref = value.get("value_ref")
-        record_ref = value_ref.get("record_ref") if isinstance(value_ref, Mapping) else None
-        if not isinstance(name, str) or not name:
-            continue
-        if record_ref == location_ref:
-            return name
-        if segmentation_ref is not None and record_ref == segmentation_ref:
-            fallback = name
-    return fallback
 
 
 def _annotated_candidate_rgb(
@@ -956,86 +973,244 @@ def _reviewed_candidate_crop(
     return None
 
 
-def _state_result_evidence(
-    interaction_root: Path,
-    *,
-    target_feature: Mapping[str, object],
-    state_name: str,
-    reach_state: Mapping[str, object],
+def _state_visuals(
+    root: Path,
+    state: Mapping[str, object],
+    artifact_hashes: Mapping[str, str],
     observation_review_bindings: Mapping[str, str],
-) -> dict[str, object]:
-    """Join one ontology state to its exact location, reach, and RGB evidence."""
-    location_ref = reach_state.get("location_record_ref")
-    if not isinstance(location_ref, str):
-        raise ValueError(f"Final {state_name} location reference is invalid.")
-    location = _read_json_object(_interaction_ref_path(interaction_root, location_ref))
-    if location.get("record_type") != "RobotFrameLocationRecord":
-        raise ValueError(f"Final {state_name} location record is invalid.")
-    source_segmentation = location.get("source_segmentation")
-    segmentation_ref = (
-        source_segmentation.get("ref") if isinstance(source_segmentation, Mapping) else None
-    )
-    candidate_reference = location.get("candidate_reference")
-    candidate = dict(candidate_reference) if isinstance(candidate_reference, Mapping) else {}
-    state_iri = reach_state.get("state_iri")
-    state_label = (
-        state_iri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
-        if isinstance(state_iri, str)
-        else state_name
-    )
-    visual = (
-        _annotated_candidate_rgb(
-            interaction_root,
+) -> list[dict[str, object]]:
+    """Load every exact observed candidate cited by a grounded state's values."""
+    from .agents.pa.ontology_grounding import resolve_json_pointer
+
+    visuals: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for value in state["state_values"]:
+        reference = value["value_ref"]
+        record_ref = reference["record_ref"]
+        field_path = reference["field_path"]
+        if (record_ref, field_path) in seen:
+            continue
+        seen.add((record_ref, field_path))
+        record_path = _interaction_ref_path(root, record_ref)
+        if hashlib.sha256(record_path.read_bytes()).hexdigest() != artifact_hashes.get(record_ref):
+            raise ValueError("State evidence has changed.")
+        record = _read_json_object(record_path)
+        segmentation_ref = None
+        candidate_reference = None
+        if record.get("record_type") == "RGBDSegmentationRecord":
+            selected = resolve_json_pointer(record, field_path)
+            for camera in record["cameras"]:
+                for candidate in camera["candidates"]:
+                    if candidate is selected:
+                        segmentation_ref = record_ref
+                        candidate_reference = {
+                            "observation_handle": camera["observation_handle"],
+                            "candidate_handle": candidate["candidate_handle"],
+                        }
+        elif record.get("record_type") == "RobotFrameLocationRecord":
+            source = record.get("source_segmentation")
+            segmentation_ref = source.get("ref") if isinstance(source, Mapping) else None
+            candidate_reference = record.get("candidate_reference")
+        if not isinstance(segmentation_ref, str) or not isinstance(candidate_reference, Mapping):
+            continue
+        visual = _annotated_candidate_rgb(
+            root,
             segmentation_ref=segmentation_ref,
-            candidate_reference=candidate,
+            candidate_reference=candidate_reference,
             observation_review_bindings=observation_review_bindings,
-            state_label=state_label,
+            state_label=value["name"],
         )
-        if isinstance(segmentation_ref, str)
-        else None
+        if visual is not None:
+            visuals.append(
+                {
+                    **visual,
+                    "state_value_name": value["name"],
+                    "source_record_ref": record_ref,
+                    "source_field_path": field_path,
+                    "candidate_reference": dict(candidate_reference),
+                }
+            )
+    return visuals
+
+
+def _validated_grounding_result(root: Path, proposal_ref: str) -> dict[str, object]:
+    """Present PA claims and pinned evidence even when allocation is deferred."""
+    from .agents.pa.grounding_contracts import validate_grounding_evidence
+
+    proposal = _read_json_object(_interaction_ref_path(root, proposal_ref))
+    if proposal.get("status") != "accepted":
+        raise ValueError("Product grounding has not been accepted.")
+    evidence_view = validate_grounding_evidence(root, proposal)
+    target = proposal["output"]["target_feature"]
+    caveats = proposal["compiled_delta"]["uncertainty"]
+    product_context = _latest_interaction_json_object(
+        root, "products/grounding/product_context/view_*.json"
     )
-    result = {
-        "state_name": state_name,
-        "state_iri": state_iri,
-        "statement": _state_statement(target_feature, state_name),
-        "state_value_name": _state_value_name(
-            target_feature,
-            state_name,
-            location_ref=location_ref,
-            segmentation_ref=(segmentation_ref if isinstance(segmentation_ref, str) else None),
-        ),
-        "evidence_handle": reach_state.get("evidence_handle"),
-        "source_record_type": reach_state.get("source_record_type"),
-        "source_record_ref": reach_state.get("source_record_ref"),
-        "source_field_path": reach_state.get("source_field_path"),
-        "location_record_ref": location_ref,
-        "candidate_reference": candidate,
-        "target_frame": location.get("target_frame"),
-        "translated_location_m": location.get("translated_location_m"),
-        "annotated_rgb": visual,
+    raw_turtle = _interaction_ref_path(
+        root, "products/grounding/ontology/interaction_abox.ttl"
+    ).read_text(encoding="utf-8")
+    artifact_hashes = {
+        item["ref"]: item["sha256"] for item in proposal["grounding_evidence"]["input_artifacts"]
     }
-    if "in_workspace" in reach_state:
-        result.update(
-            {
-                "planar_distance_from_reach_origin_m": reach_state.get(
-                    "planar_distance_from_reach_origin_m"
-                ),
-                "distance_from_reach_origin_m": reach_state.get("distance_from_reach_origin_m"),
-                "in_workspace": reach_state.get("in_workspace"),
-                "in_gripper_reach": reach_state.get("in_gripper_reach"),
-                "reachable": reach_state.get("reachable"),
-                "verdicts": reach_state.get("verdicts"),
-            }
-        )
-    else:
-        result.update(
-            {
-                "cad_dimensions_m": reach_state.get("cad_dimensions_m"),
-                "support_plane": reach_state.get("support_plane"),
-                "reachability_basis": "live_cartesian_pick_place",
-            }
-        )
+    observation_review_bindings = {
+        binding["record_ref"]: binding["record_sha256"]
+        for binding in evidence_view.to_record()["typed_bindings"]
+        if binding.get("output_symbol") == "ObservationCandidateReview"
+        and binding.get("status") == "accepted"
+        and artifact_hashes.get(binding["record_ref"]) == binding["record_sha256"]
+    }
+
+    def affected(value: object) -> list[object]:
+        refs: set[str] = set()
+
+        def visit(item: object) -> None:
+            if isinstance(item, Mapping):
+                refs.update(item.get("evidence_refs", []))
+                state_name = item.get("state_name")
+                if state_name in {"current_state", "desired_state"}:
+                    for state_value in target[state_name]["state_values"]:
+                        if state_value["name"] == item.get("state_value_name"):
+                            visit(state_value)
+                for nested in item.values():
+                    visit(nested)
+            elif isinstance(item, list):
+                for nested in item:
+                    visit(nested)
+
+        visit(value)
+        for artifact_ref in artifact_hashes:
+            if artifact_ref in refs and artifact_ref.endswith(".json"):
+                record = _read_json_object(_interaction_ref_path(root, artifact_ref))
+                refs.update(record.get("evidence_refs", []))
+        return [item for item in caveats if refs.intersection(item["evidence_refs"])]
+
+    result: dict[str, object] = {
+        "product_requirement": evidence_view.product_requirement,
+        "target_feature": {**target, "source_uncertainty": caveats},
+        "allocation_label": "Product grounding; allocation deferred",
+        "resource_assignment_status": "deferred",
+        "motion_executed": False,
+        "process": _compact_iri(
+            target["required_process"]["process_iri"], _turtle_prefixes(raw_turtle)
+        ),
+        "cad_identity": _cad_identity(
+            root, typed_bindings=product_context["typed_bindings"], target_feature=target
+        ),
+        "ontology": _final_ontology_view(product_context, raw_turtle),
+        "evidence": _final_result_evidence(product_context=product_context),
+        "source_uncertainty": caveats,
+        "limitations": [
+            item["description"] + " [" + ", ".join(item["evidence_refs"]) + "]" for item in caveats
+        ],
+        "assembly_feature_association": [
+            {**association, "source_uncertainty": affected(association)}
+            for association in target.get("assembly_feature_association", [])
+        ],
+    }
+    for state in ("current_state", "desired_state"):
+        relationships = [
+            association
+            for association in result["assembly_feature_association"]
+            if state in association.get("state_names", [])
+        ]
+        relationship_visuals = []
+        for association in relationships:
+            for endpoint in association["assembly_features"]:
+                source_state = endpoint.get("state_name")
+                if source_state not in {"current_state", "desired_state"} or source_state == state:
+                    continue
+                endpoint_values = [
+                    value
+                    for value in target[source_state]["state_values"]
+                    if value["name"] == endpoint.get("state_value_name")
+                ]
+                relationship_visuals.extend(
+                    {**visual, "source_state": source_state}
+                    for visual in _state_visuals(
+                        root,
+                        {"state_values": endpoint_values},
+                        artifact_hashes,
+                        observation_review_bindings,
+                    )
+                )
+        result[f"{state}_evidence"] = {
+            "statement": target[state]["statement"]["text"],
+            "state_values": target[state]["state_values"],
+            "source_uncertainty": affected(target[state]),
+            "relationships": relationships,
+            "relationship_visuals": relationship_visuals,
+            "reference_note": "Images are directly bound to desired_state; they do not establish that assembly is complete."
+            if (state == "desired_state")
+            else None,
+            "candidate_visuals": _state_visuals(
+                root,
+                target[state],
+                artifact_hashes,
+                observation_review_bindings,
+            ),
+        }
+    result["resource_comparison"] = _resource_comparison(root)
     return result
+
+
+def _resource_comparison(
+    root: Path,
+    *,
+    selected: str | None = None,
+    tool_refs: list[str] | None = None,
+) -> list[dict[str, object]]:
+    """Show planning coverage without treating unavailable or unchecked arms as unreachable."""
+    from .agents.pa.presentation_records import load_allocation_presentation
+    from .agents.pa.resource_grounding import validate_location_planning_response
+
+    presentation_path = root / "products/grounding/presentation/allocation_presentation_record.json"
+    if not presentation_path.is_file():
+        return []
+    presentation = load_allocation_presentation(root)
+    rows = {
+        symbol: {
+            "resource": symbol,
+            "current_state": "Unchecked",
+            "desired_state": "Unchecked",
+            "selected": "Selected" if symbol == selected else "",
+        }
+        for symbol in presentation.resource_order
+    }
+    refs = (
+        tool_refs
+        if tool_refs is not None
+        else [
+            path.relative_to(root).as_posix()
+            for path in sorted((root / "interaction_record").glob("allocation_tool_call_*.json"))
+        ]
+    )
+    labels = {
+        "accepted": "Reachable",
+        "rejected": "Planning rejected",
+        "needs_context": "Unavailable",
+    }
+    for ref in refs:
+        call = _read_json_object(_interaction_ref_path(root, ref))
+        if call.get("record_type") != "ProductAgentAllocationToolCall":
+            continue
+        symbol = call.get("arguments", {}).get("resource_symbol")
+        if symbol not in rows:
+            continue
+        rows[symbol].update(current_state="Unavailable", desired_state="Unavailable")
+        if not isinstance(call.get("result_ref"), str):
+            continue
+        path = _interaction_ref_path(root, call["result_ref"])
+        if hashlib.sha256(path.read_bytes()).hexdigest() != call.get("result_sha256"):
+            raise ValueError("Resource comparison evidence changed.")
+        check = _read_json_object(path)
+        validation = check["validation"]
+        validate_location_planning_response(validation["request"], validation["response"])
+        for state in ("current_state", "desired_state"):
+            statuses = {item["status"] for item in validation["response"]["state_locations"][state]}
+            rows[symbol][state] = " / ".join(
+                labels[status] for status in labels if status in statuses
+            )
+    return list(rows.values())
 
 
 def _final_grounding_result(
@@ -1043,293 +1218,43 @@ def _final_grounding_result(
     completion: Mapping[str, object],
 ) -> dict[str, object]:
     """Build the operator result from one already validated completion bundle."""
-    product_context = _latest_interaction_json_object(
-        interaction_root,
-        "products/grounding/product_context/view_*.json",
-    )
-    completion_schema = completion.get("schema_version")
-    contract = (
-        {}
-        if completion_schema in {7, 8}
-        else _read_json_object(
-            _interaction_ref_path(
-                interaction_root,
-                completion.get("typed_grounding_contract_ref"),
-            )
-        )
+    result = _validated_grounding_result(
+        interaction_root, str(completion["ontology_projection_ref"])
     )
     selection = _read_json_object(
-        _interaction_ref_path(
-            interaction_root,
-            completion.get("resource_selection_ref"),
-        )
+        _interaction_ref_path(interaction_root, completion["resource_selection_ref"])
     )
-    raw_turtle = _interaction_ref_path(
+    reachability = _read_json_object(
+        _interaction_ref_path(interaction_root, completion["reachability_check_ref"])
+    )
+    result.update(
+        status=completion["status"],
+        resource_assignment_status="complete",
+        selected_resource=selection["selected_resource_symbol"],
+        selected_resource_jid=selection["selected_resource_jid"],
+        execution_mode=selection["selected_execution_mode"],
+        process_symbol=selection["process_symbol"],
+        allocation_label=completion["allocation_label"],
+        validation_scope=completion["validation_scope"],
+        motion_validation_performed=completion.get("motion_validation_performed", False),
+        target_frame=reachability["target_frame"],
+        reachability={**reachability, "record_ref": completion["reachability_check_ref"]},
+        robot_agent_validation=reachability.get("validation"),
+        phase_5_available=True,
+        checked_constraints=completion["checked_constraints"],
+        unvalidated_constraints=completion["unvalidated_constraints"],
+    )
+    result["resource_comparison"] = _resource_comparison(
         interaction_root,
-        "products/grounding/ontology/interaction_abox.ttl",
-    ).read_text(encoding="utf-8")
-    prefixes = _turtle_prefixes(raw_turtle)
-
-    typed_bindings = product_context.get("typed_bindings")
-    if not isinstance(typed_bindings, list):
-        raise ValueError("Final typed context bindings are invalid.")
-    observation_review_bindings = {
-        str(binding["record_ref"]): str(binding["record_sha256"])
-        for binding in typed_bindings
-        if isinstance(binding, Mapping)
-        and binding.get("output_symbol") == "ObservationCandidateReview"
-        and binding.get("status") == "accepted"
-        and isinstance(binding.get("record_ref"), str)
-        and isinstance(binding.get("record_sha256"), str)
-    }
-    grounding_record_type = (
-        "RobotFrameLocationRecord"
-        if completion_schema in {3, 4, 5, 6, 7, 8}
-        else "RobotFramePoseRecord"
+        selected=selection["selected_resource_symbol"],
+        tool_refs=[item["ref"] for item in completion["tool_call_refs"]],
     )
-    reachability: Mapping[str, object] | None = None
-    validation: Mapping[str, object] | None = None
-    current_state_evidence: Mapping[str, object] | None = None
-    desired_state_evidence: Mapping[str, object] | None = None
-    if completion_schema in {5, 6, 7, 8}:
-        reachability = _read_json_object(
-            _interaction_ref_path(
-                interaction_root,
-                completion.get("reachability_check_ref"),
-            )
-        )
-        validation = _read_json_object(
-            _interaction_ref_path(
-                interaction_root,
-                completion.get("robot_agent_validation_ref"),
-            )
-        )
-        if completion_schema in {7, 8}:
-            state_locations = reachability.get("state_locations")
-            current_locations = (
-                state_locations.get("current_state")
-                if isinstance(state_locations, Mapping)
-                else None
-            )
-            desired_locations = (
-                state_locations.get("desired_state")
-                if isinstance(state_locations, Mapping)
-                else None
-            )
-            current_reach = (
-                current_locations[0]
-                if isinstance(current_locations, list) and current_locations
-                else None
-            )
-            desired_reach = (
-                desired_locations[0]
-                if isinstance(desired_locations, list) and desired_locations
-                else None
-            )
-        else:
-            current_reach = reachability.get("current_state")
-            desired_reach = reachability.get("desired_state")
-        if (
-            reachability.get("record_type") != "ReachabilityCheckRecord"
-            or validation.get("record_type") != "PlanOnlyFeasibilityValidationRecord"
-            or not isinstance(current_reach, Mapping)
-            or not isinstance(desired_reach, Mapping)
-        ):
-            raise ValueError("Final validated allocation evidence is invalid.")
-        current_location_ref = current_reach.get("location_record_ref")
-        pose_binding = next(
-            (
-                item
-                for item in typed_bindings
-                if isinstance(item, Mapping)
-                and item.get("output_symbol") == grounding_record_type
-                and item.get("record_ref") == current_location_ref
-            ),
-            None,
-        )
-    else:
-        pose_binding = next(
-            (
-                item
-                for item in typed_bindings
-                if isinstance(item, Mapping) and item.get("output_symbol") == grounding_record_type
-            ),
-            None,
-        )
-    if not isinstance(pose_binding, Mapping):
-        raise ValueError(f"Final {grounding_record_type} binding is unavailable.")
-    pose_record = _read_json_object(
-        _interaction_ref_path(interaction_root, pose_binding.get("record_ref"))
-    )
-
-    target_feature: Mapping[str, object] | None = None
-    context_summary = contract.get("context_summary")
-    if completion_schema in {4, 5, 6, 7, 8}:
-        proposal = _read_json_object(
-            _interaction_ref_path(
-                interaction_root,
-                completion.get("ontology_projection_ref"),
-            )
-        )
-        output = proposal.get("output")
-        candidate = output.get("target_feature") if isinstance(output, Mapping) else None
-        if (
-            proposal.get("schema_version") not in {6, 7, 8, 9, 10}
-            or proposal.get("status") != "accepted"
-            or not isinstance(candidate, Mapping)
-        ):
-            raise ValueError("Final target feature is invalid.")
-        target_feature = candidate
-        desired_state = target_feature.get("desired_state")
-        statement = desired_state.get("statement") if isinstance(desired_state, Mapping) else None
-        context_summary = statement.get("text") if isinstance(statement, Mapping) else None
-    if not isinstance(context_summary, str) or not context_summary:
-        raise ValueError("Final target-feature statement is invalid.")
-    session = None
-    if completion_schema == 2:
-        session = _read_json_object(
-            _interaction_ref_path(
-                interaction_root,
-                completion.get("grounding_session_ref"),
-            )
-        )
-    if completion_schema in {5, 6, 7, 8}:
-        assert isinstance(target_feature, Mapping)
-        assert isinstance(reachability, Mapping)
-        if completion_schema in {7, 8}:
-            reach_groups = reachability["state_locations"]
-            assert isinstance(reach_groups, Mapping)
-            current_locations = reach_groups["current_state"]
-            desired_locations = reach_groups["desired_state"]
-            assert isinstance(current_locations, list) and current_locations
-            assert isinstance(desired_locations, list) and desired_locations
-            current_reach = current_locations[0]
-            desired_reach = desired_locations[0]
-        else:
-            current_reach = reachability["current_state"]
-            desired_reach = reachability["desired_state"]
-        assert isinstance(current_reach, Mapping)
-        assert isinstance(desired_reach, Mapping)
-        current_state_evidence = _state_result_evidence(
-            interaction_root,
-            target_feature=target_feature,
-            state_name="current_state",
-            reach_state=current_reach,
-            observation_review_bindings=observation_review_bindings,
-        )
-        desired_state_evidence = _state_result_evidence(
-            interaction_root,
-            target_feature=target_feature,
-            state_name="desired_state",
-            reach_state=desired_reach,
-            observation_review_bindings=observation_review_bindings,
-        )
-    cad_identity = _cad_identity(
-        interaction_root,
-        typed_bindings=typed_bindings,
-        target_feature=target_feature,
-    )
-    robot_frame_pose = pose_record.get("robot_frame_pose")
-    translation = pose_record.get("translated_location_m")
-    if translation is None:
-        translation = (
-            robot_frame_pose.get("CAD_centroid_translation_m")
-            if isinstance(robot_frame_pose, Mapping)
-            else None
-        )
-    return {
-        "status": completion.get("status"),
-        "product_requirement": completion.get("product_requirement"),
-        "target_feature": (
-            dict(target_feature)
-            if target_feature is not None
-            else {
-                "desired_state": {
-                    "statement": {"text": context_summary, "evidence_refs": []},
-                    "state_values": [],
-                }
-            }
-        ),
-        "process": _compact_iri(selection.get("process_iri"), prefixes),
-        "process_symbol": selection.get("process_symbol"),
-        "selected_resource": selection.get("selected_resource_symbol"),
-        "selected_resource_jid": selection.get("selected_resource_jid"),
-        "execution_mode": selection.get("selected_execution_mode"),
-        "allocation_label": completion.get("allocation_label"),
-        "validation_scope": completion.get("validation_scope"),
-        "motion_executed": completion.get("motion_executed"),
-        "target_context_ref": (
-            cad_identity.get("context_ref")
-            if isinstance(cad_identity, Mapping)
-            and isinstance(cad_identity.get("context_ref"), str)
-            else _target_context_ref(pose_record, pose_binding, contract)
-        ),
-        "cad_identity": cad_identity,
-        "target_frame": pose_record.get("target_frame"),
-        "location": pose_record.get("location"),
-        "pose": pose_record.get("pose"),
-        "robot_frame_conversion": pose_record.get("robot_frame_conversion"),
-        "CAD_centroid_translation_m": translation,
-        "current_state_evidence": (
-            dict(current_state_evidence) if isinstance(current_state_evidence, Mapping) else None
-        ),
-        "desired_state_evidence": (
-            dict(desired_state_evidence) if isinstance(desired_state_evidence, Mapping) else None
-        ),
-        "reachability": (
-            {
-                "record_ref": completion.get("reachability_check_ref"),
-                "status": reachability.get("status"),
-                "resource_symbol": reachability.get("resource_symbol"),
-                "process_symbol": reachability.get("process_symbol"),
-                "process_iri": reachability.get("process_iri"),
-                "target_frame": reachability.get("target_frame"),
-                "state_locations": reachability.get("state_locations"),
-            }
-            if isinstance(reachability, Mapping)
-            else None
-        ),
-        "robot_agent_validation": (
-            {
-                "record_ref": completion.get("robot_agent_validation_ref"),
-                "status": validation.get("status"),
-                "validator_authority": validation.get("validator_authority"),
-                "moveit_group": validation.get("moveit_group"),
-                "end_effector_link": validation.get("end_effector_link"),
-                "tcp_link": validation.get("tcp_link"),
-                "cartesian_path_service": validation.get("cartesian_path_service"),
-                "motion_mode": validation.get("motion_mode"),
-                "mode": validation.get("mode"),
-                "process_symbol": validation.get("process_symbol"),
-                "process_iri": validation.get("process_iri"),
-                "feature_iri": validation.get("feature_iri"),
-                "validation_scope": validation.get("validation_scope"),
-                "checked_constraints": validation.get("checked_constraints"),
-                "unvalidated_constraints": validation.get("unvalidated_constraints"),
-                "motion_executed": validation.get("motion_executed"),
-                "current_state": validation.get("current_state"),
-                "desired_state": validation.get("desired_state"),
-                "state_locations": validation.get("state_locations"),
-                "live_start_pose": validation.get("live_start_pose"),
-                "ee_to_tcp_transform": validation.get("ee_to_tcp_transform"),
-                "waypoints": validation.get("waypoints"),
-                "phases": validation.get("phases"),
-                "feedback": validation.get("feedback"),
-            }
-            if isinstance(validation, Mapping)
-            else None
-        ),
-        "evidence": _final_result_evidence(
-            product_context=product_context,
-            contract=contract,
-            session=session,
-            selection=selection,
-            reachability=reachability,
-            validation=validation,
-        ),
-        "limitations": _final_result_limitations(product_context, contract),
-        "ontology": _final_ontology_view(product_context, raw_turtle),
-    }
+    for state in ("current_state", "desired_state"):
+        result[f"{state}_evidence"]["reachability_locations"] = reachability["state_locations"][
+            state
+        ]
+    result["limitations"].extend(completion["unvalidated_constraints"])
+    return result
 
 
 def _persisted_pa_timeline(
@@ -1352,9 +1277,9 @@ def _persisted_pa_timeline(
     ]
     successful_calls = [item for item in tool_calls if item.get("failure") is None]
     evidence_detail = (
-        f"{len(successful_calls)} approved evidence retrievals were accepted."
+        f"{len(successful_calls)} approved evidence operations completed."
         if tool_calls
-        else "No external evidence retrieval was needed for this grounding."
+        else "No external evidence operation was needed for this grounding."
     )
     events.append(
         _timeline_event(
@@ -1363,52 +1288,41 @@ def _persisted_pa_timeline(
             evidence_detail,
         )
     )
-    proposal = _latest_record(records, "ontology_grounding_proposal_")
-    if isinstance(proposal, Mapping) and proposal.get("status") == "accepted":
+    progress = _persisted_grounding_progress(records)
+    if detail := _grounding_progress_text(progress):
+        stopped = progress.get("stop_reason") not in {None, "complete", "clarification_required"}
+        events.append(
+            _timeline_event("waiting" if stopped else "accepted", "Grounding investigation", detail)
+        )
+    if final_result is not None and terminal_failure is None:
         events.append(
             _timeline_event(
                 "accepted",
                 "Target feature grounded",
-                "The PA-authored target feature passed semantic and deterministic validation.",
+                (
+                    "The PA-authored target feature passed deterministic structure and evidence validation."
+                ),
             )
         )
-    if final_result is not None:
+    if (
+        final_result is not None
+        and terminal_failure is None
+        and final_result.get("resource_assignment_status") == "complete"
+    ):
         resource = final_result.get("selected_resource")
-        mode = final_result.get("execution_mode")
-        cartesian = final_result.get("validation_scope") == "cartesian_pick_place"
-        state_location = (
-            final_result.get("validation_scope") == "state_location_reachability"
-        )
-        events.append(
-            _timeline_event(
-                "accepted",
-                (
-                    "Cartesian pick-place allocation validated"
-                    if cartesian
-                    else (
-                        "State-location allocation validated"
-                        if state_location
-                        else "Endpoint-motion allocation validated"
-                    )
+        events.extend(
+            [
+                _timeline_event(
+                    "accepted",
+                    "Arm assigned",
+                    f"{resource} · every capable arm checked against the grounded positions.",
                 ),
-                " · ".join(
-                    [
-                        *(str(value) for value in (resource, mode) if value not in {None, ""}),
-                        "planning only; no motion executed",
-                    ]
+                _timeline_event(
+                    "accepted",
+                    "Product grounding and arm assignment complete",
+                    "Product goal grounded and RA selected. Position plans were validated; grasping and insertion remain unvalidated.",
                 ),
-            )
-        )
-        events.append(
-            _timeline_event(
-                "accepted",
-                "Grounding complete",
-                (
-                    "The validated context and historical Cartesian resource assignment are available."
-                    if cartesian
-                    else "The validated context and state-location resource assignment are available."
-                ),
-            )
+            ]
         )
         return events
     latest_output = next(
@@ -1421,11 +1335,7 @@ def _persisted_pa_timeline(
     )
     if terminal_failure is not None:
         events.append(
-            _timeline_event(
-                "failed",
-                "Grounding incomplete",
-                _failure_message(terminal_failure),
-            )
+            _timeline_event("failed", "Grounding incomplete", _failure_message(terminal_failure))
         )
     elif isinstance(latest_output, Mapping) and latest_output.get("grounding_status") == "complete":
         resource_status = latest_output.get("resource_assignment_status")
@@ -1526,7 +1436,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
     presentation_failure: dict[str, str] | None = (
         {
             "reason": "invalid_context_completion",
-            "message": "The persisted context completion failed validation.",
+            "message": "The persisted context completion is incompatible or changed. Start a fresh interaction.",
         }
         if completion_candidates and completion_record is None
         else None
@@ -1543,35 +1453,51 @@ def _pa_ui_view(  # noqa: C901, PLR0915
                 "message": f"Final grounding result could not be loaded: {type(exc).__name__}: {exc}",
             }
     completed = final_result is not None
-    session_records = [
-        record
-        for name, record in records.items()
-        if name.startswith("grounding_session_revision_") and isinstance(record, dict)
-    ]
-    latest_session = session_records[-1] if session_records else None
+    if (
+        not completion_candidates
+        and isinstance(latest_output, Mapping)
+        and isinstance(latest_output.get("ontology_projection_ref"), str)
+    ):
+        try:
+            final_result = _validated_grounding_result(
+                interaction_root, str(latest_output["ontology_projection_ref"])
+            )
+            final_result["deferred_reason"] = latest_output.get("deferred_reason")
+            if latest_output.get("grounding_status") == "incomplete":
+                final_result["resource_assignment_status"] = "incomplete"
+                final_result["deferred_reason"] = latest_output.get("insufficient_evidence")
+        except (OSError, KeyError, TypeError, ValueError):
+            presentation_failure = {
+                "reason": "invalid_grounding",
+                "message": "Grounding evidence could not be validated. Start a fresh interaction.",
+            }
     grounding_status = (
         latest_output.get("grounding_status") if isinstance(latest_output, Mapping) else None
     )
-    if grounding_status is None and isinstance(latest_session, dict):
-        grounding_status = latest_session.get("status")
+    if (
+        grounding_status == "incomplete"
+        and isinstance(latest_output, Mapping)
+        and latest_output.get("grounding_validation_code") not in _GROUNDING_VALIDATION_CODES
+    ):
+        presentation_failure = presentation_failure or {
+            "reason": "invalid_grounding_result",
+            "message": "The persisted grounding result is incompatible. Start a fresh interaction.",
+        }
     terminal_failure = presentation_failure or _terminal_failure(
         phase_3_1,
         phase_3_2,
         phase_3_3,
+        latest_turn,
     )
-    phase_3_1_failure = phase_3_1.get("failure")
     grounding_unavailable = (
-        isinstance(phase_3_1_failure, dict)
-        and phase_3_1_failure.get("reason") == "grounding_unavailable"
+        isinstance(terminal_failure, dict)
+        and terminal_failure.get("reason") == "grounding_unavailable"
     )
     if grounding_unavailable:
         activity_state, activity_color = "grounding unavailable", "amber"
         activity_message = (
-            f"{_failure_message(phase_3_1_failure)} No PA evidence decision was requested."
+            f"{_failure_message(terminal_failure)} No PA evidence decision was requested."
         )
-    elif phase_3_1_failure is not None:
-        activity_state, activity_color = "failed", "red"
-        activity_message = _failure_message(phase_3_1_failure)
     elif terminal_failure is not None:
         activity_state, activity_color = "failed", "red"
         activity_message = _failure_message(terminal_failure)
@@ -1583,9 +1509,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         activity_message = "ProductAgent is waiting for the operator's reply."
     elif completed:
         activity_state, activity_color = "grounding complete", "green"
-        activity_message = (
-            "The validated context and coarse resource assignment are available below."
-        )
+        activity_message = "The grounded states and validated arm assignment are available below."
     elif grounding_status == "complete":
         resource_status = (
             latest_output.get("resource_assignment_status")
@@ -1632,6 +1556,9 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         final_result=final_result,
         terminal_failure=terminal_failure,
     )
+    progress = _persisted_grounding_progress(records)
+    if detail := _grounding_progress_text(progress):
+        activity_message += " " + detail
     phase_5_1 = read_phase_5_1_diagnostic(interaction_root).to_view()
     phase_5_2 = read_phase_5_2_diagnostic(interaction_root).to_view()
     return {
@@ -1659,6 +1586,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
             ),
             "decision_count": len(turns),
             "failure": _product_agent_request_failure_text(terminal_failure),
+            "grounding_progress": dict(progress),
         },
     }
 
@@ -1760,15 +1688,15 @@ def _interaction_records(interaction_root: Path) -> dict[str, object]:
         )
     )
     grounding_paths.extend(
-        (f"grounding_session_{path.stem}", path)
-        for path in sorted(
-            (interaction_root / "products/grounding/session").glob("revision_*.json")
-        )
-    )
-    grounding_paths.extend(
         (f"ontology_grounding_{path.stem}", path)
         for path in sorted(
             (interaction_root / "products/grounding/ontology_grounding").glob("proposal_*.json")
+        )
+    )
+    grounding_paths.extend(
+        (f"grounding_{path.stem}", path)
+        for path in sorted(
+            (interaction_root / "products/grounding/ontology_grounding").glob("request_*.json")
         )
     )
     grounding_paths.extend(
@@ -1946,10 +1874,6 @@ def _json_text(value: object) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
 
 
-def _compact_json_text(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, allow_nan=False)
-
-
 def _concise_final_grounding_summary(
     result: Mapping[str, object],
 ) -> dict[str, object]:
@@ -1970,54 +1894,86 @@ def _concise_final_grounding_summary(
     reachability = result.get("reachability")
     reachability_mapping = reachability if isinstance(reachability, Mapping) else {}
     validation = result.get("robot_agent_validation")
-    validation_mapping = validation if isinstance(validation, Mapping) else {}
-    return {
-        "target": "\n".join(
-            (
-                f"CAD: {cad_name}" if cad_name else "CAD identity unresolved",
-                f"reference: {context_ref}" if context_ref else "",
+    validation_mapping = validation.get("response", {}) if isinstance(validation, Mapping) else {}
+    deferred = result.get("resource_assignment_status") in {"deferred", "incomplete"}
+    target_lines = [
+        f"CAD: {cad_name}" if cad_name else "CAD identity unresolved",
+    ]
+    if deferred:
+        target_lines.extend(
+            [
+                "Resource assignment is still incomplete.",
+                str(result.get("deferred_reason") or "Resource assignment is deferred."),
+            ]
+        )
+    else:
+        target_lines.extend(
+            [
                 f"target frame: {result.get('target_frame')}",
-                f"current XYZ: {_compact_json_text(current_mapping.get('translated_location_m'))}",
-                f"desired XYZ: {_compact_json_text(desired_mapping.get('translated_location_m'))}",
-                (f"selected-resource reachability: {reachability_mapping.get('status')}"),
-            )
-        ).replace("\n\n", "\n"),
+                f"current references checked: {len(current_mapping.get('reachability_locations', []))}",
+                f"destination references checked: {len(desired_mapping.get('reachability_locations', []))}",
+            ]
+        )
+    return {
+        "target": "\n".join(line for line in target_lines if line),
         "current_state": _concise_state_summary(current_mapping),
         "desired_state": _concise_state_summary(desired_mapping),
-        "reachability": "\n".join(
+        "reachability": "Not checked: resource assignment is deferred."
+        if deferred
+        else "\n".join(
             (
                 f"status: {reachability_mapping.get('status')}",
                 f"resource: {reachability_mapping.get('resource_symbol')}",
                 f"target frame: {reachability_mapping.get('target_frame')}",
             )
         ),
-        "validation": "\n".join(
+        "validation": "Motion validation not performed. Primitive composition remains a separate step."
+        if result.get("motion_validation_performed") is False
+        else "Not checked: resource assignment is deferred."
+        if deferred
+        else "\n".join(
             (
                 f"status: {validation_mapping.get('status')}",
-                f"mode: {validation_mapping.get('mode')}",
-                f"scope: {validation_mapping.get('validation_scope')}",
-                f"motion executed: {validation_mapping.get('motion_executed')}",
+                "Position checks · no motion executed",
             )
         ),
     }
 
 
 def _concise_state_summary(state: Mapping[str, object]) -> str:
-    """Return a short state summary while detailed provenance remains expandable."""
-    visual = state.get("annotated_rgb")
-    description = visual.get("description") if isinstance(visual, Mapping) else None
-    values = [
-        state.get("statement"),
-        (
-            f"semantic value: {state.get('state_value_name')}"
-            if state.get("state_value_name")
-            else None
-        ),
-        f"visible evidence: {description}" if isinstance(description, str) else None,
-        f"XYZ: {_compact_json_text(state.get('translated_location_m'))}",
-        f"reachable: {state.get('reachable')}",
-    ]
-    return "\n".join(str(value) for value in values if value not in {None, ""})
+    """Keep the PA statement verbatim; evidence and caveats belong in details."""
+    statement = state.get("statement")
+    return statement if isinstance(statement, str) else "No grounded state statement is available."
+
+
+def _render_state_visuals(container: Any, state: Mapping[str, object]) -> None:
+    """Render only the supplied direct state bindings, with descriptions expandable."""
+    visuals = state.get("candidate_visuals", [])
+    container.clear()
+    with container:
+        if not visuals:
+            ui.label("No image is directly bound to this state.").classes("text-xs text-slate-500")
+        for visual in visuals:
+            label = visual.get("state_value_name") or "Observed candidate"
+            if visual.get("source_state"):
+                label = f"{label} · source: {visual['source_state']}"
+            ui.label(label).classes("text-xs font-semibold text-slate-700")
+            ui.image(visual["data_uri"]).classes(
+                "w-full min-w-0 max-w-full max-h-80 object-contain rounded border border-slate-200"
+            )
+            with ui.expansion("Image evidence", icon="image").classes("w-full min-w-0"):
+                for field in (
+                    "description",
+                    "uncertainty",
+                    "source_record_ref",
+                    "source_field_path",
+                ):
+                    if visual.get(field):
+                        ui.label(str(visual[field])).classes("text-xs whitespace-pre-wrap")
+                if visual.get("source_view_data_uri"):
+                    ui.image(visual["source_view_data_uri"]).classes(
+                        "w-full min-w-0 max-w-full max-h-80 object-contain"
+                    )
 
 
 def _render_pa_timeline_events(
@@ -2056,9 +2012,84 @@ def _render_pa_timeline_events(
                     )
 
 
+def _render_state_statement() -> dict[str, Any]:
+    """Render an exact statement with a four-line preview and responsive expansion."""
+    statement = ui.label("").classes("s2p-state-statement text-sm text-slate-700")
+    expanded = False
+    revision = 0
+    measuring = False
+
+    def toggle() -> None:
+        nonlocal expanded, revision
+        revision += 1
+        expanded = not expanded
+        statement.classes(
+            add="s2p-state-expanded" if expanded else "",
+            remove="" if expanded else "s2p-state-expanded",
+        )
+        button.set_text("Show less" if expanded else "Show more")
+
+    button = ui.button("Show more", on_click=toggle).props("flat dense no-caps size=sm")
+    button.set_visibility(False)
+
+    async def measure() -> None:
+        nonlocal measuring
+        if (
+            expanded
+            or measuring
+            or statement.is_deleted
+            or button.is_deleted
+            or not statement.client.has_socket_connection
+        ):
+            return
+        measured_revision = revision
+        measuring = True
+        try:
+            overflowing = await statement.client.run_javascript(
+                f"(() => {{ const e = document.getElementById('c{statement.id}'); return !!e && e.scrollHeight > e.clientHeight + 1; }})()"
+            )
+        except TimeoutError:
+            # Browser measurement is optional; the exact statement must stay accessible.
+            overflowing = bool(statement.text)
+        finally:
+            measuring = False
+        if (
+            measured_revision == revision
+            and not statement.is_deleted
+            and not button.is_deleted
+            and statement.client.has_socket_connection
+        ):
+            button.set_visibility(bool(overflowing))
+
+    def reset() -> None:
+        nonlocal expanded, revision
+        revision += 1
+        expanded = False
+        statement.classes(remove="s2p-state-expanded")
+        button.set_text("Show more")
+        button.set_visibility(bool(statement.text))
+        ui.timer(0.1, measure, once=True)
+
+    ui.element("q-resize-observer").on("resize", measure)
+    return {"statement": statement, "show_more": button, "reset": reset}
+
+
 def _render_final_grounding_result() -> dict[str, Any]:
     """Render the hidden final grounding result and return updateable elements."""
-    with ui.card().classes("w-full border-2 border-emerald-200 bg-white shadow-sm") as card:
+    ui.add_css("""
+        .s2p-grounding-result, .s2p-grounding-result * { min-width: 0; box-sizing: border-box; }
+        .s2p-grounding-result { max-width: 100%; overflow-wrap: anywhere; }
+        .s2p-grounding-result .q-expansion-item, .s2p-grounding-result .q-expansion-item__content,
+        .s2p-grounding-result .q-card, .s2p-grounding-result .q-img { max-width: 100%; }
+        .s2p-grounding-result pre, .s2p-grounding-result code { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+        .s2p-grounding-result .q-table { table-layout: fixed; width: 100%; }
+        .s2p-grounding-result .q-table td { white-space: normal; overflow-wrap: anywhere; }
+        .s2p-state-statement { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+        .s2p-state-statement.s2p-state-expanded { display: block; -webkit-line-clamp: unset; overflow: visible; }
+    """)
+    with ui.card().classes(
+        "s2p-grounding-result w-full min-w-0 max-w-full border-2 border-emerald-200 bg-white shadow-sm"
+    ) as card:
         with ui.row().classes("w-full items-start justify-between gap-3"):
             with ui.column().classes("gap-0"):
                 ui.label("Final Grounding Result").classes("text-xl font-semibold text-slate-900")
@@ -2075,22 +2106,24 @@ def _render_final_grounding_result() -> dict[str, Any]:
             "w-full border border-slate-200 rounded"
         ):
             target_feature_value = ui.code("", language="json").classes(
-                "w-full text-xs overflow-x-auto"
+                "w-full min-w-0 max-w-full text-xs overflow-x-auto"
             )
 
-        with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
+        with ui.element("div").classes(
+            "grid grid-cols-1 md:grid-cols-2 w-full min-w-0 gap-3 items-stretch"
+        ):
             with ui.card().classes(
-                "flex-1 min-w-48 border border-slate-200 bg-slate-50 shadow-none"
+                "min-w-0 max-w-full border border-slate-200 bg-slate-50 shadow-none"
             ):
                 ui.label("Process").classes("text-xs font-semibold text-slate-500")
                 process_value = ui.label("").classes("text-base font-semibold text-slate-900")
             with ui.card().classes(
-                "flex-1 min-w-48 border border-slate-200 bg-slate-50 shadow-none"
+                "min-w-0 max-w-full border border-slate-200 bg-slate-50 shadow-none"
             ):
                 ui.label("Selected Resource").classes("text-xs font-semibold text-slate-500")
                 resource_value = ui.label("").classes("text-base font-semibold text-slate-900")
             with ui.card().classes(
-                "flex-[2] min-w-72 border border-slate-200 bg-slate-50 shadow-none"
+                "min-w-0 max-w-full border border-slate-200 bg-slate-50 shadow-none"
             ):
                 ui.label("CAD and grounded states").classes("text-xs font-semibold text-slate-500")
                 target_value = ui.label("").classes(
@@ -2100,67 +2133,51 @@ def _render_final_grounding_result() -> dict[str, Any]:
                     "w-full border border-slate-200 rounded"
                 ):
                     target_details_value = ui.code("", language="json").classes(
-                        "w-full text-xs overflow-x-auto"
+                        "w-full min-w-0 max-w-full text-xs overflow-x-auto"
                     )
 
+        relationships_value = ui.column().classes("w-full min-w-0 gap-2")
         ui.label("PA-Selected Feature-State Evidence").classes(
             "text-sm font-semibold text-slate-800"
         )
-        with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
-            with ui.card().classes("flex-1 min-w-80 border border-sky-200 bg-sky-50 shadow-none"):
-                ui.label("Current State · currentstate_0001").classes(
-                    "text-sm font-semibold text-sky-900"
-                )
-                current_image = ui.image("").classes(
-                    "w-full max-h-80 object-contain rounded border border-sky-200"
-                )
-                current_image.set_visibility(False)
-                current_image_placeholder = ui.label(
-                    "No RGB artifact is attached to this selected state evidence."
-                ).classes("text-xs text-slate-500")
-                current_state_value = ui.label("").classes(
-                    "text-xs text-slate-700 whitespace-pre-wrap break-words"
-                )
-                with ui.expansion("Evidence details and source view", icon="image").classes(
-                    "w-full border border-sky-200 rounded"
-                ):
-                    current_source_image = ui.image("").classes(
-                        "w-full max-h-80 object-contain rounded"
-                    )
-                    current_source_image.set_visibility(False)
-                    current_state_details = ui.code("", language="json").classes(
-                        "w-full text-xs overflow-x-auto"
-                    )
-            with ui.card().classes(
-                "flex-1 min-w-80 border border-violet-200 bg-violet-50 shadow-none"
+        state_elements = {}
+        with ui.element("div").classes(
+            "grid grid-cols-1 md:grid-cols-2 w-full min-w-0 gap-3 items-stretch"
+        ):
+            for prefix, title, color in (
+                ("current", "Current State · currentstate_0001", "sky"),
+                ("desired", "Desired State · desiredstate_0001", "violet"),
             ):
-                ui.label("Desired State · desiredstate_0001").classes(
-                    "text-sm font-semibold text-violet-900"
-                )
-                desired_image = ui.image("").classes(
-                    "w-full max-h-80 object-contain rounded border border-violet-200"
-                )
-                desired_image.set_visibility(False)
-                desired_image_placeholder = ui.label(
-                    "No RGB artifact is attached to this selected state evidence."
-                ).classes("text-xs text-slate-500")
-                desired_state_value = ui.label("").classes(
-                    "text-xs text-slate-700 whitespace-pre-wrap break-words"
-                )
-                with ui.expansion("Evidence details and source view", icon="image").classes(
-                    "w-full border border-violet-200 rounded"
+                with ui.card().classes(
+                    f"min-w-0 max-w-full border border-{color}-200 bg-{color}-50 shadow-none"
                 ):
-                    desired_source_image = ui.image("").classes(
-                        "w-full max-h-80 object-contain rounded"
+                    ui.label(title).classes(f"text-sm font-semibold text-{color}-900")
+                    state_elements[f"{prefix}_images"] = ui.column().classes("w-full gap-3")
+                    statement_widget = _render_state_statement()
+                    state_elements[f"{prefix}_state"] = statement_widget["statement"]
+                    state_elements[f"{prefix}_preview_reset"] = statement_widget["reset"]
+                    state_elements[f"{prefix}_show_more"] = statement_widget["show_more"]
+                    state_elements[f"{prefix}_caveat_count"] = ui.label("").classes(
+                        "text-xs text-amber-800"
                     )
-                    desired_source_image.set_visibility(False)
-                    desired_state_details = ui.code("", language="json").classes(
-                        "w-full text-xs overflow-x-auto"
-                    )
+                    with ui.expansion("Evidence details", icon="data_object").classes(
+                        f"w-full border border-{color}-200 rounded"
+                    ):
+                        state_elements[f"{prefix}_caveats"] = ui.column().classes(
+                            "w-full min-w-0 gap-2"
+                        )
+                        state_elements[f"{prefix}_relationship_images"] = ui.column().classes(
+                            "w-full min-w-0 gap-2"
+                        )
+                        state_elements[f"{prefix}_state_details"] = ui.code(
+                            "", language="json"
+                        ).classes("w-full min-w-0 max-w-full text-xs overflow-x-auto")
 
-        with ui.row().classes("w-full gap-3 items-stretch flex-wrap"):
+        with ui.element("div").classes(
+            "grid grid-cols-1 md:grid-cols-2 w-full min-w-0 gap-3 items-stretch"
+        ):
             with ui.card().classes(
-                "flex-1 min-w-80 border border-slate-200 bg-slate-50 shadow-none"
+                "min-w-0 max-w-full border border-slate-200 bg-slate-50 shadow-none"
             ):
                 ui.label("Reachability · both states").classes(
                     "text-xs font-semibold text-slate-500"
@@ -2172,14 +2189,12 @@ def _render_final_grounding_result() -> dict[str, Any]:
                     "w-full border border-slate-200 rounded"
                 ):
                     reachability_details = ui.code("", language="json").classes(
-                        "w-full text-xs overflow-x-auto"
+                        "w-full min-w-0 max-w-full text-xs overflow-x-auto"
                     )
             with ui.card().classes(
-                "flex-1 min-w-80 border border-slate-200 bg-slate-50 shadow-none"
+                "min-w-0 max-w-full border border-slate-200 bg-slate-50 shadow-none"
             ):
-                ui.label("Exact RobotAgent · endpoint-motion validation").classes(
-                    "text-xs font-semibold text-slate-500"
-                )
+                ui.label("MoveIt position planning").classes("text-xs font-semibold text-slate-500")
                 validation_value = ui.label("").classes(
                     "text-sm font-medium text-slate-900 whitespace-pre-wrap"
                 )
@@ -2187,9 +2202,27 @@ def _render_final_grounding_result() -> dict[str, Any]:
                     "w-full border border-slate-200 rounded"
                 ):
                     validation_details = ui.code("", language="json").classes(
-                        "w-full text-xs overflow-x-auto"
+                        "w-full min-w-0 max-w-full text-xs overflow-x-auto"
                     )
 
+        ui.label("Resource comparison").classes("text-sm font-semibold text-slate-800")
+        comparison = (
+            ui.table(
+                columns=[
+                    {"name": field, "label": label, "field": field}
+                    for field, label in (
+                        ("resource", "Resource"),
+                        ("current_state", "Current location"),
+                        ("desired_state", "Desired location"),
+                        ("selected", "Selection"),
+                    )
+                ],
+                rows=[],
+                row_key="resource",
+            )
+            .props("flat bordered wrap-cells hide-bottom")
+            .classes("w-full min-w-0 max-w-full")
+        )
         ui.label("Validated Evidence").classes("text-sm font-semibold text-slate-800")
         evidence_container = ui.row().classes("w-full gap-2 flex-wrap")
 
@@ -2228,7 +2261,7 @@ def _render_final_grounding_result() -> dict[str, Any]:
             "w-full border border-slate-200 rounded"
         ):
             raw_turtle_value = ui.code("", language="turtle").classes(
-                "w-full text-xs overflow-x-auto"
+                "w-full min-w-0 max-w-full text-xs overflow-x-auto"
             )
     card.set_visibility(False)
     return {
@@ -2237,20 +2270,13 @@ def _render_final_grounding_result() -> dict[str, Any]:
         "result_kind": result_kind_value,
         "requirement": requirement_value,
         "target_feature": target_feature_value,
+        "relationships": relationships_value,
+        "resource_comparison": comparison,
         "process": process_value,
         "resource": resource_value,
         "target": target_value,
         "target_details": target_details_value,
-        "current_image": current_image,
-        "current_image_placeholder": current_image_placeholder,
-        "current_source_image": current_source_image,
-        "current_state": current_state_value,
-        "current_state_details": current_state_details,
-        "desired_image": desired_image,
-        "desired_image_placeholder": desired_image_placeholder,
-        "desired_source_image": desired_source_image,
-        "desired_state": desired_state_value,
-        "desired_state_details": desired_state_details,
+        **state_elements,
         "reachability": reachability_value,
         "reachability_details": reachability_details,
         "validation": validation_value,
@@ -2273,7 +2299,9 @@ def _apply_final_grounding_result(
     if result is None:
         card.set_visibility(False)
         return
-    allocation_label = str(result.get("allocation_label") or "validated plan-only allocation")
+    allocation_label = str(
+        result.get("allocation_label") or "resource assignment validated by MoveIt"
+    )
     elements["status_badge"].set_text(allocation_label)
     elements["result_kind"].set_text(f"{allocation_label} · no motion executed")
     elements["requirement"].set_text(str(result.get("product_requirement", "")))
@@ -2289,6 +2317,26 @@ def _apply_final_grounding_result(
         else ""
     )
     elements["target_feature"].update()
+    relationships = result.get("assembly_feature_association", [])
+    elements["relationships"].clear()
+    with elements["relationships"]:
+        for association in relationships:
+            with ui.expansion(association["assembly"]["name"], icon="link").classes(
+                "w-full min-w-0"
+            ):
+                ui.label(f"{len(association.get('source_uncertainty', []))} caveats").classes(
+                    "text-xs text-amber-800"
+                )
+                for endpoint in association["assembly_features"]:
+                    ui.label(f"{endpoint['owner']['name']} / {endpoint['name']}").classes(
+                        "text-sm whitespace-pre-wrap"
+                    )
+                ui.code(_json_text(association), language="json").classes(
+                    "w-full min-w-0 max-w-full text-xs"
+                )
+    elements["relationships"].set_visibility(bool(relationships))
+    elements["resource_comparison"].rows = result.get("resource_comparison", [])
+    elements["resource_comparison"].update()
     process_text = " · ".join(
         str(result[field])
         for field in ("process_symbol", "process")
@@ -2305,6 +2353,10 @@ def _apply_final_grounding_result(
         if result.get(field) not in {None, ""}
     )
     elements["resource"].set_text(resource_text)
+    if result.get("resource_assignment_status") == "deferred":
+        elements["resource"].set_text("Deferred")
+    elif result.get("resource_assignment_status") == "incomplete":
+        elements["resource"].set_text("Not assigned — grounding incomplete")
     summary = _concise_final_grounding_summary(result)
     elements["target"].set_text(str(summary["target"]))
     elements["target_details"].content = _json_text(
@@ -2327,28 +2379,36 @@ def _apply_final_grounding_result(
         state_evidence = result.get(result_key)
         state_mapping = state_evidence if isinstance(state_evidence, Mapping) else {}
         elements[f"{prefix}_state"].set_text(str(summary[f"{prefix}_state"]))
-        elements[f"{prefix}_state_details"].content = _json_text(state_mapping)
-        elements[f"{prefix}_state_details"].update()
-        annotated = state_mapping.get("annotated_rgb")
-        data_uri = annotated.get("data_uri") if isinstance(annotated, Mapping) else None
-        source_view_data_uri = (
-            annotated.get("source_view_data_uri") if isinstance(annotated, Mapping) else None
+        elements[f"{prefix}_preview_reset"]()
+        caveats = state_mapping.get("source_uncertainty", [])
+        elements[f"{prefix}_caveat_count"].set_text(f"{len(caveats)} caveats")
+        elements[f"{prefix}_caveats"].clear()
+        with elements[f"{prefix}_caveats"]:
+            for caveat in caveats:
+                ui.label(caveat["description"]).classes("text-xs whitespace-pre-wrap")
+                ui.label("\n".join(caveat["evidence_refs"])).classes(
+                    "text-xs whitespace-pre-wrap text-slate-500"
+                )
+        relationship_visuals = state_mapping.get("relationship_visuals", [])
+        elements[f"{prefix}_relationship_images"].set_visibility(bool(relationship_visuals))
+        _render_state_visuals(
+            elements[f"{prefix}_relationship_images"], {"candidate_visuals": relationship_visuals}
         )
-        image_element = elements[f"{prefix}_image"]
-        source_image_element = elements[f"{prefix}_source_image"]
-        placeholder = elements[f"{prefix}_image_placeholder"]
-        if isinstance(data_uri, str) and data_uri:
-            image_element.set_source(data_uri)
-            image_element.set_visibility(True)
-            placeholder.set_visibility(False)
-        else:
-            image_element.set_visibility(False)
-            placeholder.set_visibility(True)
-        if isinstance(source_view_data_uri, str) and source_view_data_uri:
-            source_image_element.set_source(source_view_data_uri)
-            source_image_element.set_visibility(True)
-        else:
-            source_image_element.set_visibility(False)
+        elements[f"{prefix}_state_details"].content = _json_text(
+            {
+                key: value
+                for key, value in state_mapping.items()
+                if key
+                not in {
+                    "statement",
+                    "candidate_visuals",
+                    "relationship_visuals",
+                    "source_uncertainty",
+                }
+            }
+        )
+        elements[f"{prefix}_state_details"].update()
+        _render_state_visuals(elements[f"{prefix}_images"], state_mapping)
 
     for element_key, result_key in (
         ("reachability", "reachability"),
@@ -2378,6 +2438,9 @@ def _apply_final_grounding_result(
     limitations = result.get("limitations")
     limitation_values = limitations if isinstance(limitations, list) else []
     elements["limitations"].set_text("\n".join(f"• {value}" for value in limitation_values))
+    elements["limitations_expansion"].set_text(
+        f"Caveats ({len(result.get('source_uncertainty', []))}) and validation limits"
+    )
     elements["limitations_expansion"].set_visibility(bool(limitation_values))
 
     ontology = result.get("ontology")
@@ -2439,11 +2502,11 @@ def _phase_5_1_action_state(
 ) -> tuple[str, bool]:
     """Return the Phase 5.1 action label and enabled state."""
     if status == "waiting_for_ra":
-        label = "Retry Phase 5"
+        label = "Retry context capture"
     elif status == "context_captured":
-        label = "Restart Phase 5"
+        label = "Refresh RobotAgent context"
     else:
-        label = "Start Phase 5"
+        label = "Capture RobotAgent context"
     enabled = (
         activation_available
         and not activation_busy
@@ -2458,7 +2521,7 @@ def _phase_5_1_action_state(
 
 
 def _phase_5_2_waiting_view(
-    message: str = "Capture one valid Phase 5.1 RobotAgent context first.",
+    message: str = "Capture one valid RobotAgent context first.",
 ) -> dict[str, object]:
     """Return the empty read-only Phase 5.2 card state."""
     return {
@@ -2528,25 +2591,25 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
     with ui.card().classes("w-full border-2 border-violet-200 bg-violet-50 shadow-sm"):
         with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
             with ui.column().classes("gap-0"):
-                ui.label("Phase 5 · RobotAgent Diagnostics").classes(
+                ui.label("RobotAgent context and primitive draft").classes(
                     "text-xl font-semibold text-slate-900"
                 )
                 ui.label(
-                    "Operator activation and persisted inspection while Phase 5 is implemented"
+                    "Capture the assigned RobotAgent context and create a structural primitive draft."
                 ).classes("text-xs text-slate-500")
             with ui.row().classes("items-center gap-2 flex-wrap"):
                 start_phase_5_button = ui.button(
-                    "Start Phase 5",
+                    "Capture RobotAgent context",
                     icon="play_arrow",
                 ).props("flat disable")
                 refresh_button = ui.button("Refresh", icon="refresh").props("flat disable")
 
         with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
-            ui.label("5.1 · Assigned RA activation and context snapshot").classes(
+            ui.label("Assigned RA activation and context snapshot").classes(
                 "text-sm font-semibold text-violet-900"
             )
             with ui.row().classes("items-center gap-2 flex-wrap"):
-                status_badge = ui.badge("waiting_for_phase_4").props("color=grey outline")
+                status_badge = ui.badge("Waiting for grounding").props("color=grey outline")
                 ui.badge("contract-first").props("color=violet outline")
         message_value = ui.label("").classes(
             "text-sm text-slate-700 whitespace-pre-wrap break-words"
@@ -2617,7 +2680,7 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
         ui.separator().classes("my-1 bg-violet-200")
 
         with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
-            ui.label("5.2 · RA-authored structural primitive draft").classes(
+            ui.label("RA-authored structural primitive draft").classes(
                 "text-sm font-semibold text-violet-900"
             )
             with ui.row().classes("items-center gap-2 flex-wrap"):
@@ -2764,7 +2827,9 @@ def _apply_phase_5_1_diagnostic(
 ) -> None:
     """Apply one JSON-safe persisted Phase 5.1 diagnostic to the UI card."""
     status = str(diagnostic.get("status", "waiting_for_phase_4"))
-    elements["status_badge"].set_text(status)
+    elements["status_badge"].set_text(
+        "Waiting for grounding" if status == "waiting_for_phase_4" else status
+    )
     elements["status_badge"].props(f"color={_phase_5_1_status_color(status)} outline")
     elements["message"].set_text(str(diagnostic.get("message", "")))
 
@@ -2957,10 +3022,10 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
     grounding_ready = runtime.ontology_config is not None and runtime.grounding_runtime is not None
     grounding_unavailable_reason = (
         runtime.document_diagnostic_unavailable_reason
-        or "Authoritative TBox and controlled Phase 4 grounding runtime are unavailable."
+        or "Authoritative TBox and controlled ProductAgent grounding runtime are unavailable."
     )
 
-    with ui.card().classes("w-full border border-slate-200 shadow-sm"):
+    with ui.card().classes("w-full border border-slate-200 shadow-sm") as interaction_card:
         with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
             with ui.column().classes("gap-0"):
                 ui.label("ProductAgent Grounding").classes("text-lg font-semibold text-slate-900")
@@ -3111,6 +3176,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         }
 
         def _update_start_enabled() -> None:
+            if interaction_card.is_deleted:
+                return
             value = requirement_input.value
             _set_enabled(
                 start_button,
@@ -3223,7 +3290,27 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 submit_reply_button.props("disable")
                 cancel_interaction_button.props("disable")
 
+        def _show_pa_event(event: dict[str, str]) -> None:
+            # Page lifetime must not determine whether the underlying PA decision completes.
+            if interaction_card.is_deleted:
+                return
+            events = action_state["timeline"]
+            if not isinstance(events, list):
+                events = []
+                action_state["timeline"] = events
+            events.append(event)
+            _render_pa_timeline_events(timeline_container, events)
+
+        def _show_pa_stage(sentence: str) -> None:
+            if interaction_card.is_deleted:
+                return
+            activity_badge.set_text("grounding")
+            activity_badge.props("color=indigo")
+            activity_message.set_text(sentence)
+
         async def _start_pa_interaction() -> None:
+            if interaction_card.is_deleted:
+                return
             value = requirement_input.value
             if (
                 not grounding_ready
@@ -3245,14 +3332,14 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             _apply_phase_5_1_diagnostic(
                 phase_5_elements,
                 _phase_5_1_waiting_view(
-                    "ProductAgent grounding is running; Phase 5.1 is unavailable."
+                    "ProductAgent grounding is running; RobotAgent context capture is unavailable."
                 ),
                 activation_available=phase_5_1_activation_available,
             )
             _apply_phase_5_2_diagnostic(
                 phase_5_elements,
                 _phase_5_2_waiting_view(
-                    "ProductAgent grounding is running; Phase 5.2 is unavailable."
+                    "ProductAgent grounding is running; structural primitive drafting is unavailable."
                 ),
                 authoring_available=phase_5_2_authoring_available,
             )
@@ -3273,28 +3360,20 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             diagnostic_path.set_text("Persisted path: pending")
             diagnostic_counts.set_text("Turns: 0 · evidence: 0 · decisions: 0")
 
-            def _show_pa_event(event: dict[str, str]) -> None:
-                events = action_state["timeline"]
-                if not isinstance(events, list):
-                    events = []
-                    action_state["timeline"] = events
-                events.append(event)
-                _render_pa_timeline_events(timeline_container, events)
-
-            def _show_pa_stage(sentence: str) -> None:
-                activity_badge.set_text("grounding")
-                activity_badge.props("color=indigo")
-                activity_message.set_text(sentence)
-
             try:
                 interaction = await _run_pa_ui_interaction(
                     runtime,
                     value,
                     on_pa_stage=_show_pa_stage,
                     on_pa_event=_show_pa_event,
+                    is_attached=lambda: not interaction_card.is_deleted,
                 )
+                if interaction_card.is_deleted:
+                    return
                 view = _pa_ui_view(interaction)
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                if interaction_card.is_deleted:
+                    raise
                 failure_message = f"Connected PA workflow failed: {type(exc).__name__}: {exc}"
                 activity_badge.set_text("failed")
                 activity_badge.props("color=red")
@@ -3316,13 +3395,16 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 ui.notify(str(view["activity_state"]), type=notification_type)
             finally:
                 action_state["busy"] = False
-                if action_state["pending_clarification"]:
-                    requirement_input.props("disable")
-                else:
-                    requirement_input.props(remove="disable")
-                _update_start_enabled()
+                if not interaction_card.is_deleted:
+                    if action_state["pending_clarification"]:
+                        requirement_input.props("disable")
+                    else:
+                        requirement_input.props(remove="disable")
+                    _update_start_enabled()
 
         def _update_reply_enabled() -> None:
+            if interaction_card.is_deleted:
+                return
             value = clarification_reply_input.value
             _set_enabled(
                 submit_reply_button,
@@ -3333,6 +3415,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             )
 
         async def _submit_clarification() -> None:
+            if interaction_card.is_deleted:
+                return
             interaction = action_state["interaction"]
             reply = clarification_reply_input.value
             if (
@@ -3353,20 +3437,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             timeline_badge.props("color=indigo outline")
             recovered_label.set_visibility(False)
 
-            def _show_pa_event(event: dict[str, str]) -> None:
-                events = action_state["timeline"]
-                if not isinstance(events, list):
-                    events = []
-                    action_state["timeline"] = events
-                events.append(event)
-                _render_pa_timeline_events(timeline_container, events)
-
             _show_pa_event(_timeline_event("accepted", "Clarification submitted", reply))
-
-            def _show_pa_stage(sentence: str) -> None:
-                activity_badge.set_text("grounding")
-                activity_badge.props("color=indigo")
-                activity_message.set_text(sentence)
 
             try:
                 interaction = await _submit_pa_ui_clarification(
@@ -3375,9 +3446,14 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                     reply,
                     on_pa_stage=_show_pa_stage,
                     on_pa_event=_show_pa_event,
+                    is_attached=lambda: not interaction_card.is_deleted,
                 )
+                if interaction_card.is_deleted:
+                    return
                 view = _pa_ui_view(interaction)
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                if interaction_card.is_deleted:
+                    raise
                 failure_message = f"Clarification failed: {type(exc).__name__}: {exc}"
                 activity_badge.set_text("failed")
                 activity_badge.props("color=red")
@@ -3396,10 +3472,11 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 ui.notify(str(view["activity_state"]), type="positive")
             finally:
                 action_state["busy"] = False
-                _update_reply_enabled()
-                if not action_state["pending_clarification"]:
-                    requirement_input.props(remove="disable")
-                _update_start_enabled()
+                if not interaction_card.is_deleted:
+                    _update_reply_enabled()
+                    if not action_state["pending_clarification"]:
+                        requirement_input.props(remove="disable")
+                    _update_start_enabled()
 
         def _cancel_clarification() -> None:
             interaction = action_state["interaction"]
@@ -3455,7 +3532,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 activation_busy=True,
             )
             phase_5_elements["message"].set_text(
-                "Starting or reusing only the exact RobotAgent selected by Phase 4."
+                "Starting or reusing only the exact RobotAgent selected by ProductAgent."
             )
             _set_enabled(phase_5_elements["refresh_button"], False)
             _apply_phase_5_2_diagnostic(
@@ -3479,10 +3556,10 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             ) as exc:
                 diagnostic_view = read_phase_5_1_diagnostic(interaction_root).to_view()
                 diagnostic_view["failure"] = f"{type(exc).__name__}: {exc}"
-                ui.notify("Phase 5.1 activation failed closed.", type="negative")
+                ui.notify("RobotAgent context capture failed closed.", type="negative")
             else:
                 diagnostic_view = read_phase_5_1_diagnostic(interaction_root).to_view()
-                ui.notify("Phase 5.1 context captured.", type="positive")
+                ui.notify("RobotAgent context captured.", type="positive")
             finally:
                 action_state["phase_5_1_activating"] = False
                 _apply_phase_5_1_diagnostic(
@@ -3528,7 +3605,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 failure_view = _phase_5_1_waiting_view(
-                    "Phase 5.1 persisted evidence could not be inspected."
+                    "Persisted RobotAgent context evidence could not be inspected."
                 )
                 failure_view["status"] = "blocked"
                 failure_view["failure"] = f"{type(exc).__name__}: {exc}"
@@ -3539,7 +3616,9 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 )
                 _apply_phase_5_2_diagnostic(
                     phase_5_elements,
-                    _phase_5_2_waiting_view("Phase 5 persisted evidence could not be inspected."),
+                    _phase_5_2_waiting_view(
+                        "Persisted RobotAgent evidence could not be inspected."
+                    ),
                     authoring_available=phase_5_2_authoring_available,
                 )
             finally:
@@ -3601,7 +3680,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             ) as exc:
                 diagnostic_view = read_phase_5_2_diagnostic(interaction_root).to_view()
                 diagnostic_view["failure"] = f"{type(exc).__name__}: {exc}"
-                ui.notify("Phase 5.2 draft failed closed.", type="negative")
+                ui.notify("Primitive draft creation failed closed.", type="negative")
             else:
                 diagnostic_view = read_phase_5_2_diagnostic(interaction_root).to_view()
                 notification_type = (

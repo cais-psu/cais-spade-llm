@@ -2061,37 +2061,6 @@ class RobotAgent(ResourceAgent):
     # Recovery physical feasibility check
     # ------------------------------------------------------------------ #
 
-    def _is_pose_in_workspace(
-        self,
-        pose: dict[str, Any],
-    ) -> tuple[bool, str]:
-        """Check if a Cartesian pose falls within this robot's workspace bounds.
-
-        Returns (is_inside, reason).
-        """
-        bounds = self.static_capabilities.get("workspace_bounds")
-        if not bounds or not isinstance(bounds, dict):
-            return False, "workspace_bounds capability data is unavailable"
-
-        violations: list[str] = []
-        for axis in ("x", "y", "z"):
-            val = pose.get(axis)
-            if val is None:
-                continue
-            try:
-                val = float(val)
-            except (TypeError, ValueError):
-                continue
-            lo = bounds.get(f"{axis}_min_m")
-            hi = bounds.get(f"{axis}_max_m")
-            if lo is not None and val < float(lo):
-                violations.append(f"{axis}={val:.4f} < {axis}_min_m={float(lo):.4f}")
-            if hi is not None and val > float(hi):
-                violations.append(f"{axis}={val:.4f} > {axis}_max_m={float(hi):.4f}")
-
-        if violations:
-            return False, f"pose outside workspace: {', '.join(violations)}"
-        return True, "pose within workspace bounds"
 
     @staticmethod
     def _recovery_pose_gripper_reach_error(
@@ -2547,24 +2516,6 @@ class RobotAgent(ResourceAgent):
         }
         gripper_reach = dict(static_capabilities.get("gripper_reach") or {})
         for pose_name, pose in pose_bundle.items():
-            inside, workspace_reason = self._is_pose_in_workspace(pose)
-            if not inside:
-                status = (
-                    "NEEDS_CONTEXT"
-                    if "capability data is unavailable" in workspace_reason
-                    else "INFEASIBLE"
-                )
-                return _result(
-                    status,
-                    (
-                        "resource_validation_unavailable"
-                        if status == "NEEDS_CONTEXT"
-                        else "workspace_unreachable"
-                    ),
-                    f"{pose_name} {workspace_reason}",
-                    guard_kind="pose_unreachable",
-                    extra_evidence={"checked_poses": pose_bundle},
-                )
             reach_error = RobotAgent._recovery_pose_gripper_reach_error(
                 pose,
                 gripper_reach,
@@ -2961,30 +2912,15 @@ class RobotAgent(ResourceAgent):
                 "evidence": evidence,
             }
 
-        inside, reason = self._is_pose_in_workspace(target_pose)
         evidence["checked_pose"] = deepcopy(target_pose)
-        evidence["workspace_bounds"] = deepcopy(
-            self.static_capabilities.get("workspace_bounds") or {}
-        )
-        workspace_data_unavailable = "capability data is unavailable" in reason
+        # This synchronous precondition check cannot establish live robot reachability.
+        # Its caller must obtain robot-model planning evidence before accepting the pose.
         return {
-            "allowed": inside,
-            "constraint_code": (
-                "resource_validation_unavailable"
-                if workspace_data_unavailable
-                else "workspace_unreachable" if not inside else None
-            ),
-            "guard": (
-                {
-                    "kind": "observed_pose_unreachable",
-                    "resource_jid": str(getattr(self, "jid", "") or ""),
-                    "part_name": str(part_name or "").strip() or None,
-                    "pose": deepcopy(target_pose),
-                }
-                if not inside
-                else None
-            ),
-            "reason": reason,
+            "allowed": False,
+            "feasibility_status": "NEEDS_CONTEXT",
+            "constraint_code": "resource_validation_unavailable",
+            "guard": {"kind": "physical_validation_required", "resource_jid": resource_jid},
+            "reason": "Live robot-model planning is required for this pose.",
             "evidence": evidence,
         }
 

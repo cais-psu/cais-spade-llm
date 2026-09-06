@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Project predefined robot resources into a minimal immutable registry."""
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -14,6 +15,7 @@ from rdflib.namespace import RDF
 from cais_spade_llm.spec2primitives.config import WorkcellProfile, load_workcell_profile
 
 from .ppr_tbox import OntologyContextError, TBoxSnapshot
+
 
 class ResourceRegistryError(OntologyContextError):
     """Raised when a predefined resource registry cannot be trusted."""
@@ -61,9 +63,7 @@ class ResourceRegistrySnapshot:
         try:
             self._tbox.assert_unchanged()
         except OntologyContextError as exc:
-            raise ResourceRegistryError(
-                "Resource registry TBox changed after validation."
-            ) from exc
+            raise ResourceRegistryError("Resource registry TBox changed after validation.") from exc
         self._profile.assert_unchanged()
         if self._tbox.fingerprint != self.tbox_fingerprint:
             raise ResourceRegistryError(
@@ -72,13 +72,10 @@ class ResourceRegistrySnapshot:
 
         ppr = Namespace(self.ppr_namespace)
         expected_graph = {
-            (URIRef(entry.resource_iri), RDF.type, ppr.resource)
-            for entry in self.resources
+            (URIRef(entry.resource_iri), RDF.type, ppr.resource) for entry in self.resources
         }
         if set(self.graph) != expected_graph:
-            raise ResourceRegistryError(
-                "Resource registry graph changed after validation."
-            )
+            raise ResourceRegistryError("Resource registry graph changed after validation.")
 
         for entry, source_path in zip(self.resources, self._source_paths, strict=True):
             if _source_sha256(source_path) != entry.source_sha256:
@@ -89,14 +86,11 @@ class ResourceRegistrySnapshot:
         payload = self.to_record()
         payload.pop("fingerprint")
         if _record_fingerprint(payload) != self.fingerprint:
-            raise ResourceRegistryError(
-                "Resource registry fingerprint changed after validation."
-            )
+            raise ResourceRegistryError("Resource registry fingerprint changed after validation.")
 
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe registry record without manifest configuration."""
         return {
-            "schema_version": 1,
             "record_type": "ResourceRegistrySnapshot",
             "ppr_namespace": self.ppr_namespace,
             "resource_namespace": self.resource_namespace,
@@ -148,9 +142,7 @@ def load_predefined_resource_registry(
             source_ref=resource_profile.manifest_ref,
         )
         if entry.resource_jid in resource_jids:
-            raise ResourceRegistryError(
-                f"Resource JID is not unique: {entry.resource_jid}"
-            )
+            raise ResourceRegistryError(f"Resource JID is not unique: {entry.resource_jid}")
         resource_jids.add(entry.resource_jid)
         resources.append(entry)
         source_paths.append(source_path)
@@ -166,7 +158,6 @@ def load_predefined_resource_registry(
         graph.add((URIRef(entry.resource_iri), RDF.type, ppr.resource))
 
     payload: dict[str, object] = {
-        "schema_version": 1,
         "record_type": "ResourceRegistrySnapshot",
         "ppr_namespace": tbox.ppr_namespace,
         "resource_namespace": resource_namespace,
@@ -200,24 +191,18 @@ def _load_resource_entry(
     try:
         payload = json.loads(source_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ResourceRegistryError(
-            f"Resource manifest is not valid JSON: {source_path}"
-        ) from exc
+        raise ResourceRegistryError(f"Resource manifest is not valid JSON: {source_path}") from exc
     if not isinstance(payload, dict) or set(payload) != {resource_symbol}:
         raise ResourceRegistryError(
             f"Resource manifest must contain only the exact symbol '{resource_symbol}'."
         )
     resource = payload[resource_symbol]
     if not isinstance(resource, dict):
-        raise ResourceRegistryError(
-            f"Resource manifest entry must be an object: {resource_symbol}"
-        )
+        raise ResourceRegistryError(f"Resource manifest entry must be an object: {resource_symbol}")
 
     resource_type = resource.get("type")
     if resource_type != "robot":
-        raise ResourceRegistryError(
-            f"Resource type must be exactly 'robot': {resource_symbol}"
-        )
+        raise ResourceRegistryError(f"Resource type must be exactly 'robot': {resource_symbol}")
     resource_jid = _exact_nonempty_string(
         resource.get("jid"),
         f"Resource JID for {resource_symbol}",
@@ -249,9 +234,7 @@ def _read_source_bytes(source_path: Path) -> bytes:
     try:
         return source_path.read_bytes()
     except OSError as exc:
-        raise ResourceRegistryError(
-            f"Resource manifest cannot be read: {source_path}"
-        ) from exc
+        raise ResourceRegistryError(f"Resource manifest cannot be read: {source_path}") from exc
 
 
 def _source_sha256(source_path: Path) -> str:

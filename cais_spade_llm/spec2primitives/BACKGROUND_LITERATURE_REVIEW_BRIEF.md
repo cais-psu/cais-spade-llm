@@ -1,5 +1,7 @@
 # Spec2Primitives Background Literature Review
 
+Current implementation: PA-owned product grounding with deterministic contract and evidence checks, budgeted PA corrections, and MoveIt-validated arm assignment, followed by selected-RA context and unbound structural drafting. The later binding, executable-validation and outcome workflow below is research methodology, not completed runtime behavior. See [implementation status](IMPLEMENTATION_PLAN.md) and [bias experiments](BIAS_VALIDATION.md).
+
 ## Goal
 
 Prepare a concise Background/Related Work section for:
@@ -52,8 +54,8 @@ repeat, bind, validate, and revise robot primitives at runtime.
   required process, and available robot capabilities. The ontology constrains
   what the task means, but it does not contain the primitive recipe.
 - The grounded requirement is matched to available robots. Capability,
-  workspace reach, and a planning-only motion check determine which robot can
-  attempt the task.
+  live MoveIt position plans support the current arm
+  assignment. IK and collision-free motion checks belong to later executable validation.
 - The selected robot then reports its current state and its available primitive
   operations, including their inputs, outputs, limits, and known conditions.
 - The LLM uses this information to propose the program structure. For example,

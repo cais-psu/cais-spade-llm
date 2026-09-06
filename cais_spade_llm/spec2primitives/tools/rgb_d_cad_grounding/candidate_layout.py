@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Measure geometry for PA-selected candidates without interpreting a relation."""
 
-from __future__ import annotations
 
 import hashlib
 import itertools
@@ -64,18 +65,14 @@ def analyze_candidate_layout(
         _candidate_at_path(segmentation, segmentation_ref, field_path)
         for field_path in candidate_field_paths
     ]
-    views = {
-        (candidate["observation_handle"], candidate["frame"])
-        for candidate in candidates
-    }
+    views = {(candidate["observation_handle"], candidate["frame"]) for candidate in candidates}
     if len(views) != 1:
         raise CandidateLayoutError("Selected candidates must come from the same view and frame.")
 
     pairwise_measurements = []
     for first, second in itertools.combinations(candidates, 2):
         displacement = [
-            float(second["center_m"][axis]) - float(first["center_m"][axis])
-            for axis in range(3)
+            float(second["center_m"][axis]) - float(first["center_m"][axis]) for axis in range(3)
         ]
         pairwise_measurements.append(
             {
@@ -91,7 +88,6 @@ def analyze_candidate_layout(
         for first, second, third in itertools.combinations(candidates, 3)
     ]
     record: dict[str, object] = {
-        "schema_version": 2,
         "record_type": "CandidateSpatialRelationRecord",
         "producer": _PRODUCER,
         "relation_number": relation_number,
@@ -226,8 +222,10 @@ def _load_local_record(
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateLayoutError(f"{label} record could not be read.") from exc
-    if not isinstance(record, Mapping):
-        raise CandidateLayoutError(f"{label} record is invalid.")
+    if not isinstance(record, Mapping) or "schema_version" in record:
+        raise CandidateLayoutError(
+            f"{label} record has incompatible fields. Start a fresh interaction."
+        )
     return path, relative, record
 
 

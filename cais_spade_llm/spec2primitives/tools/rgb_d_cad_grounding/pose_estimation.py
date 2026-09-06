@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 """Estimate a camera-frame CAD pose for neutral segmented candidates."""
 
-from __future__ import annotations
 
 import math
 import shutil
@@ -17,11 +18,13 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondenc
     _GROUNDING_ROOT,
     _PRODUCER,
     CADSizeAssociationError,
-    _association_decision,
+    _measure_candidates,
+    _fingerprint,
+    _DIMENSION_ERROR_LIMIT,
+    _MINIMUM_MEASURED_DIMENSION_M,
     _load_cad_input,
     _load_candidates,
     _load_json_record,
-    _rank_candidates,
     _relative_ref,
     _sha256_path,
     _validate_hashed_ref,
@@ -30,7 +33,6 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding.size_correspondenc
 )
 
 _CORRESPONDENCE_RECORD_KEYS = {
-    "schema_version",
     "record_type",
     "producer",
     "correspondence_number",
@@ -38,9 +40,9 @@ _CORRESPONDENCE_RECORD_KEYS = {
     "parameters",
     "CAD",
     "segmentation",
-    "ranked_candidates",
-    "plausible_candidates",
-    "selected_candidate",
+    "candidate_measurements",
+    "measurement",
+    "fingerprint",
     "CAD_correspondence",
     "location",
     "pose",
@@ -187,12 +189,11 @@ def _load_pose_inputs(
     if relative != expected_ref:
         raise CADSizeAssociationError("CAD size correspondence record path is invalid.")
     if (
-        record["schema_version"] != 2
-        or record["record_type"] != "CADSizeCorrespondenceRecord"
-        or record["producer"] != _PRODUCER
-        or record["method"] != "two_largest_principal_dimensions"
-        or record["pose"] != "not_evaluated"
-        or record["cross_camera_fusion"] != "not_evaluated"
+        (record["record_type"] != "CADSizeCorrespondenceRecord")
+        or (record["producer"] != _PRODUCER)
+        or (record["method"] != "two_largest_principal_dimensions")
+        or (record["pose"] != "not_evaluated")
+        or (record["cross_camera_fusion"] != "not_evaluated")
     ):
         raise CADSizeAssociationError("CAD size correspondence identity is invalid.")
 
@@ -221,8 +222,8 @@ def _load_pose_inputs(
         interaction_root,
         segmentation_path,
     )
-    ranked = _rank_candidates(candidate_inputs, cad_input.dimensions_m)
-    correspondence, location, selected, plausible = _association_decision(ranked)
+    measurements = _measure_candidates(candidate_inputs, cad_input.dimensions_m)
+    plausible = [item for item in measurements if item["within_size_tolerance"]]
     expected_cad_metadata = {
         "context_ref": cad_input.context_ref,
         "record": {
@@ -243,11 +244,17 @@ def _load_pose_inputs(
     if (
         cad_metadata != expected_cad_metadata
         or segmentation_metadata != expected_segmentation_metadata
-        or record["ranked_candidates"] != ranked
-        or record["plausible_candidates"] != plausible
-        or record["selected_candidate"] != selected
-        or record["CAD_correspondence"] != correspondence
-        or record["location"] != location
+        or record["candidate_measurements"] != measurements
+        or record["measurement"] != "accepted"
+        or record["CAD_correspondence"] != "not_evaluated"
+        or record["location"] != "not_evaluated"
+        or record["parameters"]
+        != {
+            "dimension_error_limit": _DIMENSION_ERROR_LIMIT,
+            "minimum_measured_dimension_m": _MINIMUM_MEASURED_DIMENSION_M,
+        }
+        or record["fingerprint"]
+        != _fingerprint({key: value for key, value in record.items() if key != "fingerprint"})
     ):
         raise CADSizeAssociationError("CAD size correspondence record is inconsistent.")
 
@@ -657,7 +664,6 @@ def _pose_record(
         raise CADPoseEstimationError("Qualified pose hypotheses are invalid.")
     correspondence = inputs.correspondence_record
     return {
-        "schema_version": 3,
         "record_type": "CADPoseEstimationRecord",
         "producer": _PRODUCER,
         "pose_number": pose_number,
