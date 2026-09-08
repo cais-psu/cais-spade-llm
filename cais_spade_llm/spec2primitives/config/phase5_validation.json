@@ -1,0 +1,21 @@
+{
+  "max_candidates": 3,
+  "max_pa_batches": 2,
+  "max_pa_operations": 12,
+  "deadline_sec": 300,
+  "service_timeout_sec": 10,
+  "worker_startup_timeout_sec": 30,
+  "planning_timeout_sec": 20,
+  "state_max_age_sec": 2,
+  "max_capture_skew_sec": 2,
+  "scene_max_age_sec": 120,
+  "validation_specification_path": null,
+  "cartesian_max_step_m": 0.002,
+  "cartesian_jump_threshold": 2.0,
+  "fk_orientation_tolerance_rad": 0.01,
+  "state_change_joint_tolerance_rad": 0.001,
+  "resources": {
+    "xarm6@localhost": {"joint_states_topic": "/joint_states", "move_group_node": "/move_group"},
+    "ur5e@localhost": {"joint_states_topic": "/joint_states", "move_group_node": "/move_group"}
+  }
+}

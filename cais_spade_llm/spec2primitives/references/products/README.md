@@ -84,3 +84,5 @@ and verifiers derive only the numeric geometry they need. All use must obey the
 MUST do-not-leak boundary in `../../AGENTS.md`.
 
 Current proposal separates current observations from desired relationship membership. Source-first review must support task roles, attachment claims and the complete goal. Source caveats persist in the UI. Required arm assignment uses all reviewed coordinates and live MoveIt reachability before completion; only position planning is validated; grasping and insertion remain unvalidated. See [bias validation](../../BIAS_VALIDATION.md).
+
+Phase 4 evidence identifies observed products and desired assembly relationships. Its CAD measurements and destination references are not complete robot placement geometry. Phase 5 may need additional product evidence plus RA-owned tool/grasp geometry; bounded refinement routes those product gaps to PA and leaves unresolved quantities visible. Scene configuration in this README must never resolve `model_name` or final target coordinates for recognition/composition. See [VALIDATION_AND_REVISION.md](../../VALIDATION_AND_REVISION.md).

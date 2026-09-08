@@ -1,6 +1,6 @@
-"""Robot-specific primitive catalog policy."""
-
 from __future__ import annotations
+
+"""Robot-specific primitive catalog policy."""
 
 import os
 from copy import deepcopy
@@ -121,6 +121,28 @@ ROBOT_PRIMITIVE_TRACE_FACT_MAP = {
 }
 
 
+def _target_pose_schema(description: str) -> dict[str, Any]:
+    """Describe returned world-frame end-effector coordinates, without a recipe."""
+    return {
+        "type": "object",
+        "description": description,
+        "properties": {
+            **{
+                axis: {
+                    "type": "number",
+                    "x-frame-source": "world",
+                    "x-binding-role": "end_effector_coordinate",
+                }
+                for axis in ("x", "y", "z")
+            },
+            **{
+                axis: {"type": "number", "description": "Only available when a complete orientation is returned."}
+                for axis in ("qx", "qy", "qz", "qw")
+            },
+        },
+    }
+
+
 ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP = {
     "detect_parts": {
         "part_name": "string",
@@ -157,12 +179,76 @@ ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP = {
         }
     },
     "compute_pick_targets": {
-        "approach_pose": {"x": "number", "y": "number", "z": "number"},
-        "target_pose": {"x": "number", "y": "number", "z": "number"},
+        "approach_pose": _target_pose_schema(
+            "Candidate approach position calculated using the controller's vertical clearance policy."
+        ),
+        "target_pose": _target_pose_schema(
+            "Computed end-effector pick position; distinct from the observed object target_pose input."
+        ),
+        "part_name": "string",
+        "model_name": {
+            "type": "string",
+            "description": "Controller identifier when supplied by the source; may be empty when unknown.",
+            "x-binding-role": "controller_identifier",
+        },
+        **{
+            name: {"type": "number", "x-frame-source": "world"}
+            for name in ("tx", "ty", "tz", "pick_z", "travel_z", "pick_tcp_z")
+        },
+        **{
+            name: {"type": "number", "x-frame-source": "controller_config.move_group.frame_id"}
+            for name in ("start_x", "start_y", "start_z")
+        },
+        "part_height": "number",
+        "tcp_offset_z": "number",
     },
     "compute_place_targets": {
-        "approach_pose": {"x": "number", "y": "number", "z": "number"},
-        "target_pose": {"x": "number", "y": "number", "z": "number"},
+        "approach_pose": _target_pose_schema(
+            "Candidate approach position calculated using the controller's placement policy."
+        ),
+        "target_pose": _target_pose_schema(
+            "Placement movement target; can be pre_insert_pose rather than the final insertion pose."
+        ),
+        "pre_insert_pose": _target_pose_schema(
+            "Pre-insertion pose, only when returned by the selected calculation branch."
+        ),
+        "insert_pose": _target_pose_schema(
+            "Final insertion target, only when returned; does not establish successful insertion."
+        ),
+        "insertion_axis_world": {
+            "type": "object",
+            "description": "Insertion direction in world coordinates, when returned.",
+            "properties": {axis: {"type": "number"} for axis in ("x", "y", "z")},
+        },
+        "part_name": "string",
+        "model_name": {
+            "type": "string",
+            "description": "Controller identifier from geometry or pick context; may be empty when unknown.",
+            "x-binding-role": "controller_identifier",
+        },
+        **{
+            name: "number"
+            for name in (
+                "slot_x", "slot_y", "board_top_z", "place_z", "place_tcp_z",
+                "part_height", "tcp_offset_z", "grasp_tcp_to_part_origin_z",
+            )
+        },
+        "target_reference": {
+            "type": "object",
+            "description": "Source target reference when returned, not a manufactured assembly constraint.",
+        },
+        "target_origin_pose": {
+            "type": "object",
+            "description": "Part-origin reference when returned; not an end-effector pose.",
+            "properties": {
+                axis: {"type": "number", "x-frame-source": "world"}
+                for axis in ("x", "y", "z")
+            },
+        },
+        "place_part_origin_z": {
+            "type": "number",
+            "description": "Calculated part-origin height when returned.",
+        },
     },
 }
 
@@ -1375,7 +1461,7 @@ def _extract_pick_targets_output(
     }
     if not required_keys <= set(step_result.keys()):
         return None, "event_facts.pick_targets result was missing expected keys"
-    return {
+    output = {
         "part_name": str(step_result.get("part_name") or ""),
         "model_name": str(step_result.get("model_name") or ""),
         "tx": float(step_result["tx"]),
@@ -1399,7 +1485,28 @@ def _extract_pick_targets_output(
         "start_x": float(step_result["start_x"]),
         "start_y": float(step_result["start_y"]),
         "start_z": float(step_result["start_z"]),
-    }, None
+    }
+    _retain_returned_target_poses(output, step_result)
+    return output, None
+
+
+def _retain_returned_target_poses(output: dict[str, Any], result: dict[str, Any]) -> None:
+    """Retain returned orientation and optional insertion poses without inventing them."""
+    for name in ("approach_pose", "target_pose", "pre_insert_pose", "insert_pose"):
+        raw_pose = result.get(name)
+        if not isinstance(raw_pose, dict):
+            continue
+        if name not in output:
+            xyz = _normalized_xyz_pose(raw_pose)
+            if xyz is None:
+                continue
+            output[name] = xyz
+        orientation = _normalized_orientation(raw_pose)
+        if orientation is not None:
+            output[name].update(orientation)
+    axis = _normalized_xyz_pose(result.get("insertion_axis_world"))
+    if axis is not None:
+        output["insertion_axis_world"] = axis
 
 
 def _extract_place_targets_output(
@@ -1450,6 +1557,7 @@ def _extract_place_targets_output(
         output["target_reference"] = deepcopy(step_result["target_reference"])
     if isinstance(step_result.get("target_origin_pose"), dict):
         output["target_origin_pose"] = deepcopy(step_result["target_origin_pose"])
+    _retain_returned_target_poses(output, step_result)
     return output, None
 
 

@@ -25,8 +25,10 @@ from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
 )
 from cais_spade_llm.spec2primitives.agents.ra import (
     RobotAgentCompositionRuntime,
-    RobotAgentDraftRuntime,
+    RobotAgentProgramRuntime,
 )
+from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime
+from cais_spade_llm.spec2primitives.agents.pa.primitive_context import ProductPrimitiveContextRuntime
 from cais_spade_llm.spec2primitives.config import (
     DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH,
     ModelRuntimeConfig,
@@ -79,7 +81,8 @@ class Spec2PrimitivesUIRuntime:
     camera_to_world_calibration_runtime: CameraToWorldCalibrationRuntime | None = None
     camera_to_world_calibration_unavailable_reason: str | None = None
     robot_agent_context_runtime: RobotAgentCompositionRuntime | None = None
-    robot_agent_draft_runtime: RobotAgentDraftRuntime | None = None
+    robot_agent_program_runtime: RobotAgentProgramRuntime | None = None
+    primitive_refinement_runtime: PrimitiveRefinementRuntime | None = None
 
 
 class _UnavailableProductAgentRuntime:
@@ -203,7 +206,12 @@ def create_spec2primitives_ui_runtime(
         camera_to_world_calibration_runtime=calibration_runtime,
         camera_to_world_calibration_unavailable_reason=(calibration_unavailable_reason),
         robot_agent_context_runtime=robot_agent_runtime,
-        robot_agent_draft_runtime=robot_agent_runtime,
+        robot_agent_program_runtime=robot_agent_runtime,
+        primitive_refinement_runtime=PrimitiveRefinementRuntime(
+            program_runtime=robot_agent_runtime,
+            robot_runtime=robot_agent_runtime,
+            product_runtime=(ProductPrimitiveContextRuntime(grounding_runtime, product_agent) if isinstance(grounding_runtime, ProductionProductContextGroundingRuntime) else None),
+        ),
     )
 
 

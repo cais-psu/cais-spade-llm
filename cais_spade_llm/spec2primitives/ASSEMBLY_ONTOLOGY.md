@@ -77,3 +77,11 @@ Unresolved planning inputs prevent target commit; invalid evidence or failed ass
 The UI includes observed endpoint images beside each state's relationships. Desired images are labeled assembly references. Cited uncertainty remains visible after reload; qualified attachment never silently becomes verified installation.
 
 Accepted proposals pin their pre-commit context and complete evidence dependencies in `grounding_evidence`. Incompatible saved contracts fail reload with “Start a fresh interaction”. Existing records remain unchanged and cannot start new RA work under an earlier contract. See [schemas](schemas/README.md) and [bias validation](BIAS_VALIDATION.md).
+
+## Product relationships and robot targets
+
+The ontology describes the product now and its required assembly relationship. It adds no primitive order or approach/lift/release rule. Phase 4 need not calculate every possible robot target before handoff. Phase 5's selected operations determine which geometry is needed.
+
+The current composition report distinguishes an observed object location, a final part-origin reference, and a controlled end-effector position. A raw `CADMeshRecord` does not establish helper placement geometry, seating Z or tool offsets. Missing geometry stays visible while bounded refinement routes product needs to PA and robot needs to the selected RA adapter. Only RA chooses bindings; audited calculations produce targets without adding ontology sequence rules. `model_name` is excluded from new composition contracts and deferred to a future execution adapter; product labels and ontology assertions do not establish that simulator binding.
+
+`approach_pose`, `target_pose`, `pre_insert_pose` and `insert_pose` are helper outputs, not ontology-entitled operations or sequence edges. RA chooses whether and when to use them. See [bounded resolution and validation](VALIDATION_AND_REVISION.md) and [partial-contract experiments](COMPOSITION_EVALUATION.md).

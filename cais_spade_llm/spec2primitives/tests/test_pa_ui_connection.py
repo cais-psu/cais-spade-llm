@@ -9,6 +9,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
 
@@ -784,7 +785,7 @@ def test_rendered_interaction_detaches_without_interrupting_grounding(
         ontology_config=object(),
         grounding_runtime=object(),
         robot_agent_context_runtime=None,
-        robot_agent_draft_runtime=None,
+        robot_agent_program_runtime=None,
         document_diagnostic_unavailable_reason=None,
         camera_to_world_calibration_runtime=None,
         camera_to_world_calibration_unavailable_reason=None,
@@ -919,10 +920,11 @@ def test_completed_view_has_five_simple_stages_and_location(
     assert phase_5_1["assignment_ref"] is None
     assert phase_5_1["robot_state"] is None
     assert phase_5_1["primitive_catalog"] == []
-    phase_5_2 = view["phase_5_2"]
-    assert isinstance(phase_5_2, dict)
-    assert phase_5_2["status"] == "waiting_for_context"
-    assert phase_5_2["draft"] is None
+    composition = view["primitive_composition"]
+    assert isinstance(composition, dict)
+    assert composition["status"] == "waiting_for_context"
+    assert composition["candidate"] is None
+    assert "phase_5_2" not in view
     serialized = json.dumps(view)
     for removed_wording in (
         "Target grounded",
@@ -1604,6 +1606,185 @@ def test_robot_context_waiting_label_preserves_diagnostic_status() -> None:
         container.delete()
 
 
+@pytest.mark.parametrize("detach", ["never", "validating", "authoring", "refreshing"])
+@pytest.mark.parametrize("refinement", [False, True])
+def test_compose_button_records_candidate_when_page_detaches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    detach: str,
+    refinement: bool,
+) -> None:
+    """Compose once without a draft, keeping clicks responsive after page detachment."""
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
+    from cais_spade_llm.spec2primitives.agents.ra import primitive_composition
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import (
+        _prepare_composition,
+        _program_action,
+        _ProgramRuntime,
+    )
+
+    root = tmp_path / "interaction_composition"
+    adapter, _, _ = _prepare_composition(root)
+    buttons: dict[str, Callable] = {}
+    original_on_click = spec2primitives_ui.ui.button.on_click
+
+    def capture_on_click(button: Any, callback: Callable) -> Any:
+        buttons[button.text] = callback
+        return original_on_click(button, callback)
+
+    def detach_page(stage: str) -> None:
+        if detach == stage:
+            container.delete()
+            _reject_deleted_page_updates(monkeypatch, container)
+
+    program_runtime = _ProgramRuntime(
+        [
+            _program_action([("move_cartesian", {"z": 0.07})]),
+        ],
+        on_call=lambda: detach_page("authoring"),
+    )
+    runtime = Spec2PrimitivesUIRuntime(
+        dual_gazebo=object(),
+        product_agent=object(),
+        contexts_root=tmp_path,
+        robot_agent_context_runtime=adapter,
+        robot_agent_program_runtime=program_runtime,
+    )
+    if refinement:
+        from dataclasses import replace
+        from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime, load_refinement_profile
+
+        class MeasuredContext:
+            async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+                raise RuntimeError("Controlled UI fixture has no measured robot context.")
+
+        async def validate_fixture(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "unknown", "findings": [{"step_index": None, "check": "motion", "status": "unknown", "message": "No live motion validator in this controlled UI test."}], "calculation_refs": []}
+
+        runtime = replace(runtime, primitive_refinement_runtime=PrimitiveRefinementRuntime(program_runtime=program_runtime, robot_runtime=MeasuredContext(), validator=validate_fixture, profile={**load_refinement_profile(), "max_candidates": 1}))
+    monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", capture_on_click)
+    with spec2primitives_ui.ui.column() as container:
+        spec2primitives_ui._render_pa_interaction(runtime)
+    assert "Create Primitive Draft" not in buttons
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        validating = asyncio.Event()
+        release = Event()
+        blocked: list[str] = []
+        input_reads = 0
+
+        def slow_check(reader: Callable) -> Callable:
+            def read(*args: Any) -> Any:
+                nonlocal input_reads
+                if reader.__name__ == "_load_inputs":
+                    input_reads += 1
+                    if input_reads == 1:
+                        loop.call_soon_threadsafe(validating.set)
+                        if not release.wait(timeout=0.5):
+                            blocked.append("initial validation")
+                elif reader.__name__ == "read_primitive_composition_diagnostic":
+                    loop.call_soon_threadsafe(detach_page, "refreshing")
+                heartbeat = Event()
+                loop.call_soon_threadsafe(heartbeat.set)
+                if not heartbeat.wait(timeout=0.5):
+                    blocked.append(reader.__name__)
+                return reader(*args)
+
+            return read
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                primitive_composition,
+                "_load_inputs",
+                slow_check(primitive_composition._load_inputs),
+            )
+            for name in ("read_primitive_composition_diagnostic", "read_phase_5_1_diagnostic"):
+                patch.setattr(
+                    spec2primitives_ui, name, slow_check(getattr(spec2primitives_ui, name))
+                )
+            task = asyncio.create_task(buttons["Compose Primitive Program"]())
+            try:
+                await asyncio.wait_for(validating.wait(), timeout=5)
+                assert not task.done(), "Validation blocked the UI until composition finished."
+                await buttons["Compose Primitive Program"]()
+                detach_page("validating")
+            finally:
+                release.set()
+                await task
+        assert blocked == [], f"UI validation blocked connection heartbeats: {blocked}"
+
+    try:
+        asyncio.run(scenario())
+        diagnostic = spec2primitives_ui.read_primitive_composition_diagnostic(root)
+        assert diagnostic["status"] == ("budget_exhausted" if refinement else "proposed")
+        assert len(program_runtime.calls) == 1
+        assert diagnostic["candidate"]["primitive_steps"][0]["params"] == {"z": 0.07}
+        assert not (root / "composition/primitive_program_drafts").exists()
+    finally:
+        if not container.is_deleted:
+            container.delete()
+
+
+@pytest.mark.parametrize(
+    "status", ["waiting_for_context", "blocked", "ready_for_composition", "proposed"]
+)
+def test_primitive_composition_ui_gates_and_displays_candidate(status: str) -> None:
+    """Show RA parameters while distinguishing proposals from physical validation."""
+    candidate = {
+        "primitive_steps": [
+            {"primitive_symbol": "move_cartesian", "params": {"z": 0.07}},
+        ]
+    }
+    diagnostic = {
+        "status": status,
+        "message": "Motion remains unvalidated.",
+        "candidate": candidate if status == "proposed" else None,
+        "trace": [{"response": "recorded"}] if status == "proposed" else [],
+        "attempt_count": 1,
+        "composition_input": {
+            "primitive_catalog": [
+                {
+                    "primitive_symbol": "move_cartesian",
+                    "typed_parameters": [
+                        {"name": name, "required": True} for name in ("x", "y", "z")
+                    ],
+                }
+            ]
+        },
+    }
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        spec2primitives_ui._apply_primitive_composition_diagnostic(
+            elements,
+            diagnostic,
+            authoring_available=True,
+        )
+        assert elements["candidate_status_badge"].text == status
+        assert (not elements["create_candidate_button"]._props.get("disable", False)) == (
+            status in {"ready_for_composition", "proposed"}
+        )
+        assert elements["candidate_steps"].visible == (status == "proposed")
+        if status == "proposed":
+            assert elements["candidate_steps"].content == (
+                "1. move_cartesian(z=0.07, x=<unbound>, y=<unbound>)"
+            )
+            assert json.loads(elements["candidate_trace"].content)["candidate"] == candidate
+            assert candidate["primitive_steps"][0]["params"] == {"z": 0.07}
+            assert "unvalidated" in elements["candidate_message"].text
+        spec2primitives_ui._apply_primitive_composition_diagnostic(
+            elements,
+            diagnostic,
+            authoring_available=True,
+            authoring_busy=True,
+        )
+        assert elements["create_candidate_button"]._props.get("disable") is True
+        assert elements["candidate_status_badge"].text == "composing"
+    finally:
+        container.delete()
+
+
 def test_incompatible_saved_completion_is_rejected_without_rewriting(tmp_path):
     persist_native_completion_fixture(tmp_path)
     path = tmp_path / "interaction_record/context_completion_0001.json"
@@ -1625,3 +1806,123 @@ def test_incompatible_saved_completion_is_rejected_without_rewriting(tmp_path):
     assert view["final_result"] is None
     assert "Start a fresh interaction" in view["activity_message"]
     assert path.read_bytes() == before
+
+
+def test_primitive_program_displays_nested_gaps_without_filling_parameters() -> None:
+    steps = [
+        {
+            "primitive_symbol": "compute_place_targets",
+            "params": {"product_geometry": {"board_center": {}}},
+        }
+    ]
+    original = json.dumps(steps)
+    catalog = [
+        {
+            "primitive_symbol": "compute_place_targets",
+            "typed_parameters": [
+                {"name": "product_geometry", "required": False},
+                {"name": "pick_ctx", "required": False},
+            ],
+            "parameter_schemas": {
+                "product_geometry": {
+                    "type": "object",
+                    "x-grounding-fields": ["board_center", "slot_xy"],
+                    "properties": {
+                        "board_center": {"type": "object", "x-grounding-fields": ["x", "y"]},
+                    },
+                },
+                "pick_ctx": {"type": "object", "x-grounding-required": True},
+            },
+        }
+    ]
+    rendered = spec2primitives_ui._format_primitive_program(steps, catalog)
+    assert rendered == (
+        '1. compute_place_targets(product_geometry={"board_center": {"x": <unbound>, "y": <unbound>}, '
+        '"slot_xy": <unbound>}, pick_ctx=<unbound>)'
+    )
+    assert json.dumps(steps) == original
+
+
+def test_primitive_binding_summary_is_short_and_full_report_remains_expandable() -> None:
+    issues = [
+        {
+            "step_index": n,
+            "parameter_path": "/product_geometry",
+            "status": "missing",
+            "message": "Required input is unbound.",
+        }
+        for n in range(1, 6)
+    ]
+    issues.append(
+        {
+            "step_index": 6,
+            "parameter_path": "/results",
+            "status": "deferred",
+            "message": "Not executed.",
+        }
+    )
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        spec2primitives_ui._apply_primitive_composition_diagnostic(
+            elements,
+            {
+                "status": "proposed",
+                "message": "Unvalidated proposal.",
+                "candidate": {"primitive_steps": []},
+                "binding_issues": issues,
+                "composition_input": {"primitive_catalog": []},
+                "trace": [],
+            },
+            authoring_available=True,
+        )
+        text = elements["candidate_bindings"].text
+        assert elements["candidate_bindings"].visible
+        assert "Deferred results: 1" in text
+        assert "Step 3 /product_geometry" in text and "Step 4 /product_geometry" not in text
+        assert len(text.splitlines()) == 5
+        assert json.loads(elements["candidate_trace"].content)["binding_issues"] == issues
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_primitive_program_uses_attempt_catalog_for_execution_bindings(historical: bool) -> None:
+    """New calls omit simulator fields; an older request keeps its recorded interface."""
+    from cais_spade_llm.spec2primitives.agents.ra.composition_context import _composition_catalog_view
+
+    entry = {
+        "primitive_symbol": "grasp_part",
+        "typed_parameters": [
+            {"name": "model_name", "type": "string", "required": True},
+            {"name": "part_name", "type": "string", "required": False},
+        ],
+        "parameter_schemas": {"model_name": {"type": "string"}, "part_name": {"type": "string"}},
+        "conditions": {"held_part": {"equals": None}},
+        "effects": {"held_part": {"set_from_param_any_of": ["part_name", "model_name"]}},
+    }
+    catalog = [entry] if historical else _composition_catalog_view((entry,))
+    candidate = {
+        "primitive_steps": [{"primitive_symbol": "grasp_part", "params": {"part_name": "medium gear"}}]
+    }
+    original = json.dumps(candidate)
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        spec2primitives_ui._apply_primitive_composition_diagnostic(
+            elements,
+            {
+                "status": "proposed",
+                "message": "Unvalidated proposal.",
+                "candidate": candidate,
+                "composition_input": {"primitive_catalog": catalog},
+                "trace": [],
+            },
+            authoring_available=True,
+        )
+        suffix = ", model_name=<unbound>" if historical else ""
+        assert elements["candidate_steps"].content == f'1. grasp_part(part_name="medium gear"{suffix})'
+        assert json.dumps(candidate) == original
+        assert json.loads(elements["candidate_trace"].content)["candidate"] == candidate
+    finally:
+        container.delete()

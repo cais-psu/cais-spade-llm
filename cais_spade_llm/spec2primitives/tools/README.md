@@ -9,3 +9,5 @@ PA controls four native investigation tools: approved `retrieve`, PA-authored `q
 After deterministic proposal validation, PA invokes required resource reachability for every grounded state location. Every capable resource must be checked against the same grounded positions. The live MoveIt backend validates position plans without executing motion.
 
 See [bias validation](../BIAS_VALIDATION.md), [schemas](../schemas/README.md), and [tests](../tests/README.md). No tool-level success alone authorizes semantic completion or robot execution.
+
+Phase 4 tools supply observed product evidence and desired relationship support. Robot target calculations belong to Phase 5 and run only for the helper calls selected and bound by RA. The composition reader only serves RA-selected pinned evidence/ontology assertions; its binding report runs no tool or repair operation. Supplemental PA evidence requests, neutral CAD/support/mating-geometry producers in `assembly_geometry.py`, and strict RA geometry adapters are described in [VALIDATION_AND_REVISION.md](../VALIDATION_AND_REVISION.md).

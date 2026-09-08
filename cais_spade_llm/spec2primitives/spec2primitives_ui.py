@@ -45,13 +45,14 @@ from cais_spade_llm.spec2primitives.agents.pa.context_interaction import (
     _grounding_progress_validation_error,
 )
 from cais_spade_llm.spec2primitives.agents.ra import (
-    PrimitiveDraftError,
+    PrimitiveCompositionError,
     RAContextHandoffError,
     activate_selected_ra_context,
-    author_primitive_program_draft,
+    author_primitive_program_candidate,
     read_phase_5_1_diagnostic,
-    read_phase_5_2_diagnostic,
+    read_primitive_composition_diagnostic,
 )
+from cais_spade_llm.spec2primitives.agents.ra.refinement import cancel_primitive_refinement
 
 _TURTLE_PREFIX_PATTERN = re.compile(r"^@prefix\s+([A-Za-z][A-Za-z0-9_-]*):\s+<([^>]+)>\s+\.\s*$")
 
@@ -1560,7 +1561,6 @@ def _pa_ui_view(  # noqa: C901, PLR0915
     if detail := _grounding_progress_text(progress):
         activity_message += " " + detail
     phase_5_1 = read_phase_5_1_diagnostic(interaction_root).to_view()
-    phase_5_2 = read_phase_5_2_diagnostic(interaction_root).to_view()
     return {
         "activity_state": activity_state,
         "activity_color": activity_color,
@@ -1572,7 +1572,7 @@ def _pa_ui_view(  # noqa: C901, PLR0915
         ),
         "pending_clarification_turn": str(pending_clarification_turn or ""),
         "phase_5_1": phase_5_1,
-        "phase_5_2": phase_5_2,
+        "primitive_composition": read_primitive_composition_diagnostic(interaction_root),
         "diagnostics": {
             "interaction_identifier": interaction_identifier,
             "interaction_path": str(interaction_root),
@@ -2520,82 +2520,16 @@ def _phase_5_1_action_state(
     return label, enabled
 
 
-def _phase_5_2_waiting_view(
-    message: str = "Capture one valid RobotAgent context first.",
-) -> dict[str, object]:
-    """Return the empty read-only Phase 5.2 card state."""
-    return {
-        "status": "waiting_for_context",
-        "message": message,
-        "draft_count": 0,
-        "latest_draft_ref": None,
-        "primitive_symbols": [],
-        "unsupported_reason": None,
-        "draft": None,
-        "composition_input": None,
-        "failure": None,
-    }
-
-
-def _phase_5_2_composition_evidence_summary(
-    composition_input: object,
-) -> dict[str, object]:
-    """Summarize the exact composition input without changing its contents."""
-    if not isinstance(composition_input, Mapping):
-        return {
-            "assertion_count": 0,
-            "primitive_count": 0,
-            "typed_record_count": 0,
-            "tbox_fingerprint": None,
-            "abox_fingerprint": None,
-        }
-    ontology_projection = composition_input.get("ontology_projection")
-    projection = ontology_projection if isinstance(ontology_projection, Mapping) else {}
-    assertions = projection.get("assertions")
-    primitive_catalog = composition_input.get("primitive_catalog")
-    grounded_context = composition_input.get("grounded_context")
-    grounded = grounded_context if isinstance(grounded_context, Mapping) else {}
-    typed_records = grounded.get("typed_records")
-    return {
-        "assertion_count": len(assertions) if isinstance(assertions, list) else 0,
-        "primitive_count": (len(primitive_catalog) if isinstance(primitive_catalog, list) else 0),
-        "typed_record_count": (len(typed_records) if isinstance(typed_records, list) else 0),
-        "tbox_fingerprint": projection.get("tbox_fingerprint"),
-        "abox_fingerprint": projection.get("abox_fingerprint"),
-    }
-
-
-def _phase_5_2_status_color(status: str) -> str:
-    """Return the diagnostic badge color for one exact Phase 5.2 status."""
-    return {
-        "ready_for_draft": "amber",
-        "draft_authored": "green",
-        "unsupported": "amber",
-        "blocked": "red",
-        "waiting_for_context": "grey",
-    }.get(status, "grey")
-
-
-def _phase_5_2_action_enabled(
-    status: str,
-    *,
-    authoring_available: bool,
-    authoring_busy: bool,
-) -> bool:
-    """Return whether the structural-draft authoring action is available."""
-    return authoring_available and not authoring_busy and status == "ready_for_draft"
-
-
 def _render_phase_5_diagnostics() -> dict[str, Any]:
     """Render the temporary RobotAgent activation and diagnostics card."""
     with ui.card().classes("w-full border-2 border-violet-200 bg-violet-50 shadow-sm"):
         with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
             with ui.column().classes("gap-0"):
-                ui.label("RobotAgent context and primitive draft").classes(
+                ui.label("RobotAgent context and primitive composition").classes(
                     "text-xl font-semibold text-slate-900"
                 )
                 ui.label(
-                    "Capture the assigned RobotAgent context and create a structural primitive draft."
+                    "Capture the assigned RobotAgent context and compose one primitive program."
                 ).classes("text-xs text-slate-500")
             with ui.row().classes("items-center gap-2 flex-wrap"):
                 start_phase_5_button = ui.button(
@@ -2677,104 +2611,7 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
             )
         failure_card.set_visibility(False)
 
-        ui.separator().classes("my-1 bg-violet-200")
-
-        with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
-            ui.label("RA-authored structural primitive draft").classes(
-                "text-sm font-semibold text-violet-900"
-            )
-            with ui.row().classes("items-center gap-2 flex-wrap"):
-                draft_status_badge = ui.badge("waiting_for_context").props("color=grey outline")
-                create_draft_button = ui.button(
-                    "Create Primitive Draft",
-                    icon="account_tree",
-                ).props("flat disable")
-        draft_message_value = ui.label("").classes(
-            "text-sm text-slate-700 whitespace-pre-wrap break-words"
-        )
-
-        with ui.card().classes("w-full border border-slate-200 bg-white shadow-none"):
-            draft_count_value = ui.label("Drafts: 0").classes(
-                "text-sm font-semibold text-slate-900"
-            )
-            latest_draft_ref_value = ui.label("Latest draft: none").classes(
-                "text-xs text-slate-600 break-all"
-            )
-            draft_symbols_container = ui.row().classes("w-full gap-1 flex-wrap")
-            unsupported_reason_value = ui.label("").classes(
-                "text-xs text-amber-800 whitespace-pre-wrap break-words"
-            )
-            unsupported_reason_value.set_visibility(False)
-
-        with ui.card().classes(
-            "w-full border border-violet-200 bg-white shadow-none"
-        ) as composition_evidence_card:
-            ui.label("RA composition evidence").classes("text-sm font-semibold text-violet-900")
-            ui.label(
-                "Reconstructed from the current draft's hash-pinned inputs. "
-                "This is input provenance, not private model reasoning, feasibility "
-                "validation, or execution evidence."
-            ).classes("text-xs text-slate-600 whitespace-pre-wrap")
-            ui.label("Input sections").classes("text-xs font-semibold text-slate-500")
-            with ui.row().classes("w-full gap-1 flex-wrap"):
-                for section in (
-                    "target_feature",
-                    "selected_resource",
-                    "ontology_projection",
-                    "robot_state",
-                    "primitive_catalog",
-                    "grounded_context",
-                ):
-                    ui.badge(section).props("color=violet outline")
-            with ui.row().classes("w-full gap-4 items-start flex-wrap"):
-                composition_assertion_count_value = ui.label("Assertions: 0").classes(
-                    "text-xs font-semibold text-slate-800"
-                )
-                composition_primitive_count_value = ui.label("Primitives: 0").classes(
-                    "text-xs font-semibold text-slate-800"
-                )
-                composition_typed_record_count_value = ui.label(
-                    "Typed-record identities: 0"
-                ).classes("text-xs font-semibold text-slate-800")
-            composition_tbox_fingerprint_value = ui.label("TBox: none").classes(
-                "text-xs text-slate-600 break-all"
-            )
-            composition_abox_fingerprint_value = ui.label("ABox: none").classes(
-                "text-xs text-slate-600 break-all"
-            )
-            ui.label(
-                "target_feature includes the PA-authored desired state and bounded "
-                "resolved state-value projections. grounded_context otherwise contains "
-                "typed-record identities only. Excluded: raw RDF, unrelated typed-record "
-                "payloads, unrelated ProductContextView fields, parameter bindings, "
-                "task tools, private model reasoning, feasibility claims, and execution "
-                "evidence."
-            ).classes("text-xs text-slate-500 whitespace-pre-wrap")
-            with ui.expansion(
-                "COMPOSITION_INPUT delivered to RA",
-                icon="fact_check",
-            ).classes(
-                "w-full border border-slate-200 bg-slate-50 rounded"
-            ) as composition_input_expansion:
-                composition_input_value = ui.code("", language="json").classes(
-                    "w-full text-xs overflow-x-auto"
-                )
-        composition_evidence_card.set_visibility(False)
-
-        with ui.expansion("PrimitiveProgramDraft", icon="schema").classes(
-            "w-full border border-slate-200 bg-white rounded"
-        ) as draft_expansion:
-            draft_value = ui.code("", language="json").classes("w-full text-xs overflow-x-auto")
-        draft_expansion.set_visibility(False)
-
-        with ui.card().classes(
-            "w-full border border-red-200 bg-red-50 shadow-none"
-        ) as draft_failure_card:
-            ui.label("Fail-closed draft diagnostic").classes("text-sm font-semibold text-red-900")
-            draft_failure_value = ui.label("").classes(
-                "text-xs text-red-800 whitespace-pre-wrap break-words"
-            )
-        draft_failure_card.set_visibility(False)
+        candidate_elements = _render_primitive_candidate_diagnostics()
 
     return {
         "status_badge": status_badge,
@@ -2796,25 +2633,48 @@ def _render_phase_5_diagnostics() -> dict[str, Any]:
         "primitive_catalog": primitive_catalog_value,
         "failure_card": failure_card,
         "failure": failure_value,
-        "draft_status_badge": draft_status_badge,
-        "create_draft_button": create_draft_button,
-        "draft_message": draft_message_value,
-        "draft_count": draft_count_value,
-        "latest_draft_ref": latest_draft_ref_value,
-        "draft_symbols": draft_symbols_container,
-        "unsupported_reason": unsupported_reason_value,
-        "composition_evidence_card": composition_evidence_card,
-        "composition_assertion_count": composition_assertion_count_value,
-        "composition_primitive_count": composition_primitive_count_value,
-        "composition_typed_record_count": composition_typed_record_count_value,
-        "composition_tbox_fingerprint": composition_tbox_fingerprint_value,
-        "composition_abox_fingerprint": composition_abox_fingerprint_value,
-        "composition_input_expansion": composition_input_expansion,
-        "composition_input": composition_input_value,
-        "draft_expansion": draft_expansion,
-        "draft": draft_value,
-        "draft_failure_card": draft_failure_card,
-        "draft_failure": draft_failure_value,
+        **candidate_elements,
+    }
+
+
+def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
+    """Render the non-executing program authoring action and its audit trace."""
+    ui.separator().classes("my-1 bg-violet-200")
+    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+        ui.label("RA-authored primitive program").classes("text-sm font-semibold text-violet-900")
+        status_badge = ui.badge("waiting_for_context").props("color=grey outline")
+        create_button = ui.button("Compose Primitive Program", icon="account_tree").props(
+            "flat disable"
+        )
+        cancel_button = ui.button("Cancel composition", icon="cancel").props("flat")
+        cancel_button.set_visibility(False)
+    message = ui.label("Capture the selected RobotAgent context first.").classes(
+        "text-sm text-slate-700 whitespace-pre-wrap break-words"
+    )
+    ui.label(
+        "Program proposals are not executed. <unbound> marks required parameters "
+        "that still need values; physical correctness remains unvalidated."
+    ).classes("text-xs text-slate-500")
+    attempts = ui.label("Attempts: 0").classes("text-xs text-slate-600")
+    steps = ui.code("", language="python").classes("w-full text-xs overflow-x-auto")
+    steps.set_visibility(False)
+    bindings = ui.label("").classes("text-xs text-amber-800 whitespace-pre-wrap")
+    bindings.set_visibility(False)
+    with ui.expansion("Program records and composition trace", icon="fact_check").classes(
+        "w-full border border-slate-200 bg-white rounded"
+    ) as trace_expansion:
+        trace = ui.code("", language="json").classes("w-full text-xs overflow-x-auto")
+    trace_expansion.set_visibility(False)
+    return {
+        "candidate_status_badge": status_badge,
+        "create_candidate_button": create_button,
+        "cancel_candidate_button": cancel_button,
+        "candidate_message": message,
+        "candidate_attempts": attempts,
+        "candidate_steps": steps,
+        "candidate_bindings": bindings,
+        "candidate_trace": trace,
+        "candidate_trace_expansion": trace_expansion,
     }
 
 
@@ -2911,89 +2771,143 @@ def _apply_phase_5_1_diagnostic(
     _set_enabled(elements["start_button"], action_enabled)
 
 
-def _apply_phase_5_2_diagnostic(
+def _format_primitive_program(steps: list[dict[str, Any]], catalog: list[dict[str, Any]]) -> str:
+    """Render numbered calls without binding or changing the RA-authored program."""
+    declarations = {item["primitive_symbol"]: item for item in catalog}
+    lines = []
+    for index, step in enumerate(steps, start=1):
+        symbol, params = step["primitive_symbol"], step["params"]
+        declaration = declarations.get(symbol, {})
+        schemas = declaration.get("parameter_schemas", {})
+        arguments = [
+            f"{name}={_format_parameter_binding(value, schemas.get(name, {}))}"
+            for name, value in params.items()
+        ]
+        for parameter in declaration.get("typed_parameters", []):
+            name = parameter["name"]
+            schema = schemas.get(name, {})
+            grounding_required = isinstance(schema, Mapping) and schema.get("x-grounding-required") is True
+            if (parameter["required"] or grounding_required) and name not in params:
+                arguments.append(f"{name}=<unbound>")
+        lines.append(f"{index}. {symbol}({', '.join(arguments)})")
+    return "\n".join(lines)
+
+
+def _format_parameter_binding(value: Any, schema: Any) -> str:
+    """Show omitted geometry fields without changing supplied values or references."""
+    if not isinstance(schema, Mapping) or not isinstance(value, Mapping) or set(value) in (
+        {"value_ref"}, {"result_ref"}
+    ):
+        return _format_primitive_value(value)
+    properties = schema.get("properties", {})
+    items = [
+        f"{json.dumps(name)}: {_format_parameter_binding(item, properties.get(name, {}))}"
+        for name, item in value.items()
+    ]
+    required = dict.fromkeys([*schema.get("required", []), *schema.get("x-grounding-fields", [])])
+    items.extend(f"{json.dumps(name)}: <unbound>" for name in required if name not in value)
+    return "{" + ", ".join(items) + "}"
+
+
+def _format_binding_issues(issues: list[dict[str, Any]]) -> str:
+    """Keep the visible report short; complete findings remain in the trace."""
+    unresolved = [issue for issue in issues if issue["status"] != "deferred"]
+    deferred = sum(issue["status"] == "deferred" for issue in issues)
+    lines = [f"Inputs to check: {len(unresolved)} · Deferred results: {deferred}"]
+    for issue in unresolved[:3]:
+        lines.append(f"Step {issue['step_index']} {issue['parameter_path']}: {issue['message']}")
+    if len(unresolved) > 3:
+        lines.append("Open the program records for the remaining input details.")
+    return "\n".join(lines) if issues else ""
+
+
+def _format_primitive_value(value: Any) -> str:
+    if isinstance(value, Mapping) and set(value) in ({"value_ref"}, {"result_ref"}):
+        name, fields = next(iter(value.items()))
+        if isinstance(fields, Mapping):
+            arguments = ", ".join(
+                f"{key}={json.dumps(item, ensure_ascii=False, allow_nan=False)}"
+                for key, item in fields.items()
+            )
+            return f"{name}({arguments})"
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def _apply_primitive_composition_diagnostic(
     elements: Mapping[str, Any],
-    diagnostic: Mapping[str, object],
+    diagnostic: Mapping[str, Any],
     *,
     authoring_available: bool = False,
     authoring_busy: bool = False,
 ) -> None:
-    """Apply one JSON-safe persisted Phase 5.2 diagnostic to the UI card."""
+    """Display a candidate and its read-only trace without implying execution."""
     status = str(diagnostic.get("status", "waiting_for_context"))
-    elements["draft_status_badge"].set_text(status)
-    elements["draft_status_badge"].props(f"color={_phase_5_2_status_color(status)} outline")
-    elements["draft_message"].set_text(str(diagnostic.get("message", "")))
-    elements["draft_count"].set_text(f"Drafts: {diagnostic.get('draft_count', 0)}")
-    elements["latest_draft_ref"].set_text(
-        f"Latest draft: {diagnostic.get('latest_draft_ref') or 'none'}"
+    elements["candidate_status_badge"].set_text("composing" if authoring_busy else status)
+    color = "green" if status == "validated_for_declared_scope" else "red" if status in {"invalid", "failed", "blocked"} else "amber"
+    elements["candidate_status_badge"].props(f"color={color} outline")
+    elements["candidate_message"].set_text(
+        "RA is inspecting evidence and composing a primitive program."
+        if authoring_busy
+        else str(diagnostic.get("message", "Capture the selected RobotAgent context first."))
     )
-
-    primitive_symbols = diagnostic.get("primitive_symbols")
-    symbols = primitive_symbols if isinstance(primitive_symbols, list) else []
-    elements["draft_symbols"].clear()
-    with elements["draft_symbols"]:
-        for index, symbol in enumerate(symbols, start=1):
-            ui.badge(f"{index}. {symbol}").props("color=violet outline")
-
-    unsupported_reason = diagnostic.get("unsupported_reason")
-    elements["unsupported_reason"].set_text(
-        f"Unsupported: {unsupported_reason}" if unsupported_reason else ""
-    )
-    elements["unsupported_reason"].set_visibility(bool(unsupported_reason))
-
+    elements["candidate_attempts"].set_text(f"Attempts: {diagnostic.get('attempt_count', 0)}")
+    candidate = diagnostic.get("candidate")
     composition_input = diagnostic.get("composition_input")
-    has_composition_input = status in {"draft_authored", "unsupported"} and isinstance(
-        composition_input, Mapping
+    catalog = (
+        composition_input.get("primitive_catalog", [])
+        if isinstance(composition_input, Mapping)
+        else []
     )
-    evidence_summary = _phase_5_2_composition_evidence_summary(composition_input)
-    elements["composition_assertion_count"].set_text(
-        f"Assertions: {evidence_summary['assertion_count']}"
-    )
-    elements["composition_primitive_count"].set_text(
-        f"Primitives: {evidence_summary['primitive_count']}"
-    )
-    elements["composition_typed_record_count"].set_text(
-        f"Typed-record identities: {evidence_summary['typed_record_count']}"
-    )
-    elements["composition_tbox_fingerprint"].set_text(
-        f"TBox: {evidence_summary['tbox_fingerprint'] or 'none'}"
-    )
-    elements["composition_abox_fingerprint"].set_text(
-        f"ABox: {evidence_summary['abox_fingerprint'] or 'none'}"
-    )
-    elements["composition_input"].content = (
-        json.dumps(
-            composition_input,
-            indent=2,
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        if has_composition_input
+    elements["candidate_steps"].content = (
+        _format_primitive_program(candidate["primitive_steps"], catalog)
+        if isinstance(candidate, Mapping)
         else ""
     )
-    elements["composition_input"].update()
-    elements["composition_input_expansion"].set_visibility(has_composition_input)
-    elements["composition_evidence_card"].set_visibility(has_composition_input)
-
-    draft = diagnostic.get("draft")
-    has_draft = isinstance(draft, Mapping)
-    elements["draft"].content = (
-        json.dumps(draft, indent=2, ensure_ascii=False, allow_nan=False) if has_draft else ""
+    elements["candidate_steps"].update()
+    elements["candidate_steps"].set_visibility(isinstance(candidate, Mapping))
+    binding_issues = diagnostic.get("binding_issues", [])
+    validation = diagnostic.get("validation")
+    findings = [item for item in validation.get("findings", []) if item["status"] != "passed"] if isinstance(validation, Mapping) else []
+    elements["candidate_bindings"].set_text(
+        "\n".join(f"{('Step ' + str(item['step_index']) + ': ') if item.get('step_index') else ''}{item['message']}" for item in findings[:3])
+        if isinstance(validation, Mapping) else _format_binding_issues(binding_issues)
     )
-    elements["draft"].update()
-    elements["draft_expansion"].set_visibility(has_draft)
-
-    failure = diagnostic.get("failure")
-    elements["draft_failure"].set_text(str(failure or ""))
-    elements["draft_failure_card"].set_visibility(bool(failure))
+    elements["candidate_bindings"].set_visibility(bool(findings) if isinstance(validation, Mapping) else bool(binding_issues))
+    trace = diagnostic.get("trace", [])
+    elements["candidate_trace"].content = json.dumps(
+        {
+            "composition_input": composition_input,
+            "candidate": candidate,
+            "binding_issues": binding_issues,
+            "exchanges": trace,
+            **({"validation": validation, "refinement": diagnostic.get("refinement")} if "refinement" in diagnostic else {}),
+        },
+        indent=2,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    elements["candidate_trace"].update()
+    elements["candidate_trace_expansion"].set_visibility(
+        bool(trace) or candidate is not None or composition_input is not None
+    )
     _set_enabled(
-        elements["create_draft_button"],
-        _phase_5_2_action_enabled(
-            status,
-            authoring_available=authoring_available,
-            authoring_busy=authoring_busy,
-        ),
+        elements["create_candidate_button"],
+        authoring_available
+        and not authoring_busy
+        and status
+        in {
+            "ready_for_composition",
+            "proposed",
+            "invalid",
+            "unsupported",
+            "budget_exhausted",
+            "failed",
+            "incomplete",
+            "validated_for_declared_scope", "needs_context", "no_progress", "cancelled", "interrupted", "stale", "authority_conflict",
+        },
     )
+    if "cancel_candidate_button" in elements:
+        elements["cancel_candidate_button"].set_visibility(authoring_busy or status in {"composing", "proposal", "robot_context", "validating", "evidence", "validation_result"})
 
 
 def _calibration_readiness(
@@ -3018,7 +2932,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
 ) -> None:
     """Render the streamlined ProductAgent grounding interaction."""
     phase_5_1_activation_available = runtime.robot_agent_context_runtime is not None
-    phase_5_2_authoring_available = runtime.robot_agent_draft_runtime is not None
+    primitive_authoring_available = runtime.robot_agent_program_runtime is not None
     grounding_ready = runtime.ontology_config is not None and runtime.grounding_runtime is not None
     grounding_unavailable_reason = (
         runtime.document_diagnostic_unavailable_reason
@@ -3120,11 +3034,6 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             _phase_5_1_waiting_view(),
             activation_available=phase_5_1_activation_available,
         )
-        _apply_phase_5_2_diagnostic(
-            phase_5_elements,
-            _phase_5_2_waiting_view(),
-            authoring_available=phase_5_2_authoring_available,
-        )
 
         with ui.expansion("Developer diagnostics", icon="terminal", value=False).classes(
             "w-full border border-slate-200 rounded"
@@ -3170,7 +3079,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             "pending_clarification": False,
             "phase_5_1_activating": False,
             "phase_5_1_refreshing": False,
-            "phase_5_2_authoring": False,
+            "primitive_composing": False,
             "interaction": None,
             "timeline": [],
         }
@@ -3183,6 +3092,9 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 start_button,
                 grounding_ready
                 and not action_state["busy"]
+                and not action_state["primitive_composing"]
+                and not action_state["phase_5_1_activating"]
+                and not action_state["phase_5_1_refreshing"]
                 and not action_state["pending_clarification"]
                 and isinstance(value, str)
                 and bool(value.strip()),
@@ -3238,14 +3150,14 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 activation_available=phase_5_1_activation_available,
                 activation_busy=bool(action_state["phase_5_1_activating"]),
             )
-            phase_5_2 = view.get("phase_5_2")
-            _apply_phase_5_2_diagnostic(
-                phase_5_elements,
-                phase_5_2 if isinstance(phase_5_2, Mapping) else _phase_5_2_waiting_view(),
-                authoring_available=phase_5_2_authoring_available,
-                authoring_busy=bool(action_state["phase_5_2_authoring"]),
-            )
             _set_enabled(phase_5_elements["refresh_button"], True)
+
+            _apply_primitive_composition_diagnostic(
+                phase_5_elements,
+                view.get("primitive_composition", {}),
+                authoring_available=primitive_authoring_available,
+                authoring_busy=bool(action_state["primitive_composing"]),
+            )
 
             diagnostics = view.get("diagnostics")
             diagnostic_values = diagnostics if isinstance(diagnostics, Mapping) else {}
@@ -3315,6 +3227,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             if (
                 not grounding_ready
                 or action_state["busy"]
+                or action_state["primitive_composing"]
                 or not isinstance(value, str)
                 or not value.strip()
             ):
@@ -3336,14 +3249,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 ),
                 activation_available=phase_5_1_activation_available,
             )
-            _apply_phase_5_2_diagnostic(
-                phase_5_elements,
-                _phase_5_2_waiting_view(
-                    "ProductAgent grounding is running; structural primitive drafting is unavailable."
-                ),
-                authoring_available=phase_5_2_authoring_available,
-            )
             _set_enabled(phase_5_elements["refresh_button"], False)
+            _apply_primitive_composition_diagnostic(phase_5_elements, {})
             activity_strip.set_visibility(True)
             activity_badge.set_text("grounding")
             activity_badge.props("color=indigo")
@@ -3497,209 +3404,155 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 requirement_input.props(remove="disable")
                 _update_start_enabled()
 
-        async def _start_phase_5_1() -> None:
-            interaction = action_state["interaction"]
-            phase_5_runtime = runtime.robot_agent_context_runtime
-            if (
-                action_state["phase_5_1_activating"]
-                or action_state["phase_5_1_refreshing"]
-                or action_state["phase_5_2_authoring"]
-                or not isinstance(interaction, dict)
-                or phase_5_runtime is None
+        def _begin_phase_5_action(flag: str) -> Path | None:
+            if interaction_card.is_deleted or any(
+                action_state[name]
+                for name in (
+                    "busy",
+                    "primitive_composing",
+                    "phase_5_1_activating",
+                    "phase_5_1_refreshing",
+                )
             ):
-                return
-            interaction_root = interaction.get("interaction_root")
-            if not isinstance(interaction_root, Path):
-                return
-            current_diagnostic = read_phase_5_1_diagnostic(interaction_root)
-            if current_diagnostic.status not in {
-                "ready_for_assignment",
-                "waiting_for_ra",
-                "context_captured",
-            }:
-                _apply_phase_5_1_diagnostic(
-                    phase_5_elements,
-                    current_diagnostic.to_view(),
-                    activation_available=phase_5_1_activation_available,
-                )
-                return
+                return None
+            interaction = action_state["interaction"]
+            root = interaction.get("interaction_root") if isinstance(interaction, dict) else None
+            if not isinstance(root, Path):
+                return None
+            # Claim the action before the first await so queued clicks remain exclusive.
+            action_state[flag] = True
+            _update_start_enabled()
+            for name in ("start_button", "refresh_button", "create_candidate_button"):
+                _set_enabled(phase_5_elements[name], False)
+            return root
 
-            action_state["phase_5_1_activating"] = True
-            _apply_phase_5_1_diagnostic(
-                phase_5_elements,
-                current_diagnostic.to_view(),
-                activation_available=phase_5_1_activation_available,
-                activation_busy=True,
-            )
-            phase_5_elements["message"].set_text(
-                "Starting or reusing only the exact RobotAgent selected by ProductAgent."
-            )
-            _set_enabled(phase_5_elements["refresh_button"], False)
-            _apply_phase_5_2_diagnostic(
-                phase_5_elements,
-                read_phase_5_2_diagnostic(interaction_root).to_view(),
-                authoring_available=phase_5_2_authoring_available,
-                authoring_busy=True,
-            )
-            diagnostic_view = current_diagnostic.to_view()
+        async def _finish_phase_5_action(flag: str, root: Path) -> None:
+            context_view = None
+            candidate_view = None
             try:
-                await activate_selected_ra_context(
-                    phase_5_runtime,
-                    interaction_root,
-                )
+                if not interaction_card.is_deleted:
+                    context_diagnostic, candidate_view = await asyncio.gather(
+                        asyncio.to_thread(read_phase_5_1_diagnostic, root),
+                        asyncio.to_thread(read_primitive_composition_diagnostic, root),
+                    )
+                    context_view = context_diagnostic.to_view()
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failure = f"Persisted RobotAgent context could not be inspected: {exc}"
+                context_view = {
+                    **_phase_5_1_waiting_view(failure),
+                    "status": "blocked",
+                    "failure": failure,
+                }
+                candidate_view = {"status": "blocked", "message": failure}
+            finally:
+                action_state[flag] = False
+                if not interaction_card.is_deleted:
+                    if context_view is not None and candidate_view is not None:
+                        _apply_phase_5_1_diagnostic(
+                            phase_5_elements,
+                            context_view,
+                            activation_available=phase_5_1_activation_available,
+                        )
+                        _apply_primitive_composition_diagnostic(
+                            phase_5_elements,
+                            candidate_view,
+                            authoring_available=primitive_authoring_available,
+                        )
+                    _set_enabled(phase_5_elements["refresh_button"], True)
+                    _update_start_enabled()
+
+        async def _start_phase_5_1() -> None:
+            phase_5_runtime = runtime.robot_agent_context_runtime
+            if phase_5_runtime is None:
+                return
+            root = _begin_phase_5_action("phase_5_1_activating")
+            if root is None:
+                return
+            try:
+                diagnostic = await asyncio.to_thread(read_phase_5_1_diagnostic, root)
+                if diagnostic.status not in {
+                    "ready_for_assignment",
+                    "waiting_for_ra",
+                    "context_captured",
+                }:
+                    return
+                if not interaction_card.is_deleted:
+                    _apply_phase_5_1_diagnostic(
+                        phase_5_elements,
+                        diagnostic.to_view(),
+                        activation_available=phase_5_1_activation_available,
+                        activation_busy=True,
+                    )
+                await activate_selected_ra_context(phase_5_runtime, root)
+                if not interaction_card.is_deleted:
+                    ui.notify("RobotAgent context captured.", type="positive")
+            except (OSError, RAContextHandoffError, RuntimeError, TypeError, ValueError) as exc:
+                if not interaction_card.is_deleted:
+                    ui.notify(f"RobotAgent context unavailable: {exc}", type="negative")
+            finally:
+                await _finish_phase_5_action("phase_5_1_activating", root)
+
+        async def _refresh_phase_5_1() -> None:
+            root = _begin_phase_5_action("phase_5_1_refreshing")
+            if root is not None:
+                await _finish_phase_5_action("phase_5_1_refreshing", root)
+
+        async def _start_primitive_composition() -> None:
+            program_runtime = runtime.robot_agent_program_runtime
+            if program_runtime is None:
+                return
+            root = _begin_phase_5_action("primitive_composing")
+            if root is None:
+                return
+            phase_5_elements["candidate_status_badge"].set_text("composing")
+            phase_5_elements["candidate_message"].set_text(
+                "RA is composing a primitive program from the current context."
+            )
+            try:
+                if runtime.primitive_refinement_runtime is None:
+                    await author_primitive_program_candidate(program_runtime, root)
+                else:
+                    view = await asyncio.to_thread(read_primitive_composition_diagnostic, root)
+                    catalog = (view.get("composition_input") or {}).get("primitive_catalog", [])
+                    if not interaction_card.is_deleted:
+                        phase_5_elements["cancel_candidate_button"].set_visibility(True)
+
+                    async def progress(event: Mapping[str, Any]) -> None:
+                        if interaction_card.is_deleted:
+                            return
+                        phase_5_elements["candidate_status_badge"].set_text(str(event.get("status", event["stage"])))
+                        phase_5_elements["candidate_message"].set_text(str(event["message"]))
+                        if "candidate" in event:
+                            phase_5_elements["candidate_steps"].content = _format_primitive_program(event["candidate"]["primitive_steps"], catalog)
+                            phase_5_elements["candidate_steps"].set_visibility(True)
+                            phase_5_elements["candidate_steps"].update()
+                            phase_5_elements["candidate_attempts"].set_text(f"Program versions: {event['candidate_count']}")
+                        if "validation" in event:
+                            findings = [item for item in event["validation"]["findings"] if item["status"] != "passed"]
+                            phase_5_elements["candidate_bindings"].set_text("\n".join(item["message"] for item in findings[:3]))
+                            phase_5_elements["candidate_bindings"].set_visibility(bool(findings))
+
+                    await runtime.primitive_refinement_runtime.compose(root, progress=progress)
             except (
                 OSError,
+                PrimitiveCompositionError,
                 RAContextHandoffError,
                 RuntimeError,
                 TypeError,
                 ValueError,
             ) as exc:
-                diagnostic_view = read_phase_5_1_diagnostic(interaction_root).to_view()
-                diagnostic_view["failure"] = f"{type(exc).__name__}: {exc}"
-                ui.notify("RobotAgent context capture failed closed.", type="negative")
-            else:
-                diagnostic_view = read_phase_5_1_diagnostic(interaction_root).to_view()
-                ui.notify("RobotAgent context captured.", type="positive")
+                if not interaction_card.is_deleted:
+                    ui.notify(f"Primitive composition unavailable: {exc}", type="negative")
             finally:
-                action_state["phase_5_1_activating"] = False
-                _apply_phase_5_1_diagnostic(
-                    phase_5_elements,
-                    diagnostic_view,
-                    activation_available=phase_5_1_activation_available,
-                )
-                _apply_phase_5_2_diagnostic(
-                    phase_5_elements,
-                    read_phase_5_2_diagnostic(interaction_root).to_view(),
-                    authoring_available=phase_5_2_authoring_available,
-                )
-                _set_enabled(phase_5_elements["refresh_button"], True)
+                if not interaction_card.is_deleted:
+                    phase_5_elements["cancel_candidate_button"].set_visibility(False)
+                await _finish_phase_5_action("primitive_composing", root)
 
-        async def _refresh_phase_5_1() -> None:
+        def _cancel_primitive_composition() -> None:
             interaction = action_state["interaction"]
-            if (
-                action_state["phase_5_1_activating"]
-                or action_state["phase_5_1_refreshing"]
-                or action_state["phase_5_2_authoring"]
-                or not isinstance(interaction, dict)
-            ):
-                return
-            interaction_root = interaction.get("interaction_root")
-            if not isinstance(interaction_root, Path):
-                return
-            action_state["phase_5_1_refreshing"] = True
-            _set_enabled(phase_5_elements["refresh_button"], False)
-            try:
-                diagnostic = await asyncio.to_thread(
-                    read_phase_5_1_diagnostic,
-                    interaction_root,
-                )
-                _apply_phase_5_1_diagnostic(
-                    phase_5_elements,
-                    diagnostic.to_view(),
-                    activation_available=phase_5_1_activation_available,
-                )
-                _apply_phase_5_2_diagnostic(
-                    phase_5_elements,
-                    read_phase_5_2_diagnostic(interaction_root).to_view(),
-                    authoring_available=phase_5_2_authoring_available,
-                )
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                failure_view = _phase_5_1_waiting_view(
-                    "Persisted RobotAgent context evidence could not be inspected."
-                )
-                failure_view["status"] = "blocked"
-                failure_view["failure"] = f"{type(exc).__name__}: {exc}"
-                _apply_phase_5_1_diagnostic(
-                    phase_5_elements,
-                    failure_view,
-                    activation_available=phase_5_1_activation_available,
-                )
-                _apply_phase_5_2_diagnostic(
-                    phase_5_elements,
-                    _phase_5_2_waiting_view(
-                        "Persisted RobotAgent evidence could not be inspected."
-                    ),
-                    authoring_available=phase_5_2_authoring_available,
-                )
-            finally:
-                action_state["phase_5_1_refreshing"] = False
-                _set_enabled(phase_5_elements["refresh_button"], True)
-
-        async def _start_phase_5_2() -> None:
-            interaction = action_state["interaction"]
-            draft_runtime = runtime.robot_agent_draft_runtime
-            if (
-                action_state["phase_5_1_activating"]
-                or action_state["phase_5_1_refreshing"]
-                or action_state["phase_5_2_authoring"]
-                or not isinstance(interaction, dict)
-                or draft_runtime is None
-            ):
-                return
-            interaction_root = interaction.get("interaction_root")
-            if not isinstance(interaction_root, Path):
-                return
-            current_diagnostic = read_phase_5_2_diagnostic(interaction_root)
-            if current_diagnostic.status != "ready_for_draft":
-                _apply_phase_5_2_diagnostic(
-                    phase_5_elements,
-                    current_diagnostic.to_view(),
-                    authoring_available=phase_5_2_authoring_available,
-                )
-                return
-
-            action_state["phase_5_2_authoring"] = True
-            _apply_phase_5_2_diagnostic(
-                phase_5_elements,
-                current_diagnostic.to_view(),
-                authoring_available=phase_5_2_authoring_available,
-                authoring_busy=True,
-            )
-            phase_5_elements["draft_message"].set_text(
-                "The exact selected RobotAgent is authoring an unbound structural sequence."
-            )
-            _apply_phase_5_1_diagnostic(
-                phase_5_elements,
-                read_phase_5_1_diagnostic(interaction_root).to_view(),
-                activation_available=phase_5_1_activation_available,
-                activation_busy=True,
-            )
-            _set_enabled(phase_5_elements["refresh_button"], False)
-            diagnostic_view = current_diagnostic.to_view()
-            try:
-                await author_primitive_program_draft(
-                    draft_runtime,
-                    interaction_root,
-                )
-            except (
-                OSError,
-                PrimitiveDraftError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-            ) as exc:
-                diagnostic_view = read_phase_5_2_diagnostic(interaction_root).to_view()
-                diagnostic_view["failure"] = f"{type(exc).__name__}: {exc}"
-                ui.notify("Primitive draft creation failed closed.", type="negative")
-            else:
-                diagnostic_view = read_phase_5_2_diagnostic(interaction_root).to_view()
-                notification_type = (
-                    "positive" if diagnostic_view["status"] == "draft_authored" else "warning"
-                )
-                ui.notify(str(diagnostic_view["status"]), type=notification_type)
-            finally:
-                action_state["phase_5_2_authoring"] = False
-                _apply_phase_5_2_diagnostic(
-                    phase_5_elements,
-                    diagnostic_view,
-                    authoring_available=phase_5_2_authoring_available,
-                )
-                _apply_phase_5_1_diagnostic(
-                    phase_5_elements,
-                    read_phase_5_1_diagnostic(interaction_root).to_view(),
-                    activation_available=phase_5_1_activation_available,
-                )
-                _set_enabled(phase_5_elements["refresh_button"], True)
+            root = interaction.get("interaction_root") if isinstance(interaction, dict) else None
+            if isinstance(root, Path) and cancel_primitive_refinement(root):
+                phase_5_elements["candidate_message"].set_text("Cancelling composition; recorded proposals will be retained.")
 
         requirement_input.on_value_change(lambda _: _update_start_enabled())
         clarification_reply_input.on_value_change(lambda _: _update_reply_enabled())
@@ -3707,7 +3560,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         submit_reply_button.on_click(_submit_clarification)
         cancel_interaction_button.on_click(_cancel_clarification)
         phase_5_elements["start_button"].on_click(_start_phase_5_1)
-        phase_5_elements["create_draft_button"].on_click(_start_phase_5_2)
+        phase_5_elements["create_candidate_button"].on_click(_start_primitive_composition)
+        phase_5_elements["cancel_candidate_button"].on_click(_cancel_primitive_composition)
         phase_5_elements["refresh_button"].on_click(_refresh_phase_5_1)
         _update_start_enabled()
 

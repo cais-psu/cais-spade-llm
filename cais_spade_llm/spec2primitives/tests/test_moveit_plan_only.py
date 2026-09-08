@@ -159,3 +159,62 @@ def test_runtime_contains_no_trajectory_execution_client() -> None:
 
     assert "ExecuteTrajectory" not in source
     assert "execute_trajectory" not in source
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_base_pose_uses_live_tf_and_cleans_up_on_timeout(monkeypatch, available):
+    calls = []
+    transform = SimpleNamespace(
+        child_frame_id="xarm6_link_base",
+        header=SimpleNamespace(frame_id="world"),
+        transform=SimpleNamespace(translation=SimpleNamespace(x=0.0, y=-0.5, z=1.021)),
+    )
+
+    class Node:
+        def __init__(self, name):
+            assert name == "spec2primitives_resource_base_pose"
+
+        def destroy_node(self):
+            calls.append("destroy")
+
+    class Buffer:
+        def can_transform(self, target, base, stamp):
+            assert (target, base) == ("world", "xarm6_link_base")
+            return available
+
+        def lookup_transform(self, target, base, stamp):
+            calls.append("lookup")
+            return transform
+
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy",
+        SimpleNamespace(
+            ok=lambda: True,
+            time=SimpleNamespace(Time=object),
+            spin_once=lambda *args, **kwargs: None,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "rclpy.node", SimpleNamespace(Node=Node))
+    monkeypatch.setitem(
+        sys.modules,
+        "tf2_ros",
+        SimpleNamespace(
+            Buffer=Buffer,
+            TransformException=LookupError,
+            TransformListener=lambda *args: SimpleNamespace(
+                unregister=lambda: calls.append("unregister")
+            ),
+        ),
+    )
+    ticks = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(moveit_plan_only.time, "monotonic", lambda: next(ticks))
+    runtime = moveit_plan_only.MoveItPlanOnlyRuntime(service_timeout_sec=0.5)
+    if available:
+        result = runtime._read_resource_base_pose_sync("xarm6_link_base", "world")
+        assert result["translation_m"] == [0.0, -0.5, 1.021]
+        assert result["observed_at_ns"] > 0
+    else:
+        with pytest.raises(RuntimeError, match="transform is unavailable"):
+            runtime._read_resource_base_pose_sync("xarm6_link_base", "world")
+    assert calls == (["lookup"] if available else []) + ["unregister", "destroy"]

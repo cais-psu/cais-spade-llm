@@ -3,6 +3,7 @@ from __future__ import annotations
 """Tests for the dual Gazebo adapter and streamlined ProductAgent UI."""
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -246,98 +247,11 @@ def test_phase_5_1_ui_activates_only_from_the_persisted_interaction() -> None:
     assert 'label = "Refresh RobotAgent context"' in source
     assert "async def _start_phase_5_1()" in source
     assert "interaction_root = interaction.get(\"interaction_root\")" in source
-    assert (
-        '"Starting or reusing only the exact RobotAgent selected by ProductAgent."'
-        in source
-    )
     assert 'ui.badge("temporary diagnostic")' not in source
     assert "await activate_selected_ra_context(" in source
     assert '"context_captured",' in source
     assert 'phase_5_elements["start_button"].on_click(_start_phase_5_1)' in source
     assert "runtime.robot_agent_context_runtime" in source
-
-
-@pytest.mark.parametrize(
-    ("status", "available", "busy", "expected"),
-    [
-        ("ready_for_draft", True, False, True),
-        ("ready_for_draft", True, True, False),
-        ("ready_for_draft", False, False, False),
-        ("waiting_for_context", True, False, False),
-        ("draft_authored", True, False, False),
-        ("unsupported", True, False, False),
-        ("blocked", True, False, False),
-    ],
-)
-def test_phase_5_2_action_state_is_fail_closed(
-    status: str,
-    available: bool,
-    busy: bool,
-    expected: bool,
-) -> None:
-    assert (
-        spec2primitives_ui._phase_5_2_action_enabled(
-            status,
-            authoring_available=available,
-            authoring_busy=busy,
-        )
-        is expected
-    )
-
-
-def test_phase_5_2_composition_evidence_summary_uses_exact_input_sections() -> None:
-    summary = spec2primitives_ui._phase_5_2_composition_evidence_summary(
-        {
-            "task": {"product_requirement": "assemble medium gear"},
-            "selected_resource": {"resource_jid": "xarm6@localhost"},
-            "ontology_projection": {
-                "tbox_fingerprint": "tbox-fingerprint",
-                "abox_fingerprint": "abox-fingerprint",
-                "assertions": [{"subject": "s"}, {"subject": "t"}],
-            },
-            "robot_state": {"controller_ready": True},
-            "primitive_catalog": [{"primitive_symbol": "detect_parts"}],
-            "grounded_context": {
-                "typed_records": [
-                    {
-                        "record_type": "RobotFrameLocationRecord",
-                        "record_ref": "products/grounding/location.json",
-                    }
-                ]
-            },
-        }
-    )
-
-    assert summary == {
-        "assertion_count": 2,
-        "primitive_count": 1,
-        "typed_record_count": 1,
-        "tbox_fingerprint": "tbox-fingerprint",
-        "abox_fingerprint": "abox-fingerprint",
-    }
-    assert spec2primitives_ui._phase_5_2_waiting_view()["composition_input"] is None
-
-
-def test_phase_5_2_ui_authors_only_from_the_active_persisted_context() -> None:
-    source = Path(spec2primitives_ui.__file__).read_text(encoding="utf-8")
-
-    assert 'ui.label("RA-authored structural primitive draft")' in source
-    assert '"Create Primitive Draft"' in source
-    assert "async def _start_phase_5_2()" in source
-    assert 'interaction_root = interaction.get("interaction_root")' in source
-    assert 'current_diagnostic.status != "ready_for_draft"' in source
-    assert "await author_primitive_program_draft(" in source
-    assert "runtime.robot_agent_draft_runtime" in source
-    assert 'ui.label("RA composition evidence")' in source
-    assert '"COMPOSITION_INPUT delivered to RA"' in source
-    assert 'composition_input = diagnostic.get("composition_input")' in source
-    assert 'status in {"draft_authored", "unsupported"}' in source
-    assert 'elements["composition_evidence_card"].set_visibility(' in source
-    assert "json.dumps(\n            composition_input," in source
-    assert (
-        'phase_5_elements["create_draft_button"].on_click(_start_phase_5_2)'
-        in source
-    )
 
 
 def test_phase_2_pa_start_requires_configured_grounding() -> None:
@@ -428,3 +342,35 @@ def test_spec2primitives_production_code_has_no_ground_truth_reference() -> None
                 f"{path} contains forbidden ground-truth reference "
                 f"{forbidden_reference!r}"
             )
+
+
+def test_program_details_preserve_context_without_a_draft_panel() -> None:
+    """The compact program keeps source context available under expandable details."""
+    context = {
+        "target_feature": {"product_requirement": "assemble medium gear"},
+        "selected_resource": {"resource_jid": "xarm6@localhost"},
+        "ontology_projection": {
+            "tbox_fingerprint": "tbox",
+            "abox_fingerprint": "abox",
+            "assertions": [],
+        },
+        "robot_state": {"held_part": None},
+        "primitive_catalog": [],
+        "grounded_context": {"typed_records": []},
+    }
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        spec2primitives_ui._apply_primitive_composition_diagnostic(
+            elements,
+            {"status": "ready_for_composition", "composition_input": context},
+            authoring_available=True,
+        )
+        assert elements["create_candidate_button"].text == "Compose Primitive Program"
+        assert not elements["create_candidate_button"]._props.get("disable", False)
+        assert "create_draft_button" not in elements
+        assert "draft" not in elements
+        assert elements["candidate_trace_expansion"].visible
+        assert json.loads(elements["candidate_trace"].content)["composition_input"] == context
+    finally:
+        container.delete()

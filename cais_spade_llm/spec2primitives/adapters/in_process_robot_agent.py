@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Read Phase 5.1 context from the exact live in-process RobotAgent."""
+"""Read context and author primitive programs with the exact live RobotAgent."""
 
 
 import asyncio
@@ -51,7 +51,7 @@ class InProcessRobotAgentHost(Protocol):
 
 
 class InProcessRobotAgentCompositionRuntime:
-    """Adapt one exact live RobotAgent to the Phase 5.1 context contract."""
+    """Adapt the selected RobotAgent for context capture and program authoring."""
 
     def __init__(
         self,
@@ -95,10 +95,30 @@ class InProcessRobotAgentCompositionRuntime:
                 raise RAContextHandoffError(
                     "Selected live RobotAgent returned an empty state snapshot."
                 )
+            state = deepcopy(dict(robot_state))
+            # Configuration describes coordinate interpretation, not live TCP
+            # feedback. Do not turn absent configuration into a measured pose.
+            configuration = getattr(selected_agent, "controller_config", None)
+            move_group = (
+                configuration.get("move_group") if isinstance(configuration, Mapping) else None
+            )
+            state["motion_context"] = {
+                "source": "controller_config.move_group",
+                **{
+                    name: (
+                        move_group[name]
+                        if isinstance(move_group, Mapping)
+                        and isinstance(move_group.get(name), str)
+                        and move_group[name].strip()
+                        else None
+                    )
+                    for name in ("frame_id", "ee_link", "tcp_link")
+                },
+            }
             return {
                 "resource_jid": assignment.selected_resource_jid,
                 "assignment_fingerprint": assignment.fingerprint,
-                "robot_state": deepcopy(dict(robot_state)),
+                "robot_state": state,
                 "primitive_catalog": _phase_5_1_primitive_catalog(raw_catalog),
             }
 
@@ -107,14 +127,18 @@ class InProcessRobotAgentCompositionRuntime:
             raise RAContextHandoffError("Selected live RobotAgent context response is unavailable.")
         return response
 
-    async def author_structural_draft(
+    async def author_composition_action(
         self,
         assignment: SelectedRAAssignmentEnvelope,
         *,
         prompt: str,
         response_format: Mapping[str, object],
     ) -> Mapping[str, object]:
-        """Ask only the exact selected RobotAgent to author an unbound draft."""
+        """Return an RA-authored evidence request or parameterized candidate.
+
+        The owned composer serves evidence requests; shared execution tools and
+        recovery instructions must never participate in this call.
+        """
         selected_agent = await self._selected_or_started_agent(assignment)
         assignment.assert_addressed_to(str(getattr(selected_agent, "jid", "")))
         self._require_alive(selected_agent, assignment.selected_resource_jid)
@@ -136,16 +160,55 @@ class InProcessRobotAgentCompositionRuntime:
             )
             if not isinstance(response, Mapping):
                 raise RAContextHandoffError(
-                    "Selected live RobotAgent returned an invalid structural draft."
+                    "Selected live RobotAgent returned an invalid composition response."
                 )
             return deepcopy(dict(response))
 
         response = await self._host._run_on_agent_runtime(_author())
         if not isinstance(response, Mapping):
             raise RAContextHandoffError(
-                "Selected live RobotAgent structural draft response is unavailable."
+                "Selected live RobotAgent composition response is unavailable."
             )
         return response
+
+    async def capture_validation_context(
+        self, assignment: SelectedRAAssignmentEnvelope, *, profile: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Measure the selected resource through owned read-only ROS interfaces."""
+        from .robot_validation_context import MeasuredRobotContextRuntime
+        from ..agents.ra.refinement_records import fingerprint
+
+        selected = await self._selected_or_started_agent(assignment)
+        self._require_alive(selected, assignment.selected_resource_jid)
+        self._require_execution_mode(selected, assignment)
+        if assignment.selected_execution_mode != "simulation":
+            raise RAContextHandoffError("The current no-motion validation model supports simulation context only.")
+
+        async def configuration() -> dict[str, Any]:
+            value = getattr(selected, "controller_config", None)
+            if not isinstance(value, Mapping):
+                raise RAContextHandoffError("Selected robot controller configuration is unavailable.")
+            return deepcopy(dict(value))
+
+        config = await self._host._run_on_agent_runtime(configuration())
+        measured = await MeasuredRobotContextRuntime().capture(
+            resource_jid=assignment.selected_resource_jid,
+            assignment_fingerprint=assignment.fingerprint,
+            configuration=config,
+            profile=profile,
+        )
+        current = await self._host._run_on_agent_runtime(configuration())
+        if fingerprint(current) != measured["configuration_sha256"]:
+            raise RAContextHandoffError("Robot tool/configuration changed during measurement.")
+        async def custody() -> Any:
+            state = selected.get_recovery_snapshot()
+            if not isinstance(state, Mapping) or "held_part" not in state:
+                raise RAContextHandoffError("The selected RA's held_part state is unavailable.")
+            return deepcopy(state["held_part"])
+        from ..agents.ra.composition_context import _without_model_name
+
+        measured["held_part"] = _without_model_name(await self._host._run_on_agent_runtime(custody()))
+        return measured
 
     async def validate_plan_only_allocation(
         self,
@@ -175,6 +238,16 @@ class InProcessRobotAgentCompositionRuntime:
         if not isinstance(response, Mapping):
             raise RAContextHandoffError("MoveIt location planning response is invalid.")
         return deepcopy(dict(response))
+
+    async def read_resource_base_pose(
+        self, *, base_frame: str, target_frame: str
+    ) -> Mapping[str, object]:
+        """Read advisory TF evidence through the owned running-simulation boundary."""
+        if self._host.ros2_proc_status(DUAL_GAZEBO_NAME) != "running":
+            raise RAContextHandoffError("Spec2Primitives Dual Gazebo Environment is not running.")
+        return await self._moveit_plan_only_runtime.read_resource_base_pose(
+            base_frame=base_frame, target_frame=target_frame
+        )
 
     async def _selected_or_started_agent(
         self,
@@ -433,6 +506,8 @@ def _phase_5_1_primitive_catalog(value: object) -> list[dict[str, object]]:
                 "operation_description": description,
                 "typed_parameters": typed_parameters,
                 "typed_results": typed_results,
+                "parameter_schemas": deepcopy(dict(parameters)),
+                "result_schemas": deepcopy(dict(output_schema)),
                 "invocation_binding": symbol,
                 "truthful_limits": _optional_text_list(item, "truthful_limits", index),
                 "direct_evidence": _optional_text_list(item, "direct_evidence", index),

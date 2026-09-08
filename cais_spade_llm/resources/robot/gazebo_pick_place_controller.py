@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Config-driven Gazebo pick/place controller.
 
@@ -5,8 +7,6 @@ This module intentionally avoids importing ROS2 packages at module import time.
 All ROS2 imports happen lazily inside `init()` so non-ROS workflows can still
 import the package.
 """
-
-from __future__ import annotations
 
 import hashlib
 import importlib
@@ -27,6 +27,13 @@ from typing import Any
 import yaml
 
 from cais_spade_llm.product.profile import ProductProfile
+from cais_spade_llm.resources.robot.target_calculations import (
+    controlled_link_height,
+    pick_travel_height,
+    placement_poses,
+    supported_part_origin_height,
+    vertical_pick_bias,
+)
 
 destination_token_from_place_inputs = ProductProfile.destination_token_from_place_inputs
 has_place_geometry_fields = ProductProfile.has_place_geometry_fields
@@ -3129,9 +3136,9 @@ class GazeboPickPlaceController:
         ---
         description: Move end-effector to an absolute Cartesian position and optional orientation.
         params:
-          x: {type: number, description: "Target X coordinate in meters (base frame)"}
-          y: {type: number, description: "Target Y coordinate in meters (base frame)"}
-          z: {type: number, description: "Target Z coordinate in meters (base frame)"}
+          x: {type: number, description: "Controlled end-effector X in metres in the configured planning frame", x-frame-source: controller_config.move_group.frame_id, x-binding-role: end_effector_coordinate}
+          y: {type: number, description: "Controlled end-effector Y in metres in the configured planning frame", x-frame-source: controller_config.move_group.frame_id, x-binding-role: end_effector_coordinate}
+          z: {type: number, description: "Controlled end-effector Z in metres in the configured planning frame", x-frame-source: controller_config.move_group.frame_id, x-binding-role: end_effector_coordinate}
           speed: {type: number, description: "Trajectory time scale (>1 slower, <1 faster). Optional."}
           qx: {type: number, description: "Target quaternion X component. Optional with qy, qz, and qw."}
           qy: {type: number, description: "Target quaternion Y component. Optional with qx, qz, and qw."}
@@ -3554,9 +3561,9 @@ class GazeboPickPlaceController:
         ---
         description: Move end-effector to an absolute pose with explicit quaternion orientation.
         params:
-          x: {type: number, description: "Target X coordinate in meters (base frame)"}
-          y: {type: number, description: "Target Y coordinate in meters (base frame)"}
-          z: {type: number, description: "Target Z coordinate in meters (base frame)"}
+          x: {type: number, description: "Controlled end-effector X in metres in the configured planning frame"}
+          y: {type: number, description: "Controlled end-effector Y in metres in the configured planning frame"}
+          z: {type: number, description: "Controlled end-effector Z in metres in the configured planning frame"}
           qx: {type: number, description: "Target quaternion X component"}
           qy: {type: number, description: "Target quaternion Y component"}
           qz: {type: number, description: "Target quaternion Z component"}
@@ -3647,7 +3654,7 @@ class GazeboPickPlaceController:
     def get_current_pose(self) -> dict[str, Any]:
         """
         ---
-        description: Return the current end-effector pose in the base frame.
+        description: Return the current controlled end-effector pose in the configured planning frame.
         params: {}
         preconditions: {}
         effects:
@@ -3803,7 +3810,7 @@ class GazeboPickPlaceController:
         ---
         description: Close the gripper and attach the target part as one high-level grasp primitive.
         params:
-          model_name: {type: string, description: "Gazebo model name of the part to attach"}
+          model_name: {type: string, description: "Controller identifier of the part to attach; a semantic part label does not establish this binding", x-binding-role: controller_identifier}
           part_name: {type: string, description: "Optional canonical part identifier for held-part tracking."}
           position: {type: number, description: "Optional gripper closing position override."}
         preconditions:
@@ -3871,7 +3878,7 @@ class GazeboPickPlaceController:
         ---
         description: Open the gripper and detach the currently held part as one high-level release primitive.
         params:
-          model_name: {type: string, description: "Optional controller model name to detach."}
+          model_name: {type: string, description: "Optional controller identifier of the part to detach.", x-binding-role: controller_identifier}
           part_name: {type: string, description: "Optional canonical recovery part name for release trace validation."}
           assume_released_if_open: {type: boolean, description: "Treat an already-open gripper as an idempotent release when true."}
         preconditions:
@@ -4261,12 +4268,47 @@ class GazeboPickPlaceController:
     ) -> dict[str, Any]:
         """
         ---
-        description: Compute pick target positions from perception + geometry without moving.
+        description: Compute vertical pick target positions from world object geometry and configured end-effector/TCP feedback without moving. The frames must agree.
         params:
           part_name: {type: string, description: "Name of the detected part to pick"}
-          product_geometry: {type: object, description: "Optional geometry override dict"}
-          target_pose: {type: object, description: "Optional known target pose with x/y/z; skips perception when provided"}
-          detected_parts: {type: array, description: "Optional detect_parts result to consume without issuing another detection"}
+          product_geometry:
+            type: object
+            description: "Optional pick geometry override, not a CADMeshRecord. Missing dimensions or surface height use controller defaults."
+            x-grounding-required: true
+            x-grounding-fields: [board_center, part_height_m]
+            properties:
+              board_center:
+                type: object
+                description: "Support reference in world metres; z supplies the support height."
+                x-grounding-fields: [z]
+                properties:
+                  x: {type: number, x-frame-source: world}
+                  y: {type: number, x-frame-source: world}
+                  z: {type: number, x-frame-source: world}
+              part_height_m: {type: number, exclusiveMinimum: 0, x-binding-role: vertical_part_height, description: "Part height along the supported vertical pick direction in metres."}
+              model_name: {type: string, x-binding-role: controller_identifier}
+          target_pose:
+            type: object
+            description: "Optional observed object location in world metres; this is not the computed end-effector pick position. Skips perception when provided."
+            x-grounding-fields: [x, y, z]
+            properties:
+              x: {type: number, x-frame-source: world}
+              y: {type: number, x-frame-source: world}
+              z: {type: number, x-frame-source: world}
+              model_name: {type: string, x-binding-role: controller_identifier}
+          detected_parts:
+            type: array
+            description: "Optional detected object records to consume without another detection."
+            minItems: 1
+            items:
+              type: object
+              x-grounding-fields: [part_name, x, y, z]
+              properties:
+                part_name: {type: string}
+                model_name: {type: string, x-binding-role: controller_identifier}
+                x: {type: number, x-frame-source: world}
+                y: {type: number, x-frame-source: world}
+                z: {type: number, x-frame-source: world}
           target_pose_source: {type: string, description: "Optional source label for target_pose, e.g. observed_pose"}
           prefer_live_detection: {type: boolean, description: "When true, try perception first and use target_pose only as fallback"}
           approach_height_override_m: {type: number, description: "Optional vertical approach distance"}
@@ -4469,9 +4511,8 @@ class GazeboPickPlaceController:
         )
 
         ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
-        pick_bias = max(
-            self.pick_tcp_z_bias_min_m,
-            min(self.pick_tcp_z_bias_max_m, target_height * 0.25),
+        pick_bias = vertical_pick_bias(
+            target_height, self.pick_tcp_z_bias_min_m, self.pick_tcp_z_bias_max_m
         )
         surface_clearance_m = max(0.0, _as_float(surface_clearance_override_m, 0.0))
         if physical_stl_pick:
@@ -4561,14 +4602,10 @@ class GazeboPickPlaceController:
             }
 
         approach_height = _as_float(approach_height_override_m, self.approach_height_m)
-        travel_candidates = [
-            tz + approach_height,
-            board_center_z + approach_height,
-            pick_z + 0.05,
-        ]
-        if not bool(ignore_current_height_for_travel_z):
-            travel_candidates.append(ee.position.z)
-        travel_z = max(travel_candidates)
+        travel_z = pick_travel_height(
+            tz, board_center_z, pick_z, approach_height,
+            None if bool(ignore_current_height_for_travel_z) else ee.position.z,
+        )
 
         self._log().info(
             "[ComputePickTargets] "
@@ -5066,13 +5103,53 @@ class GazeboPickPlaceController:
     ) -> dict[str, Any]:
         """
         ---
-        description: Compute placement target positions from pick context + geometry without moving.
+        description: Compute vertical placement targets from world geometry, pick context and configured end-effector/TCP feedback without moving. The frames must agree.
         params:
           part_name: {type: string, description: "Name of the held part to place"}
-          pick_ctx: {type: object, description: "Optional output context from previous pick"}
-          product_geometry: {type: object, description: "Optional geometry override dict"}
+          pick_ctx:
+            type: object
+            description: "Optional pick result or measured held-part context. Missing grasp/tool offsets invoke controller fallbacks."
+            x-grounding-required: true
+            x-grounding-fields: [tz, pick_tcp_z, tcp_offset_z, part_height]
+            properties:
+              part_name: {type: string}
+              model_name: {type: string, x-binding-role: controller_identifier}
+              tz: {type: number, x-frame-source: world}
+              pick_tcp_z: {type: number, x-frame-source: world}
+              tcp_offset_z: {type: number, description: "TCP Z minus controlled end-effector Z in world metres."}
+              part_height: {type: number, exclusiveMinimum: 0, x-binding-role: vertical_part_height}
+          product_geometry:
+            type: object
+            description: "Optional placement geometry override, not a CADMeshRecord. Explicit fields avoid configured destination lookup and geometric defaults."
+            x-grounding-required: true
+            x-grounding-fields: [board_center, slot_xy, slot_floor_z_m]
+            properties:
+              board_center:
+                type: object
+                description: "Origin of the slot XY offsets in world metres."
+                x-grounding-fields: [x, y]
+                properties:
+                  x: {type: number, x-frame-source: world}
+                  y: {type: number, x-frame-source: world}
+                  z: {type: number, x-frame-source: world}
+              slot_xy: {type: array, minItems: 2, items: {type: number}, description: "XY offsets in metres from board_center."}
+              slot_floor_z_m: {type: number, x-frame-source: world, description: "Measured seating/support surface height in world metres."}
+              part_height_m: {type: number, exclusiveMinimum: 0, x-binding-role: vertical_part_height, description: "Optional height override; otherwise uses pick_ctx.part_height."}
+              model_name: {type: string, x-binding-role: controller_identifier}
+              target_reference:
+                type: object
+                properties:
+                  target_point: {type: string, description: "part_origin or inserted_part_origin uses target_origin_pose.z when supplied."}
+                  surface_role: {type: string, description: "Describes the target surface; assembly_slot can yield distinct pre-insertion and insertion poses."}
+              target_origin_pose:
+                type: object
+                description: "Supported final part-origin reference, not an end-effector pose."
+                properties:
+                  x: {type: number, x-frame-source: world}
+                  y: {type: number, x-frame-source: world}
+                  z: {type: number, x-frame-source: world}
           z_adjustment_m: {type: number, description: "Extra Z vertical adjustment"}
-          destination_location: {type: string, description: "Optional symbolic destination token, such as assembly_board-v1, resolved internally to placement geometry when available"}
+          destination_location: {type: string, description: "Optional registered controller destination token. A descriptive ontology label does not establish a resolvable token.", x-binding-role: destination_identifier}
           assembly_board_v1_aruco: {type: object, description: "Frozen per-arm assembly_board-v1 ArUco observation for physical placement"}
         preconditions: {}
         effects: {}
@@ -5443,15 +5520,13 @@ class GazeboPickPlaceController:
                     else "support_geometry_fallback"
                 )
         else:
-            place_gap = self.place_surface_gap_m - self.insertion_depth_m
-            place_part_origin_z = board_top_z + (target_height * 0.5) + place_gap
-            if target_point not in {"part_origin", "inserted_part_origin"}:
-                place_part_origin_z = max(
-                    place_part_origin_z,
-                    board_top_z + (target_height * 0.5),
-                )
+            place_part_origin_z = supported_part_origin_height(
+                board_top_z, target_height, self.place_surface_gap_m, self.insertion_depth_m
+            )
         place_tcp_z = place_part_origin_z + grasp_tcp_to_part_origin_z
-        place_z = place_tcp_z - tcp_offset_z + _as_float(z_adjustment_m, 0.0)
+        place_z = controlled_link_height(
+            place_tcp_z, tcp_offset_z, _as_float(z_adjustment_m, 0.0)
+        )
 
         insertion_axis_world = {"x": 0.0, "y": 0.0, "z": -1.0}
         pose_orientation: dict[str, float] = {}
@@ -5480,29 +5555,19 @@ class GazeboPickPlaceController:
                     field: held_pose[field] for field in ("qx", "qy", "qz", "qw")
                 }
 
-        insert_pose = {"x": bx, "y": by, "z": place_z, **pose_orientation}
-        pre_insert_pose = dict(insert_pose)
-        approach_pose = {
-            "x": bx,
-            "y": by,
-            "z": place_z + 0.05,
-            **pose_orientation,
-        }
-        move_insert_mode = ""
-        if (
+        simulation_assembly_slot = (
             self.execution_mode == "simulation"
             and str(target_reference.get("surface_role") or "") == "assembly_slot"
-        ):
-            if not pose_orientation:
-                pose_orientation = {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
-                insert_pose.update(pose_orientation)
-            simulation_offset_m = max(0.0, float(self.insertion_depth_m))
-            pre_insert_pose = {
-                **insert_pose,
-                "z": insert_pose["z"] + simulation_offset_m,
-            }
-            approach_pose = {**pre_insert_pose, "z": pre_insert_pose["z"] + 0.05}
-            move_insert_mode = "simulation_direct"
+        )
+        poses = placement_poses(
+            bx, by, place_z, pose_orientation,
+            simulation_assembly_slot=simulation_assembly_slot,
+            insertion_depth=float(self.insertion_depth_m),
+        )
+        insert_pose = poses["insert_pose"]
+        pre_insert_pose = poses["pre_insert_pose"]
+        approach_pose = poses["approach_pose"]
+        move_insert_mode = "simulation_direct" if simulation_assembly_slot else ""
         # A learned seated reference is insertion authority only. Physical
         # place_approach recordings remain corrections of these nominal poses.
         place_approach_pose = deepcopy(approach_pose)

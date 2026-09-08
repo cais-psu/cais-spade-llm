@@ -80,3 +80,13 @@ After passing contract tests: “The tested gates reject malformed/altered evide
 After live trials: report exactly which conditions, scenes, models and sample sizes were tested, with observed accuracy/abstention/error rates. “No answer leakage was found in the inspected inputs” is narrower and more defensible than “the system has no bias.” If a permutation changes a supported physical answer or removed evidence leaves an unsupported confident answer, preserve the trace, diagnose the source and rerun a new frozen evaluation after the fix.
 
 No live counterfactual or hardware accuracy claim follows from the offline fixtures shipped with this change.
+
+## Composition input audit
+
+Audit `composition/primitive_program_candidates/attempt_*/request.json` and every `exchange_*.json`, including root and nested record reads. Compare full captured state/catalog records with the filtered model-facing projection: grasp/release conditions/effects contain only `held_part`, and recovery examples, decompositions and unrelated recovery metadata are excluded from both paths. Full catalog snapshots are not available through `read_record`.
+
+New composition catalogs exclude `model_name`, including nested helper fields and custody-effect references. Their complete backend signatures remain in snapshots. Audit each saved attempt against its own recorded interface; an older identifier-bearing program is not evidence that a new request received that field. New proposals reject supplied simulator identifier arguments. A future execution adapter must bind the recognized instance independently of the LLM's sequence choice.
+
+Truthful helper descriptions and named waypoints remain prior information. They do not prescribe execution order; measure whether RA adapts the sequence when the physical condition changes. A helper result is deferred until an audited calculation actually returns it. Frames and reference-point semantics must not be silently supplied by the host. Current derived binding reports expose those gaps without revising steps or authorizing motion. Simulator identity resolution is deferred execution work, not a new composition requirement.
+
+Use [COMPOSITION_EVALUATION.md](COMPOSITION_EVALUATION.md) for fair baselines, retrieval/validation ablations, independent evaluation, all-attempt reporting and reproducibility. The [validation/revision guide](VALIDATION_AND_REVISION.md) describes the implemented bounded loop. Its first proposal, subsequent modeled verdicts and physical outcomes must be scored separately. PA receives fact requests; validators return findings without suggesting repair steps.

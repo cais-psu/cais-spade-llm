@@ -1674,6 +1674,9 @@ def _validate_resource_check_coverage(
                     "Allocation resource checks use different validated context."
                 )
         result = _required_mapping(call["result"], "allocation tool result")
+        from .resource_proximity import validate_allocation_proximity
+
+        validate_allocation_proximity(result, check)
         if (
             result.get("status") != check["status"]
             or result.get("resource_symbol") != symbol
@@ -2261,6 +2264,7 @@ def _validated_two_decision_completion(
         resolved["resource_selection_ref"],
         "ResourceSelectionRecord",
     )
+    _validate_requested_resource(resolved["decision_ref"], selection)
     reachability = _read_json_mapping(
         resolved["reachability_check_ref"],
         "ReachabilityCheckRecord",
@@ -2353,6 +2357,18 @@ def _validated_two_decision_completion(
 
 def _is_sha256_value(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _validate_requested_resource(decision_path: Path, selection: Mapping[str, object]) -> None:
+    """Keep a rebuilt completion bound to its explicit user resource constraint."""
+    decision = _read_json_mapping(decision_path, "allocation decision")
+    decision_input = decision.get("PA_input")
+    if (
+        isinstance(decision_input, Mapping)
+        and decision_input.get("requested_resource_symbol") is not None
+        and decision_input["requested_resource_symbol"] != selection["selected_resource_symbol"]
+    ):
+        raise GroundingContractError("Selected resource differs from the explicit user request.")
 
 
 def _latest_product_context_view(root: Path) -> ProductContextView:

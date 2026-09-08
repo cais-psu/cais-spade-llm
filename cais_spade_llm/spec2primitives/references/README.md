@@ -7,3 +7,5 @@ Approved CAD filenames and source document part names are allowed evidence befor
 This Markdown documentation, scene setup notes, simulator names, spawn poses and evaluator labels are not the approved recognition corpus. Never pass scene manifests or this directory's setup prose to PA as source evidence. Keep calibration authority internal and model-facing sensor metadata opaque.
 
 Current Phase 4 uses proposal/evidence and required live MoveIt reachability before completion. Historical source/proposal records remain read-only history. See [bias validation](../BIAS_VALIDATION.md) for corpus-label and distractor experiments.
+
+In Phase 5, retrieved product/CAD records remain evidence, not automatically resolved robot geometry. A descriptive destination cannot establish placement coordinates. New composition interfaces exclude `model_name`; the future execution adapter must establish that simulator binding for the recognized physical instance, rather than infer it from a CAD filename. See [composition bindings](../agents/ra/README.md) and [bounded evidence resolution](../VALIDATION_AND_REVISION.md).

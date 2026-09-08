@@ -93,7 +93,7 @@ _CATALOG_REQUIRED_KEYS = frozenset(
         "evaluator_endpoints",
     }
 )
-_CATALOG_OPTIONAL_KEYS = frozenset({"conditions", "effects"})
+_CATALOG_OPTIONAL_KEYS = frozenset({"conditions", "effects", "parameter_schemas", "result_schemas"})
 
 
 class RAContextHandoffError(ValueError):
@@ -319,6 +319,9 @@ async def activate_selected_ra_context(
     )
     response = await runtime.request_assigned_context(assignment)
     robot_state, primitive_catalog = _validate_runtime_response(response, assignment)
+    current_assignment, _ = _build_assignment_envelope(root)
+    if current_assignment.fingerprint != assignment.fingerprint:
+        raise RAContextHandoffError("Resource assignment changed during RobotAgent context capture.")
     retrieved_at_ns = time.time_ns()
 
     resource_root = root / "resources" / assignment.selected_resource_jid
@@ -497,7 +500,7 @@ def load_selected_ra_context_snapshot(
     assignment_path = root.joinpath(*_ASSIGNMENT_ROOT, _ASSIGNMENT_NAME)
     if not assignment_path.is_file():
         raise RAContextHandoffError(
-            "Structural primitive drafting requires one completed RobotAgent context capture."
+            "Primitive composition requires one completed RobotAgent context capture."
         )
     persisted_assignment = _assignment_from_mapping(
         _read_json_mapping(assignment_path, "SelectedRAAssignmentEnvelope")
@@ -531,7 +534,7 @@ def _load_latest_selected_ra_context(
         )
     if not state_paths:
         raise RAContextHandoffError(
-            "Structural primitive drafting requires one completed RobotAgent context capture."
+            "Primitive composition requires one completed RobotAgent context capture."
         )
     _next_snapshot_number(
         root,
@@ -1049,8 +1052,33 @@ def _validate_primitive_catalog(value: object) -> list[dict[str, object]]:
                 raise RAContextHandoffError(
                     f"primitive_catalog[{index}].{field} must be an object."
                 )
+        _validate_catalog_schemas(raw_entry)
         result.append(_json_mapping(raw_entry, f"primitive_catalog[{index}]"))
     return result
+
+
+def _validate_catalog_schemas(entry: Mapping[str, object]) -> None:
+    """Keep complete declarations consistent with the captured typed catalog."""
+    for field, typed_field in (
+        ("parameter_schemas", "typed_parameters"),
+        ("result_schemas", "typed_results"),
+    ):
+        if field not in entry:
+            continue
+        schemas = entry[field]
+        typed = entry[typed_field]
+        assert isinstance(schemas, Mapping) and isinstance(typed, list)
+        if set(schemas) != {item["name"] for item in typed}:
+            raise RAContextHandoffError(f"{field} names disagree with {typed_field}.")
+        for item in typed:
+            schema = schemas[item["name"]]
+            declared_type = schema
+            if isinstance(schema, Mapping):
+                declared_type = schema.get("type")
+                if declared_type is None and field == "result_schemas" and schema:
+                    declared_type = "object"
+            if declared_type != item["type"]:
+                raise RAContextHandoffError(f"{field} type disagrees with {typed_field}.")
 
 
 def _validate_typed_parameters(value: object, entry_index: int) -> None:
@@ -1290,7 +1318,9 @@ def _resolve_ref(root: Path, record_ref: str, *, prefix: tuple[str, ...]) -> Pat
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise RAContextHandoffError("RobotAgent context record ref leaves its interaction.") from exc
+        raise RAContextHandoffError(
+            "RobotAgent context record ref leaves its interaction."
+        ) from exc
     return path
 
 

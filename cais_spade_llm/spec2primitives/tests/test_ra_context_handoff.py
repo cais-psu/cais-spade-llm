@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-"""Tests for selected-RA context capture and structural primitive drafts."""
+"""Tests for selected-RA context capture and direct primitive composition."""
 
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -18,17 +20,21 @@ from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
 from cais_spade_llm.spec2primitives.adapters.in_process_robot_agent import (
     InProcessRobotAgentCompositionRuntime,
 )
-from cais_spade_llm.spec2primitives.agents.ra import context_handoff
+from cais_spade_llm.spec2primitives.agents.ra import (
+    composition_context,
+    context_handoff,
+    primitive_composition,
+)
 from cais_spade_llm.spec2primitives.agents.ra.context_handoff import (
     RAContextHandoffError,
     SelectedRAAssignmentEnvelope,
     activate_selected_ra_context,
     read_phase_5_1_diagnostic,
 )
-from cais_spade_llm.spec2primitives.agents.ra.primitive_draft import (
-    PrimitiveDraftError,
-    author_primitive_program_draft,
-    read_phase_5_2_diagnostic,
+from cais_spade_llm.spec2primitives.agents.ra.primitive_composition import (
+    PrimitiveCompositionError,
+    author_primitive_program_candidate,
+    read_primitive_composition_diagnostic,
 )
 from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
     persist_native_completion_fixture,
@@ -94,7 +100,7 @@ class _LiveRobotAgent:
         alive: bool = True,
         robot_state: dict[str, object] | None = None,
         primitive_catalog: list[dict[str, object]] | None = None,
-        draft_response: dict[str, object] | None = None,
+        composition_response: dict[str, object] | None = None,
         feasibility_allowed: bool = True,
     ) -> None:
         self.jid = jid
@@ -112,12 +118,10 @@ class _LiveRobotAgent:
         self.primitive_catalog = (
             primitive_catalog if primitive_catalog is not None else _raw_live_catalog()
         )
-        self.draft_response = draft_response or {
-            "draft_status": "proposed",
-            "primitive_symbols": ["compute_pick_targets", "grasp_part"],
-            "unsupported_reason": None,
+        self.composition_response = composition_response or {
+            "action": _program_action([("compute_pick_targets", {}), ("grasp_part", {})])
         }
-        self.draft_calls: list[dict[str, object]] = []
+        self.composition_calls: list[dict[str, object]] = []
         self.feasibility_allowed = feasibility_allowed
         self.feasibility_calls: list[dict[str, object]] = []
 
@@ -160,7 +164,7 @@ class _LiveRobotAgent:
         max_tool_rounds: int = 3,
         include_agent_instructions: bool = True,
     ) -> dict[str, object]:
-        self.draft_calls.append(
+        self.composition_calls.append(
             {
                 "prompt": prompt,
                 "response_format": deepcopy(response_format),
@@ -169,21 +173,22 @@ class _LiveRobotAgent:
                 "include_agent_instructions": include_agent_instructions,
             }
         )
-        return deepcopy(self.draft_response)
+        return deepcopy(self.composition_response)
 
 
-class _StructuralDraftRuntime:
-    def __init__(self, response: dict[str, object]) -> None:
-        self.response = response
-        self.calls: list[dict[str, object]] = []
+class _ProgramRuntime:
+    def __init__(self, actions: list[dict[str, Any]], *, on_call: Callable | None = None) -> None:
+        self.actions = actions
+        self.calls: list[dict[str, Any]] = []
+        self.on_call = on_call
 
-    async def author_structural_draft(
+    async def author_composition_action(
         self,
         assignment: SelectedRAAssignmentEnvelope,
         *,
         prompt: str,
-        response_format: dict[str, object],
-    ) -> dict[str, object]:
+        response_format: Mapping,
+    ) -> dict[str, Any]:
         self.calls.append(
             {
                 "assignment": assignment,
@@ -191,7 +196,9 @@ class _StructuralDraftRuntime:
                 "response_format": deepcopy(response_format),
             }
         )
-        return deepcopy(self.response)
+        if self.on_call is not None:
+            self.on_call()
+        return {"action": deepcopy(self.actions[min(len(self.calls) - 1, len(self.actions) - 1)])}
 
 
 class _LiveRobotAgentHost:
@@ -488,60 +495,49 @@ def test_in_process_ra_adapter_captures_exact_live_state_and_atomic_catalog(
         [{"name": "part_name", "type": "string", "required": False}]
     )
     assert detect_parts["typed_results"] == [{"name": "pose", "type": "object"}]
+    assert detect_parts["parameter_schemas"] == raw_catalog[2]["params"]
+    assert detect_parts["result_schemas"] == raw_catalog[2]["output_schema"]
     assert detect_parts["conditions"] == {"controller_ready": True}
     assert detect_parts["effects"] == {"part_observed": True}
     assert raw_catalog == _raw_live_catalog()
 
 
-def test_in_process_ra_adapter_asks_exact_robot_agent_for_structural_draft(
-    tmp_path: Path,
-) -> None:
-    completion = persist_native_completion_fixture(tmp_path).to_record()
-    agent = _LiveRobotAgent()
-    host = _LiveRobotAgentHost([agent])
-    runtime = InProcessRobotAgentCompositionRuntime(host)
-    asyncio.run(activate_selected_ra_context(runtime, tmp_path))
-
-    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
-
-    assert draft.path.name == "draft_0001.json"
-    assert draft.record["structural_steps"] == [
-        {"step_index": 1, "primitive_symbol": "compute_pick_targets"},
-        {"step_index": 2, "primitive_symbol": "grasp_part"},
+def test_in_process_ra_adapter_asks_exact_robot_agent_for_primitive_program(tmp_path: Path) -> None:
+    """Author directly from captured context with one isolated selected-RA call."""
+    runtime, agent, _ = _prepare_composition(tmp_path)
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.path.name == "candidate.json"
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": "compute_pick_targets", "params": {}},
+        {"primitive_symbol": "grasp_part", "params": {}},
     ]
-    assert len(agent.draft_calls) == 1
-    call = agent.draft_calls[0]
+    assert len(agent.composition_calls) == 1
+    call = agent.composition_calls[0]
     assert call["tools"] is None
     assert call["max_tool_rounds"] == 0
     assert call["include_agent_instructions"] is False
-    assert "assemble medium gear" in str(call["prompt"])
-    assert "The medium gear is assembled as requested." in str(call["prompt"])
     composition_input = _composition_input_from_prompt(call["prompt"])
+    assert composition_input["target_feature"]["product_requirement"] == "assemble medium gear"
     projection = composition_input["ontology_projection"]
+    assert set(projection) == {"tbox_fingerprint", "abox_fingerprint", "subjects", "predicates"}
+    view = read_primitive_composition_diagnostic(tmp_path)
     final_view_path = sorted((tmp_path / "products/grounding/product_context").glob("view_*.json"))[
         -1
     ]
-    final_view = _read_json(final_view_path)
-    assert set(projection) == {"tbox_fingerprint", "abox_fingerprint", "assertions"}
-    assert projection["tbox_fingerprint"] == completion["tbox_fingerprint"]
-    assert projection["abox_fingerprint"] == completion["abox_fingerprint"]
-    assert projection["assertions"] == final_view["assertions"]
-    serialized_projection = json.dumps(projection, sort_keys=True)
-    for excluded_field in (
-        "typed_bindings",
-        "uncertainty",
-        "attempted_evidence",
-        "translated_location_m",
-    ):
-        assert excluded_field not in serialized_projection
-    response_schema = call["response_format"]
-    assert response_schema["schema"]["type"] == "object"
-    assert response_schema["schema"]["properties"]["primitive_symbols"]["items"]["enum"] == (
-        _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+    assert (
+        view["composition_input"]["ontology_projection"]["assertions"]
+        == _read_json(final_view_path)["assertions"]
     )
+    variants = call["response_format"]["schema"]["properties"]["action"]["anyOf"]
+    proposal = next(item for item in variants if item["properties"]["kind"]["enum"] == ["propose"])
+    assert (
+        proposal["properties"]["primitive_steps"]["items"]["properties"]["primitive_symbol"]["enum"]
+        == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+    )
+    assert not (tmp_path / "composition/primitive_program_drafts").exists()
 
 
-def test_phase_5_2_rejects_assignment_inconsistent_ontology_projection(
+def test_composition_rejects_assignment_inconsistent_ontology_projection(
     tmp_path: Path,
 ) -> None:
     completion = persist_native_completion_fixture(tmp_path).to_record()
@@ -563,55 +559,47 @@ def test_phase_5_2_rejects_assignment_inconsistent_ontology_projection(
     completion["fingerprint"] = _record_fingerprint(completion)
     _write_json(completion_path, completion)
 
-    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
-    runtime = _StructuralDraftRuntime(
-        {
-            "draft_status": "proposed",
-            "primitive_symbols": ["detect_parts"],
-            "unsupported_reason": None,
-        }
-    )
-
-    with pytest.raises(PrimitiveDraftError, match="runsOnResource"):
-        asyncio.run(author_primitive_program_draft(runtime, tmp_path))
-
+    adapter = InProcessRobotAgentCompositionRuntime(_LiveRobotAgentHost([_LiveRobotAgent()]))
+    asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+    runtime = _ProgramRuntime([_program_action([("release_part", {})])])
+    with pytest.raises(RAContextHandoffError, match="runsOnResource"):
+        asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
     assert runtime.calls == []
-    assert not (tmp_path / "composition/primitive_program_drafts").exists()
+    assert not (tmp_path / "composition/primitive_program_candidates").exists()
 
 
-def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
-    tmp_path: Path,
-) -> None:
-    persist_native_completion_fixture(tmp_path)
-    context_runtime = _AssignedContextRuntime()
-    first_context = asyncio.run(activate_selected_ra_context(context_runtime, tmp_path))
-    phase_4_path = tmp_path / "interaction_record/context_completion_0001.json"
-    phase_4_bytes = phase_4_path.read_bytes()
-    state_bytes = first_context.robot_state_path.read_bytes()
-    catalog_bytes = first_context.primitive_catalog_path.read_bytes()
-    draft_runtime = _StructuralDraftRuntime(
-        {
-            "draft_status": "proposed",
-            "primitive_symbols": ["detect_parts", "move_pose", "detect_parts"],
-            "unsupported_reason": None,
+def test_composition_pins_context_and_preserves_phase_4(tmp_path: Path) -> None:
+    """A program pins its own authority without copying or editing source records."""
+    adapter, _, _ = _prepare_composition(tmp_path)
+    context = context_handoff.load_selected_ra_context_snapshot(tmp_path)
+    paths = {
+        "pa_completion": tmp_path / "interaction_record/context_completion_0001.json",
+        "assignment": context.assignment_path,
+        "robot_state": context.robot_state_path,
+        "primitive_catalog": context.primitive_catalog_path,
+    }
+    before = {name: path.read_bytes() for name, path in paths.items()}
+    original_records = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    runtime = _ProgramRuntime(
+        [_program_action([("detect_parts", {}), ("move_cartesian", {}), ("detect_parts", {})])]
+    )
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    request = _read_json(candidate.path.parent / "request.json")
+    assert request["context_refs"] == {
+        name: {
+            "ref": path.relative_to(tmp_path).as_posix(),
+            "sha256": hashlib.sha256(before[name]).hexdigest(),
         }
-    )
-
-    first = asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
-    diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
-
-    assert first.path.relative_to(tmp_path).as_posix() == (
-        "composition/primitive_program_drafts/draft_0001.json"
-    )
-    assert diagnostic["status"] == "draft_authored"
-    assert diagnostic["primitive_symbols"] == [
-        "detect_parts",
-        "move_pose",
-        "detect_parts",
+        for name, path in paths.items()
+    }
+    assert "draft_ref" not in request
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": symbol, "params": {}}
+        for symbol in ("detect_parts", "move_cartesian", "detect_parts")
     ]
-    delivered_input = _composition_input_from_prompt(draft_runtime.calls[0]["prompt"])
+    diagnostic = read_primitive_composition_diagnostic(tmp_path)
     composition_input = diagnostic["composition_input"]
-    assert composition_input == delivered_input
+    assert diagnostic["status"] == "proposed"
     assert set(composition_input) == {
         "target_feature",
         "selected_resource",
@@ -620,24 +608,16 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
         "primitive_catalog",
         "grounded_context",
     }
-    assert composition_input["robot_state"] == first_context.robot_state.robot_state
+    assert composition_input["robot_state"] == context.robot_state.robot_state
     assert composition_input["primitive_catalog"] == list(
-        first_context.primitive_catalog.primitive_catalog
+        context.primitive_catalog.primitive_catalog
     )
-    projection = composition_input["ontology_projection"]
-    assert isinstance(projection, dict)
-    assert projection["assertions"]
-    grounded_context = composition_input["grounded_context"]
-    assert isinstance(grounded_context, dict)
-    assert set(grounded_context) == {"typed_records"}
+    assert composition_input["ontology_projection"]["assertions"]
     target_feature = composition_input["target_feature"]
     assert target_feature["product_requirement"] == "assemble medium gear"
-    assert target_feature["desired_state"]["statement"]["text"] == (
-        "The medium gear is assembled as requested."
-    )
-    assert target_feature["current_state"]["state_values"][0]["name"] == ("medium_gear_location")
-    assert target_feature["desired_state"]["state_values"][0]["name"] == (
-        "assembly_board_shaft_location"
+    assert (
+        target_feature["desired_state"]["statement"]["text"]
+        == "The medium gear is assembled as requested."
     )
     assert {item["name"] for item in target_feature["resolved_state_values"]} == {
         "medium_gear_location",
@@ -648,58 +628,31 @@ def test_phase_5_2_persists_one_unbound_draft_per_context_pair(
         "current_state",
         "current_state",
     ]
-    assert "task" not in composition_input
     assert all(
-        set(record) == {"record_type", "record_ref"} for record in grounded_context["typed_records"]
+        set(item) == {"record_ref", "record_type"}
+        for item in composition_input["grounded_context"]["typed_records"]
     )
-    serialized_input = json.dumps(composition_input, sort_keys=True)
-    for excluded_field in (
-        "raw_turtle",
-        "typed_bindings",
-        "attempted_evidence",
-        "parameter_bindings",
-    ):
-        assert excluded_field not in serialized_input
-    serialized = json.dumps(first.to_record())
-    assert "primitive_steps" not in serialized
-    assert "typed_parameters" not in serialized
-    assert "parameter_bindings" not in serialized
+    delivered = _composition_input_from_prompt(runtime.calls[0]["prompt"])
+    assert delivered["target_feature"] == target_feature
+    assert delivered["robot_state"] == composition_input["robot_state"]
+    assert "structural_steps" not in delivered
+    serialized = json.dumps(candidate.to_record())
     assert "composition_input" not in serialized
     assert "ontology_projection" not in serialized
-    assert phase_4_path.read_bytes() == phase_4_bytes
-    assert first_context.robot_state_path.read_bytes() == state_bytes
-    assert first_context.primitive_catalog_path.read_bytes() == catalog_bytes
-    with pytest.raises(PrimitiveDraftError, match="already has"):
-        asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
-
-    asyncio.run(activate_selected_ra_context(context_runtime, tmp_path))
-    assert read_phase_5_2_diagnostic(tmp_path).status == "ready_for_draft"
-    second = asyncio.run(author_primitive_program_draft(draft_runtime, tmp_path))
-    assert second.path.name == "draft_0002.json"
-    assert (
-        first.path.read_bytes()
-        == json.dumps(first.to_record(), indent=2, sort_keys=True).encode("utf-8") + b"\n"
-    )
+    assert {name: path.read_bytes() for name, path in paths.items()} == before
+    assert not (tmp_path / "composition/primitive_program_drafts").exists()
+    second = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert second.path.parent.name == "attempt_0002"
+    assert second.record["primitive_steps"] == candidate.record["primitive_steps"]
+    assert {path: path.read_bytes() for path in original_records} == original_records
 
 
-def test_ra_receives_resolved_target_state_values_without_persisting_them(
-    tmp_path: Path,
-) -> None:
-    persist_native_completion_fixture(
-        tmp_path,
-        include_target_state_values=True,
-    )
-    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
-    runtime = _StructuralDraftRuntime(
-        {
-            "draft_status": "proposed",
-            "primitive_symbols": ["detect_parts", "move_pose"],
-            "unsupported_reason": None,
-        }
-    )
-
-    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
-
+def test_ra_receives_resolved_target_state_values_without_persisting_them(tmp_path: Path) -> None:
+    persist_native_completion_fixture(tmp_path, include_target_state_values=True)
+    adapter = InProcessRobotAgentCompositionRuntime(_LiveRobotAgentHost([_LiveRobotAgent()]))
+    asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+    runtime = _ProgramRuntime([_program_action([("detect_parts", {}), ("move_cartesian", {})])])
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
     composition_input = _composition_input_from_prompt(runtime.calls[0]["prompt"])
     assert "task" not in composition_input
     target_feature = composition_input["target_feature"]
@@ -708,98 +661,55 @@ def test_ra_receives_resolved_target_state_values_without_persisting_them(
         "specified_finish",
         "specified_coating",
     ]
-    resolved_by_name = {item["name"]: item for item in target_feature["resolved_state_values"]}
-    assert resolved_by_name["specified_finish"]["resolved_value"] == "matte"
-    assert resolved_by_name["specified_coating"]["resolved_value"] == "primer"
-    assert resolved_by_name["specified_finish"]["value_ref"]["field_path"] == ("/overview/summary")
-    assert resolved_by_name["specified_coating"]["value_ref"]["field_path"] == (
-        "/overview/observations/0"
-    )
-    serialized_draft = json.dumps(draft.to_record(), sort_keys=True)
-    assert "target_feature" not in serialized_draft
-    assert "specified_finish" not in serialized_draft
+    resolved = {item["name"]: item for item in target_feature["resolved_state_values"]}
+    assert resolved["specified_finish"]["resolved_value"] == "matte"
+    assert resolved["specified_coating"]["resolved_value"] == "primer"
+    assert resolved["specified_finish"]["value_ref"]["field_path"] == "/overview/summary"
+    assert resolved["specified_coating"]["value_ref"]["field_path"] == "/overview/observations/0"
+    serialized = json.dumps(candidate.to_record())
+    assert "target_feature" not in serialized
+    assert "specified_finish" not in serialized
 
 
-def test_phase_5_2_diagnostic_blocks_mismatched_draft_evidence_ref(
-    tmp_path: Path,
-) -> None:
-    persist_native_completion_fixture(tmp_path)
-    context = asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
-    runtime = _StructuralDraftRuntime(
-        {
-            "draft_status": "proposed",
-            "primitive_symbols": ["detect_parts"],
-            "unsupported_reason": None,
-        }
-    )
-    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
-    assignment_record = _read_json(context.assignment_path)
-    altered = draft.to_record()
-    altered["robot_state_ref"] = context.assignment_path.relative_to(tmp_path).as_posix()
-    altered["robot_state_sha256"] = hashlib.sha256(context.assignment_path.read_bytes()).hexdigest()
-    altered["robot_state_fingerprint"] = assignment_record["fingerprint"]
-    altered["fingerprint"] = _record_fingerprint(altered)
-    _write_json(draft.path, altered)
-
-    diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
-
+def test_composition_diagnostic_blocks_mismatched_context_role(tmp_path: Path) -> None:
+    _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime([_program_action([("detect_parts", {})])])
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    request_path = candidate.path.parent / "request.json"
+    request = _read_json(request_path)
+    request["context_refs"]["robot_state"] = request["context_refs"]["assignment"]
+    _write_program_record(request_path, request)
+    diagnostic = read_primitive_composition_diagnostic(tmp_path)
     assert diagnostic["status"] == "blocked"
-    assert diagnostic["draft"] is None
-    assert diagnostic["composition_input"] is None
-    assert diagnostic["failure"] == (
-        "PrimitiveProgramDraft robot_state_ref does not match its active context."
-    )
+    assert diagnostic["candidate"] is None
+    assert "wrong role" in diagnostic["message"]
     assert len(runtime.calls) == 1
 
 
-@pytest.mark.parametrize(
-    ("response", "expected_status"),
-    [
-        (
-            {
-                "draft_status": "unsupported",
-                "primitive_symbols": [],
-                "unsupported_reason": "The catalog has no insertion behavior.",
-            },
-            "unsupported",
-        ),
-        (
-            {
-                "draft_status": "proposed",
-                "primitive_symbols": ["invented_primitive"],
-                "unsupported_reason": None,
-            },
-            None,
-        ),
-    ],
-)
-def test_phase_5_2_handles_unsupported_and_unknown_symbols(
-    tmp_path: Path,
-    response: dict[str, object],
-    expected_status: str | None,
+@pytest.mark.parametrize("unsupported", [True, False])
+def test_composition_handles_unsupported_and_unknown_symbols(
+    tmp_path: Path, unsupported: bool
 ) -> None:
-    persist_native_completion_fixture(tmp_path)
-    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
-    runtime = _StructuralDraftRuntime(response)
-
-    if expected_status is None:
-        with pytest.raises(PrimitiveDraftError, match="unknown primitive"):
-            asyncio.run(author_primitive_program_draft(runtime, tmp_path))
-        assert not (tmp_path / "composition/primitive_program_drafts").exists()
-        return
-
-    draft = asyncio.run(author_primitive_program_draft(runtime, tmp_path))
-    diagnostic = read_phase_5_2_diagnostic(tmp_path).to_view()
-    assert draft.record["structural_steps"] == []
-    assert diagnostic["status"] == expected_status
-    assert diagnostic["unsupported_reason"] == ("The catalog has no insertion behavior.")
+    _prepare_composition(tmp_path)
+    action = (
+        {"kind": "unsupported", "reason": "The catalog has no insertion behavior."}
+        if unsupported
+        else _program_action([("invented_primitive", {})])
+    )
+    runtime = _ProgramRuntime([action])
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.record["status"] == ("unsupported" if unsupported else "invalid")
+    diagnostic = read_primitive_composition_diagnostic(tmp_path)
+    assert diagnostic["status"] == candidate.record["status"]
     assert isinstance(diagnostic["composition_input"], dict)
+    assert not (tmp_path / "composition/primitive_program_drafts").exists()
 
 
 def test_default_xarm6_robot_agent_owns_eight_synthesis_primitives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from cais_spade_llm import agent_creator
+    from cais_spade_llm.resources.resource_primitives import build_primitive_reference_card
 
     monkeypatch.setattr(agent_creator, "ROBOT_ENV", "gazebo")
     monkeypatch.setattr(agent_creator, "_EXECUTION_MODE_OVERRIDE", "dry_run")
@@ -820,6 +730,16 @@ def test_default_xarm6_robot_agent_owns_eight_synthesis_primitives(
         "y": 0.0,
         "z": 0.0,
     }
+    recovery_catalog = agent.recovery_synthesis_primitive_catalog()
+    entries = {entry["name"]: entry for entry in recovery_catalog}
+    assert "current_state" in entries["grasp_part"]["effects"]
+    pick = entries["compute_pick_targets"]
+    assert "product_geometry" not in pick["required_params"]
+    assert pick["params"]["product_geometry"]["properties"]["board_center"]["properties"]["z"]["type"] == "number"
+    assert "insert_pose" in entries["compute_place_targets"]["output_schema"]
+    card = build_primitive_reference_card(recovery_catalog)
+    assert "product_geometry:object" in card
+    assert "product_geometry:object required" not in card
 
 
 @pytest.mark.parametrize(
@@ -877,6 +797,13 @@ def test_context_only_robot_agent_has_no_tools_failures_or_controller(
     assert snapshot["tcp_ready"] is False
     synthesis_symbols = [entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()]
     assert synthesis_symbols
+    composer_catalog = in_process_robot_agent._phase_5_1_primitive_catalog(
+        agent.recovery_synthesis_primitive_catalog()
+    )
+    context_handoff._validate_primitive_catalog(composer_catalog)
+    assert all(
+        "parameter_schemas" in entry and "result_schemas" in entry for entry in composer_catalog
+    )
     if resource_name == "xarm6":
         assert synthesis_symbols == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
     messages = [
@@ -1131,6 +1058,41 @@ def test_phase_5_1_rejects_audit_only_completion_v7_before_assignment(
         asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
 
     assert not (tmp_path / "composition/selected_ra_assignments").exists()
+
+
+def test_phase_5_1_rejects_ur5e_response_after_reassignment(tmp_path: Path) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa.resource_reassignment import (
+        reassign_completed_interaction,
+    )
+    from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
+        _reassignment_runtime,
+        _ReassignmentAgent,
+    )
+
+    persist_native_completion_fixture(tmp_path, resource_symbol="ur5e")
+
+    class DelayedUR5eContext(_AssignedContextRuntime):
+        async def request_assigned_context(self, assignment):
+            response = await super().request_assigned_context(assignment)
+            await reassign_completed_interaction(
+                interaction_root=tmp_path,
+                runtime=_reassignment_runtime(),
+                product_agent=_ReassignmentAgent(),
+                requested_resource_symbol="xarm6",
+            )
+            return response
+
+    with pytest.raises(RAContextHandoffError, match="assignment changed during"):
+        asyncio.run(
+            activate_selected_ra_context(
+                DelayedUR5eContext(self_jid="ur5e@localhost"),
+                tmp_path,
+            )
+        )
+    assert not (tmp_path / "resources/ur5e@localhost").exists()
+    diagnostic = read_phase_5_1_diagnostic(tmp_path)
+    assert diagnostic.status == "ready_for_assignment"
+    assert diagnostic.selected_resource_jid == "xarm6@localhost"
 
 
 def test_phase_5_1_dispatches_assignment_and_appends_paired_snapshots(
@@ -1463,6 +1425,439 @@ def test_runtime_failure_leaves_only_assignment_audit(tmp_path: Path) -> None:
     assert diagnostic.assignment_ref == ("composition/selected_ra_assignments/assignment_0001.json")
 
 
+def test_composition_requires_complete_catalog_declarations_before_ra_call(tmp_path: Path) -> None:
+    persist_native_completion_fixture(tmp_path)
+    asyncio.run(activate_selected_ra_context(_AssignedContextRuntime(), tmp_path))
+    runtime = _ProgramRuntime([_program_action([("move_pose", {})])])
+    with pytest.raises(PrimitiveCompositionError, match="Capture a fresh RobotAgent context"):
+        asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert runtime.calls == []
+    assert not (tmp_path / "composition/primitive_program_candidates").exists()
+
+
+def test_catalog_declarations_cannot_disagree_with_typed_snapshot(tmp_path: Path) -> None:
+    persist_native_completion_fixture(tmp_path)
+
+    def change_schema(response: dict[str, Any]) -> None:
+        response["primitive_catalog"][0]["parameter_schemas"] = {"part_name": {"type": "number"}}
+
+    with pytest.raises(RAContextHandoffError, match="type disagrees"):
+        asyncio.run(
+            activate_selected_ra_context(_AssignedContextRuntime(transform=change_schema), tmp_path)
+        )
+
+    _assert_no_ra_context_snapshots(tmp_path)
+
+
+def test_composition_recapture_uses_new_context_and_preserves_old_candidate(
+    tmp_path: Path,
+) -> None:
+    adapter, _, _ = _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime([_program_action([("release_part", {})])])
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    before = candidate.path.read_bytes()
+    asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["status"] == "ready_for_composition"
+    assert view["attempt_count"] == 0
+    assert candidate.path.read_bytes() == before
+
+
+def _prepare_composition(
+    tmp_path: Path,
+) -> tuple[InProcessRobotAgentCompositionRuntime, _LiveRobotAgent, str]:
+    persist_native_completion_fixture(tmp_path)
+    catalog = _raw_live_catalog()
+    catalog[0]["params"]["target_pose"] = {
+        "type": "object",
+        "description": "Observed target in metres.",
+    }
+    catalog[5]["params"]["dz"]["description"] = "Relative displacement in metres."
+    agent = _LiveRobotAgent(primitive_catalog=catalog)
+    runtime = InProcessRobotAgentCompositionRuntime(_LiveRobotAgentHost([agent]))
+    asyncio.run(activate_selected_ra_context(runtime, tmp_path))
+    view = read_primitive_composition_diagnostic(tmp_path)
+    current_ref = view["composition_input"]["target_feature"]["current_state"]["state_values"][0][
+        "value_ref"
+    ]["record_ref"]
+    return runtime, agent, current_ref
+
+
+def _program_action(steps: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    return {
+        "kind": "propose",
+        "primitive_steps": [
+            {"primitive_symbol": symbol, "params": json.dumps(params)} for symbol, params in steps
+        ],
+    }
+
+
+def test_composition_proposes_with_unbound_parameters_and_ignores_draft_history(
+    tmp_path: Path,
+) -> None:
+    """Old drafts cannot seed the program or prevent a proposal with missing geometry."""
+    _prepare_composition(tmp_path)
+    draft = tmp_path / "composition/primitive_program_drafts/draft_0001.json"
+    draft.parent.mkdir()
+    draft.write_text("Historical draft must never reach the composer.")
+    old_attempt = tmp_path / "composition/primitive_program_candidates/attempt_0001"
+    old_attempt.mkdir(parents=True)
+    _write_program_record(
+        old_attempt / "request.json",
+        {
+            "record_type": "PrimitiveCompositionRequest",
+            "draft_ref": draft.relative_to(tmp_path).as_posix(),
+            "draft_sha256": hashlib.sha256(draft.read_bytes()).hexdigest(),
+            "prompt": "Historical program must never reach the composer.",
+        },
+    )
+    (old_attempt / "candidate.json").write_text("Immutable historical candidate.")
+    preserved = {path: path.read_bytes() for path in (draft, *old_attempt.iterdir())}
+    steps = [("grasp_part", {}), ("move_cartesian", {"x": 0.2}), ("release_part", {})]
+    runtime = _ProgramRuntime([_program_action(steps)])
+
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+
+    assert candidate.record["status"] == "proposed"
+    assert candidate.path.parent.name == "attempt_0002"
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": symbol, "params": params} for symbol, params in steps
+    ]
+    assert len(runtime.calls) == 1
+    assert all("Historical" not in call["prompt"] for call in runtime.calls)
+    assert {path: path.read_bytes() for path in preserved} == preserved
+    diagnostic = read_primitive_composition_diagnostic(tmp_path)
+    assert diagnostic["status"] == "proposed"
+    assert diagnostic["attempt_count"] == 1
+    assert "Omit any parameter" in runtime.calls[0]["prompt"]
+    assert "including required parameters" in runtime.calls[0]["prompt"]
+    variants = runtime.calls[0]["response_format"]["schema"]["properties"]["action"]["anyOf"]
+    assert ["missing_context"] not in [item["properties"]["kind"]["enum"] for item in variants]
+
+
+def test_composition_keeps_event_loop_responsive_during_evidence_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow evidence I/O permits connection heartbeats between RA decisions."""
+    _, _, current_ref = _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime(
+        [
+            {"kind": "read_record", "record_ref": current_ref, "field_path": ""},
+            _program_action([("move_cartesian", {})]),
+        ]
+    )
+    blocked: list[str] = []
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+
+        def slow_check(reader: Callable) -> Callable:
+            def read(*args: Any) -> Any:
+                heartbeat = Event()
+                loop.call_soon_threadsafe(heartbeat.set)
+                if not heartbeat.wait(timeout=0.5):
+                    blocked.append(reader.__name__)
+                return reader(*args)
+
+            return read
+
+        with monkeypatch.context() as patch:
+            for name in (
+                "_load_inputs",
+                "_read_composition_history",
+                "_serve_evidence",
+                "_validate_steps",
+            ):
+                patch.setattr(
+                    primitive_composition, name, slow_check(getattr(primitive_composition, name))
+                )
+            candidate = await author_primitive_program_candidate(runtime, tmp_path)
+        assert candidate.record["status"] == "proposed"
+
+    asyncio.run(scenario())
+    assert len(runtime.calls) == 2
+    assert blocked == [], f"Evidence checks blocked connection heartbeats: {blocked}"
+
+
+def test_parameterized_composition_reads_evidence_and_preserves_ra_decisions(
+    tmp_path: Path,
+) -> None:
+    _, agent, current_ref = _prepare_composition(tmp_path)
+    location = {"value_ref": {"record_ref": current_ref, "field_path": "/translated_location_m/0"}}
+    output = {"result_ref": {"step_index": 1, "field_path": "/target_pose/y"}}
+    steps = [
+        ("compute_pick_targets", {"part_name": "medium gear", "target_pose": {"x": location}}),
+        ("move_cartesian", {"x": location, "y": output, "z": 1.2}),
+        ("move_relative", {"dx": 0, "dy": 0, "dz": 0.07}),
+        ("move_relative", {"dx": 0, "dy": 0, "dz": -0.02}),
+    ]
+    runtime = _ProgramRuntime(
+        [
+            {
+                "kind": "read_record",
+                "record_ref": current_ref,
+                "field_path": "/translated_location_m",
+            },
+            {
+                "kind": "query_ontology",
+                "subject": None,
+                "predicate": "http://PAonto.com#defines",
+                "object": None,
+                "offset": 0,
+            },
+            _program_action(steps),
+        ]
+    )
+
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+
+    assert candidate.record["status"] == "proposed"
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": symbol, "params": params} for symbol, params in steps
+    ]
+    assert not (tmp_path / "composition/primitive_program_drafts").exists()
+    assert len(runtime.calls) == 3
+    assert (
+        len(agent.composition_calls) == 0
+    )  # Context capture never calls the LLM or executes controller/observation APIs.
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["status"] == "proposed"
+    assert (
+        view["trace"][0]["result"]["value"]
+        == _read_json(tmp_path / current_ref)["translated_location_m"]
+    )
+    assert view["trace"][1]["result"]["assertions"]
+    assert all(
+        item["predicate"] == "http://PAonto.com#defines"
+        for item in view["trace"][1]["result"]["assertions"]
+    )
+    assert "unvalidated" in view["message"]
+    prompt = runtime.calls[0]["prompt"]
+    initial_input = json.loads(
+        prompt.split("COMPOSITION_INPUT\n", 1)[1].split("\n\nEXCHANGES", 1)[0]
+    )
+    assert "assertions" not in initial_input["ontology_projection"]
+    assert initial_input["ontology_projection"]["subjects"]
+    assert initial_input["target_feature"]["current_state"]
+    assert initial_input["target_feature"]["desired_state"]
+    assert (
+        initial_input["primitive_catalog"][5]["parameter_schemas"]["dz"]["description"]
+        == "Relative displacement in metres."
+    )
+    assert "/capability_decompositions/" not in prompt
+    assert "/memo/" not in prompt
+
+
+def test_parameterized_composition_uses_only_selected_ra_isolated_llm(tmp_path: Path) -> None:
+    runtime, agent, _ = _prepare_composition(tmp_path)
+    agent.composition_response = {
+        "action": _program_action(
+            [
+                ("release_part", {}),
+                ("move_relative", {"dx": 0, "dy": 0, "dz": 0.1}),
+            ]
+        )
+    }
+
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+
+    assert candidate.record["status"] == "proposed"
+    call = agent.composition_calls[-1]
+    assert call["tools"] is None
+    assert call["max_tool_rounds"] == 0
+    assert call["include_agent_instructions"] is False
+    assert call["response_format"]["name"] == "spec2primitives_primitive_composition"
+    assert agent.feasibility_calls == []
+    assert [step["primitive_symbol"] for step in candidate.record["primitive_steps"]] == [
+        "release_part",
+        "move_relative",
+    ]  # Structural acceptance deliberately does not certify this sequence's semantics.
+
+
+@pytest.mark.parametrize(
+    ("symbol", "params", "reason"),
+    [
+        ("invented_primitive", {}, "unknown primitive_symbol"),
+        ("release_part", {"invented": 1}, "unknown parameters"),
+        ("move_relative", {"dx": False, "dy": 0, "dz": 0}, "declared type number"),
+        ("move_relative", {"dx": "0.1", "dy": 0, "dz": 0}, "declared type number"),
+        (
+            "move_relative",
+            {
+                "dx": 0,
+                "dy": 0,
+                "dz": {"result_ref": {"step_index": 1, "field_path": "/target_pose/x"}},
+            },
+            "earlier step",
+        ),
+        (
+            "move_relative",
+            {
+                "dx": 0,
+                "dy": 0,
+                "dz": {"value_ref": {"record_ref": "evaluations/answer.json", "field_path": "/z"}},
+            },
+            "not approved",
+        ),
+    ],
+)
+def test_parameterized_composition_rejects_without_repair(
+    tmp_path: Path,
+    symbol: str,
+    params: dict[str, Any],
+    reason: str,
+) -> None:
+    _prepare_composition(tmp_path)
+    action = _program_action([(symbol, params)])
+    runtime = _ProgramRuntime([action])
+
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+
+    assert candidate.record["status"] == "invalid"
+    assert reason in candidate.record["reason"]
+    assert len(runtime.calls) == 1
+    assert candidate.record["primitive_steps"] == [{"primitive_symbol": symbol, "params": params}]
+    trace = read_primitive_composition_diagnostic(tmp_path)["trace"]
+    assert trace[0]["response"] == {"action": action}
+
+
+@pytest.mark.parametrize("pointer", ["/target_pose/missing", "/undeclared", "/target_pose/~2"])
+def test_parameterized_composition_rejects_undeclared_result_paths(
+    tmp_path: Path, pointer: str
+) -> None:
+    _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime(
+        [
+            _program_action(
+                [
+                    ("compute_pick_targets", {"part_name": "medium gear"}),
+                    (
+                        "move_cartesian",
+                        {
+                            "x": 0,
+                            "y": 0,
+                            "z": {"result_ref": {"step_index": 1, "field_path": pointer}},
+                        },
+                    ),
+                ]
+            )
+        ]
+    )
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.record["status"] == "invalid"
+
+
+def test_parameterized_composition_cannot_read_unapproved_or_traversing_refs(
+    tmp_path: Path,
+) -> None:
+    _, _, current_ref = _prepare_composition(tmp_path)
+    secret_path = tmp_path / "evaluations/answer.json"
+    secret_path.parent.mkdir()
+    secret_path.write_text('{"answer": "must not reach RA"}')
+    runtime = _ProgramRuntime(
+        [
+            {"kind": "read_record", "record_ref": "evaluations/answer.json", "field_path": ""},
+            {"kind": "read_record", "record_ref": "../answer.json", "field_path": ""},
+            {
+                "kind": "read_record",
+                "record_ref": current_ref,
+                "field_path": "/translated_location_m/01",
+            },
+            _program_action([("move_cartesian", {})]),
+        ]
+    )
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.record["status"] == "proposed"
+    assert all("must not reach RA" not in call["prompt"] for call in runtime.calls)
+    trace = read_primitive_composition_diagnostic(tmp_path)["trace"]
+    assert all("error" in exchange["result"] for exchange in trace[:3])
+
+
+def test_parameterized_composition_stops_changed_evidence_and_preserves_response(
+    tmp_path: Path,
+) -> None:
+    _, _, current_ref = _prepare_composition(tmp_path)
+
+    def change_evidence() -> None:
+        path = tmp_path / current_ref
+        path.write_text(path.read_text() + "\n")
+
+    action = _program_action([("release_part", {})])
+    runtime = _ProgramRuntime([action], on_call=change_evidence)
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.record["status"] != "proposed"
+    assert len(runtime.calls) == 1
+    exchange = _read_json(candidate.path.parent / "exchange_0001.json")
+    assert exchange["response"] == {"action": action}
+    assert read_primitive_composition_diagnostic(tmp_path)["status"] == "blocked"
+
+
+def test_parameterized_composition_budget_and_independent_attempts(tmp_path: Path) -> None:
+    _, _, current_ref = _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime(
+        [
+            {
+                "kind": "read_record",
+                "record_ref": current_ref,
+                "field_path": "/translated_location_m",
+            },
+        ]
+    )
+    first = asyncio.run(
+        author_primitive_program_candidate(runtime, tmp_path, max_evidence_requests=1)
+    )
+    assert first.record["status"] == "budget_exhausted"
+    assert len(runtime.calls) == 2
+    assert len(first.record["exchange_refs"]) == 2
+    before = first.path.read_bytes()
+    fresh = _ProgramRuntime(
+        [{"kind": "unsupported", "reason": "A required capability is unavailable."}]
+    )
+    second = asyncio.run(
+        author_primitive_program_candidate(fresh, tmp_path, max_evidence_requests=0)
+    )
+    assert second.path.parent.name == "attempt_0002"
+    assert second.record["status"] == "unsupported"
+    assert first.path.read_bytes() == before
+    assert (
+        json.loads(fresh.calls[0]["prompt"].split("EXCHANGES\n", 1)[1].split("\nEvidence", 1)[0])
+        == []
+    )
+    assert read_primitive_composition_diagnostic(tmp_path)["attempt_count"] == 2
+
+
+def test_parameterized_composition_blocks_changed_trace_before_ra_call(tmp_path: Path) -> None:
+    _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime([_program_action([("release_part", {})])])
+    first = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    path = first.path.parent / "exchange_0001.json"
+    path.write_text(path.read_text() + "\n")
+    fresh = _ProgramRuntime([_program_action([("release_part", {})])])
+    with pytest.raises(PrimitiveCompositionError, match="exchange changed"):
+        asyncio.run(author_primitive_program_candidate(fresh, tmp_path))
+    assert fresh.calls == []
+
+
+@pytest.mark.parametrize("params", ['{"part_name":"a","part_name":"b"}', '{"part_name":NaN}'])
+def test_parameterized_composition_rejects_ambiguous_json(tmp_path: Path, params: str) -> None:
+    _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime(
+        [
+            {
+                "kind": "propose",
+                "primitive_steps": [
+                    {"primitive_symbol": "grasp_part", "params": params},
+                ],
+            }
+        ]
+    )
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.record["status"] == "invalid"
+    assert len(runtime.calls) == 1
+
+
 def _valid_catalog() -> list[dict[str, Any]]:
     return [
         {
@@ -1624,17 +2019,17 @@ def _record_fingerprint(value: Mapping[str, object]) -> str:
 
 
 def _composition_input_from_prompt(value: object) -> dict[str, Any]:
-    marker = "\n\nCOMPOSITION_INPUT\n"
+    marker = "COMPOSITION_INPUT\n"
     _prefix, separator, serialized = str(value).partition(marker)
     assert separator == marker
-    composition_input = json.loads(serialized)
+    composition_input = json.loads(serialized.split("\n\nEXCHANGES", 1)[0])
     assert isinstance(composition_input, dict)
     return composition_input
 
 
 @pytest.mark.parametrize("artifact", ["completion", "proposal"])
 @pytest.mark.parametrize("retired_field", ["schema_version", "semantic_review_ref"])
-def test_incompatible_completion_cannot_activate_ra_or_draft(tmp_path, artifact, retired_field):
+def test_incompatible_completion_cannot_activate_ra_or_compose(tmp_path, artifact, retired_field):
     completion = persist_native_completion_fixture(tmp_path).to_record()
     path = tmp_path / (
         "interaction_record/context_completion_0001.json"
@@ -1651,6 +2046,623 @@ def test_incompatible_completion_cannot_activate_ra_or_draft(tmp_path, artifact,
 
     with pytest.raises(RAContextHandoffError, match="requires"):
         asyncio.run(activate_selected_ra_context(UncalledRuntime(), tmp_path))
-    with pytest.raises((RAContextHandoffError, PrimitiveDraftError)):
-        asyncio.run(author_primitive_program_draft(UncalledRuntime(), tmp_path))
+    with pytest.raises((RAContextHandoffError, PrimitiveCompositionError)):
+        asyncio.run(author_primitive_program_candidate(UncalledRuntime(), tmp_path))
     assert not (tmp_path / "composition").exists()
+
+
+def _write_program_record(path: Path, value: Mapping[str, Any]) -> None:
+    payload = {key: item for key, item in value.items() if key != "fingerprint"}
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
+    ).hexdigest()
+    _write_json(path, {**payload, "fingerprint": fingerprint})
+
+
+def _declared_geometry_catalog() -> list[dict[str, Any]]:
+    """Use actual shared metadata without constructing a controller or running a helper."""
+    from cais_spade_llm.function_analyzer import FunctionAnalyzer
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
+        GazeboPickPlaceController,
+    )
+    from cais_spade_llm.resources.robot.robot_primitives import ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP
+
+    catalog = _raw_live_catalog()
+    for entry in catalog:
+        function = getattr(GazeboPickPlaceController, entry["name"])
+        entry["params"] = FunctionAnalyzer().analyze_function(function)["parameters"]["properties"]
+        entry["required_params"] = [
+            name
+            for name, parameter in inspect.signature(function).parameters.items()
+            if name != "self" and parameter.default is inspect.Parameter.empty
+        ]
+        metadata = FunctionAnalyzer._extract_yaml_frontmatter(function)
+        entry["preconditions"] = metadata.get("preconditions", {})
+        entry["effects"] = metadata.get("effects", {})
+        entry["output_schema"] = deepcopy(
+            ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP.get(entry["name"], {})
+        )
+    return catalog
+
+
+def _capture_geometry_context(tmp_path: Path, *, frame: str | None = "world") -> Any:
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    agent = _LiveRobotAgent(primitive_catalog=_declared_geometry_catalog())
+    agent.controller_config = {
+        "move_group": {"frame_id": frame, "ee_link": "configured_ee", "tcp_link": "configured_tcp"}
+    }
+    adapter = InProcessRobotAgentCompositionRuntime(_LiveRobotAgentHost([agent]))
+    captured = asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+    return agent, adapter, captured, completion["typed_context_refs"][0]["ref"]
+
+
+def test_composition_projects_minimal_contracts_and_filters_every_state_read(
+    tmp_path: Path,
+) -> None:
+    agent, adapter, _, _ = _capture_geometry_context(tmp_path)
+    sentinel = "RECOVERY_RECIPE_MUST_NOT_REACH_COMPOSITION"
+    agent.robot_state.update(
+        {
+            "held_part": None,
+            "recovery_adapter": {"examples": [sentinel]},
+            "resource_facets": {
+                "manipulator": {"held_part": None, "capability_decompositions": [sentinel]}
+            },
+            "function_names": [sentinel],
+        }
+    )
+    captured = asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+    state_ref = captured.robot_state_path.relative_to(tmp_path).as_posix()
+    catalog_ref = captured.primitive_catalog_path.relative_to(tmp_path).as_posix()
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    runtime = _ProgramRuntime(
+        [
+            {"kind": "read_record", "record_ref": state_ref, "field_path": ""},
+            {
+                "kind": "read_record",
+                "record_ref": state_ref,
+                "field_path": "/robot_state/recovery_adapter",
+            },
+            {
+                "kind": "read_record",
+                "record_ref": state_ref,
+                "field_path": "/robot_state/resource_facets",
+            },
+            {"kind": "read_record", "record_ref": catalog_ref, "field_path": ""},
+            _program_action([("release_part", {}), ("grasp_part", {"part_name": "medium gear"})]),
+        ]
+    )
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert candidate.record["status"] == view["status"] == "proposed"
+    assert all(sentinel not in call["prompt"] for call in runtime.calls)
+    assert "compute_pick_targets and compute_place_targets" not in runtime.calls[0]["prompt"]
+    assert view["trace"][0]["result"]["value"]["robot_state"]["held_part"] is None
+    assert "error" in view["trace"][1]["result"]
+    assert (
+        "error" in view["trace"][3]["result"]
+    )  # Full runtime contracts are not a model read surface.
+    projected = {
+        item["primitive_symbol"]: item for item in view["composition_input"]["primitive_catalog"]
+    }
+    authoritative = {
+        item["primitive_symbol"]: item for item in captured.primitive_catalog.primitive_catalog
+    }
+    for symbol in ("grasp_part", "release_part"):
+        assert set(projected[symbol]["conditions"]) == {"held_part"}
+        assert set(projected[symbol]["effects"]) == {"held_part"}
+        assert set(authoritative[symbol]["effects"]) == {
+            "held_part",
+            "current_state",
+            "gripper_state",
+        }
+        assert "model_name" in authoritative[symbol]["parameter_schemas"]
+        assert projected[symbol]["parameter_schemas"]["part_name"] == (
+            authoritative[symbol]["parameter_schemas"]["part_name"]
+        )
+    assert "model_name" not in json.dumps(projected)
+    assert projected["grasp_part"]["effects"]["held_part"] == {
+        "set_from_param_any_of": ["part_name"]
+    }
+    assert not view["binding_issues"]
+    assert "composition interface, not a directly executable Python signature" in runtime.calls[0][
+        "prompt"
+    ]
+    assert all(path.read_bytes() == payload for path, payload in before.items())
+
+
+def test_nested_metadata_preserves_callable_contracts_for_recovery() -> None:
+    from cais_spade_llm.function_analyzer import FunctionAnalyzer
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
+        GazeboPickPlaceController,
+    )
+
+    catalog = {item["name"]: item for item in _declared_geometry_catalog()}
+    pick = catalog["compute_pick_targets"]
+    geometry = pick["params"]["product_geometry"]
+    assert geometry["x-grounding-fields"] == ["board_center", "part_height_m"]
+    assert geometry["properties"]["board_center"]["x-grounding-fields"] == ["z"]
+    assert "required" not in geometry
+    assert "product_geometry" not in pick["required_params"]
+    assert pick["params"]["detected_parts"]["items"]["properties"]["part_name"]["type"] == "string"
+    move = catalog["move_cartesian"]
+    assert move["required_params"] == ["x", "y", "z"]
+    assert move["params"]["x"]["x-frame-source"] == "controller_config.move_group.frame_id"
+    assert catalog["grasp_part"]["required_params"] == ["model_name"]
+    assert (
+        catalog["grasp_part"]["params"]["model_name"]["x-binding-role"] == "controller_identifier"
+    )
+    assert "current_state" in catalog["grasp_part"]["effects"]
+    geometry["properties"]["board_center"]["properties"]["z"]["type"] = "string"
+    fresh = FunctionAnalyzer().analyze_function(GazeboPickPlaceController.compute_pick_targets)
+    assert (
+        fresh["parameters"]["properties"]["product_geometry"]["properties"]["board_center"][
+            "properties"
+        ]["z"]["type"]
+        == "number"
+    )
+
+
+def test_geometry_gaps_and_conditional_results_preserve_the_exact_program(tmp_path: Path) -> None:
+    _, _, captured, current_ref = _capture_geometry_context(tmp_path)
+    observed = {"value_ref": {"record_ref": current_ref, "field_path": "/translated_location_m/0"}}
+    steps = [
+        ("compute_pick_targets", {"part_name": "medium gear", "target_pose": {"x": observed}}),
+        (
+            "compute_place_targets",
+            {
+                "pick_ctx": {"result_ref": {"step_index": 1, "field_path": ""}},
+                "product_geometry": {"board_center": {}},
+                "destination_location": "middle gear shaft destination reference",
+            },
+        ),
+        (
+            "move_cartesian",
+            {"z": {"result_ref": {"step_index": 2, "field_path": "/insert_pose/z"}}},
+        ),
+        ("grasp_part", {"part_name": "medium gear"}),
+        ("move_cartesian", {"x": observed}),
+    ]
+    candidate = asyncio.run(
+        author_primitive_program_candidate(_ProgramRuntime([_program_action(steps)]), tmp_path)
+    )
+    before = candidate.path.read_bytes()
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert candidate.record["status"] == view["status"] == "proposed"
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": s, "params": p} for s, p in steps
+    ]
+    issues = {
+        (item["step_index"], item["parameter_path"], item["status"])
+        for item in view["binding_issues"]
+    }
+    assert (1, "/product_geometry", "missing") in issues
+    assert (1, "/target_pose/y", "missing") in issues
+    assert (2, "/product_geometry/slot_floor_z_m", "missing") in issues
+    assert (2, "/destination_location", "unverified") in issues
+    assert (2, "/pick_ctx", "deferred") in issues
+    assert (3, "/z", "deferred") in issues
+    assert not any("model_name" in path for _, path, _ in issues)
+    assert (
+        5,
+        "/x",
+        "unverified",
+    ) in issues  # Same frame does not make an object point an EE target.
+    assert not any(item["status"] == "incompatible" for item in view["binding_issues"])
+    assert captured.robot_state.robot_state["motion_context"] == {
+        "source": "controller_config.move_group",
+        "frame_id": "world",
+        "ee_link": "configured_ee",
+        "tcp_link": "configured_tcp",
+    }
+    assert candidate.path.read_bytes() == before
+    assert "binding_issues" not in candidate.record  # Derived view, never a rewrite of RA's record.
+
+
+@pytest.mark.parametrize("frame", ["world", "robot_base", None])
+def test_binding_report_checks_configured_frames_without_converting(
+    tmp_path: Path, frame: str | None
+) -> None:
+    _, _, _, current_ref = _capture_geometry_context(tmp_path, frame=frame)
+    coordinate = {
+        "value_ref": {"record_ref": current_ref, "field_path": "/translated_location_m/0"}
+    }
+    steps = [("move_cartesian", {"x": coordinate})]
+    candidate = asyncio.run(
+        author_primitive_program_candidate(_ProgramRuntime([_program_action(steps)]), tmp_path)
+    )
+    issues = read_primitive_composition_diagnostic(tmp_path)["binding_issues"]
+    assert candidate.record["primitive_steps"][0]["params"]["x"] == coordinate
+    incompatible = [issue for issue in issues if issue["status"] == "incompatible"]
+    assert bool(incompatible) == (frame == "robot_base")
+    if frame == "robot_base":
+        assert (
+            "world" in incompatible[0]["message"] and "no conversion" in incompatible[0]["message"]
+        )
+    if frame is None:
+        assert any(issue["parameter_path"].endswith("/frame_id") for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "params,reason",
+    [
+        ({"target_pose": {"x": "0.4"}}, "declared type number"),
+        ({"target_pose": {"value_ref": {}, "x": 1}}, "only value_ref"),
+        ({"product_geometry": {"part_height_m": -1}}, "numeric bounds"),
+        ({"product_geometry": {"slot_xy": [0.1]}}, "declared length"),
+    ],
+)
+def test_binding_types_and_malformed_references_remain_errors(
+    tmp_path: Path, params: dict, reason: str
+) -> None:
+    _capture_geometry_context(tmp_path)
+    symbol = (
+        "compute_place_targets"
+        if "slot_xy" in params.get("product_geometry", {})
+        else "compute_pick_targets"
+    )
+    candidate = asyncio.run(
+        author_primitive_program_candidate(
+            _ProgramRuntime([_program_action([(symbol, params)])]), tmp_path
+        )
+    )
+    assert candidate.record["status"] == "invalid"
+    assert reason in candidate.record["reason"]
+    assert candidate.record["primitive_steps"][0]["params"] == params
+
+
+def test_binding_report_does_not_promote_raw_cad_or_labels_to_geometry(tmp_path: Path) -> None:
+    _capture_geometry_context(tmp_path)
+    steps = [
+        (
+            "compute_place_targets",
+            {"product_geometry": {"record_type": "CADMeshRecord", "coordinate_frame": "CAD_local"}},
+        ),
+        ("compute_place_targets", {"destination_location": "middle gear shaft destination reference"}),
+    ]
+    candidate = asyncio.run(
+        author_primitive_program_candidate(_ProgramRuntime([_program_action(steps)]), tmp_path)
+    )
+    issues = read_primitive_composition_diagnostic(tmp_path)["binding_issues"]
+    assert candidate.record["status"] == "proposed"
+    assert any(issue["step_index"] == 1 and issue["status"] == "incompatible" for issue in issues)
+    assert any(
+        issue["step_index"] == 2
+        and issue["parameter_path"] == "/destination_location"
+        and issue["status"] == "unverified"
+        for issue in issues
+    )
+
+
+@pytest.mark.parametrize(
+    "symbol,params",
+    [
+        ("grasp_part", {"part_name": "medium gear", "model_name": "medium gear"}),
+        ("release_part", {"model_name": "simulated_instance"}),
+        ("compute_pick_targets", {"product_geometry": {"model_name": "simulated_instance"}}),
+        ("compute_pick_targets", {"target_pose": {"model_name": "simulated_instance"}}),
+        ("compute_pick_targets", {"detected_parts": [{"model_name": "simulated_instance"}]}),
+        ("compute_place_targets", {"pick_ctx": {"model_name": "simulated_instance"}}),
+        (
+            "compute_place_targets",
+            {"product_geometry": {"metadata": [{"model_name": "simulated_instance"}]}},
+        ),
+    ],
+)
+def test_composition_rejects_execution_arguments_without_rewriting(
+    tmp_path: Path, symbol: str, params: dict[str, Any]
+) -> None:
+    _capture_geometry_context(tmp_path)
+    action = _program_action([(symbol, params)])
+    runtime = _ProgramRuntime([action])
+
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+
+    assert candidate.record["status"] == "invalid"
+    assert "model_name is execution-only" in candidate.record["reason"]
+    assert candidate.record["primitive_steps"] == [{"primitive_symbol": symbol, "params": params}]
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["status"] == "invalid"
+    assert view["trace"][-1]["response"] == {"action": action}
+    assert len(runtime.calls) == 1
+
+
+def test_composition_rejects_identifier_fields_in_referenced_objects(tmp_path: Path) -> None:
+    agent, adapter, _, _ = _capture_geometry_context(tmp_path)
+    agent.robot_state["execution_context"] = {"model_name": "simulated_instance"}
+    captured = asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+    params = {
+        "product_geometry": {
+            "value_ref": {
+                "record_ref": captured.robot_state_path.relative_to(tmp_path).as_posix(),
+                "field_path": "/robot_state/execution_context",
+            }
+        }
+    }
+    candidate = asyncio.run(
+        author_primitive_program_candidate(
+            _ProgramRuntime([_program_action([("compute_pick_targets", params)])]), tmp_path
+        )
+    )
+    assert candidate.record["status"] == "invalid"
+    assert "model_name is execution-only" in candidate.record["reason"]
+    assert candidate.record["primitive_steps"][0]["params"] == params
+
+
+def test_composition_rejects_removed_helper_identifier_outputs(tmp_path: Path) -> None:
+    _capture_geometry_context(tmp_path)
+    steps = [
+        ("compute_pick_targets", {"part_name": "medium gear"}),
+        (
+            "compute_place_targets",
+            {"part_name": {"result_ref": {"step_index": 1, "field_path": "/model_name"}}},
+        ),
+    ]
+    candidate = asyncio.run(
+        author_primitive_program_candidate(_ProgramRuntime([_program_action(steps)]), tmp_path)
+    )
+    assert candidate.record["status"] == "invalid"
+    assert "undeclared result field" in candidate.record["reason"]
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": symbol, "params": params} for symbol, params in steps
+    ]
+
+
+def test_composition_projection_preserves_non_identifier_geometry_requirements(tmp_path: Path) -> None:
+    agent, adapter, _, _ = _capture_geometry_context(tmp_path)
+    pick = agent.primitive_catalog[0]
+    geometry = pick["params"]["product_geometry"]
+    geometry["required"] = ["model_name", "part_height_m"]
+    geometry["x-grounding-fields"].append("model_name")
+    pick["params"]["detected_parts"]["items"]["required"] = ["model_name", "part_name"]
+    captured = asyncio.run(activate_selected_ra_context(adapter, tmp_path))
+    before = captured.primitive_catalog_path.read_bytes()
+    runtime = _ProgramRuntime(
+        [_program_action([("compute_pick_targets", {"part_name": "medium gear"})])]
+    )
+
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+
+    assert candidate.record["status"] == "proposed"
+    delivered = _composition_input_from_prompt(runtime.calls[0]["prompt"])["primitive_catalog"]
+    params = delivered[0]["parameter_schemas"]
+    assert params["product_geometry"]["required"] == ["part_height_m"]
+    assert params["product_geometry"]["x-grounding-fields"] == ["board_center", "part_height_m"]
+    assert params["detected_parts"]["items"]["required"] == ["part_name"]
+    assert "model_name" not in json.dumps(delivered)
+    assert captured.primitive_catalog_path.read_bytes() == before
+
+
+def test_saved_attempt_uses_its_recorded_catalog_and_next_attempt_uses_new_interface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capture_geometry_context(tmp_path)
+    original_steps = [
+        ("compute_pick_targets", {"part_name": "medium gear"}),
+        (
+            "grasp_part",
+            {
+                "part_name": "medium gear",
+                "model_name": {"result_ref": {"step_index": 1, "field_path": "/model_name"}},
+            },
+        ),
+    ]
+    # Reproduce the prior interface, which still exposed the simulator binding.
+    with monkeypatch.context() as patch:
+        patch.setattr(composition_context, "_without_model_name", deepcopy)
+        old = asyncio.run(
+            author_primitive_program_candidate(
+                _ProgramRuntime([_program_action(original_steps)]), tmp_path
+            )
+        )
+    assert old.record["status"] == "proposed"
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    reopened = read_primitive_composition_diagnostic(tmp_path)
+    assert reopened["status"] == "proposed"
+    assert reopened["candidate"] == old.record
+    assert "model_name" in json.dumps(reopened["composition_input"]["primitive_catalog"])
+    assert any(issue["parameter_path"] == "/model_name" for issue in reopened["binding_issues"])
+    assert all(path.read_bytes() == value for path, value in before.items())
+
+    steps = [("grasp_part", {"part_name": "medium gear"}), ("release_part", {})]
+    runtime = _ProgramRuntime([_program_action(steps)])
+    new = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert new.record["status"] == "proposed"
+    assert new.record["primitive_steps"] == [
+        {"primitive_symbol": symbol, "params": params} for symbol, params in steps
+    ]
+    assert "model_name" not in runtime.calls[0]["prompt"]
+    assert all(path.read_bytes() == value for path, value in before.items())
+    reopened = read_primitive_composition_diagnostic(tmp_path)
+    assert reopened["candidate"] == new.record
+    assert reopened["attempt_count"] == 2
+    assert not reopened["binding_issues"]
+    assert "model_name" not in json.dumps(reopened["composition_input"]["primitive_catalog"])
+
+
+def test_saved_request_catalog_must_still_match_pinned_context(tmp_path: Path) -> None:
+    _capture_geometry_context(tmp_path)
+    inputs = primitive_composition._load_inputs(tmp_path)
+    request = {"prompt": primitive_composition._composition_prompt(inputs)}
+    prefix, payload = request["prompt"].split("\n\nCOMPOSITION_INPUT\n", 1)
+    recorded = json.loads(payload)
+    recorded["primitive_catalog"][0]["primitive_symbol"] = "invented_primitive"
+    request["prompt"] = prefix + "\n\nCOMPOSITION_INPUT\n" + json.dumps(recorded)
+
+    with pytest.raises(PrimitiveCompositionError, match="catalog differs from its context"):
+        primitive_composition._recorded_request_inputs(inputs, request)
+
+
+def test_result_object_type_check_is_recursive(tmp_path: Path) -> None:
+    _, _, _, current_ref = _capture_geometry_context(tmp_path)
+    inputs = primitive_composition._load_inputs(tmp_path)
+    steps = [{"primitive_symbol": "compute_pick_targets", "params": {}}]
+    with pytest.raises(PrimitiveCompositionError, match="result_ref type"):
+        primitive_composition._validate_parameter(
+            {"result_ref": {"step_index": 1, "field_path": "/target_pose"}},
+            {"type": "object", "properties": {"x": {"type": "string"}}},
+            inputs,
+            steps,
+        )
+
+
+def test_shared_target_extractors_preserve_returned_fields_and_legacy_waypoints() -> None:
+    from cais_spade_llm.resources.robot.robot_primitives import (
+        ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP,
+        _extract_pick_targets_output,
+        _extract_place_targets_output,
+    )
+
+    orientation = {"qx": 0, "qy": 0, "qz": 0, "qw": 1}
+    pick = {
+        "success": True,
+        "part_name": "medium gear",
+        "model_name": "explicit_controller_id",
+        **{
+            key: 0.2
+            for key in (
+                "tx",
+                "ty",
+                "tz",
+                "pick_z",
+                "travel_z",
+                "part_height",
+                "tcp_offset_z",
+                "pick_tcp_z",
+                "start_x",
+                "start_y",
+                "start_z",
+            )
+        },
+    }
+    pick["target_pose"] = {"x": 0.3, "y": 0.4, "z": 0.5, **orientation}
+    output, error = _extract_pick_targets_output({}, pick)
+    assert error is None
+    assert set(ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP["compute_pick_targets"]) <= output.keys()
+    assert output["target_pose"] == pick["target_pose"]
+    assert output["approach_pose"] == {"x": 0.2, "y": 0.2, "z": 0.2}
+    place = {
+        "success": True,
+        "part_name": "medium gear",
+        "model_name": "explicit_controller_id",
+        **{
+            key: 0.2
+            for key in (
+                "slot_x",
+                "slot_y",
+                "board_top_z",
+                "place_z",
+                "place_tcp_z",
+                "part_height",
+                "tcp_offset_z",
+                "grasp_tcp_to_part_origin_z",
+            )
+        },
+    }
+    baseline, error = _extract_place_targets_output({}, place)
+    assert error is None
+    assert "pre_insert_pose" not in baseline and "insert_pose" not in baseline
+    assert baseline["target_pose"] == {"x": 0.2, "y": 0.2, "z": 0.2}
+    place.update(
+        {
+            "approach_pose": {"x": 0.2, "y": 0.2, "z": 0.4, **orientation},
+            "pre_insert_pose": {"x": 0.2, "y": 0.2, "z": 0.3, **orientation},
+            "insert_pose": {"x": 0.2, "y": 0.2, "z": 0.1, **orientation},
+            "insertion_axis_world": {"x": 0, "y": 0, "z": -1},
+            "target_reference": {"target_point": "inserted_part_origin"},
+            "target_origin_pose": {"x": 0.2, "y": 0.2, "z": 0.1},
+            "place_part_origin_z": 0.1,
+        }
+    )
+    place["target_pose"] = deepcopy(place["pre_insert_pose"])
+    output, error = _extract_place_targets_output({}, place)
+    assert error is None
+    assert set(ROBOT_OBSERVATION_OUTPUT_SCHEMA_MAP["compute_place_targets"]) == output.keys()
+    for name, value in place.items():
+        if name != "success":
+            assert output[name] == value
+    assert output["target_pose"] != output["insert_pose"]
+
+
+@pytest.mark.parametrize("frame", ["world", "robot_base"])
+def test_binding_assessment_reads_only_selected_evidence_and_defers_identifier(frame: str) -> None:
+    from cais_spade_llm.spec2primitives.agents.ra.parameter_binding import assess_parameter_bindings
+
+    catalog = {
+        entry["primitive_symbol"]: entry
+        for entry in in_process_robot_agent._phase_5_1_primitive_catalog(
+            _declared_geometry_catalog()
+        )
+    }
+    cad = {"record_type": "CADMeshRecord", "coordinate_frame": "CAD_local", "height_m": 0.02}
+    reads = []
+
+    def read(ref: str, pointer: str) -> dict:
+        reads.append((ref, pointer))
+        assert (ref, pointer) == ("selected_cad.json", "")
+        return cad
+
+    def result_schema(ref: dict) -> dict:
+        assert ref == {"step_index": 1, "field_path": "/model_name"}
+        return catalog["compute_pick_targets"]["result_schemas"]["model_name"]
+
+    steps = [
+        {
+            "primitive_symbol": "compute_pick_targets",
+            "params": {
+                "product_geometry": {
+                    "part_height_m": {
+                        "value_ref": {"record_ref": "selected_cad.json", "field_path": "/height_m"}
+                    },
+                }
+            },
+        },
+        {
+            "primitive_symbol": "grasp_part",
+            "params": {
+                "model_name": {"result_ref": {"step_index": 1, "field_path": "/model_name"}},
+            },
+        },
+        {
+            "primitive_symbol": "compute_place_targets",
+            "params": {
+                "product_geometry": {
+                    "value_ref": {"record_ref": "selected_cad.json", "field_path": ""}
+                },
+            },
+        },
+    ]
+    before = deepcopy(steps)
+    issues = assess_parameter_bindings(
+        steps,
+        catalog,
+        {"motion_context": {"frame_id": frame, "ee_link": "ee", "tcp_link": "tcp"}},
+        read_evidence=read,
+        result_schema=result_schema,
+    )
+    assert steps == before
+    assert reads == [("selected_cad.json", "")]
+    assert any(
+        issue["step_index"] == 3
+        and issue["parameter_path"] == "/product_geometry"
+        and issue["status"] == "incompatible"
+        for issue in issues
+    )
+    assert any(
+        issue["parameter_path"] == "/product_geometry/part_height_m"
+        and issue["status"] == "incompatible"
+        for issue in issues
+    )
+    assert any(
+        issue["step_index"] == 2
+        and issue["parameter_path"] == "/model_name"
+        and issue["status"] == "deferred"
+        for issue in issues
+    )
+    assert not any(issue["step_index"] == 2 and issue["status"] == "missing" for issue in issues)
+    assert any(
+        issue["parameter_path"] == "/robot_state/motion_context/frame_id"
+        and issue["status"] == "incompatible"
+        for issue in issues
+    ) == (frame == "robot_base")

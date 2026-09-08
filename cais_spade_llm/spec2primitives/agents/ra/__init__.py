@@ -15,31 +15,29 @@ from .context_handoff import (
     read_phase_5_1_diagnostic,
 )
 from .feasibility_validation import RobotAgentFeasibilityRuntime
-from .primitive_draft import (
-    Phase52Diagnostic,
-    PrimitiveDraftError,
-    PrimitiveProgramDraft,
-    RobotAgentDraftRuntime,
-    author_primitive_program_draft,
-    read_phase_5_2_diagnostic,
+from .primitive_composition import (
+    PrimitiveCompositionError,
+    PrimitiveProgramCandidate,
+    RobotAgentProgramRuntime,
+    author_primitive_program_candidate,
+    read_primitive_composition_diagnostic,
 )
 
 __all__ = [
     "Phase51Diagnostic",
-    "Phase52Diagnostic",
     "PrimitiveCatalogSnapshot",
-    "PrimitiveDraftError",
-    "PrimitiveProgramDraft",
+    "PrimitiveCompositionError",
+    "PrimitiveProgramCandidate",
     "RAContextHandoffError",
     "RobotAgentCompositionRuntime",
-    "RobotAgentDraftRuntime",
     "RobotAgentFeasibilityRuntime",
+    "RobotAgentProgramRuntime",
     "RobotStateSnapshot",
     "SelectedRAAssignmentEnvelope",
     "SelectedRAContextSnapshot",
     "activate_selected_ra_context",
-    "author_primitive_program_draft",
+    "author_primitive_program_candidate",
     "load_selected_ra_context_snapshot",
     "read_phase_5_1_diagnostic",
-    "read_phase_5_2_diagnostic",
+    "read_primitive_composition_diagnostic",
 ]

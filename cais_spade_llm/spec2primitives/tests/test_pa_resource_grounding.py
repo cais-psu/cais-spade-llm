@@ -7,7 +7,9 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rdflib import Namespace
@@ -46,6 +48,114 @@ PPR_NAMESPACE = "http://PAonto.com#"
 PROCESS_IRI = "https://cais-spade-llm.local/process/assembly"
 RESOURCE_NAMESPACE = "https://cais-spade-llm.local/resource/"
 EVIDENCE_REF = "products/user_requirement/product_requirement.json"
+
+
+def _proximity_check(symbol="xarm6", status="accepted"):
+    record = {
+        "resource_symbol": symbol,
+        "target_frame": "world",
+        "state_locations": {
+            "current_state": [
+                {"evidence_handle": "source_1", "translation_m": [3.0, 0.0, 0.0]},
+                {"evidence_handle": "source_2", "translation_m": [0.0, 4.0, 0.0]},
+            ],
+            "desired_state": [
+                {"evidence_handle": "destination", "translation_m": [0.0, 0.0, 5.0]}
+            ],
+        },
+    }
+    return SimpleNamespace(
+        resource_symbol=symbol, target_frame="world", status=status, to_record=lambda: record
+    )
+
+
+class _BasePoseRuntime:
+    def __init__(self, translation=(0.0, 0.0, 0.0), **changes):
+        self.translation = translation
+        self.changes = changes
+
+    async def read_resource_base_pose(self, *, base_frame, target_frame):
+        return {
+            "base_frame": base_frame,
+            "target_frame": target_frame,
+            "translation_m": list(self.translation),
+            "observed_at_ns": 123,
+            **self.changes,
+        }
+
+
+@pytest.mark.parametrize("verdict", ["accepted", "rejected", "needs_context"])
+def test_proximity_measures_all_locations_without_changing_eligibility(verdict):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_proximity import (
+        read_resource_proximity,
+        validate_resource_proximity,
+    )
+
+    check = _proximity_check(status=verdict)
+    result = asyncio.run(read_resource_proximity(_BasePoseRuntime(), check))
+
+    assert result["mean_current_state_distance_m"] == 3.5
+    assert [item["distance_m"] for item in result["state_locations"]["current_state"]] == [3, 4]
+    assert result["state_locations"]["desired_state"][0]["distance_m"] == 5
+    assert check.status == verdict
+    assert "selected_resource_symbol" not in result
+    validate_resource_proximity(result, check.to_record())
+
+
+def test_proximity_follows_swapped_robot_positions():
+    from cais_spade_llm.spec2primitives.agents.pa.resource_proximity import read_resource_proximity
+
+    near = _BasePoseRuntime((0.0, 0.0, 0.0))
+    far = _BasePoseRuntime((20.0, 0.0, 0.0))
+    for first, second in ((near, far), (far, near)):
+        xarm = asyncio.run(read_resource_proximity(first, _proximity_check("xarm6")))
+        ur5e = asyncio.run(read_resource_proximity(second, _proximity_check("ur5e")))
+        assert (xarm["mean_current_state_distance_m"] < ur5e["mean_current_state_distance_m"]) is (
+            first is near
+        )
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        object(),
+        _BasePoseRuntime(target_frame="camera"),
+        _BasePoseRuntime(base_frame="other_robot"),
+        _BasePoseRuntime((float("nan"), 0, 0)),
+        _BasePoseRuntime((True, 0, 0)),
+        _BasePoseRuntime(observed_at_ns=0),
+    ],
+)
+def test_invalid_or_missing_base_pose_does_not_become_zero_distance(runtime):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_proximity import read_resource_proximity
+
+    check = _proximity_check()
+    result = asyncio.run(read_resource_proximity(runtime, check))
+
+    assert result["status"] == "unavailable"
+    assert set(result) == {"status", "feedback"}
+    assert check.status == "accepted"
+
+
+@pytest.mark.parametrize("changed", ["distance", "mean", "handle", "frame"])
+def test_proximity_validator_recomputes_pinned_measurements(changed):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_proximity import (
+        read_resource_proximity,
+        validate_resource_proximity,
+    )
+
+    check = _proximity_check()
+    result = deepcopy(asyncio.run(read_resource_proximity(_BasePoseRuntime(), check)))
+    if changed == "distance":
+        result["state_locations"]["current_state"][0]["distance_m"] = 0.0
+    elif changed == "mean":
+        result["mean_current_state_distance_m"] = 0.0
+    elif changed == "handle":
+        result["state_locations"]["current_state"][0]["evidence_handle"] = "unbound"
+    else:
+        result["base_pose"]["target_frame"] = "camera"
+    with pytest.raises(ValueError):
+        validate_resource_proximity(result, check.to_record())
 
 
 def test_removed_need_and_automatic_selection_are_not_exported() -> None:

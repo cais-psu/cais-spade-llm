@@ -1,6 +1,6 @@
 # Spec2Primitives Background Literature Review
 
-Current implementation: PA-owned product grounding with deterministic contract and evidence checks, budgeted PA corrections, and MoveIt-validated arm assignment, followed by selected-RA context and unbound structural drafting. The later binding, executable-validation and outcome workflow below is research methodology, not completed runtime behavior. See [implementation status](IMPLEMENTATION_PLAN.md) and [bias experiments](BIAS_VALIDATION.md).
+Current implementation: PA-owned product grounding with deterministic contract and evidence checks, budgeted PA corrections, and MoveIt-validated arm assignment, followed by selected-RA context and one program with available parameters plus a derived binding report. Target calculation, new evidence acquisition, executable validation, revision and outcome evaluation below remain research methodology, not completed runtime behavior. See [implementation status](IMPLEMENTATION_PLAN.md) and [bias experiments](BIAS_VALIDATION.md).
 
 ## Goal
 
@@ -44,7 +44,7 @@ repeat, bind, validate, and revise robot primitives at runtime.
   information, or fail physically. Independent checks must therefore evaluate
   the proposal without silently rewriting it.
 
-### Methodology
+### Proposed methodology beyond the current proposal boundary
 
 - First, the system interprets the product request and identifies what evidence
   is still needed. It retrieves only relevant instructions, drawings, part
@@ -160,3 +160,5 @@ Also search recent ICRA, IROS, RSS, CoRL, CASE, and ICAPS papers using:
 - `robot program synthesis primitive library`
 - `industrial robot skills ontology composition`
 - `LLM assembly planning primitive sequence`
+
+The current hypothesis concerns RA inferring intermediate dependencies absent from supplied formal contracts. Full runtime definitions stay in captured records; the composition view exposes only `held_part` grasp/release conditions/effects. Natural-language descriptions and helper waypoint definitions still supply domain knowledge. Their presence is not proof of leakage or novelty; audit and ablate them as specified in [COMPOSITION_EVALUATION.md](COMPOSITION_EVALUATION.md). Phase 4 supplies observed product information and desired relationships; Phase 5's audited selected calculations derive robot targets within bounded refinement. See [VALIDATION_AND_REVISION.md](VALIDATION_AND_REVISION.md).

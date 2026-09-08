@@ -32,9 +32,19 @@ The end-to-end composition/execution architecture in this document remains propo
 
 PA checks every configured capable arm using the same bound current/destination coordinate references and live MoveIt position planning, then selects an arm with an accepted check. Missing arm checks retain their separate single correction; unavailable results remain distinct from rejected planning. Selection and completion record that ontology assignment with position-planning evidence and explicit unvalidated grasp/insertion constraints. Multiple relationships do not force a unique Cartesian pair. Required locations are checked before target commit; unresolved inputs or assignment prevent completion. Contract acceptance does not establish semantic correctness.
 
-Phase 5.1 requires current completion before exact selected-RA envelope and paired context snapshots. Phase 5.2A creates one unbound structural draft. Live SPADE delivery, binding/context exchange, primitive-level validation, execution and observed outcomes remain future work. Older supported records remain immutable history and cannot authorize new RA work.
+Phase 5.1 requires current completion before exact selected-RA envelope and paired context snapshots. Primitive composition starts directly from those authorities. RA chooses a single `primitive_steps` program with available parameters and can inspect existing pinned evidence and accepted ontology assertions. Missing geometry permits omitted parameters, displayed as `<unbound>` when required. Supplied structure and references are checked; there is no separate draft stage. The bounded loop obtains supplemental evidence, measures robot geometry, calculates selected helpers and validates direct Cartesian segments in a private scene. RA alone revises its program. Force/contact validity, execution and observed outcomes remain future work. Historical drafts and draft-dependent attempts remain immutable and are excluded from new composition inputs.
 
 See [implementation status](IMPLEMENTATION_PLAN.md), [ontology semantics](ASSEMBLY_ONTOLOGY.md) and [bias experiments](BIAS_VALIDATION.md). Generic deterministic checks and offline tests do not establish model accuracy or absence of bias.
+
+## Correct primitive-input boundary
+
+Phase 4 supplies observed product information and desired assembly relationships. Phase 5 determines the robot targets needed by RA's selected operations. The current bounded loop obtains supplemental evidence and calculates RA-selected targets before modeled validation; missing geometry remains explicit.
+
+Fresh captures preserve full runtime contracts and nested schemas, plus configured planning frame/EE/TCP names. Composition exposes only `held_part` grasp/release formal conditions/effects and filters recovery metadata from initial state and every record read. No richer causal model or sequence rule is added.
+
+The derived report checks RA-selected references against input shape, frame and binding meaning. Raw CAD is not complete placement geometry; descriptive destination labels and semantic part labels are not controller bindings. Missing inputs stay visible without target fabrication, source substitution or program repair. Only explicitly selected, grounded helper calls are numerically evaluated. `approach_pose` and conditional insertion outputs remain available declarations; RA chooses their use and order.
+
+Use [VALIDATION_AND_REVISION.md](VALIDATION_AND_REVISION.md) for implemented bounded resolution/validation and subsequent physical work and [COMPOSITION_EVALUATION.md](COMPOSITION_EVALUATION.md) for the partial-contract hypothesis, fair baselines, held-out conditions and claim limits. No offline test establishes reliable physical composition.
 
 ## Fundamental research challenge
 
@@ -128,6 +138,12 @@ invocation binding, truthful limits, direct evidence, applicable evaluator
 endpoints, and only the local conditions or effects explicitly modeled. An
 omitted condition or effect is `unmodeled`, not satisfied.
 
+The RA composition view retains primitive symbols and product/motion inputs while
+omitting the execution-only `model_name` binding from parameters and results.
+Full runtime signatures stay captured. A future adapter must supply the
+identifier for the recognized physical instance before Gazebo execution;
+discovering simulator names is outside the composition research task.
+
 Together, these interfaces are not a task-specific PDDL domain/problem,
 closed-world state model, product-to-primitive mapping, expected primitive
 sequence, or exhaustive transition model. Their detailed executable cards stay
@@ -183,7 +199,7 @@ The requirement and TBox are understood together, while PA dynamically chooses
 which approved document, file, observation, or existing record to retrieve.
 The TBox defines legal shared meaning; it does not prescribe a document, CAD,
 observation, calibration, or primitive recipe. After allocation, the selected
-RA's `PrimitiveProgramDraft` and primitive interfaces expose further
+RA's composition and primitive interfaces expose further
 runtime inputs.
 
 ```text
@@ -249,13 +265,14 @@ copying the target feature or creating a new-run `TypedGroundingContract`. There
 is no separate `TaskTransitionContract`. The
 selected RA then receives a reconstructed transient `target_feature`, bounded
 resolved state values, selected-resource projection, fresh state, and its
-complete current primitive-only catalog. The RA LLM authors a structural
-`PrimitiveProgramDraft`; a deterministic binding preflight gathers all currently
-unbound inputs without creating or repairing steps. Robot state and later
+complete current primitive-only catalog. The RA LLM authors `primitive_steps`
+with available parameters. The current derived binding report identifies
+missing, incompatible, unverified and deferred inputs without creating or repairing steps. Robot state and later
 primitive-level feasibility remain RA-owned. Phase 4 reachability checks only
-the submitted locations through the exact selected RobotAgent and never
-executes motion.
-Product or scene gaps are deduplicated into one `MissingContextBatch` per round.
+the submitted locations through the owned MoveIt adapter without contacting
+a RobotAgent or executing motion.
+The proposed later context loop deduplicates product or scene gaps into one
+`MissingContextBatch` per round.
 
 Formal PA completion pins both the exact `ResourceSelectionRecord` and the
 `resource_grounding_host` assignment delta. The four execution assertions must
@@ -274,14 +291,14 @@ PA may service one batch through several existing single-source audited
 operations, then returns one new `CompositionContextBundle`. There is
 no fixed semantic round count. Another batch round is allowed only after a new
 accepted binding, changed need classification, or structurally different RA
-draft demonstrates progress. Ambiguous or unavailable evidence, an unsupported
+program proposal demonstrates progress. Ambiguous or unavailable evidence, an unsupported
 need, an identical request against unchanged context, or no new accepted result
 stops fail-closed. `context understanding complete` means readiness for Phase 5,
 not that every later primitive input is already available.
 
 Phase 4.4 candidate discovery is a semantic join over the pinned workcell-profile
 and registry snapshots for the process selected from the authorized catalog.
-Configured workspace/gripper reach checks are deterministic evidence providers
+Configured capability and live MoveIt position checks are deterministic evidence providers
 for current Phase 4; position plans are validated; grasping and insertion remain unvalidated. PA
 remains the allocation authority and no optimality claim is made. Both
 nominal and recovery cases consume the selected exact
@@ -449,9 +466,11 @@ Phase 5.1 activates the selected exact resource_jid through the current adapter
 selected RA receives reconstructed target_feature + resource projection
         + fresh state + complete current primitive-only catalog
         ↓
-RA LLM authors a structural PrimitiveProgramDraft
+RA LLM authors primitive_steps with available parameters
         ↓
-binding preflight gathers every currently unbound input
+current derived binding report identifies selected-input gaps
+        ↓
+bounded supplemental evidence and audited selected calculation
         ├── RA-owned gaps resolve locally
         └── product/scene gaps form one MissingContextBatch
                                       ↓
@@ -484,11 +503,13 @@ The initial scene-only milestone provided the isolated structure, research
 workflow, narrow no-hardware `gazebo_dual_spec2primitives` launcher, dedicated
 `table_spec2primitives.world`, and local placeholder chat. Later milestones added
 the narrow PA context boundary, standalone supporting perception records, and
-the Phase 5.1 contract-first RA assignment/state/catalog boundary and Phase 5.2A
-structural draft. The current adapter can reuse or start the exact selected
-context-only RobotAgent and obtain one LLM-authored symbol sequence, but it has
-no live SPADE delivery, parameter binding, insertion-physics validation, or
-robot execution.
+the Phase 5.1 contract-first RA assignment/state/catalog boundary and an earlier
+structural draft stage. The current adapter can reuse or start the exact selected
+context-only RobotAgent and obtain one RA-authored primitive program directly
+from captured context, with bounded read-only evidence access and available parameters.
+Bounded supplemental evidence, numerical target calculation and private Cartesian
+validation are now implemented. Live SPADE task delivery, insertion-physics
+validation and robot execution remain later work.
 
 The starting scene pre-installs the static NIST `Gear_Plate` and three
 `Gear_Shaft` fixtures while leaving `gear_small`, `gear_medium`, and

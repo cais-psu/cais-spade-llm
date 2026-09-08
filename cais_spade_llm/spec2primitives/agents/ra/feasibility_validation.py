@@ -15,3 +15,9 @@ class RobotAgentFeasibilityRuntime(Protocol):
     ) -> Mapping[str, object]:
         """Return per-location planning results without executing motion."""
         ...
+
+    async def read_resource_base_pose(
+        self, *, base_frame: str, target_frame: str
+    ) -> Mapping[str, object]:
+        """Read the configured robot base in the grounded location frame."""
+        ...

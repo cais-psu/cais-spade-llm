@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 Analysis of Python functions and entire classes using introspection
 for creating descriptions usable with the OpenAI API
 """
 
-from __future__ import annotations
-
 import inspect
 import json
 import typing
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
@@ -121,6 +122,16 @@ class FunctionAnalyzer:
             if isinstance(detail, dict):
                 if detail.get("type"):
                     schema["type"] = detail["type"]
+                # Preserve declared object fields and binding annotations; callers
+                # need more than the outer type to connect primitive parameters.
+                for key in (
+                    "properties", "required", "items", "additionalProperties",
+                    "minItems", "maxItems", "enum", "minimum", "maximum",
+                    "exclusiveMinimum", "exclusiveMaximum",
+                    "x-grounding-required", "x-grounding-fields", "x-binding-role", "x-frame-source",
+                ):
+                    if key in detail:
+                        schema[key] = deepcopy(detail[key])
                 desc = detail.get("description")
             elif isinstance(detail, str):
                 desc = detail

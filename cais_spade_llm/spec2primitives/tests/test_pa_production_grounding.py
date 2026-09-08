@@ -96,6 +96,48 @@ def _default_handles(root: Path) -> tuple[EvidencePresentationRecord, tuple[_Evi
     return presentation, _approved_evidence_handles(presentation)
 
 
+def test_phase5_retrieval_checks_typed_evidence_without_committing_phase4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supplemental retrieval retains original ontology bytes and separate tool audits."""
+    tbox = ontology_config().load_tbox()
+    abox = initialize_interaction_abox(tmp_path, "assemble medium gear", tbox)
+    handle = _EvidenceHandle(evidence_id="cad_opaque", evidence_type="CAD", display_name="cad_opaque", context_ref="synthetic.stl", source_revision="a" * 64)
+    presentation = _presentation_for_handles(tmp_path, (handle,))
+    originals = {path: path.read_bytes() for path in (tmp_path / "products/grounding/ontology").rglob("*") if path.is_file()}
+    audit = tmp_path / "composition/refinement_runs/run_0001/pa_0001/native"
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Phase 5 must not commit or replace Phase 4 authority.")
+
+    def retrieve(*args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs["audit_directory"] == audit
+        return {"served_context": {"evidence_type": "CAD", "context_ref": "synthetic.stl"}}
+
+    class Runtime:
+        _grounding_limits = SimpleNamespace(max_evidence_operations=12, max_proposals=3)
+        async def interpret_retrieved_evidence(self, **kwargs: object) -> dict[str, object]:
+            path = tmp_path / "products/grounding/rgb_d_cad_grounding/cad_0001.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"record_type": "CADMeshRecord", "producer": production_grounding._GEOMETRY_PRODUCER, "coordinate_frame": "CAD_local", "stored_units": "m", "triangle_count": 1, "vertex_count": 3, "bounds_m": [[0, 0, 0], [0.1, 0.1, 0]], "vertex_centroid_m": [0.03, 0.03, 0]}))
+            return {"typed_context_refs": [path.relative_to(tmp_path).as_posix()]}
+
+    monkeypatch.setattr(production_grounding, "validate_and_merge_triple_delta", forbidden)
+    monkeypatch.setattr(production_grounding, "persist_product_context_view", forbidden)
+    monkeypatch.setattr(production_grounding, "_handle_revision_is_current", lambda handle: True)
+    monkeypatch.setattr(production_grounding.context_serving, "retrieve_pa_evidence", retrieve)
+    investigation = _NativeEvidenceInvestigation(runtime=Runtime(), interaction_root=tmp_path, tbox=tbox, abox=abox, requirement=abox.product_requirement, handles=(handle,), presentation=presentation, supplemental_directory=audit)
+    result = asyncio.run(investigation.execute("retrieve", {"evidence_id": handle.evidence_id}))
+    assert "error" not in result, result
+    assert (audit / "tool_call_0001.json").is_file()
+    assert (audit / "model_tool_exchange_0001.json").is_file()
+    assert not list((tmp_path / "interaction_record").glob("model_tool_exchange_*.json"))
+    ref = next(iter(investigation._issued_record_hashes))
+    binding = investigation._input_binding(ref, expected_record_type="CADMeshRecord")
+    assert binding.status == "accepted"
+    result_abox, derived = production_grounding._merge_derived_record(tmp_path, tbox, abox, tmp_path / ref, status="accepted", prerequisite_bindings=(), persist=False)
+    assert result_abox is abox and derived == binding
+    assert all(path.read_bytes() == value for path, value in originals.items())
+
+
 def test_pa_document_question_is_persisted_verbatim_and_scene_refs_are_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,6 +159,7 @@ def test_pa_document_question_is_persisted_verbatim_and_scene_refs_are_rejected(
         _document_config=load_model_runtime_config().document_vlm,
         _document_vision_runtime=_NoDocumentVision(),
         _grounding_candidate_order=None,
+        _grounding_limits=load_model_runtime_config().grounding_limits,
     )
     investigation = _NativeEvidenceInvestigation(
         runtime=runtime,

@@ -199,8 +199,33 @@ explicitly under the corresponding heading.
   `ProductAgentContextRuntime` composition boundary. Do not start its lifecycle
   or expose other shared-agent operations.
 - Keep User ↔ ProductAgent interaction non-executing. Phase 5.1 may contact only
-  the selected RA after current completion and evidence validation; Phase 5.2A may
-  author only an unbound structural draft.
+  the selected RA after current completion and evidence validation. Primitive
+  composition authors one program with available parameters; omitted required
+  parameters remain unbound. Strict selected numerical calculations and private
+  motion validation are permitted; robot primitives are never executed.
+- Preserve complete runtime contracts in snapshots. Project grasp/release formal
+  conditions/effects to `held_part` only in composition inputs. Omit `model_name`
+  from composition parameters, nested schemas, outputs and custody effects;
+  retain it in authoritative runtime contracts for a future execution adapter.
+  Reject new submissions containing that execution-only argument. Filter recovery
+  examples/decompositions from initial state and every model-facing record read.
+- Preserve nested schemas and distinguish signature-required arguments from
+  grounding requirements. Binding diagnostics inspect RA-selected sources only;
+  they never fill values, select sources or repair steps. Only the separate strict
+  calculation adapter evaluates RA-selected helper calls with grounded inputs.
+- Read each saved attempt against the composition catalog in its own hash-checked
+  request. Preserve old programs and reports; use the current projection only for
+  new attempts. Historical catalogs never become new composition inputs.
+- Capture configured planning frame and controlled-link/TCP names without
+  treating configuration as measured feedback. Do not infer `model_name` from
+  product labels or apply an automatic world-to-base conversion.
+- Phase 4 supplies observed product evidence and desired relationships. Phase 5
+  owns bounded supplemental evidence, measured robot context, strict selected
+  target calculations and isolated Cartesian validation with execution disabled.
+  RA alone binds evidence and revises steps. Helper waypoints prescribe no order.
+  Preserve Phase 4 ontology/views and historical programs. Follow
+  `VALIDATION_AND_REVISION.md` for implemented scope and subsequent physical work,
+  and `COMPOSITION_EVALUATION.md` for experiments and claim limits.
 - Current Phase 4 implements PA-owned evidence investigation, deterministic validation,
   pairwise assembly relationships and required MoveIt position planning for arm
   assignment in simulation. It does not establish grasping or assembly outcome.

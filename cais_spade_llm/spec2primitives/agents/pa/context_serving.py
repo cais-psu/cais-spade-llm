@@ -85,12 +85,14 @@ def retrieve_pa_evidence(
     context_ref: str | None,
     retrieval_number: int,
     live_observation_timeout_sec: float = 5.0,
+    audit_directory: Path | None = None,
 ) -> dict[str, object]:
     """Serve one controller-resolved native ``retrieve`` tool request."""
     root = Path(interaction_root)
-    retrieval_path = (
-        root / "interaction_record" / f"retrieval_{retrieval_number:04d}.json"
-    )
+    directory = audit_directory or root / "interaction_record"
+    if not directory.resolve().is_relative_to(root.resolve()):
+        raise ValueError("Retrieval audit directory must remain inside its interaction.")
+    retrieval_path = directory / f"retrieval_{retrieval_number:04d}.json"
     if retrieval_path.exists():
         return _failure(
             "interaction_exists",

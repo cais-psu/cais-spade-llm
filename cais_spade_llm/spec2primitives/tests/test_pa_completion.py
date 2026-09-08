@@ -514,6 +514,11 @@ async def prepare_native_completion_fixture(
         desired_location_ref,
         target_state_record_ref,
     )
+    from cais_spade_llm.spec2primitives.tools.observation_presentation import (
+        ObservationPresentation,
+    )
+
+    ObservationPresentation(root, create=True)
     evidence_presentation = load_or_create_evidence_presentation(
         root,
         sources=((None, "observation", "fresh_on_call"),),
@@ -716,6 +721,185 @@ def persist_native_completion_fixture(root: Path, **kwargs) -> PAContextGroundin
         workcell=prepared["workcell"],
     )
     return load_pa_context_grounding_completion(root)
+
+
+class _ReassignmentAgent:
+    def __init__(self, selected="xarm6", after_checks=None):
+        self.selected = selected
+        self.after_checks = after_checks
+        self.prompts = []
+        self.results = []
+
+    async def ask_llm_structured(
+        self, prompt, *, response_format, tools, tool_executor, max_tool_rounds
+    ):
+        assert response_format["name"] == "spec2primitives_pa_resource_allocation"
+        self.prompts.append(prompt)
+        results = {}
+        for symbol in tools[0]["function"]["parameters"]["properties"]["resource_symbol"]["enum"]:
+            results[symbol] = await tool_executor("check_reachability", {"resource_symbol": symbol})
+        self.results.append(results)
+        if self.after_checks is not None:
+            self.after_checks()
+        return {
+            "result": {
+                "resource_symbol": self.selected,
+                "reachability_check_ref": results[self.selected]["reachability_check_ref"],
+            }
+        }
+
+
+def _reassignment_runtime(verdicts=None, *, swapped=False):
+    from cais_spade_llm.spec2primitives.agents.pa.production_grounding import (
+        ProductionProductContextGroundingRuntime,
+    )
+    from cais_spade_llm.spec2primitives.config import load_model_runtime_config
+    from cais_spade_llm.spec2primitives.tests.pa_grounding_test_support import OfflineMoveItPlanning
+
+    class MeasuredPlanning(OfflineMoveItPlanning):
+        async def read_resource_base_pose(self, *, base_frame, target_frame):
+            near = (base_frame == "xarm6_link_base") != swapped
+            return {
+                "base_frame": base_frame,
+                "target_frame": target_frame,
+                "translation_m": [0.0 if near else 20.0, 0.0, 0.0],
+                "observed_at_ns": 123,
+            }
+
+    return ProductionProductContextGroundingRuntime(
+        tbox=ontology_config().load_tbox(),
+        document_config=load_model_runtime_config().document_vlm,
+        document_vision_runtime=object(),
+        robot_agent_feasibility_runtime=MeasuredPlanning(verdicts),
+    )
+
+
+def test_reassignment_preserves_grounding_and_rebuilds_xarm_context(tmp_path):
+    from cais_spade_llm.spec2primitives import spec2primitives_ui
+    from cais_spade_llm.spec2primitives.agents.pa.resource_reassignment import (
+        reassign_completed_interaction,
+    )
+    from cais_spade_llm.spec2primitives.agents.ra import (
+        activate_selected_ra_context,
+        read_phase_5_1_diagnostic,
+    )
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import _AssignedContextRuntime
+
+    root = tmp_path / "interaction_reassignment"
+    original = persist_native_completion_fixture(
+        root, resource_symbol="ur5e", include_dynamic_grounding_records=True,
+    ).to_record()
+    old_context = _AssignedContextRuntime(self_jid="ur5e@localhost")
+    asyncio.run(activate_selected_ra_context(old_context, root))
+    original_bytes = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+    agent = _ReassignmentAgent()
+
+    result = asyncio.run(
+        reassign_completed_interaction(
+            interaction_root=root,
+            runtime=_reassignment_runtime(),
+            product_agent=agent,
+            requested_resource_symbol="xarm6",
+        )
+    )
+
+    assert result["activated"] is True
+    assert result["selected_resource_symbol"] == "xarm6"
+    archive = Path(result["archive_root"])
+    assert {
+        path.relative_to(archive): path.read_bytes()
+        for path in archive.rglob("*")
+        if path.is_file()
+    } == original_bytes
+    assert load_pa_context_grounding_completion(archive).to_record() == original
+    current = load_pa_context_grounding_completion(root).to_record()
+    assert current["completion_turn"] == 2
+    decision = _read_json(root / current["decision_ref"])
+    assert decision["PA_input"]["requested_resource_symbol"] == "xarm6"
+    assert decision["PA_input"]["previous_completion_fingerprint"] == original["fingerprint"]
+    for binding in original["typed_context_refs"]:
+        assert (root / binding["ref"]).read_bytes() == original_bytes[Path(binding["ref"])]
+    assert (root / original["ontology_projection_ref"]).read_bytes() == original_bytes[
+        Path(original["ontology_projection_ref"])
+    ]
+    assert len(agent.prompts) == 1
+    assert '"requested_resource_symbol": "xarm6"' in agent.prompts[0]
+    assert set(agent.results[0]) == {"xarm6", "ur5e"}
+    assert not (root / "resources/ur5e@localhost").exists()
+    fresh_runtime = _AssignedContextRuntime()
+    asyncio.run(activate_selected_ra_context(fresh_runtime, root))
+    assert read_phase_5_1_diagnostic(root).selected_resource_jid == "xarm6@localhost"
+    recovered = spec2primitives_ui._latest_pa_ui_interaction(root.parent)
+    assert recovered["interaction_root"] == root
+    view = spec2primitives_ui._pa_ui_view(recovered)
+    assert view["activity_state"] == "grounding complete"
+    assert view["phase_5_1"]["selected_resource_jid"] == "xarm6@localhost"
+    assert not (root / "composition/primitive_program_candidates").exists()
+
+
+@pytest.mark.parametrize("failure", ["wrong_robot", "rejected", "changed_original"])
+def test_failed_reassignment_does_not_replace_original(tmp_path, failure):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_reassignment import (
+        reassign_completed_interaction,
+    )
+
+    root = tmp_path / "interaction"
+    original = persist_native_completion_fixture(root, resource_symbol="ur5e").to_record()
+    agent = _ReassignmentAgent(
+        selected="ur5e" if failure == "wrong_robot" else "xarm6",
+        after_checks=(lambda: (root / "new_user_note.txt").write_text("concurrent change"))
+        if failure == "changed_original"
+        else None,
+    )
+    runtime = _reassignment_runtime({"xarm6": "rejected"} if failure == "rejected" else None)
+    with pytest.raises((RuntimeError, ValueError)):
+        asyncio.run(
+            reassign_completed_interaction(
+                interaction_root=root,
+                runtime=runtime,
+                product_agent=agent,
+                requested_resource_symbol="xarm6",
+            )
+        )
+    assert load_pa_context_grounding_completion(root).to_record() == original
+    assert not (root.parent / f".{root.name}.resource_reassignment.lock").exists()
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+def test_allocation_trial_keeps_pa_choice_and_original_interaction(tmp_path, swapped):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_reassignment import (
+        reassign_completed_interaction,
+    )
+
+    root = tmp_path / "interaction"
+    original = persist_native_completion_fixture(root, resource_symbol="ur5e").to_record()
+    agent = _ReassignmentAgent(selected="ur5e")
+    result = asyncio.run(
+        reassign_completed_interaction(
+            interaction_root=root,
+            runtime=_reassignment_runtime(swapped=swapped),
+            product_agent=agent,
+            requested_resource_symbol=None,
+            activate=False,
+        )
+    )
+    assert result["activated"] is False
+    assert result["selected_resource_symbol"] == "ur5e"
+    assert '"requested_resource_symbol"' not in agent.prompts[0]
+    distances = {
+        symbol: result["proximity"]["mean_current_state_distance_m"]
+        for symbol, result in agent.results[0].items()
+    }
+    assert (distances["xarm6"] > distances["ur5e"]) is swapped
+    assert load_pa_context_grounding_completion(root).to_record() == original
+    assert (
+        load_pa_context_grounding_completion(Path(result["candidate_root"])).to_record()[
+            "completion_turn"
+        ]
+        == 2
+    )
 
 
 async def _unused_tool(
@@ -925,7 +1109,14 @@ def _allocation_evidence_source(
         observation_handle=str(candidate_reference["observation_handle"]),
         candidate_handle=str(candidate_reference["candidate_handle"]),
         source_frame=str(record["source_frame"]),
-        neutral_projection={"location_record_available": True},
+        neutral_projection={
+            "visual_region_available": True,
+            "location_record_available": True,
+            "observation_handle": candidate_reference["observation_handle"],
+            "candidate_handle": candidate_reference["candidate_handle"],
+            "target_frame": record["target_frame"],
+            "translated_location_m": record["translated_location_m"],
+        },
     )
 
 
@@ -1035,6 +1226,38 @@ def test_completion_reload_rechecks_all_arm_evidence(tmp_path, change):
     completion["fingerprint"] = _fingerprint_without_fingerprint(completion)
     _write_json(completion_path, completion)
     with pytest.raises(GroundingContractError):
+        load_pa_context_grounding_completion(tmp_path)
+
+
+@pytest.mark.parametrize("change", ["requested_resource", "proximity"])
+def test_completion_rechecks_rehashed_allocation_constraint_and_distance(tmp_path, change):
+    from cais_spade_llm.spec2primitives.agents.pa.resource_proximity import _proximity_from_pose
+
+    completion = persist_native_completion_fixture(tmp_path).to_record()
+    if change == "requested_resource":
+        path = tmp_path / completion["decision_ref"]
+        decision = _read_json(path)
+        decision["PA_input"]["requested_resource_symbol"] = "ur5e"
+        _write_json(path, decision)
+        completion["decision_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    else:
+        pinned = completion["tool_call_refs"][0]
+        path = tmp_path / pinned["ref"]
+        call = _read_json(path)
+        check = _read_json(tmp_path / call["result_ref"])
+        proximity = _proximity_from_pose({
+            "base_frame": "xarm6_link_base",
+            "target_frame": check["target_frame"],
+            "translation_m": [0.0, -0.5, 1.021],
+            "observed_at_ns": 123,
+        }, check)
+        call["result"]["proximity"] = proximity
+        proximity["mean_current_state_distance_m"] += 1.0
+        _write_json(path, call)
+        pinned["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    completion["fingerprint"] = _fingerprint_without_fingerprint(completion)
+    _write_json(tmp_path / "interaction_record/context_completion_0001.json", completion)
+    with pytest.raises((GroundingContractError, ValueError)):
         load_pa_context_grounding_completion(tmp_path)
 
 

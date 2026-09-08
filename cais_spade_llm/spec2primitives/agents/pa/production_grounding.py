@@ -20,6 +20,7 @@ from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingProducerDescriptor,
     ProductContextView,
     TypedContextBinding,
+    _typed_binding_from_ref,
     build_product_context_view,
     persist_product_context_view,
     validate_grounding_evidence,
@@ -52,6 +53,7 @@ from cais_spade_llm.spec2primitives.agents.pa.resource_grounding import (
     commit_resource_assignment,
     persist_pa_resource_selection,
 )
+from cais_spade_llm.spec2primitives.agents.pa.resource_proximity import read_resource_proximity
 from cais_spade_llm.spec2primitives.agents.ra.feasibility_validation import (
     RobotAgentFeasibilityRuntime,
 )
@@ -246,6 +248,7 @@ class _NativeEvidenceInvestigation:
         requirement: str,
         handles: Sequence[_EvidenceHandle],
         presentation: EvidencePresentationRecord,
+        supplemental_directory: Path | None = None,
     ) -> None:
         self.runtime = runtime
         self.root = Path(interaction_root).resolve()
@@ -253,6 +256,10 @@ class _NativeEvidenceInvestigation:
         self.abox = abox
         self.requirement = requirement
         self.presentation = presentation
+        self.supplemental_directory = supplemental_directory
+        self.audit_directory = supplemental_directory or self.root / "interaction_record"
+        if not self.audit_directory.resolve().is_relative_to(self.root):
+            raise ProductionGroundingError("Evidence audits must remain inside the interaction.")
         self.presentation.assert_unchanged()
         # The first retrieval must be blinded before any proposal is produced.
         ObservationPresentation(self.root, create=True)
@@ -279,6 +286,10 @@ class _NativeEvidenceInvestigation:
         self._retrieval_number = _latest_number(
             self.root / "interaction_record", "retrieval_*.json", "retrieval_"
         )
+        if supplemental_directory is not None:
+            self._tool_call_number = 0
+            numbers = [int(path.stem.removeprefix("retrieval_")) for path in (self.root / "composition/refinement_runs").glob("run_*/pa_*/native/retrieval_*.json")]
+            self._retrieval_number = max([self._retrieval_number, *numbers])
         self._load_prior_evidence()
 
     def grounding_progress(self, *, stop_reason: str | None = None) -> dict[str, object]:
@@ -363,6 +374,20 @@ class _NativeEvidenceInvestigation:
                 self.prior_evidence.append({"retrieval_state": "already_retrieved", **dict(result)})
             self.retrieved_results[handle.evidence_id] = result
 
+    def _input_binding(self, record_ref: str, *, expected_record_type: str) -> TypedContextBinding:
+        """Check an issued premise without admitting supplemental records to the ABox."""
+        if self.supplemental_directory is not None:
+            if record_ref not in self._issued_record_hashes:
+                raise ProductionGroundingError("Supplemental premise was not issued.")
+            self._pin_issued_record(record_ref)
+            record = _read_json(self.root / record_ref)
+            binding = _typed_binding_from_ref(self.root, record_ref, producer=str(record["producer"]))
+            if binding.status != "accepted" or binding.record_type != expected_record_type:
+                raise ProductionGroundingError("Supplemental premise is not accepted typed evidence.")
+            return binding
+        view = build_product_context_view(self.root, self.abox, attempted_evidence=tuple(self.retrieved_handle_ids), assessed_at_ns=time.time_ns())
+        return _accepted_binding(view, record_ref, expected_record_type=expected_record_type)
+
     async def execute(
         self,
         tool_name: str,
@@ -378,8 +403,7 @@ class _NativeEvidenceInvestigation:
         projected = ObservationPresentation(self.root).project(result)
         _assert_blinded_pa_projection(projected, self.presentation)
         _write_json_exclusive(
-            self.root
-            / "interaction_record"
+            self.audit_directory
             / f"model_tool_exchange_{self._tool_call_number:04d}.json",
             {
                 "record_type": "ModelToolExchange",
@@ -475,6 +499,7 @@ class _NativeEvidenceInvestigation:
                 context_ref=handle.context_ref,
                 retrieval_number=self._retrieval_number,
                 live_observation_timeout_sec=_LIVE_OBSERVATION_TIMEOUT_SEC,
+                **({"audit_directory": self.audit_directory} if self.supplemental_directory is not None else {}),
             )
             served_context = served.get("served_context") if isinstance(served, Mapping) else None
         if not isinstance(served_context, Mapping):
@@ -498,22 +523,24 @@ class _NativeEvidenceInvestigation:
                 operation_number=self._retrieval_number,
             )
             source_refs = _served_source_refs(served_context)
-            merge = validate_and_merge_triple_delta(
-                self.root,
-                self.tbox,
-                _producer_for_type(handle.evidence_type),
-                delta,
-                authorized_evidence_refs=sorted(source_refs),
-            )
-            self.abox = merge.abox
-            view = build_product_context_view(
-                self.root,
-                self.abox,
-                attempted_evidence=tuple(self.retrieved_handle_ids) + (handle.evidence_id,),
-                assessed_at_ns=time.time_ns(),
-            )
-            persist_product_context_view(self.root, view)
             record_refs = _typed_context_refs(delta)
+            if self.supplemental_directory is None:
+                merge = validate_and_merge_triple_delta(
+                    self.root, self.tbox, _producer_for_type(handle.evidence_type), delta,
+                    authorized_evidence_refs=sorted(source_refs),
+                )
+                self.abox = merge.abox
+                view = build_product_context_view(
+                    self.root, self.abox,
+                    attempted_evidence=tuple(self.retrieved_handle_ids) + (handle.evidence_id,),
+                    assessed_at_ns=time.time_ns(),
+                )
+                persist_product_context_view(self.root, view)
+            else:
+                # Supplemental measurements have the same typed-record checks but
+                # cannot change the accepted Phase 4 ontology or its pinned view.
+                for ref in record_refs:
+                    _typed_binding_from_ref(self.root, ref, producer=_producer_for_type(handle.evidence_type))
             self._register_references(source_refs=source_refs, record_refs=record_refs)
             result = _compact_retrieval_result(
                 self.root,
@@ -611,14 +638,7 @@ class _NativeEvidenceInvestigation:
                 retrieval,
                 expected_record_type="DocumentSourceIndexRecord",
             )
-            view = build_product_context_view(
-                self.root,
-                self.abox,
-                attempted_evidence=tuple(self.retrieved_handle_ids),
-                assessed_at_ns=time.time_ns(),
-            )
-            source_binding = _accepted_binding(
-                view,
+            source_binding = self._input_binding(
                 source_index_ref,
                 expected_record_type="DocumentSourceIndexRecord",
             )
@@ -646,6 +666,7 @@ class _NativeEvidenceInvestigation:
                 status=binding_status,
                 prerequisite_bindings=(source_binding,),
                 producer=_DOCUMENT_PRODUCER,
+                persist=self.supplemental_directory is None,
             )
             query_ref = query.record_path.relative_to(self.root).as_posix()
             self._register_references(source_refs=(), record_refs=(query_ref,))
@@ -751,19 +772,11 @@ class _NativeEvidenceInvestigation:
                 observation_result,
                 expected_record_type="RGBDSegmentationRecord",
             )
-            view = build_product_context_view(
-                self.root,
-                self.abox,
-                attempted_evidence=tuple(self.retrieved_handle_ids),
-                assessed_at_ns=time.time_ns(),
-            )
-            cad_binding = _accepted_binding(
-                view,
+            cad_binding = self._input_binding(
                 cad_record_ref,
                 expected_record_type="CADMeshRecord",
             )
-            segmentation_binding = _accepted_binding(
-                view,
+            segmentation_binding = self._input_binding(
                 segmentation_record_ref,
                 expected_record_type="RGBDSegmentationRecord",
             )
@@ -784,6 +797,7 @@ class _NativeEvidenceInvestigation:
                 correspondence.record_path,
                 status=correspondence.measurement,
                 prerequisite_bindings=(cad_binding, segmentation_binding),
+                persist=self.supplemental_directory is None,
             )
             comparison_ref = correspondence.record_path.relative_to(self.root).as_posix()
             self._register_references(source_refs=(), record_refs=(comparison_ref,))
@@ -845,14 +859,7 @@ class _NativeEvidenceInvestigation:
             ):
                 raise ProductionGroundingError("Candidate field paths are invalid.")
             selected_paths = tuple(str(path) for path in field_paths)
-            view = build_product_context_view(
-                self.root,
-                self.abox,
-                attempted_evidence=tuple(self.retrieved_handle_ids),
-                assessed_at_ns=time.time_ns(),
-            )
-            segmentation_binding = _accepted_binding(
-                view,
+            segmentation_binding = self._input_binding(
                 segmentation_ref,
                 expected_record_type="RGBDSegmentationRecord",
             )
@@ -898,6 +905,7 @@ class _NativeEvidenceInvestigation:
                 relation.record_path,
                 status=relation.status,
                 prerequisite_bindings=(segmentation_binding,),
+                persist=self.supplemental_directory is None,
             )
             relation_ref = relation.record_path.relative_to(self.root).as_posix()
             self._register_references(source_refs=(), record_refs=(relation_ref,))
@@ -1050,7 +1058,7 @@ class _NativeEvidenceInvestigation:
         )
 
     def _persist_tool_call(self, call_id: str, record: Mapping[str, object]) -> None:
-        path = self.root / "interaction_record" / f"{call_id}.json"
+        path = self.audit_directory / f"{call_id}.json"
         _write_json_exclusive(path, {**record, "grounding_progress": self.grounding_progress()})
         self.tool_call_refs.append(path.relative_to(self.root).as_posix())
 
@@ -1148,6 +1156,7 @@ class _PAAllocationInvestigation:
         allocation_presentation: AllocationPresentationRecord,
         target_frame: str,
         fixed_state_locations: Mapping[str, tuple[str, ...]],
+        location_paths: Mapping[str, Path] | None = None,
     ) -> None:
         self.runtime = runtime
         self.investigation = investigation
@@ -1160,7 +1169,7 @@ class _PAAllocationInvestigation:
         self.target_frame = target_frame
         self.fixed_state_locations = fixed_state_locations
         self.reachability_checks: dict[str, ReachabilityCheckRecord] = {}
-        self._location_paths: dict[str, Path] = {}
+        self._location_paths: dict[str, Path] = dict(location_paths or {})
         self.completed_results: dict[str, Mapping[str, object]] = {}
 
     async def execute(
@@ -1264,6 +1273,9 @@ class _PAAllocationInvestigation:
                 "validation_scope": "moveit_state_location_reachability",
                 "motion_validation_performed": True,
                 "selection_made_by_tool": False,
+                "proximity": await read_resource_proximity(
+                    self.runtime._robot_agent_feasibility_runtime, reachability
+                ),
             }
             _assert_blinded_pa_projection(result, self.investigation.presentation)
             self._persist_call(
@@ -1775,7 +1787,7 @@ class ProductionProductContextGroundingRuntime:
             proposal,
         )
 
-    async def _complete_resource_assignment(
+    async def _complete_resource_assignment(  # noqa: PLR0913
         self,
         *,
         product_agent: ProductAgentContextRuntime,
@@ -1786,6 +1798,8 @@ class ProductionProductContextGroundingRuntime:
         view: ProductContextView,
         proposal: OntologyGroundingProposal,
         ontology_projection_ref: str,
+        requested_resource_symbol: str | None = None,
+        location_paths: Mapping[str, Path] | None = None,
     ) -> Mapping[str, object]:
         """Assign an arm only after bound product and destination locations pass reachability."""
         projection = _read_json(root / ontology_projection_ref)
@@ -1799,6 +1813,18 @@ class ProductionProductContextGroundingRuntime:
             )
 
         evidence_sources = _allocation_evidence_sources(root, view)
+        if location_paths is not None:
+            from .presentation_records import load_allocation_presentation
+
+            # Reassignment preserves the issued pool; calibrated locations added by the
+            # original allocation must not introduce new candidates or change handles.
+            issued_keys = {
+                entry.canonical_key
+                for entry in load_allocation_presentation(root).evidence_entries
+            }
+            evidence_sources = tuple(
+                source for source in evidence_sources if source.canonical_key in issued_keys
+            )
         if not evidence_sources:
             return _incomplete_result(
                 "location_evidence_unavailable",
@@ -1876,27 +1902,30 @@ class ProductionProductContextGroundingRuntime:
             allocation_presentation=allocation_presentation,
             target_frame=_configured_target_frame(self._workcell),
             fixed_state_locations=fixed_state_locations,
+            location_paths=location_paths,
         )
         unchecked: tuple[str, ...] = ()
         for selection_attempt in range(2):
             try:
+                prompt = _pa_allocation_prompt(
+                    unchecked_resources=unchecked,
+                    existing_results=allocation.completed_results,
+                    requirement=abox.product_requirement,
+                    target_feature=_pa_target_feature_projection(
+                        proposal.target_feature, investigation
+                    ),
+                    resource_catalog=resource_catalog,
+                    allocation_presentation=allocation_presentation,
+                    investigation=investigation,
+                    fixed_state_locations=fixed_state_locations,
+                    requested_resource_symbol=requested_resource_symbol,
+                )
+                response_format = _pa_allocation_response_format(
+                    allocation_presentation.resource_order
+                )
                 response = await product_agent.ask_llm_structured(
-                    _pa_allocation_prompt(
-                        unchecked_resources=unchecked,
-                        existing_results=allocation.completed_results,
-                        requirement=abox.product_requirement,
-                        target_feature=_pa_target_feature_projection(
-                            proposal.target_feature,
-                            investigation,
-                        ),
-                        resource_catalog=resource_catalog,
-                        allocation_presentation=allocation_presentation,
-                        investigation=investigation,
-                        fixed_state_locations=fixed_state_locations,
-                    ),
-                    response_format=_pa_allocation_response_format(
-                        allocation_presentation.resource_order,
-                    ),
+                    prompt,
+                    response_format=response_format,
                     tools=[
                         _check_reachability_tool(
                             allocation_presentation.resource_order,
@@ -1905,6 +1934,24 @@ class ProductionProductContextGroundingRuntime:
                     tool_executor=allocation.execute,
                     max_tool_rounds=_MAX_TOOL_ROUNDS,
                 )
+                exchange_number = _next_number(
+                    root, "interaction_record/allocation_model_exchange_*.json"
+                )
+                exchange_path = (
+                    root
+                    / "interaction_record"
+                    / f"allocation_model_exchange_{exchange_number:04d}.json"
+                )
+                _write_json_exclusive(
+                    exchange_path,
+                    {
+                        "record_type": "ProductAgentAllocationExchange",
+                        "prompt": prompt,
+                        "response_format": response_format,
+                        "response": response,
+                    },
+                )
+                investigation.tool_call_refs.append(exchange_path.relative_to(root).as_posix())
                 unchecked = tuple(
                     symbol
                     for symbol in allocation_presentation.resource_order
@@ -1946,6 +1993,10 @@ class ProductionProductContextGroundingRuntime:
             (reachability is None)
             or (reachability.resource_symbol != choice["resource_symbol"])
             or (reachability.status != "accepted")
+            or (
+                requested_resource_symbol is not None
+                and choice["resource_symbol"] != requested_resource_symbol
+            )
         ):
             return _incomplete_result(
                 "invalid_resource_selection",
@@ -2340,7 +2391,7 @@ def _pa_target_feature_projection(
     return projected
 
 
-def _pa_allocation_prompt(
+def _pa_allocation_prompt(  # noqa: PLR0913
     *,
     requirement: str,
     target_feature: Mapping[str, object],
@@ -2350,8 +2401,9 @@ def _pa_allocation_prompt(
     unchecked_resources: tuple[str, ...] = (),
     existing_results: Mapping[str, Mapping[str, object]] | None = None,
     fixed_state_locations: Mapping[str, tuple[str, ...]],
+    requested_resource_symbol: str | None = None,
 ) -> str:
-    """Describe a neutral location-and-resource decision without ranking choices."""
+    """Give PA measured proximity preferences without making its resource choice."""
     prompt_input: dict[str, object] = {
         "exact_requirement": requirement,
         "grounded_target_feature": dict(target_feature),
@@ -2377,6 +2429,16 @@ def _pa_allocation_prompt(
         "with an accepted result created in this conversation or return "
         "no_reachable_resource. "
     )
+    if requested_resource_symbol is not None:
+        if requested_resource_symbol not in resource_catalog:
+            raise ProductionGroundingError("Requested resource is not in the allocation catalog.")
+        prompt_input["requested_resource_symbol"] = requested_resource_symbol
+        instruction += (
+            "The user explicitly requested requested_resource_symbol for this allocation. "
+            "Check every capable resource as usual, but select only that requested resource "
+            "if its check is accepted. Otherwise return no_reachable_resource. This user "
+            "constraint takes precedence over the advisory distance preference. "
+        )
     if unchecked_resources:
         prompt_input["correction"] = {
             "unchecked_resources": list(unchecked_resources),
@@ -2393,7 +2455,13 @@ def _pa_allocation_prompt(
         + "The tool validates the submitted locations for only the selected resource "
         "and never selects a semantic state, location, or resource. "
         "Reachability does not certify grasping, insertion, process execution, force, "
-        "or tolerance. If multiple resources pass with no evidenced advantage, either may be "
+        "or tolerance. Among resources with accepted checks for every current and desired "
+        "location, prefer the smaller proximity.mean_current_state_distance_m. This is "
+        "mean straight-line base-to-current-location distance, not trajectory length or "
+        "execution time. Select a farther resource only when approved evidence supports "
+        "an advantage for this task. A distance never overrides rejected or unavailable "
+        "reachability. If either comparison measurement is unavailable, or distances are "
+        "equal, no distance preference is supported. If multiple resources pass with no evidenced advantage, either may be "
         "selected; do not invent a preference. Presentation order has no priority. Do not "
         "claim that motion or manufacturing executed.\n\n"
         f"Allocation input:\n{json.dumps(prompt_input, indent=2, ensure_ascii=False)}"
@@ -3569,8 +3637,14 @@ def _merge_derived_record(
     status: str,
     prerequisite_bindings: Sequence[TypedContextBinding],
     producer: str = _GEOMETRY_PRODUCER,
+    persist: bool = True,
 ) -> tuple[ABoxSnapshot, TypedContextBinding]:
     record_ref = record_path.relative_to(root).as_posix()
+    if not persist:
+        binding = _typed_binding_from_ref(root, record_ref, producer=producer)
+        if binding.status != status:
+            raise ProductionGroundingError("Supplemental record status differs from its provider result.")
+        return abox, binding
     evidence_refs = sorted(
         {
             ref

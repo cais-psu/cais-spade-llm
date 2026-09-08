@@ -28,7 +28,10 @@ contexts/<interaction_identifier>/
     clarification_<turn>.json
     context_completion_0001.json
   composition/selected_ra_assignments/
-  composition/primitive_program_drafts/
+  composition/primitive_program_candidates/attempt_<number>/
+    request.json
+    exchange_<number>.json
+    candidate.json
   resources/<exact_RA_identifier>/robot_state/
   resources/<exact_RA_identifier>/primitive_catalog_snapshot/
 ```
@@ -41,8 +44,14 @@ RGB-D bundles retain lossless RGB, metric depth and `fixture`, `replay`, or `liv
 
 Document source indexes and existing overview caches live under `contexts/source_cache/` outside an interaction. Interaction evidence pins its source revision. Active CAD comparison records all measurements; pose diagnostics consume the same measurement format.
 
-Phase 5.1 requires current completion before writing envelope or reading recovered paired context. Phase 5.2A appends one unbound draft per context pair. It reconstructs the target from pinned authorities rather than copying it. Binding bundles, missing-context batches, bound candidates, execution validation and execution records remain future work.
+Phase 5.1 requires current completion before writing an envelope or reading recovered paired context. Composition reconstructs the target from pinned authorities and authors one program with available parameters. Each request directly pins completion, assignment, state and catalog snapshots. Historical draft files and draft-dependent attempts remain untouched and are excluded from new inputs. `composition/refinement_runs/run_*/` appends context requests, PA investigations, measured robot contexts, calculation/validation records, events and a stop result; candidate references preserve every RA version. Execution bindings and robot execution remain future work.
 
 Saved interactions remain untouched. There is one current format per record type. Incompatible records require “Start a fresh interaction” and cannot authorize new RA work; no conversion or compatibility reader is provided.
 
 See [schemas](../schemas/README.md) and [bias audit paths and experiments](../BIAS_VALIDATION.md). Evaluator answers belong under `evaluations/` and never enter recognition inputs.
+
+The current `binding_issues` report is a derived diagnostic, not a new authoritative record or a rewritten candidate. Each item contains `step_index`, `parameter_path`, `status` (`missing`, `incompatible`, `unverified`, or `deferred`) and `message`. A deferred result refers to an unexecuted earlier step; it is distinct from missing source evidence.
+
+Each attempt is validated and displayed using the catalog embedded in its saved `request.prompt` `COMPOSITION_INPUT` payload. The reader checks that catalog against the pinned context after projection. Older programs retain their original `model_name` arguments/findings; new attempts use the simplified composition interface with that execution binding excluded. This uses existing record fields and does not rewrite snapshots, requests, traces or candidates. Independent new runs exclude prior programs. Within one run, refinement explicitly pins and supplies its preceding candidate and findings.
+
+Fresh state snapshots include configuration-sourced `motion_context` with frame/EE/TCP names. Full runtime state/contracts stay captured, while initial composition and record reads use a filtered state view and minimal grasp/release contracts. Hash checks apply to original bytes. Old snapshots retain their original declarations and saved programs remain unchanged; recapture context to use corrected metadata. See [RA input contracts](../agents/ra/README.md).

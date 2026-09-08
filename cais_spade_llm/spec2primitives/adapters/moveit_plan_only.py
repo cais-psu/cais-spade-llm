@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 import asyncio
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -24,6 +25,51 @@ class MoveItPlanOnlyRuntime:
     async def validate_state_locations(self, request: Mapping[str, object]) -> Mapping[str, object]:
         """Plan to bound positions with unconstrained tool orientation and no execution."""
         return await asyncio.to_thread(self._validate_state_locations_sync, dict(request))
+
+    async def read_resource_base_pose(
+        self, *, base_frame: str, target_frame: str
+    ) -> Mapping[str, object]:
+        """Read live TF for advisory allocation proximity without activating a robot."""
+        return await asyncio.to_thread(self._read_resource_base_pose_sync, base_frame, target_frame)
+
+    def _read_resource_base_pose_sync(
+        self, base_frame: str, target_frame: str
+    ) -> Mapping[str, object]:
+        try:
+            import rclpy
+            from rclpy.node import Node
+            from tf2_ros import Buffer, TransformException, TransformListener
+        except ImportError as exc:
+            raise RuntimeError("ROS2 TF interfaces are unavailable.") from exc
+        initialized_here = not rclpy.ok()
+        if initialized_here:
+            rclpy.init()
+        node = Node("spec2primitives_resource_base_pose")
+        buffer = Buffer()
+        listener = TransformListener(buffer, node)
+        try:
+            deadline = time.monotonic() + self._service_timeout_sec
+            while time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.1)
+                if not buffer.can_transform(target_frame, base_frame, rclpy.time.Time()):
+                    continue
+                transform = buffer.lookup_transform(target_frame, base_frame, rclpy.time.Time())
+                point = transform.transform.translation
+                return {
+                    "base_frame": transform.child_frame_id,
+                    "target_frame": transform.header.frame_id,
+                    "translation_m": [point.x, point.y, point.z],
+                    # Static TF stamps can be zero; this records when the live buffer was read.
+                    "observed_at_ns": time.time_ns(),
+                }
+            raise RuntimeError("Robot base transform is unavailable.")
+        except TransformException as exc:
+            raise RuntimeError("Robot base transform is unavailable.") from exc
+        finally:
+            listener.unregister()
+            node.destroy_node()
+            if initialized_here and rclpy.ok():
+                rclpy.shutdown()
 
     def _validate_state_locations_sync(self, request: Mapping[str, object]) -> Mapping[str, object]:
         from ..agents.pa.resource_grounding import validate_location_planning_request
