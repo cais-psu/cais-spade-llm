@@ -451,6 +451,14 @@ def _composition_prompt(inputs: _CompositionInputs) -> str:
         "Inspect accepted supplemental evidence and validation findings; you alone decide whether "
         "and how to change the program or its bindings. You may request_context with a step_index, "
         "quantity, authority (PA for product/scene, RA for robot feedback), and reason. "
+        "Missing product measurements declared by your selected primitive inputs are dispatched "
+        "to PA automatically with their exact field paths and schemas. Reuse the returned evidence "
+        "by authoring its bindings. Invalid bindings remain yours to correct. Use request_context "
+        "for supplemental product/scene facts or validation requirements; entries with authority PA "
+        "reach PA without a prescribed extraction sequence. Identical requests with unchanged "
+        "evidence are not repeated automatically. "
+        "You may instead revise your program or report an unsupported capability. "
+        "PA chooses the evidence tools for your requests. "
         "A calculation result belongs only to its recorded inputs and preceding state. "
         "Validation findings are checks, not instructions prescribing a sequence. "
         if inputs.refinement_ref is not None else ""
@@ -637,10 +645,14 @@ def _serve_evidence(action: Mapping[str, Any], inputs: _CompositionInputs) -> di
 def _evidence_value(inputs: _CompositionInputs, record_ref: object, field_path: object) -> Any:
     if not isinstance(record_ref, str) or record_ref not in inputs.record_hashes:
         raise PrimitiveCompositionError("Record reference is not approved for this composition.")
+    if {"execution", "evaluations"}.intersection(Path(record_ref).parts):
+        raise PrimitiveCompositionError("Execution and evaluation records are excluded from composition.")
     payload = _owned_path(inputs.root, record_ref).read_bytes()
     if hashlib.sha256(payload).hexdigest() != inputs.record_hashes[record_ref]:
         raise PrimitiveCompositionError("A pinned evidence record changed.")
     document = json.loads(payload)
+    if str(document.get("record_type", "")).startswith("PrimitiveExecution") or document.get("record_type") == "GazeboInstanceBinding":
+        raise PrimitiveCompositionError("Execution records are excluded from composition.")
     if document.get("record_type") == "RobotStateSnapshot":
         document["robot_state"] = _composition_state_view(document["robot_state"])
     if inputs.refinement_ref is not None:
@@ -679,6 +691,19 @@ def _with_refinement(inputs: _CompositionInputs, reference: dict[str, str]) -> _
     if previous.get("record_type") != "PrimitiveProgramCandidate" or previous.get("status") != "proposed":
         raise PrimitiveCompositionError("Refinement requires its preceding authored candidate.")
     feedback = {"previous_candidate": deepcopy(previous["primitive_steps"]), "findings": deepcopy(context["findings"])}
+    for finding in feedback["findings"]:
+        if "pa_response_ref" in finding:
+            response_ref = finding["pa_response_ref"]
+            response = verify_record(inputs.root, response_ref)
+            # A copied explanation cannot outlive or change its pinned PA response.
+            if (
+                Path(response_ref["ref"]).parent.parent != Path(reference["ref"]).parent
+                or response.get("record_type") != "PrimitiveContextResponse"
+                or finding.get("authority") != "PA"
+                or finding.get("status") != "unknown"
+                or finding.get("message") not in response.get("unresolved", [])
+            ):
+                raise PrimitiveCompositionError("PA feedback does not match its run-owned response.")
     if context.get("robot_context_ref"):
         robot = read_pin(inputs.root, context["robot_context_ref"])
         if robot.get("resource_jid") != inputs.assignment.selected_resource_jid or robot.get("assignment_fingerprint") != inputs.assignment.fingerprint:

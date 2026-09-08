@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Awaitable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any, Protocol
+from pathlib import Path
 
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
 from cais_spade_llm.spec2primitives.adapters.moveit_plan_only import (
@@ -37,6 +38,10 @@ class InProcessRobotAgentHost(Protocol):
         """Return whether the selected RobotAgent may use the simulation."""
         ...
 
+    def hardware_stack_status(self, robot: str) -> dict[str, object]:
+        """Read the hardware interlock without starting a hardware process."""
+        ...
+
     async def start_spec2primitives_robot_agent(
         self,
         resource_jid: str,
@@ -58,16 +63,25 @@ class InProcessRobotAgentCompositionRuntime:
         host: InProcessRobotAgentHost,
         *,
         moveit_plan_only_runtime: object | None = None,
+        contexts_root: Path | None = None,
     ) -> None:
         """Create the adapter with an injectable no-motion MoveIt boundary."""
         self._host = host
         self._moveit_plan_only_runtime = moveit_plan_only_runtime or MoveItPlanOnlyRuntime()
+        self._contexts_root = contexts_root or Path(__file__).resolve().parents[1] / "contexts"
 
     async def request_assigned_context(
         self,
         assignment: SelectedRAAssignmentEnvelope,
     ) -> Mapping[str, object]:
         """Return fresh state and the complete composer-visible atomic catalog."""
+        from ..agents.ra.execution_state import execution_busy, execution_custody
+
+        if execution_busy():
+            raise RAContextHandoffError("Robot context capture is unavailable during Gazebo execution.")
+        acknowledged = await asyncio.to_thread(
+            execution_custody, self._contexts_root, assignment.selected_resource_jid
+        )
         selected_agent = await self._selected_or_started_agent(assignment)
         assignment.assert_addressed_to(str(getattr(selected_agent, "jid", "")))
         self._require_alive(selected_agent, assignment.selected_resource_jid)
@@ -96,6 +110,8 @@ class InProcessRobotAgentCompositionRuntime:
                     "Selected live RobotAgent returned an empty state snapshot."
                 )
             state = deepcopy(dict(robot_state))
+            if acknowledged is not None:
+                state.update(acknowledged)
             # Configuration describes coordinate interpretation, not live TCP
             # feedback. Do not turn absent configuration into a measured pose.
             configuration = getattr(selected_agent, "controller_config", None)
@@ -139,6 +155,10 @@ class InProcessRobotAgentCompositionRuntime:
         The owned composer serves evidence requests; shared execution tools and
         recovery instructions must never participate in this call.
         """
+        from ..agents.ra.execution_state import execution_busy
+
+        if execution_busy():
+            raise RAContextHandoffError("Primitive composition is unavailable during Gazebo execution.")
         selected_agent = await self._selected_or_started_agent(assignment)
         assignment.assert_addressed_to(str(getattr(selected_agent, "jid", "")))
         self._require_alive(selected_agent, assignment.selected_resource_jid)
@@ -172,11 +192,16 @@ class InProcessRobotAgentCompositionRuntime:
         return response
 
     async def capture_validation_context(
-        self, assignment: SelectedRAAssignmentEnvelope, *, profile: Mapping[str, Any]
+        self, assignment: SelectedRAAssignmentEnvelope, *, profile: Mapping[str, Any],
+        _execution_custody: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """Measure the selected resource through owned read-only ROS interfaces."""
         from .robot_validation_context import MeasuredRobotContextRuntime
         from ..agents.ra.refinement_records import fingerprint
+        from ..agents.ra.execution_state import execution_busy, execution_custody
+
+        if _execution_custody is None and execution_busy():
+            raise RAContextHandoffError("Composition validation is unavailable during Gazebo execution.")
 
         selected = await self._selected_or_started_agent(assignment)
         self._require_alive(selected, assignment.selected_resource_jid)
@@ -208,7 +233,71 @@ class InProcessRobotAgentCompositionRuntime:
         from ..agents.ra.composition_context import _without_model_name
 
         measured["held_part"] = _without_model_name(await self._host._run_on_agent_runtime(custody()))
+        acknowledged = _execution_custody
+        if acknowledged is None:
+            acknowledged = await asyncio.to_thread(
+                execution_custody, self._contexts_root, assignment.selected_resource_jid
+            )
+        if acknowledged is not None:
+            measured["held_part"] = acknowledged["held_part"]
         return measured
+
+    async def execution_configuration(
+        self, assignment: SelectedRAAssignmentEnvelope
+    ) -> Mapping[str, Any]:
+        """Require exclusive simulation readiness and read the exact selected RA."""
+        if assignment.selected_execution_mode != "simulation":
+            raise RAContextHandoffError("Gazebo execution requires simulation mode.")
+        if self._host.ros2_proc_status(DUAL_GAZEBO_NAME) != "running":
+            raise RAContextHandoffError("Spec2Primitives Dual Gazebo Environment is not running.")
+        if (
+            self._host.robot_env != "gazebo"
+            or self._host.execution_mode != "simulation"
+            or self._host.system_running
+        ):
+            raise RAContextHandoffError(
+                "The runtime is not exclusively available for Spec2Primitives simulation."
+            )
+        for robot in ("xarm6", "ur5e", "dual robots"):
+            if self._host.hardware_stack_status(robot).get("overall") not in {"stopped", "idle"}:
+                raise RAContextHandoffError(
+                    "Hardware stack is active or its stopped state is unavailable."
+                )
+        ready, reason = await asyncio.to_thread(self._host.simulation_start_ready, force=True)
+        if not ready:
+            raise RAContextHandoffError(str(reason or "Gazebo is not ready for execution."))
+        selected = self._selected_agent_or_none(assignment.selected_resource_jid)
+        if selected is None:
+            raise RAContextHandoffError("The selected RobotAgent is not running.")
+        assignment.assert_addressed_to(str(getattr(selected, "jid", "")))
+        self._require_alive(selected, assignment.selected_resource_jid)
+        self._require_execution_mode(selected, assignment)
+        if getattr(selected, "context_only", False) is not True:
+            raise RAContextHandoffError(
+                "Gazebo execution requires the isolated context-only RobotAgent."
+            )
+
+        async def read() -> dict[str, Any]:
+            return {
+                "configuration": deepcopy(selected.controller_config),
+                "primitive_catalog": _phase_5_1_primitive_catalog(
+                    selected.recovery_synthesis_primitive_catalog()
+                ),
+            }
+
+        return await self._host._run_on_agent_runtime(read())
+
+    async def capture_execution_context(
+        self,
+        assignment: SelectedRAAssignmentEnvelope,
+        *,
+        profile: Mapping[str, Any],
+        custody: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Measure preparation state using the execution journal's semantic custody."""
+        return await self.capture_validation_context(
+            assignment, profile=profile, _execution_custody=custody
+        )
 
     async def validate_plan_only_allocation(
         self,

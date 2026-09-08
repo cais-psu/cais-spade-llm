@@ -124,6 +124,16 @@ class _BindingReport:
         source: Mapping[str, Any] | None = None,
     ) -> None:
         if value is _MISSING:
+            required = set(schema.get("required", [])) | set(schema.get("x-grounding-fields", []))
+            if required:
+                for name in sorted(required):
+                    self.visit(
+                        index,
+                        _field_path(path, name),
+                        _MISSING,
+                        _schema(schema.get("properties", {}).get(name, {})),
+                    )
+                return
             message = "Required input is unbound."
             if schema.get("x-binding-role") == "controller_identifier" or path == "/model_name":
                 message = (
@@ -199,7 +209,9 @@ class _BindingReport:
             properties = schema.get("properties", {})
             required = set(schema.get("required", [])) | set(schema.get("x-grounding-fields", []))
             for name in sorted(required - value.keys()):
-                self.add(index, _field_path(path, name), "missing", "Geometry field is unbound.")
+                self.visit(
+                    index, _field_path(path, name), _MISSING, _schema(properties.get(name, {}))
+                )
             for name, item in value.items():
                 if name in properties:
                     self.visit(

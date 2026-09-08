@@ -1,0 +1,11 @@
+{
+  "package": "xarm_gazebo",
+  "world_file": "table_spec2primitives.world",
+  "instance_position_tolerance_m": 0.01,
+  "instance_orientation_tolerance_rad": 0.1,
+  "service_timeout_sec": 10,
+  "trajectory_timeout_pad_sec": 10,
+  "stop_timeout_sec": 10,
+  "capture_timeout_sec": 10,
+  "model_list_service": "/get_model_list"
+}

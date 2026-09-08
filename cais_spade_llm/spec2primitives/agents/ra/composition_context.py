@@ -61,6 +61,50 @@ def _composition_catalog_view(entries: tuple[Mapping[str, object], ...]) -> list
     """Project composition contracts while retaining full runtime snapshots."""
     result = [_without_model_name(entry) for entry in entries]
     for entry in result:
+        symbol = entry["primitive_symbol"]
+        if symbol in {"compute_pick_targets", "compute_place_targets"}:
+            schemas = entry.get("parameter_schemas", {})
+            geometry = schemas.get("product_geometry")
+            if isinstance(geometry, dict):
+                geometry["x-grounding-required"] = True
+                geometry["description"] = (
+                    "Explicit world geometry for the selected calculation; missing measurements "
+                    "remain unbound and no controller geometry defaults are used."
+                )
+                if symbol == "compute_place_targets":
+                    fields = geometry.setdefault("x-grounding-fields", [])
+                    properties = geometry.setdefault("properties", {})
+                    for name, required in (
+                        ("target_reference", ["target_point"]),
+                        ("target_origin_pose", ["x", "y", "z"]),
+                    ):
+                        if name not in fields:
+                            fields.append(name)
+                        declaration = properties.setdefault(name, {"type": "object"})
+                        required_fields = declaration.setdefault("x-grounding-fields", [])
+                        for field in required:
+                            if field not in required_fields:
+                                required_fields.append(field)
+                    properties["target_reference"].setdefault("properties", {}).setdefault(
+                        "target_point", {"type": "string"}
+                    )["description"] = (
+                        "part_origin or inserted_part_origin; the final part origin must be established."
+                    )
+                    origin = properties["target_origin_pose"].setdefault("properties", {})
+                    for axis in ("x", "y", "z"):
+                        origin.setdefault(axis, {"type": "number", "x-frame-source": "world"})
+            if symbol == "compute_place_targets" and isinstance(schemas.get("pick_ctx"), dict):
+                schemas["pick_ctx"]["description"] = (
+                    "Selected pick result or measured held-part context; grasp/tool offsets "
+                    "must be explicitly bound and no controller fallbacks are used."
+                )
+            if symbol == "compute_pick_targets" and isinstance(schemas.get("target_pose"), dict):
+                schemas["target_pose"]["description"] = (
+                    "Observed product location in world metres, not an end-effector target. "
+                    "The current geometry validator requires an established CAD_origin "
+                    "reference to check the grasp offset; an observed candidate center alone "
+                    "does not establish that reference."
+                )
         if entry["primitive_symbol"] in {"grasp_part", "release_part"}:
             for field in ("conditions", "effects"):
                 entry[field] = {

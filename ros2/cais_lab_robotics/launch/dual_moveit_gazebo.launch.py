@@ -13,6 +13,8 @@ Usage:
     ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import xml.etree.ElementTree as ET
@@ -496,11 +498,10 @@ def launch_setup(context, *args, **kwargs):
             xarm_prefix, ur5e_prefix, combined_urdf, combined_srdf)
 
     if launch_moveit:
-        # 3. Single move_group at ROOT namespace (no namespace prefix issues)
+        # Keep MoveIt's internal parameter service separate from /move_group.
         move_group = Node(
             package='moveit_ros_move_group',
             executable='move_group',
-            name='move_group',
             output='screen',
             parameters=[
                 moveit_config,

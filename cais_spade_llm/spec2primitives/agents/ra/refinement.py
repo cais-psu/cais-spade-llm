@@ -28,6 +28,7 @@ from .program_validation import validate_program
 from .refinement_records import (
     append_record,
     fingerprint,
+    owned_path,
     pin,
     read_pin,
     verify_evidence_tree,
@@ -83,7 +84,9 @@ def load_refinement_profile() -> dict[str, Any]:
 
 def _robot_changed(
     previous: Mapping[str, Any], current: Mapping[str, Any], profile: Mapping[str, Any]
-) -> bool:
+) -> list[dict[str, Any]]:
+    """Describe differences under the existing robot-context comparison policy."""
+    differences = []
     for key in (
         "configuration_sha256",
         "model_parameters_sha256",
@@ -93,17 +96,76 @@ def _robot_changed(
         "held_part",
     ):
         if previous.get(key) != current.get(key):
-            return True
-    if not np.allclose(previous["ee_from_tcp"], current["ee_from_tcp"], rtol=0, atol=1e-6):
-        return True
+            differences.append(
+                {"field": key, "previous": previous.get(key), "current": current.get(key)}
+            )
+    first_transform = np.asarray(previous["ee_from_tcp"], dtype=float)
+    second_transform = np.asarray(current["ee_from_tcp"], dtype=float)
+    for row, column in np.argwhere(
+        ~np.isclose(first_transform, second_transform, rtol=0, atol=1e-6)
+    ):
+        first_value = float(first_transform[row, column])
+        second_value = float(second_transform[row, column])
+        differences.append(
+            {
+                "field": f"ee_from_tcp[{row}][{column}]",
+                "previous": first_value,
+                "current": second_value,
+                "difference": abs(first_value - second_value),
+                "tolerance": 1e-6,
+            }
+        )
     first = dict(
         zip(previous["joint_state"]["names"], previous["joint_state"]["positions"], strict=True)
     )
     second = dict(
         zip(current["joint_state"]["names"], current["joint_state"]["positions"], strict=True)
     )
-    return first.keys() != second.keys() or any(
-        abs(first[key] - second[key]) > profile["state_change_joint_tolerance_rad"] for key in first
+    if first.keys() != second.keys():
+        differences.append(
+            {
+                "field": "joint_state.names",
+                "previous": previous["joint_state"]["names"],
+                "current": current["joint_state"]["names"],
+                "added": [key for key in second if key not in first],
+                "missing": [key for key in first if key not in second],
+            }
+        )
+    for key in first:
+        if key in second:
+            difference = abs(first[key] - second[key])
+            if difference > profile["state_change_joint_tolerance_rad"]:
+                differences.append(
+                    {
+                        "field": f"joint_state.positions[{key!r}]",
+                        "previous": first[key],
+                        "current": second[key],
+                        "difference": difference,
+                        "tolerance": profile["state_change_joint_tolerance_rad"],
+                    }
+                )
+    return differences
+
+
+def _robot_change_message(differences: list[dict[str, Any]]) -> str:
+    descriptions = []
+    for item in differences[:2]:
+        field = item["field"]
+        if "difference" in item:
+            descriptions.append(
+                f"{field}: {item['previous']:.9g} → {item['current']:.9g} "
+                f"(difference {item['difference']:.3g}, threshold {item['tolerance']:.3g})"
+            )
+        elif field == "joint_state.names":
+            descriptions.append(f"{field}: added {item['added']!r}, missing {item['missing']!r}")
+        elif field.endswith("_sha256"):
+            descriptions.append(f"{field} differs")
+        else:
+            descriptions.append(f"{field}: {item['previous']!r} → {item['current']!r}")
+    return (
+        "Robot context comparison detected differences: "
+        + "; ".join(descriptions)
+        + ". Open the program records for all differences and compared captures."
     )
 
 
@@ -200,6 +262,7 @@ class PrimitiveRefinementRuntime:
         reports: list[dict[str, str]] = []
         source_pins: dict[str, dict[str, str]] = {}
         validation_refs: dict[str, dict[str, str]] = {}
+        pa_findings: list[dict[str, Any]] = []
         robot_ref = None
         robot = None
         cache: dict[str, dict[str, Any]] = {}
@@ -234,6 +297,7 @@ class PrimitiveRefinementRuntime:
                     source_pins[specification_ref["ref"]] = specification_ref
                 refinement_ref = None
                 seen: set[str] = set()
+                attempted_requests: set[tuple[str, str]] = set()
                 pending_requests: list[dict[str, Any]] = []
                 while (
                     len(candidate_refs) < self.profile["max_candidates"]
@@ -308,20 +372,31 @@ class PrimitiveRefinementRuntime:
                                 inputs.assignment, profile=self.profile
                             )
                         )
-                        if robot and _robot_changed(robot, captured, self.profile):
-                            status, stop_reason = (
-                                "stale",
-                                "Robot state, model or tool configuration changed during refinement. Capture fresh context.",
-                            )
-                            break
-                        robot = captured
-                        robot_ref = await asyncio.to_thread(
+                        captured_ref = await asyncio.to_thread(
                             append_record,
                             root,
                             directory,
                             f"robot_context_{len(decisions):04d}.json",
-                            robot,
+                            captured,
                         )
+                        differences = _robot_changed(robot, captured, self.profile) if robot else []
+                        if differences:
+                            status, stop_reason = (
+                                "stale",
+                                _robot_change_message(differences),
+                            )
+                            # Keep the rejected capture as diagnostics, without replacing
+                            # the context against which the previous candidate was checked.
+                            await emit(
+                                "robot_context",
+                                stop_reason,
+                                previous_robot_context_ref=robot_ref,
+                                robot_context_ref=captured_ref,
+                                differences=differences,
+                            )
+                            break
+                        robot = captured
+                        robot_ref = captured_ref
                         source_pins[robot_ref["ref"]] = robot_ref
                     except (
                         ImportError,
@@ -374,10 +449,17 @@ class PrimitiveRefinementRuntime:
                                 f"robot_final_{len(decisions):04d}.json",
                                 final_robot,
                             )
-                            if _robot_changed(robot, final_robot, self.profile):
-                                raise ValueError(
-                                    "Robot state or tool configuration changed during validation."
+                            differences = _robot_changed(robot, final_robot, self.profile)
+                            if differences:
+                                message = _robot_change_message(differences)
+                                await emit(
+                                    "robot_context",
+                                    message,
+                                    previous_robot_context_ref=robot_ref,
+                                    robot_context_ref=report["final_robot_context_ref"],
+                                    differences=differences,
                                 )
+                                raise ValueError(message)
                             for reference in validation_refs.values():
                                 accepted = await asyncio.to_thread(
                                     verify_evidence_tree, root, reference
@@ -464,24 +546,38 @@ class PrimitiveRefinementRuntime:
                     seen.add(state_key)
                     if len(candidate_refs) >= self.profile["max_candidates"]:
                         break
-                    needs = [*pending_requests, *dependencies["context_requests"]]
-                    needs.extend(
-                        {
-                            "step_index": item.get("step_index"),
-                            "authority": item["authority"],
-                            "quantity": item["check"],
-                            "reason": item["message"],
-                            "evidence_refs": [],
-                        }
-                        for item in report["findings"]
-                        if item.get("authority") and item["status"] == "unknown"
-                    )
-                    # Measurement requests already addressed by the selected RA
-                    # never go to PA. PA receives no primitive sequence to repair.
-                    product_needs = [need for need in needs if need["authority"] == "PA"]
-                    unique_needs = {fingerprint(need): need for need in product_needs}
+                    available = [
+                        {"ref": ref, "sha256": sha}
+                        for ref, sha in inputs.record_hashes.items()
+                        if not ref.startswith("resources/")
+                    ]
+                    available.extend(product_pins)
+                    available_hashes = {item["ref"]: item["sha256"] for item in available}
+                    evidence_key = fingerprint(available_hashes)
+                    product_needs = []
+                    request_keys = set()
+                    # Explicit RA requests keep their wording and take precedence over
+                    # the same missing field derived from its selected primitive.
+                    for need in [*pending_requests, *dependencies["context_requests"]]:
+                        if need["authority"] != "PA":
+                            continue
+                        request_key = fingerprint(
+                            {
+                                "step_index": need["step_index"],
+                                "primitive_symbol": steps[need["step_index"] - 1]["primitive_symbol"],
+                                "params": steps[need["step_index"] - 1]["params"],
+                                "quantity": need.get("parameter_path", need["quantity"]),
+                            }
+                        )
+                        if (
+                            request_key in request_keys
+                            or (request_key, evidence_key) in attempted_requests
+                        ):
+                            continue
+                        request_keys.add(request_key)
+                        product_needs.append(deepcopy(need))
                     if (
-                        unique_needs
+                        product_needs
                         and self.product_runtime is not None
                         and pa_batches < self.profile["max_pa_batches"]
                         and pa_operations < self.profile["max_pa_operations"]
@@ -492,21 +588,11 @@ class PrimitiveRefinementRuntime:
                             "PA is investigating missing product and scene facts.",
                             pa_batch=pa_batches,
                         )
-                        available = [
-                            {"ref": ref, "sha256": sha}
-                            for ref, sha in inputs.record_hashes.items()
-                            if not ref.startswith("resources/")
-                        ]
-                        available.extend(
-                            value
-                            for value in source_pins.values()
-                            if read_pin(root, value).get("record_type")
-                            not in {"RobotValidationContext", "PrimitiveCalculationRecord"}
-                        )
+                        attempted_requests.update((key, evidence_key) for key in request_keys)
                         batch_request = {
                             "record_type": "PrimitiveContextRequest",
                             "target_feature": deepcopy(inputs.composition_input["target_feature"]),
-                            "needs": list(unique_needs.values()),
+                            "needs": deepcopy(product_needs),
                             "evidence_refs": available,
                             "base_context_refs": inputs.context_refs,
                         }
@@ -527,19 +613,43 @@ class PrimitiveRefinementRuntime:
                         if type(used) is not int or not 0 <= used <= min(6, remaining):
                             raise ValueError("PA exceeded its evidence budget.")
                         pa_operations += used
-                        await asyncio.to_thread(
+                        pa_response_ref = await asyncio.to_thread(
                             append_record,
                             root,
                             batch_dir,
                             "response.json",
                             {"record_type": "PrimitiveContextResponse", **outcome},
                         )
+                        await emit(
+                            "evidence",
+                            "PA evidence investigation completed.",
+                            pa_batch=pa_batches,
+                            pa_response_ref=pa_response_ref,
+                        )
+                        # PA explanations are revision feedback, never geometry evidence.
+                        pa_findings = [
+                            {
+                                "step_index": None,
+                                "authority": "PA",
+                                "status": "unknown",
+                                "message": message,
+                                "pa_response_ref": pa_response_ref,
+                            }
+                            for message in outcome.get("unresolved", [])
+                        ]
                         if outcome["status"] == "authority_conflict":
                             status, stop_reason = "authority_conflict", outcome["reason"]
                             break
                         for reference in outcome.get("evidence_refs", []):
                             await asyncio.to_thread(read_pin, root, reference)
                             source_pins[reference["ref"]] = deepcopy(reference)
+                            available_hashes[reference["ref"]] = reference["sha256"]
+                        # Returning partial evidence does not itself warrant repeating
+                        # this investigation before RA has reviewed those records.
+                        returned_evidence_key = fingerprint(available_hashes)
+                        attempted_requests.update(
+                            (key, returned_evidence_key) for key in request_keys
+                        )
                         validation_refs.update(deepcopy(outcome.get("validation_refs", {})))
                         if (
                             not outcome.get("evidence_refs")
@@ -552,7 +662,7 @@ class PrimitiveRefinementRuntime:
                             )
                             break
                     pending_requests = []
-                    findings = [*dependencies["issues"], *report["findings"]]
+                    findings = [*dependencies["issues"], *report["findings"], *pa_findings]
                     context = {
                         "record_type": "PrimitiveRefinementContext",
                         "run_request_ref": request_ref,
@@ -644,6 +754,8 @@ def enrich_composition_diagnostic(
         )
         result = None
     proposed = [event for event in events if event["stage"] == "proposal"]
+    # Match the live proposal count; context requests are separate RA decisions.
+    view["attempt_count"] = len(proposed)
     if proposed:
         latest = proposed[-1]
         candidate = read_pin(root, latest["candidate_ref"])
@@ -652,5 +764,29 @@ def enrich_composition_diagnostic(
     validations = [event for event in events if event["stage"] == "validation_result"]
     if validations:
         view["validation"] = read_pin(root, validations[-1]["validation_ref"])
-    view["refinement"] = {"request": request, "result": result, "events": events}
+    pa_responses = []
+    for event in events:
+        if "previous_robot_context_ref" in event:
+            for field in ("previous_robot_context_ref", "robot_context_ref"):
+                reference = event[field]
+                if owned_path(root, reference["ref"]).parent != directory:
+                    raise ValueError("Compared robot context does not belong to this refinement run.")
+                context = verify_record(root, reference)
+                if context.get("record_type") != "RobotValidationContext":
+                    raise ValueError("Robot comparison must reference a RobotValidationContext.")
+        if "pa_response_ref" in event:
+            response = verify_record(root, event["pa_response_ref"])
+            expected = directory / f"pa_{event['pa_batch']:04d}" / "response.json"
+            if (
+                event["pa_response_ref"]["ref"] != expected.relative_to(root).as_posix()
+                or response.get("record_type") != "PrimitiveContextResponse"
+            ):
+                raise ValueError("PA feedback does not belong to this investigation.")
+            pa_responses.append(response)
+    view["refinement"] = {
+        "request": request,
+        "result": result,
+        "events": events,
+        "pa_responses": pa_responses,
+    }
     return view

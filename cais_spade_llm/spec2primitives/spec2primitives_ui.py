@@ -52,7 +52,15 @@ from cais_spade_llm.spec2primitives.agents.ra import (
     read_phase_5_1_diagnostic,
     read_primitive_composition_diagnostic,
 )
-from cais_spade_llm.spec2primitives.agents.ra.refinement import cancel_primitive_refinement
+from cais_spade_llm.spec2primitives.agents.ra.refinement import (
+    _ACTIVE as ACTIVE_COMPOSITIONS,
+    cancel_primitive_refinement,
+)
+from cais_spade_llm.spec2primitives.agents.ra.refinement_records import verify_record
+from cais_spade_llm.spec2primitives.agents.ra.execution_state import (
+    execution_busy,
+    read_primitive_execution_diagnostic,
+)
 
 _TURTLE_PREFIX_PATTERN = re.compile(r"^@prefix\s+([A-Za-z][A-Za-z0-9_-]*):\s+<([^>]+)>\s+\.\s*$")
 
@@ -2646,14 +2654,17 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
         create_button = ui.button("Compose Primitive Program", icon="account_tree").props(
             "flat disable"
         )
+        run_button = ui.button("Run in Gazebo", icon="play_arrow").props("disable")
+        stop_execution_button = ui.button("Stop execution", icon="stop").props("outline")
+        stop_execution_button.set_visibility(False)
         cancel_button = ui.button("Cancel composition", icon="cancel").props("flat")
         cancel_button.set_visibility(False)
     message = ui.label("Capture the selected RobotAgent context first.").classes(
         "text-sm text-slate-700 whitespace-pre-wrap break-words"
     )
     ui.label(
-        "Program proposals are not executed. <unbound> marks required parameters "
-        "that still need values; physical correctness remains unvalidated."
+        "Compose Primitive Program creates and validates a proposal. Run in Gazebo executes "
+        "the saved validated program. <unbound> marks required parameters that still need values."
     ).classes("text-xs text-slate-500")
     attempts = ui.label("Attempts: 0").classes("text-xs text-slate-600")
     steps = ui.code("", language="python").classes("w-full text-xs overflow-x-auto")
@@ -2665,6 +2676,13 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
     ) as trace_expansion:
         trace = ui.code("", language="json").classes("w-full text-xs overflow-x-auto")
     trace_expansion.set_visibility(False)
+    execution_status = ui.badge("not run").props("color=grey outline")
+    execution_message = ui.label("Validate a program before running it in Gazebo.").classes(
+        "text-sm text-slate-700 whitespace-pre-wrap break-words"
+    )
+    with ui.expansion("Execution records", icon="receipt_long").classes("w-full") as execution_expansion:
+        execution_trace = ui.code("", language="json").classes("w-full text-xs overflow-x-auto")
+    execution_expansion.set_visibility(False)
     return {
         "candidate_status_badge": status_badge,
         "create_candidate_button": create_button,
@@ -2675,7 +2693,58 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
         "candidate_bindings": bindings,
         "candidate_trace": trace,
         "candidate_trace_expansion": trace_expansion,
+        "run_program_button": run_button,
+        "stop_execution_button": stop_execution_button,
+        "execution_status": execution_status,
+        "execution_message": execution_message,
+        "execution_trace": execution_trace,
+        "execution_expansion": execution_expansion,
+        "execution_candidate_ref": None,
     }
+
+
+def _apply_primitive_execution_diagnostic(
+    elements: Mapping[str, Any],
+    diagnostic: Mapping[str, Any],
+    *,
+    available: bool,
+    gazebo_running: bool,
+    composition_status: str,
+    busy: bool = False,
+) -> None:
+    """Display execution separately and expose only the saved-program action."""
+    status = str(diagnostic.get("status", "idle"))
+    active = status in {"preparing", "running", "capturing", "stopping"}
+    elements["execution_status"].set_text("not run" if status == "idle" else status)
+    elements["execution_status"].props(
+        f"color={'green' if status == 'completed' else 'red' if status in {'failed', 'blocked', 'unknown', 'interrupted'} else 'grey'} outline"
+    )
+    elements["execution_message"].set_text(
+        str(diagnostic.get("message", "Validate a program before running it in Gazebo."))
+    )
+    already_attempted = (
+        bool(elements.get("execution_candidate_ref"))
+        and (diagnostic.get("candidate_ref") or {}).get("ref")
+        == elements.get("execution_candidate_ref")
+        and (diagnostic.get("result") or {}).get("command_dispatched", True)
+    )
+    _set_enabled(
+        elements["run_program_button"],
+        available
+        and gazebo_running
+        and composition_status == "validated_for_declared_scope"
+        and not busy
+        and not active
+        and not already_attempted,
+    )
+    elements["stop_execution_button"].set_visibility(active)
+    elements["execution_trace"].content = json.dumps(
+        diagnostic, indent=2, ensure_ascii=False, allow_nan=False
+    )
+    elements["execution_trace"].update()
+    elements["execution_expansion"].set_visibility(
+        bool(diagnostic.get("events") or diagnostic.get("result"))
+    )
 
 
 def _apply_phase_5_1_diagnostic(
@@ -2821,6 +2890,45 @@ def _format_binding_issues(issues: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if issues else ""
 
 
+def _format_validation_findings(
+    validation: Mapping[str, Any] | None,
+    pa_response: Mapping[str, Any] | None,
+) -> str:
+    """Summarize missing roles and PA explanations while keeping full records expandable."""
+    findings = [
+        item for item in (validation or {}).get("findings", []) if item["status"] != "passed"
+    ]
+    missing_roles = []
+    details = []
+    for item in findings:
+        role = item.get("check")
+        if (
+            item.get("authority") == "PA"
+            and role in {"part", "goal", "scene", "specification"}
+            and (
+                item["message"] == f"PA has not supplied the required {role} evidence."
+                or item["message"].startswith(f"Required {role} evidence is missing:")
+            )
+        ):
+            missing_roles.append(role)
+        else:
+            prefix = f"Step {item['step_index']}: " if item.get("step_index") else ""
+            details.append(prefix + item["message"])
+    # Retain old PA responses in the trace without presenting them as blockers after a pass.
+    unresolved = (
+        (pa_response or {}).get("unresolved", [])
+        if (validation or {}).get("status") != "passed"
+        else []
+    )
+    lines = ["Assembly validation incomplete: " + ", ".join(missing_roles) + "."] if missing_roles else []
+    details = [f"PA: {message}" for message in unresolved[:2]] + details
+    available = 3 - len(lines)
+    lines.extend(details[:available])
+    if len(unresolved) > 2 or len(details) > available:
+        lines.append("Open the program records for all findings.")
+    return "\n".join(lines)
+
+
 def _format_primitive_value(value: Any) -> str:
     if isinstance(value, Mapping) and set(value) in ({"value_ref"}, {"result_ref"}):
         name, fields = next(iter(value.items()))
@@ -2852,6 +2960,11 @@ def _apply_primitive_composition_diagnostic(
     )
     elements["candidate_attempts"].set_text(f"Attempts: {diagnostic.get('attempt_count', 0)}")
     candidate = diagnostic.get("candidate")
+    if "execution_candidate_ref" in elements:
+        elements["execution_candidate_ref"] = diagnostic.get("latest_candidate_ref") or (
+            str(Path(candidate["request_ref"]).parent / "candidate.json")
+            if isinstance(candidate, Mapping) and candidate.get("request_ref") else None
+        )
     composition_input = diagnostic.get("composition_input")
     catalog = (
         composition_input.get("primitive_catalog", [])
@@ -2867,12 +2980,14 @@ def _apply_primitive_composition_diagnostic(
     elements["candidate_steps"].set_visibility(isinstance(candidate, Mapping))
     binding_issues = diagnostic.get("binding_issues", [])
     validation = diagnostic.get("validation")
-    findings = [item for item in validation.get("findings", []) if item["status"] != "passed"] if isinstance(validation, Mapping) else []
-    elements["candidate_bindings"].set_text(
-        "\n".join(f"{('Step ' + str(item['step_index']) + ': ') if item.get('step_index') else ''}{item['message']}" for item in findings[:3])
-        if isinstance(validation, Mapping) else _format_binding_issues(binding_issues)
+    pa_responses = (diagnostic.get("refinement") or {}).get("pa_responses", [])
+    summary = (
+        _format_validation_findings(validation, pa_responses[-1] if pa_responses else None)
+        if isinstance(validation, Mapping) or pa_responses
+        else _format_binding_issues(binding_issues)
     )
-    elements["candidate_bindings"].set_visibility(bool(findings) if isinstance(validation, Mapping) else bool(binding_issues))
+    elements["candidate_bindings"].set_text(summary)
+    elements["candidate_bindings"].set_visibility(bool(summary))
     trace = diagnostic.get("trace", [])
     elements["candidate_trace"].content = json.dumps(
         {
@@ -2894,6 +3009,7 @@ def _apply_primitive_composition_diagnostic(
         elements["create_candidate_button"],
         authoring_available
         and not authoring_busy
+        and not execution_busy()
         and status
         in {
             "ready_for_composition",
@@ -3080,6 +3196,9 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             "phase_5_1_activating": False,
             "phase_5_1_refreshing": False,
             "primitive_composing": False,
+            "primitive_executing": False,
+            "execution_was_busy": False,
+            "execution_error": None,
             "interaction": None,
             "timeline": [],
         }
@@ -3093,6 +3212,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 grounding_ready
                 and not action_state["busy"]
                 and not action_state["primitive_composing"]
+                and not action_state["primitive_executing"]
+                and not execution_busy()
                 and not action_state["phase_5_1_activating"]
                 and not action_state["phase_5_1_refreshing"]
                 and not action_state["pending_clarification"]
@@ -3104,6 +3225,9 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             interaction: dict[str, object],
             view: dict[str, object],
         ) -> None:
+            previous = action_state["interaction"]
+            if not isinstance(previous, dict) or previous.get("interaction_root") != interaction.get("interaction_root"):
+                action_state["execution_error"] = None
             action_state["interaction"] = interaction
             activity_strip.set_visibility(True)
             pending = view["activity_state"] == "clarification needed"
@@ -3228,6 +3352,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 not grounding_ready
                 or action_state["busy"]
                 or action_state["primitive_composing"]
+                or action_state["primitive_executing"]
+                or execution_busy()
                 or not isinstance(value, str)
                 or not value.strip()
             ):
@@ -3405,11 +3531,12 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 _update_start_enabled()
 
         def _begin_phase_5_action(flag: str) -> Path | None:
-            if interaction_card.is_deleted or any(
+            if interaction_card.is_deleted or execution_busy() or any(
                 action_state[name]
                 for name in (
                     "busy",
                     "primitive_composing",
+                    "primitive_executing",
                     "phase_5_1_activating",
                     "phase_5_1_refreshing",
                 )
@@ -3422,7 +3549,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             # Claim the action before the first await so queued clicks remain exclusive.
             action_state[flag] = True
             _update_start_enabled()
-            for name in ("start_button", "refresh_button", "create_candidate_button"):
+            for name in ("start_button", "refresh_button", "create_candidate_button", "run_program_button"):
                 _set_enabled(phase_5_elements[name], False)
             return root
 
@@ -3513,24 +3640,48 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                     await author_primitive_program_candidate(program_runtime, root)
                 else:
                     view = await asyncio.to_thread(read_primitive_composition_diagnostic, root)
-                    catalog = (view.get("composition_input") or {}).get("primitive_catalog", [])
+                    progress_view: dict[str, Any] = {
+                        "composition_input": view.get("composition_input"),
+                        "candidate": None,
+                        "attempt_count": 0,
+                        "trace": [],
+                        "refinement": {"events": [], "pa_responses": []},
+                    }
                     if not interaction_card.is_deleted:
                         phase_5_elements["cancel_candidate_button"].set_visibility(True)
 
                     async def progress(event: Mapping[str, Any]) -> None:
                         if interaction_card.is_deleted:
                             return
-                        phase_5_elements["candidate_status_badge"].set_text(str(event.get("status", event["stage"])))
-                        phase_5_elements["candidate_message"].set_text(str(event["message"]))
+                        if "previous_robot_context_ref" in event:
+                            for field in ("previous_robot_context_ref", "robot_context_ref"):
+                                context = await asyncio.to_thread(verify_record, root, event[field])
+                                if context.get("record_type") != "RobotValidationContext":
+                                    raise ValueError(
+                                        "Robot comparison must reference a RobotValidationContext."
+                                    )
+                            if interaction_card.is_deleted:
+                                return
+                        if "pa_response_ref" in event:
+                            response = await asyncio.to_thread(
+                                verify_record, root, event["pa_response_ref"]
+                            )
+                            if response.get("record_type") != "PrimitiveContextResponse":
+                                raise ValueError(
+                                    "PA feedback must reference a PrimitiveContextResponse."
+                                )
+                            if interaction_card.is_deleted:
+                                return
+                            progress_view["refinement"]["pa_responses"].append(response)
+                        progress_view["status"] = event.get("status", event["stage"])
+                        progress_view["message"] = event["message"]
+                        progress_view["refinement"]["events"].append(event)
                         if "candidate" in event:
-                            phase_5_elements["candidate_steps"].content = _format_primitive_program(event["candidate"]["primitive_steps"], catalog)
-                            phase_5_elements["candidate_steps"].set_visibility(True)
-                            phase_5_elements["candidate_steps"].update()
-                            phase_5_elements["candidate_attempts"].set_text(f"Program versions: {event['candidate_count']}")
+                            progress_view["candidate"] = event["candidate"]
+                            progress_view["attempt_count"] = event["candidate_count"]
                         if "validation" in event:
-                            findings = [item for item in event["validation"]["findings"] if item["status"] != "passed"]
-                            phase_5_elements["candidate_bindings"].set_text("\n".join(item["message"] for item in findings[:3]))
-                            phase_5_elements["candidate_bindings"].set_visibility(bool(findings))
+                            progress_view["validation"] = event["validation"]
+                        _apply_primitive_composition_diagnostic(phase_5_elements, progress_view)
 
                     await runtime.primitive_refinement_runtime.compose(root, progress=progress)
             except (
@@ -3554,6 +3705,108 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             if isinstance(root, Path) and cancel_primitive_refinement(root):
                 phase_5_elements["candidate_message"].set_text("Cancelling composition; recorded proposals will be retained.")
 
+        async def _refresh_execution() -> None:
+            if interaction_card.is_deleted:
+                return
+            interaction = action_state["interaction"]
+            root = interaction.get("interaction_root") if isinstance(interaction, dict) else None
+            if not isinstance(root, Path):
+                return
+            try:
+                diagnostic, gazebo = await asyncio.gather(
+                    asyncio.to_thread(read_primitive_execution_diagnostic, root),
+                    asyncio.to_thread(read_dual_gazebo_status, runtime.dual_gazebo),
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                diagnostic, gazebo = {"status": "blocked", "message": str(exc)}, None
+            if interaction_card.is_deleted:
+                return
+            running = execution_busy()
+            local_busy = any(
+                action_state[key]
+                for key in (
+                    "busy",
+                    "primitive_composing",
+                    "primitive_executing",
+                    "phase_5_1_activating",
+                    "phase_5_1_refreshing",
+                )
+            )
+            if action_state["execution_was_busy"] and not running and not local_busy:
+                await _finish_phase_5_action("phase_5_1_refreshing", root)
+            action_state["execution_was_busy"] = running
+            busy = (
+                running
+                or local_busy
+                or any(not task.done() for task in tuple(ACTIVE_COMPOSITIONS.values()))
+            )
+            if action_state["execution_error"] and not running:
+                diagnostic = {
+                    **diagnostic,
+                    "status": "blocked",
+                    "message": action_state["execution_error"],
+                }
+            _apply_primitive_execution_diagnostic(
+                phase_5_elements,
+                diagnostic,
+                available=runtime.primitive_execution_runtime is not None,
+                gazebo_running=gazebo is not None
+                and gazebo.state == "running"
+                and not gazebo.blocked_reason,
+                composition_status=phase_5_elements["candidate_status_badge"].text,
+                busy=bool(busy),
+            )
+            if running:
+                for name in ("start_button", "create_candidate_button"):
+                    _set_enabled(phase_5_elements[name], False)
+            _update_start_enabled()
+
+        async def _start_primitive_execution() -> None:
+            executor = runtime.primitive_execution_runtime
+            if executor is None:
+                return
+            root = _begin_phase_5_action("primitive_executing")
+            if root is None:
+                return
+            action_state["execution_error"] = None
+
+            async def progress(event: Mapping[str, Any]) -> None:
+                if interaction_card.is_deleted:
+                    return
+                _apply_primitive_execution_diagnostic(
+                    phase_5_elements,
+                    event,
+                    available=True,
+                    gazebo_running=True,
+                    composition_status=phase_5_elements["candidate_status_badge"].text,
+                    busy=True,
+                )
+
+            try:
+                candidate_ref = phase_5_elements["execution_candidate_ref"]
+                if not isinstance(candidate_ref, str):
+                    raise ValueError("Display a saved validated program before Run in Gazebo.")
+                await executor.run(root, candidate_ref=candidate_ref, progress=progress)
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                action_state["execution_error"] = str(exc)
+                if not interaction_card.is_deleted:
+                    phase_5_elements["execution_status"].set_text("blocked")
+                    phase_5_elements["execution_message"].set_text(str(exc))
+                    ui.notify(f"Gazebo execution unavailable: {exc}", type="negative")
+            finally:
+                await _finish_phase_5_action("primitive_executing", root)
+                await _refresh_execution()
+
+        def _stop_primitive_execution() -> None:
+            interaction = action_state["interaction"]
+            root = interaction.get("interaction_root") if isinstance(interaction, dict) else None
+            executor = runtime.primitive_execution_runtime
+            if isinstance(root, Path) and executor is not None and executor.stop(root):
+                phase_5_elements["execution_status"].set_text("stopping")
+                phase_5_elements["execution_message"].set_text(
+                    "Stopping execution; awaiting command acknowledgments."
+                )
+
         requirement_input.on_value_change(lambda _: _update_start_enabled())
         clarification_reply_input.on_value_change(lambda _: _update_reply_enabled())
         start_button.on_click(_start_pa_interaction)
@@ -3562,6 +3815,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
         phase_5_elements["start_button"].on_click(_start_phase_5_1)
         phase_5_elements["create_candidate_button"].on_click(_start_primitive_composition)
         phase_5_elements["cancel_candidate_button"].on_click(_cancel_primitive_composition)
+        phase_5_elements["run_program_button"].on_click(_start_primitive_execution)
+        phase_5_elements["stop_execution_button"].on_click(_stop_primitive_execution)
         phase_5_elements["refresh_button"].on_click(_refresh_phase_5_1)
         _update_start_enabled()
 
@@ -3579,6 +3834,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             if action_state["pending_clarification"]:
                 requirement_input.props("disable")
             _update_start_enabled()
+
+        ui.timer(1.0, _refresh_execution)
 
 
 def render(runtime: Spec2PrimitivesUIRuntime) -> None:

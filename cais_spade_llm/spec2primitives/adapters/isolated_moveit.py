@@ -392,6 +392,12 @@ class IsolatedMoveItSession:
             "trajectory": {
                 "joint_names": list(trajectory.joint_names),
                 "positions": [list(point.positions) for point in trajectory.points],
+                "velocities": [list(point.velocities) for point in trajectory.points],
+                "accelerations": [list(point.accelerations) for point in trajectory.points],
+                "time_from_start_ns": [
+                    point.time_from_start.sec * 1000000000 + point.time_from_start.nanosec
+                    for point in trajectory.points
+                ],
             },
         }
 

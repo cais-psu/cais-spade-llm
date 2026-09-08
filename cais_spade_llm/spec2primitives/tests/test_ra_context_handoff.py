@@ -761,6 +761,8 @@ def test_context_only_robot_agent_has_no_tools_failures_or_controller(
     resource_name: str,
     resource_path: str,
 ) -> None:
+    import logging
+
     from cais_spade_llm import agent_creator
     from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
 
@@ -772,6 +774,9 @@ def test_context_only_robot_agent_has_no_tools_failures_or_controller(
     monkeypatch.setattr(RobotAgent, "_build_controller", _forbidden_controller)
     monkeypatch.setitem(agent_creator.ALLOWED_FUNCS, resource_name, set())
     caplog.set_level("INFO", logger=f"agent:{resource_name}")
+    # Agent handlers can bypass pytest's root capture handler. Capture directly
+    # here so the lifecycle test also avoids writing application log files.
+    monkeypatch.setattr(logging.getLogger(f"agent:{resource_name}"), "handlers", [caplog.handler])
 
     agent = agent_creator.create_resource_agents(
         [resource_path],
@@ -1491,6 +1496,87 @@ def _program_action(steps: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
             {"primitive_symbol": symbol, "params": json.dumps(params)} for symbol, params in steps
         ],
     }
+
+
+def test_gazebo_execution_reads_selected_context_only_configuration_and_interlocks(
+    tmp_path: Path,
+) -> None:
+    runtime, selected, _ = _prepare_composition(tmp_path)
+    assignment = primitive_composition._load_inputs(tmp_path).assignment
+    selected.context_only = True
+    selected.controller_config = {"gripper": {"joint": "configured_joint"}}
+    host = runtime._host
+    host.system_running = False
+    host.gazebo_state = "running"
+    hardware = {"overall": "stopped"}
+    host.hardware_stack_status = lambda robot: hardware
+    authority = asyncio.run(runtime.execution_configuration(assignment))
+    assert authority["configuration"] == selected.controller_config
+    assert authority["primitive_catalog"] == in_process_robot_agent._phase_5_1_primitive_catalog(
+        selected.primitive_catalog
+    )
+    assert host.start_calls == host.full_system_start_calls == 0
+    assert selected.context_only is True
+    assert not hasattr(selected, "controller")
+    assert host.readiness_forces[-1] is True
+    hardware["overall"] = "running"
+    with pytest.raises(RAContextHandoffError, match="Hardware stack"):
+        asyncio.run(runtime.execution_configuration(assignment))
+    hardware["overall"] = "stopped"
+    selected.context_only = False
+    with pytest.raises(RAContextHandoffError, match="context-only"):
+        asyncio.run(runtime.execution_configuration(assignment))
+
+
+@pytest.mark.parametrize("known", [True, False])
+def test_gazebo_execution_custody_is_used_by_later_context_capture(
+    tmp_path: Path,
+    known: bool,
+) -> None:
+    from cais_spade_llm.spec2primitives.agents.ra.refinement_records import append_record
+
+    root = tmp_path / "interaction"
+    runtime, selected, _ = _prepare_composition(root)
+    runtime = InProcessRobotAgentCompositionRuntime(runtime._host, contexts_root=tmp_path)
+    assignment = primitive_composition._load_inputs(root).assignment
+    directory = root / "execution/run_1"
+    request_ref = append_record(
+        root,
+        directory,
+        "request.json",
+        {
+            "record_type": "PrimitiveExecutionRequest",
+            "resource_jid": assignment.selected_resource_jid,
+            "total_steps": 1,
+            "candidate_ref": {},
+            "created_at_ns": 1,
+        },
+    )
+    append_record(
+        root,
+        directory,
+        "result.json",
+        {
+            "record_type": "PrimitiveExecutionResult",
+            "request_ref": request_ref,
+            "status": "stopped",
+            "message": "Stopped after grasp.",
+            "record_refs": [],
+            "last_event_ref": None,
+            "custody_known": known,
+            "held_part": "medium gear",
+            "gripper_state": "closed",
+        },
+    )
+    if not known:
+        with pytest.raises(ValueError, match="uncertain"):
+            asyncio.run(runtime.request_assigned_context(assignment))
+        return
+    response = asyncio.run(runtime.request_assigned_context(assignment))
+    assert response["robot_state"]["held_part"] == "medium gear"
+    assert response["robot_state"]["gripper_state"] == "closed"
+    assert "model_name" not in json.dumps(response["robot_state"])
+    assert selected.robot_state.get("held_part") is None
 
 
 def test_composition_proposes_with_unbound_parameters_and_ignores_draft_history(
@@ -2236,9 +2322,12 @@ def test_geometry_gaps_and_conditional_results_preserve_the_exact_program(tmp_pa
         (item["step_index"], item["parameter_path"], item["status"])
         for item in view["binding_issues"]
     }
-    assert (1, "/product_geometry", "missing") in issues
+    assert (1, "/product_geometry/board_center/z", "missing") in issues
+    assert (1, "/product_geometry/part_height_m", "missing") in issues
     assert (1, "/target_pose/y", "missing") in issues
     assert (2, "/product_geometry/slot_floor_z_m", "missing") in issues
+    assert (2, "/product_geometry/target_reference/target_point", "missing") in issues
+    assert all((2, "/product_geometry/target_origin_pose/" + axis, "missing") in issues for axis in ("x", "y", "z"))
     assert (2, "/destination_location", "unverified") in issues
     assert (2, "/pick_ctx", "deferred") in issues
     assert (3, "/z", "deferred") in issues

@@ -84,9 +84,24 @@ def assess_program_dependencies(
                 )
         blocked[index] = causes
         for issue in direct:
-            route = "RA" if issue["parameter_path"].startswith("/robot_state/") else "PA"
-            # Invalid types/references are rejected before this assessment. Context
-            # acquisition addresses missing facts, not arbitrary replacement values.
+            if issue["status"] != "missing":
+                continue
+            path = issue["parameter_path"]
+            fields = [
+                name.replace("~1", "/").replace("~0", "~") for name in path.split("/")[1:]
+            ]
+            schema = catalog[step["primitive_symbol"]]["parameter_schemas"].get(fields[0], {})
+            for name in fields[1:]:
+                schema = (
+                    schema.get("items", {})
+                    if schema.get("type") == "array"
+                    else schema.get("properties", {}).get(name, {})
+                )
+            route = (
+                "PA" if fields[0] in {"product_geometry", "target_pose", "detected_parts"} else "RA"
+            )
+            # Only absent measurements authorize acquisition. Incompatible sources
+            # and unverified literals remain findings for the RA author to correct.
             needs.append(
                 {
                     "step_index": index,
@@ -94,11 +109,7 @@ def assess_program_dependencies(
                     "authority": route,
                     "quantity": issue["parameter_path"],
                     "primitive_symbol": step["primitive_symbol"],
-                    "quantity_schema": deepcopy(
-                        catalog[step["primitive_symbol"]]["parameter_schemas"].get(
-                            issue["parameter_path"].split("/")[1], {}
-                        )
-                    ),
+                    "quantity_schema": deepcopy(schema),
                     "reason": issue["message"],
                     "evidence_refs": [
                         deepcopy(ref) for _, kind, ref in refs if kind == "value_ref"

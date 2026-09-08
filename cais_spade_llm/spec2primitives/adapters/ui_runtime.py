@@ -28,6 +28,7 @@ from cais_spade_llm.spec2primitives.agents.ra import (
     RobotAgentProgramRuntime,
 )
 from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime
+from cais_spade_llm.spec2primitives.agents.ra.program_execution import PrimitiveExecutionRuntime
 from cais_spade_llm.spec2primitives.agents.pa.primitive_context import ProductPrimitiveContextRuntime
 from cais_spade_llm.spec2primitives.config import (
     DEFAULT_GAZEBO_CAMERA_TO_WORLD_CALIBRATION_PATH,
@@ -83,6 +84,7 @@ class Spec2PrimitivesUIRuntime:
     robot_agent_context_runtime: RobotAgentCompositionRuntime | None = None
     robot_agent_program_runtime: RobotAgentProgramRuntime | None = None
     primitive_refinement_runtime: PrimitiveRefinementRuntime | None = None
+    primitive_execution_runtime: PrimitiveExecutionRuntime | None = None
 
 
 class _UnavailableProductAgentRuntime:
@@ -174,7 +176,9 @@ def create_spec2primitives_ui_runtime(
         unavailable_reason = (
             "Set OPENAI_API_KEY to enable production grounding and the OpenAI document diagnostic."
         )
-    robot_agent_runtime = InProcessRobotAgentCompositionRuntime(dual_gazebo)
+    robot_agent_runtime = InProcessRobotAgentCompositionRuntime(
+        dual_gazebo, contexts_root=SPEC2PRIMITIVES_CONTEXTS_ROOT
+    )
     if unavailable_reason is None and model_config is not None and tbox is not None:
         vision_runtime = OpenAIDocumentVisionRuntime(model_config.document_vlm)
         observation_vision_runtime = OpenAIObservationVisionRuntime(model_config.observation_vlm)
@@ -211,6 +215,10 @@ def create_spec2primitives_ui_runtime(
             program_runtime=robot_agent_runtime,
             robot_runtime=robot_agent_runtime,
             product_runtime=(ProductPrimitiveContextRuntime(grounding_runtime, product_agent) if isinstance(grounding_runtime, ProductionProductContextGroundingRuntime) else None),
+        ),
+        primitive_execution_runtime=PrimitiveExecutionRuntime(
+            robot_runtime=robot_agent_runtime,
+            capture_runtime=LiveGazeboObservationCaptureRuntime(),
         ),
     )
 

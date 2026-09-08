@@ -86,8 +86,8 @@ def verify_evidence_tree(root: Path, reference: Mapping[str, str]) -> Any:
 
     def visit(source: Mapping[str, str]) -> Any:
         ref, sha = source["ref"], source["sha256"]
-        if "evaluations" in Path(ref).parts:
-            raise ValueError("Evaluation records cannot supply composition evidence.")
+        if {"evaluations", "execution"}.intersection(Path(ref).parts):
+            raise ValueError("Evaluation and execution records cannot supply composition evidence.")
         if ref in seen:
             if seen[ref] != sha:
                 raise ValueError("Evidence contains conflicting source hashes.")
@@ -101,6 +101,11 @@ def verify_evidence_tree(root: Path, reference: Mapping[str, str]) -> Any:
         if Path(ref).suffix.lower() != ".json":
             return None
         value = json.loads(data)
+        if isinstance(value, dict) and (
+            str(value.get("record_type", "")).startswith("PrimitiveExecution")
+            or value.get("record_type") == "GazeboInstanceBinding"
+        ):
+            raise ValueError("Execution records cannot supply composition evidence.")
         walk(value)
         return value
 

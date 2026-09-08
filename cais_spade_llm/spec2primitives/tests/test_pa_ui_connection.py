@@ -1808,6 +1808,170 @@ def test_incompatible_saved_completion_is_rejected_without_rewriting(tmp_path):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    "composition_status,gazebo_running,busy,available,enabled",
+    [
+        ("validated_for_declared_scope", True, False, True, True),
+        ("proposed", True, False, True, False),
+        ("validated_for_declared_scope", False, False, True, False),
+        ("validated_for_declared_scope", True, True, True, False),
+        ("validated_for_declared_scope", True, False, False, False),
+    ],
+)
+def test_gazebo_execution_button_requires_validated_program_and_idle_simulation(
+    composition_status: str, gazebo_running: bool, busy: bool, available: bool, enabled: bool
+) -> None:
+    """Expose execution only after the displayed program and simulator are ready."""
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        spec2primitives_ui._apply_primitive_execution_diagnostic(
+            elements,
+            {"status": "idle", "message": "Ready"},
+            available=available,
+            gazebo_running=gazebo_running,
+            composition_status=composition_status,
+            busy=busy,
+        )
+        assert elements["run_program_button"].text == "Run in Gazebo"
+        assert (not elements["run_program_button"]._props.get("disable", False)) is enabled
+        assert not elements["stop_execution_button"].visible
+    finally:
+        container.delete()
+
+
+def test_gazebo_execution_progress_stop_and_reconnect_preserve_composition() -> None:
+    """Restored execution progress cannot become composition or duplicate a run."""
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        elements["candidate_status_badge"].set_text("validated_for_declared_scope")
+        elements["execution_candidate_ref"] = (
+            "composition/primitive_program_candidates/attempt_0001/candidate.json"
+        )
+        view = {
+            "status": "running",
+            "message": "Running step 3 of 10: move_cartesian",
+            "step_index": 3,
+            "events": [{"status": "running", "step_index": 3}],
+            "candidate_ref": {"ref": elements["execution_candidate_ref"], "sha256": "a" * 64},
+        }
+        spec2primitives_ui._apply_primitive_execution_diagnostic(
+            elements,
+            view,
+            available=True,
+            gazebo_running=True,
+            composition_status="validated_for_declared_scope",
+            busy=True,
+        )
+        assert elements["stop_execution_button"].visible
+        assert elements["execution_message"].text == view["message"]
+        assert elements["execution_expansion"].visible
+        spec2primitives_ui._apply_primitive_execution_diagnostic(
+            elements,
+            {**view, "status": "completed", "message": "Commands completed."},
+            available=True,
+            gazebo_running=True,
+            composition_status="validated_for_declared_scope",
+        )
+        assert not elements["stop_execution_button"].visible
+        assert elements["run_program_button"]._props.get("disable", False)
+        assert elements["candidate_status_badge"].text == "validated_for_declared_scope"
+        spec2primitives_ui._apply_primitive_execution_diagnostic(
+            elements,
+            {**view, "status": "blocked", "result": {"command_dispatched": False}},
+            available=True,
+            gazebo_running=True,
+            composition_status="validated_for_declared_scope",
+        )
+        assert not elements["run_program_button"]._props.get("disable", False)
+    finally:
+        container.delete()
+
+
+def test_gazebo_execution_callbacks_reconnect_and_stop_without_restarting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnect the first page during motion, then stop from the recovered page."""
+    from types import SimpleNamespace
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
+    from cais_spade_llm.spec2primitives.agents.ra.program_execution import PrimitiveExecutionRuntime
+    from cais_spade_llm.spec2primitives.tests.test_primitive_execution import (
+        _SHARE,
+        _Transport,
+        _validated,
+        _validator,
+    )
+
+    root = tmp_path / "interaction_execution"
+    robot, part, _ = _validated(root)
+    callbacks: dict[str, Callable] = {}
+    original_on_click = spec2primitives_ui.ui.button.on_click
+
+    def capture_on_click(button: Any, callback: Callable) -> Any:
+        callbacks[button.text] = callback
+        return original_on_click(button, callback)
+
+    monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", capture_on_click)
+    monkeypatch.setattr(
+        spec2primitives_ui,
+        "read_dual_gazebo_status",
+        lambda runtime: SimpleNamespace(state="running", blocked_reason=None),
+    )
+    with spec2primitives_ui.ui.column() as page_host:
+        pass
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        transport = _Transport(part, pause=started)
+        executor = PrimitiveExecutionRuntime(
+            robot_runtime=robot, validator=_validator, session_factory=transport, share=_SHARE
+        )
+        runtime = Spec2PrimitivesUIRuntime(
+            dual_gazebo=object(),
+            product_agent=object(),
+            contexts_root=tmp_path,
+            primitive_execution_runtime=executor,
+        )
+        with page_host:
+            with spec2primitives_ui.ui.column() as first:
+                spec2primitives_ui._render_pa_interaction(runtime)
+        running = asyncio.create_task(callbacks["Run in Gazebo"]())
+        try:
+            await asyncio.wait_for(started.wait(), 15)
+            await callbacks["Run in Gazebo"]()
+            assert transport.calls == ["move_cartesian"]
+            first.delete()
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            assert executor.diagnostic(root)["status"] == "running"
+            with page_host:
+                with spec2primitives_ui.ui.column() as recovered:
+                    spec2primitives_ui._render_pa_interaction(runtime)
+            try:
+                joined = asyncio.create_task(executor.run(root))
+                callbacks["Stop execution"]()
+                result = await joined
+                assert result["status"] == "stopped"
+                assert transport.calls == ["move_cartesian"]
+                assert len(list((root / "execution").glob("run_*"))) == 1
+            finally:
+                recovered.delete()
+        finally:
+            executor.stop(root)
+            if not first.is_deleted:
+                first.delete()
+            if not running.done():
+                await running
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        page_host.delete()
+
+
 def test_primitive_program_displays_nested_gaps_without_filling_parameters() -> None:
     steps = [
         {
@@ -1882,6 +2046,201 @@ def test_primitive_binding_summary_is_short_and_full_report_remains_expandable()
         assert "Step 3 /product_geometry" in text and "Step 4 /product_geometry" not in text
         assert len(text.splitlines()) == 5
         assert json.loads(elements["candidate_trace"].content)["binding_issues"] == issues
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("robot_change", [False, True])
+def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, robot_change: bool
+) -> None:
+    """Keep PA reasons visible during revision and retain all feedback in the trace."""
+    import time
+    from copy import deepcopy
+
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
+    from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime
+    from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import _setup
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import (
+        _ProgramRuntime,
+        _program_action,
+    )
+
+    root = tmp_path / "interaction_composition"
+    _, robot, _, _ = _setup(root)
+    unresolved = [
+        "The observed pose remains ambiguous.",
+        "Approved seating tolerances are unavailable.",
+        "Observed collision-scene geometry is unavailable.",
+    ]
+    height_warning = {
+        "step_index": 1,
+        "check": "part_height_m",
+        "status": "warning",
+        "message": "part_height_m is an estimate; full pose remains ambiguous.",
+    }
+    buttons: dict[str, Callable] = {}
+    elements: dict[str, Any] = {}
+    live = []
+    requests = [
+        {
+            "step_index": 1,
+            "quantity": "Observed part geometry and documented assembly tolerances",
+            "authority": "PA",
+            "reason": "Check the selected grasp against the requested assembly.",
+        }
+    ]
+    original_on_click = spec2primitives_ui.ui.button.on_click
+    original_render = spec2primitives_ui._render_phase_5_diagnostics
+    original_apply = spec2primitives_ui._apply_primitive_composition_diagnostic
+    live_comparisons = []
+
+    def capture_on_click(button: Any, callback: Callable) -> Any:
+        buttons[button.text] = callback
+        return original_on_click(button, callback)
+
+    def render() -> dict[str, Any]:
+        elements.update(original_render())
+        return elements
+
+    def apply(elements: Any, diagnostic: Any, **kwargs: Any) -> None:
+        original_apply(elements, diagnostic, **kwargs)
+        events = (diagnostic.get("refinement") or {}).get("events", [])
+        if events and "differences" in events[-1]:
+            live_comparisons.append(deepcopy(events[-1]))
+            assert elements["candidate_message"].text == events[-1]["message"]
+            trace = json.loads(elements["candidate_trace"].content)
+            assert trace["refinement"]["events"][-1]["differences"] == events[-1]["differences"]
+
+    def inspect_revision() -> None:
+        if len(program.calls) == 2:
+            assert elements["candidate_attempts"].text == "Attempts: 1"
+            assert all(reason not in elements["candidate_bindings"].text for reason in unresolved)
+            trace = json.loads(elements["candidate_trace"].content)
+            assert not trace["refinement"].get("pa_responses")
+            assert height_warning["message"] in elements["candidate_bindings"].text
+        elif len(program.calls) == 3:
+            assert elements["candidate_attempts"].text == "Attempts: 1"
+            text = elements["candidate_bindings"].text
+            assert "Assembly validation incomplete: part, goal, scene, specification." in text
+            assert all(reason in text for reason in unresolved[:2])
+            assert unresolved[2] not in text
+            trace = json.loads(elements["candidate_trace"].content)
+            assert trace["refinement"]["pa_responses"][0]["unresolved"] == unresolved
+            assert len(trace["validation"]["findings"]) == 5
+            assert height_warning in trace["validation"]["findings"]
+            live.append(text)
+
+    program = _ProgramRuntime(
+        [
+            _program_action([("grasp_part", {"part_name": "medium gear"})]),
+            {"kind": "request_context", "requests": requests},
+        ],
+        on_call=inspect_revision,
+    )
+
+    class Robot:
+        captures = 0
+
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            self.captures += 1
+            context = {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+            if robot_change and self.captures == 3:
+                context["joint_state"]["positions"][0] = 0.004
+            return context
+
+    class Product:
+        async def investigate(self, **kwargs: Any) -> Any:
+            assert len(program.calls) == 2
+            assert kwargs["request"]["needs"] == requests
+            return {
+                "status": "unavailable",
+                "operations_used": 1,
+                "evidence_refs": [],
+                "validation_refs": {},
+                "unresolved": unresolved,
+            }
+
+    async def validator(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "unknown",
+            "findings": [
+                {
+                    "step_index": None,
+                    "check": role,
+                    "status": "unknown",
+                    "authority": "PA",
+                    "message": f"PA has not supplied the required {role} evidence.",
+                }
+                for role in ("part", "goal", "scene", "specification")
+            ] + [height_warning],
+            "calculation_refs": [],
+        }
+
+    runtime = Spec2PrimitivesUIRuntime(
+        dual_gazebo=object(),
+        product_agent=object(),
+        contexts_root=tmp_path,
+        robot_agent_context_runtime=object(),
+        robot_agent_program_runtime=program,
+        primitive_refinement_runtime=PrimitiveRefinementRuntime(
+            program_runtime=program,
+            robot_runtime=Robot(),
+            product_runtime=Product(),
+            validator=validator,
+        ),
+    )
+    monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", capture_on_click)
+    monkeypatch.setattr(spec2primitives_ui, "_render_phase_5_diagnostics", render)
+    monkeypatch.setattr(spec2primitives_ui, "_apply_primitive_composition_diagnostic", apply)
+    with spec2primitives_ui.ui.column() as container:
+        spec2primitives_ui._render_pa_interaction(runtime)
+    try:
+        asyncio.run(buttons["Compose Primitive Program"]())
+        assert len(live) == 1
+        diagnostic = spec2primitives_ui.read_primitive_composition_diagnostic(root)
+        status = "stale" if robot_change else "no_progress"
+        assert diagnostic["status"] == status
+        assert diagnostic["attempt_count"] == 1
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, diagnostic)
+        assert elements["candidate_bindings"].text == live[0]
+        assert elements["candidate_status_badge"].text == status
+        if robot_change:
+            assert len(live_comparisons) == 1
+            comparison = live_comparisons[0]
+            assert elements["candidate_message"].text == comparison["message"]
+            assert "joint_state.positions['joint1']" in comparison["message"]
+            assert "threshold 0.001" in comparison["message"]
+            restored = next(
+                event for event in diagnostic["refinement"]["events"] if "differences" in event
+            )
+            assert {key: restored[key] for key in comparison} == comparison
+            assert restored["previous_robot_context_ref"]["ref"].endswith("robot_context_0002.json")
+            assert restored["robot_context_ref"]["ref"].endswith("robot_context_0003.json")
+        else:
+            assert not live_comparisons
+
+        diagnostic["status"] = "budget_exhausted"
+        diagnostic["message"] = "The configured refinement deadline (300 seconds) was reached."
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, diagnostic)
+        assert elements["candidate_status_badge"].text == "budget_exhausted"
+        assert elements["candidate_message"].text == diagnostic["message"]
+        assert elements["candidate_bindings"].text == live[0]
+
+        diagnostic["status"] = "validated_for_declared_scope"
+        diagnostic["message"] = "Program validated for the declared scope."
+        diagnostic["validation"] = {"status": "passed", "findings": [height_warning]}
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, diagnostic)
+        assert elements["candidate_bindings"].visible
+        assert height_warning["message"] in elements["candidate_bindings"].text
+        assert all(reason not in elements["candidate_bindings"].text for reason in unresolved)
+        assert elements["candidate_status_badge"].text == "validated_for_declared_scope"
+        trace = json.loads(elements["candidate_trace"].content)
+        assert trace["refinement"]["pa_responses"][0]["unresolved"] == unresolved
+        assert height_warning in trace["validation"]["findings"]
+        diagnostic["validation"]["findings"] = []
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, diagnostic)
+        assert not elements["candidate_bindings"].visible
     finally:
         container.delete()
 

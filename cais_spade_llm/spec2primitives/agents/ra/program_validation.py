@@ -98,11 +98,12 @@ def _complete(value: Any, schema: Mapping[str, Any], path: str) -> None:
             _complete(item, schema.get("items", {}), path + "/" + str(index))
 
 
-def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> None:
+def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> list[str]:
     """Require helper geometry to be evidence-backed, while allowing control proposals."""
     params = step["params"]
+    warnings = []
     if step["primitive_symbol"] not in {"compute_pick_targets", "compute_place_targets"}:
-        return
+        return warnings
     for name in ("product_geometry", "target_pose"):
         if name not in params:
             continue
@@ -125,10 +126,29 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> No
             raise BindingUnavailable(
                 f"/{name} has no selected geometry evidence; literal measurements are unverified."
             )
-        for _, kind, ref in refs:
+        for path, kind, ref in refs:
             if kind != "value_ref":
                 continue
             source = _evidence_value(inputs, ref["record_ref"], "")
+            uncertainty = source.get("uncertainty", {})
+            height_estimate = (
+                name == "product_geometry"
+                and path == "/part_height_m"
+                and ref["field_path"] == "/part_height_m"
+                and source.get("record_type") == "AssemblyGeometryEvidence"
+                and source.get("status") == "ambiguous"
+                and isinstance(uncertainty, Mapping)
+                and uncertainty.get("method") == "highest_ranked_qualified_pose_hypothesis"
+                and uncertainty.get("hypothesis_index") == 0
+                and uncertainty.get("complete_pose_established") is False
+                and isinstance(uncertainty.get("source_pose"), dict)
+                and isinstance(source.get("warning"), str)
+            )
+            if name == "target_pose" and source.get("record_type") == "RobotFrameLocationRecord":
+                raise BindingUnavailable(
+                    "/target_pose selects an observed candidate center, but the CAD-origin "
+                    "reference and grasp offset required by this validation scope remain unresolved."
+                )
             if (
                 source.get("record_type")
                 not in {
@@ -136,7 +156,7 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> No
                     "AssemblySurfaceEvidence",
                     "AssemblyGoalEvidence",
                 }
-                or source.get("status") != "accepted"
+                or (source.get("status") != "accepted" and not height_estimate)
                 or source.get("frame_id") != "world"
                 or source.get("units") != "m"
             ):
@@ -147,6 +167,9 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> No
                 raise BindingUnavailable(
                     "The selected observed location does not establish the helper's part-origin reference point."
                 )
+            if height_estimate:
+                warnings.append(source["warning"])
+    return warnings
 
 
 def _goal_check(
@@ -228,6 +251,12 @@ async def validate_program(
         "scene": "AssemblySceneEvidence",
         "specification": "AssemblyValidationSpecification",
     }
+    evidence_purposes = {
+        "part": "observed part geometry is needed for grasp and carried-part checks",
+        "goal": "mating geometry and the final part origin are needed to check the assembly outcome",
+        "scene": "observed scene coverage is needed for collision checking",
+        "specification": "acceptance criteria must come from approved documents or an explicit experiment specification",
+    }
     for role, kind in expected_types.items():
         reference = evidence.get(role)
         if reference is None:
@@ -236,7 +265,7 @@ async def validate_program(
                     None,
                     role,
                     "unknown",
-                    f"PA has not supplied the required {role} evidence.",
+                    f"Required {role} evidence is missing: {evidence_purposes[role]}.",
                     authority="PA",
                 )
             )
@@ -556,7 +585,11 @@ async def validate_program(
                     )
                     _complete(value, schemas[name], "/" + name)
                 if symbol in {"compute_pick_targets", "compute_place_targets"}:
-                    await asyncio.to_thread(_geometry_sources, step, inputs)
+                    warnings = await asyncio.to_thread(_geometry_sources, step, inputs)
+                    findings.extend(
+                        _finding(index, "part_height_m", "warning", message)
+                        for message in warnings
+                    )
                     source_refs = [
                         {
                             "ref": ref["record_ref"],
@@ -741,14 +774,19 @@ async def validate_program(
                 checked_steps.append(
                     {"step_index": index, "status": "unknown", "message": str(exc)}
                 )
-                prefix_valid = False
+                # A pure calculation cannot invalidate the known robot state;
+                # its unresolved result still blocks consumers of that result.
+                if symbol not in {"compute_pick_targets", "compute_place_targets"}:
+                    prefix_valid = False
             except (ImportError, OSError, RuntimeError) as exc:
                 findings.append(_finding(index, "runtime", "unknown", str(exc)))
-                prefix_valid = False
+                if symbol not in {"compute_pick_targets", "compute_place_targets"}:
+                    prefix_valid = False
             except (KeyError, TypeError, ValueError) as exc:
                 findings.append(_finding(index, "conditions_or_geometry", "failed", str(exc)))
                 checked_steps.append({"step_index": index, "status": "failed", "message": str(exc)})
-                prefix_valid = False
+                if symbol not in {"compute_pick_targets", "compute_place_targets"}:
+                    prefix_valid = False
     if prefix_valid and {"part", "goal", "specification", "scene"} <= records.keys():
         seated, metrics = _goal_check(part_pose, records["goal"], records["specification"])
         findings.append(

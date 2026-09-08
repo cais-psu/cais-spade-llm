@@ -102,26 +102,6 @@ def planar_features(triangles: np.ndarray) -> list[dict[str, Any]]:
     return features
 
 
-def invariant_quantities(
-    hypotheses: list[Mapping[str, float]], tolerances: Mapping[str, float]
-) -> dict[str, float]:
-    """Accept only quantities agreeing across every retained pose hypothesis."""
-    if not hypotheses:
-        return {}
-    accepted = {}
-    for name, tolerance in tolerances.items():
-        if (
-            not math.isfinite(tolerance)
-            or tolerance < 0
-            or any(name not in item for item in hypotheses)
-        ):
-            continue
-        values = [item[name] for item in hypotheses]
-        if all(math.isfinite(value) for value in values) and max(values) - min(values) <= tolerance:
-            accepted[name] = sum(values) / len(values)
-    return accepted
-
-
 class AssemblyGeometryProducer:
     """Consume exact approved records; persist neutral geometry or selected derivations."""
 
@@ -140,7 +120,9 @@ class AssemblyGeometryProducer:
         """Read only an issued record with its originally accepted bytes."""
         if ref not in self.authorized:
             raise ValueError("Geometry input was not issued to this investigation.")
-        return read_pin(self.root, {"ref": ref, "sha256": self.authorized[ref]})
+        from ..agents.ra.refinement_records import verify_evidence_tree
+
+        return verify_evidence_tree(self.root, {"ref": ref, "sha256": self.authorized[ref]})
 
     def save(self, payload: Mapping[str, Any], sources: list[str]) -> dict[str, Any]:
         """Append a measurement with complete direct source pins."""
@@ -167,26 +149,31 @@ class AssemblyGeometryProducer:
         }
 
     def inspect_features(self, cad_ref: str, pose_ref: str) -> dict[str, Any]:
-        """Measure CAD features at a selected accepted observed CAD pose."""
+        """Measure oriented features or a height estimate from approved observed poses."""
         self.read(cad_ref)
         pose = self.read(pose_ref)
+        if pose.get("record_type") != "RobotFramePoseRecord":
+            # Report the interface dependency without selecting or invoking a tool for PA.
+            raise ValueError(
+                "inspect_features requires pose_ref to identify a RobotFramePoseRecord; "
+                f"received {pose.get('record_type')!r}. estimate_pose returns a "
+                "CADPoseEstimationRecord; invoke convert_pose on that record before inspect_features."
+            )
+        if pose.get("CAD", {}).get("record", {}).get("ref") != cad_ref:
+            raise ValueError(
+                "The selected RobotFramePoseRecord refers to a different CAD record than cad_ref."
+            )
         cad = _load_cad_input(self.root, owned_path(self.root, cad_ref))
-        if (
-            pose.get("record_type") != "RobotFramePoseRecord"
-            or pose.get("CAD", {}).get("record", {}).get("ref") != cad_ref
-        ):
-            raise ValueError("The selected pose does not establish this CAD instance.")
         frame_pose = pose.get("robot_frame_pose") or {}
         if pose.get("pose") != "accepted" or "robot_from_CAD_transform" not in frame_pose:
-            result = self.save(
-                {
-                    "record_type": "AssemblyGeometryEvidence",
-                    "status": "ambiguous",
-                    "frame_id": pose.get("target_frame"),
-                    "message": "A unique CAD-origin pose is not established; no final pose or oriented feature is fabricated.",
-                },
-                [cad_ref, pose_ref],
-            )
+            record = {
+                "record_type": "AssemblyGeometryEvidence",
+                "status": "ambiguous",
+                "pose_status": "ambiguous",
+                "frame_id": pose.get("target_frame"),
+                "units": "m",
+                "message": "A unique CAD-origin pose is not established; no final pose or oriented feature is fabricated.",
+            }
             from .rgb_d_cad_grounding.frame_conversion import _load_calibration
 
             source = read_pin(self.root, pose["source_pose"])
@@ -197,43 +184,39 @@ class AssemblyGeometryProducer:
             )
             hypotheses = source.get("qualified_pose_hypotheses", [])
             selected = source.get("selected_candidate") or {}
-            if len(hypotheses) >= 2 and all(
+            if selected.get("candidate_handle") and hypotheses and all(
                 item["candidate_handle"] == selected.get("candidate_handle")
                 and item["frame"] == calibration.source_frame
+                and item["camera_id"] == selected.get("camera_id")
                 for item in hypotheses
             ):
-                quantities = []
-                for hypothesis in hypotheses:
-                    transform = calibration.target_from_camera @ np.asarray(
-                        hypothesis["camera_from_CAD_transform"]
-                    )
-                    matrix_pose(transform)
-                    vertices = (
-                        cad.triangles_m.reshape(-1, 3) @ transform[:3, :3].T + transform[:3, 3]
-                    )
-                    quantities.append({"part_height_m": float(np.ptp(vertices[:, 2]))})
-                invariant = invariant_quantities(quantities, {"part_height_m": 1e-7})
-                if invariant:
-                    result["invariant_evidence"] = self.save(
-                        {
-                            "record_type": "AssemblyGeometryEvidence",
-                            "status": "accepted",
-                            "pose_status": "ambiguous",
-                            "frame_id": pose["target_frame"],
-                            "units": "m",
-                            "reference_point": "pose_invariant_measurements",
-                            **invariant,
-                            "observation_timestamp_ns": pose["observation_timestamp_ns"],
-                            "uncertainty": {
-                                "hypotheses_considered": len(hypotheses),
-                                "numerical_agreement_m": 1e-7,
-                                "registration": [item["registration"] for item in hypotheses],
-                                "complete_pose_established": False,
-                            },
-                        },
-                        [cad_ref, pose_ref],
-                    )
-            return result
+                # Pose estimation already ranks these by registration quality. Its
+                # first qualified fit supplies an estimate, without resolving pose.
+                hypothesis = hypotheses[0]
+                transform = calibration.target_from_camera @ np.asarray(
+                    hypothesis["camera_from_CAD_transform"]
+                )
+                matrix_pose(transform)
+                height = float(np.ptp(cad.triangles_m.reshape(-1, 3) @ transform[2, :3]))
+                record.update(
+                    part_height_m=height,
+                    cad_context_ref=cad.context_ref,
+                    candidate_reference=pose["candidate_reference"],
+                    observation_timestamp_ns=pose["observation_timestamp_ns"],
+                    uncertainty={
+                        "method": "highest_ranked_qualified_pose_hypothesis",
+                        "source_pose": pose["source_pose"],
+                        "hypothesis_index": 0,
+                        "registration": hypothesis["registration"],
+                        "complete_pose_established": False,
+                    },
+                    warning=(
+                        "part_height_m is a world-vertical CAD extent estimate from the "
+                        "highest-ranked qualified observed pose. Full pose and mating geometry "
+                        "remain ambiguous; this estimate does not establish sensor accuracy."
+                    ),
+                )
+            return self.save(record, [cad_ref, pose_ref])
         transform = np.asarray(frame_pose["robot_from_CAD_transform"], dtype=float)
         origin = matrix_pose(transform)
         vertices = cad.triangles_m.reshape(-1, 3) @ transform[:3, :3].T + transform[:3, 3]

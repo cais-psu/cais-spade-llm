@@ -193,8 +193,10 @@ explicitly under the corresponding heading.
 - Do not import `SystemBridge` or issue direct ROS2 shell commands from this
   package. The application passes a runtime object that satisfies the narrow
   Spec2Primitives adapter protocol.
-- Do not add hardware launch, shared-agent changes, or robot execution. Preserve
-  the owned exact-selected-RA context-only adapter and its existing readiness gates.
+- Do not add hardware launch or shared-agent changes. Preserve the owned
+  exact-selected-RA context-only adapter and its readiness gates. The explicitly
+  authorized Run in Gazebo action may execute an unchanged saved validated
+  program through the owned simulation adapter after fresh checks.
 - Keep ProductAgent access behind the Spec2Primitives-owned
   `ProductAgentContextRuntime` composition boundary. Do not start its lifecycle
   or expose other shared-agent operations.
@@ -202,11 +204,11 @@ explicitly under the corresponding heading.
   the selected RA after current completion and evidence validation. Primitive
   composition authors one program with available parameters; omitted required
   parameters remain unbound. Strict selected numerical calculations and private
-  motion validation are permitted; robot primitives are never executed.
+  motion validation are permitted; composition never executes robot primitives.
 - Preserve complete runtime contracts in snapshots. Project grasp/release formal
   conditions/effects to `held_part` only in composition inputs. Omit `model_name`
   from composition parameters, nested schemas, outputs and custody effects;
-  retain it in authoritative runtime contracts for a future execution adapter.
+  retain it in authoritative runtime contracts for the separate execution adapter.
   Reject new submissions containing that execution-only argument. Filter recovery
   examples/decompositions from initial state and every model-facing record read.
 - Preserve nested schemas and distinguish signature-required arguments from
@@ -243,3 +245,8 @@ explicitly under the corresponding heading.
   PA, RA, retrieval tools, and recognition code cannot access them.
 - Preserve `target_feature`, target pose, insertion axis, tolerances,
   `primitive_steps`, and all other supplied terms exactly as written.
+- Keep Run in Gazebo instance binding and command records under the interaction's
+  `execution/` directory. Only that post-composition adapter may read simulator
+  fixture definitions and live entity state to bind an already accepted CAD
+  instance. Exclude those records from all PA/RA evidence readers. This does not
+  authorize simulator input to recognition or execution during composition.

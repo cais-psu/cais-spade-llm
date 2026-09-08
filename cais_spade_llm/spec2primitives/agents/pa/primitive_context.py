@@ -78,8 +78,10 @@ class ProductPrimitiveContextRuntime:
         authorized = {
             reference["ref"]: reference["sha256"] for reference in request["evidence_refs"]
         }
+        from ..ra.refinement_records import verify_evidence_tree
+
         for ref, sha in authorized.items():
-            await asyncio.to_thread(read_pin, root, {"ref": ref, "sha256": sha})
+            await asyncio.to_thread(verify_evidence_tree, root, {"ref": ref, "sha256": sha})
         producer = AssemblyGeometryProducer(
             root, directory / "geometry", authorized, request["target_feature"]
         )
@@ -99,6 +101,25 @@ class ProductPrimitiveContextRuntime:
         exchanges = []
         operations = 0
         for turn in range(max_operations + 1):
+            evidence_catalog = _current_evidence_catalog(
+                tuple(investigation.handles.values()), investigation
+            )
+            for ref, sha in authorized.items():
+                record = await asyncio.to_thread(read_pin, root, {"ref": ref, "sha256": sha})
+                record = _without_model_name(_composition_state_view(record))
+                # Discovery metadata includes earlier partial records without selecting
+                # a measurement or promoting its status to accepted geometry.
+                evidence_catalog.append(
+                    {
+                        "record_ref": ref,
+                        **{
+                            key: record[key]
+                            for key in ("record_type", "status", "pose", "conversion")
+                            if key in record
+                        },
+                        "fields": list(record),
+                    }
+                )
             prompt = (
                 "You are ProductAgent investigating missing product/scene facts for an already accepted target_feature. "
                 "Use only approved documents, CAD, RGB-D and calibration. Task roles and mating-feature associations "
@@ -109,22 +130,40 @@ class ProductPrimitiveContextRuntime:
                 "Use finish with only selected issued records and unresolved needs. Raw CAD and a destination "
                 "label do not establish final placement geometry. Seating tolerances require approved evidence "
                 "or an explicitly supplied experiment specification. Missing facts remain unresolved. "
+                "Review every request in needs, including exact missing inputs derived from RA-selected "
+                "primitive contracts and RA-authored supplemental requests. Reuse applicable issued records, including partial "
+                "evidence from earlier batches; read_record can inspect the fields listed in evidence_catalog. "
+                "When one requested measurement is blocked, consider useful supported investigations for the "
+                "remaining requests. Choose the tools and their order yourself. Before finish, explain each "
+                "unresolved request using its exact supplied quantity and step_index. Distinguish a request "
+                "you did not investigate from a measurement you attempted that remains ambiguous or unavailable. "
+                "Finish early when no useful supported operation remains; you need not spend every operation "
+                "or repeat a blocked measurement with unchanged inputs. "
                 "Geometry tool arguments are JSON objects with the listed fields. estimate_pose consumes an "
-                "issued CADSizeCorrespondenceRecord; convert_pose uses approved calibration. "
-                "Use inspect_features to obtain neutral planar/circular CAD feature candidates. "
+                "issued CADSizeCorrespondenceRecord and returns a camera-frame CADPoseEstimationRecord. "
+                "convert_pose consumes that CADPoseEstimationRecord and returns a RobotFramePoseRecord in world "
+                "using approved calibration; conversion preserves any pose ambiguity. "
+                "inspect_features requires a CADMeshRecord cad_ref and a RobotFramePoseRecord pose_ref for "
+                "that same CAD record. A correspondence record or camera-frame pose is not a valid pose_ref. "
+                "Select and invoke the required tools explicitly; no conversion is performed automatically. "
+                "inspect_features returns neutral planar/circular CAD feature candidates, or an ambiguous "
+                "record that may contain part_height_m estimated from the highest-ranked qualified "
+                "pose for the same observed candidate, with its source and warning. The height estimate "
+                "is usable as that scalar input; it does not establish an oriented feature or full pose. "
                 "assembly_geometry consumes your selected mating circles and opposing seating planes. "
                 "bind_part associates a measured candidate with one exact accepted assembly feature name. "
                 "finish includes validation_refs: part (bound observed geometry), goal (derived assembly geometry), "
                 "scene (observed collision scene) and specification (documented tolerances); use null for missing roles. "
+                "Retain useful issued partial records in evidence_refs even when a validation role remains "
+                "incomplete. Ambiguous poses and height estimates alone do not establish complete part, "
+                "goal or scene evidence; keep those validation_refs null and explain the unresolved facts. "
                 "No sequence, recovery example, or evaluator answer is available.\n\n"
                 + json.dumps(
                     ObservationPresentation(root).project(
                         {
                             "target_feature": request["target_feature"],
                             "needs": request["needs"],
-                            "evidence_catalog": _current_evidence_catalog(
-                                tuple(investigation.handles.values()), investigation
-                            ),
+                            "evidence_catalog": evidence_catalog,
                             "issued_records": list(authorized),
                             "tools": tool_descriptions,
                             "operations_remaining": max_operations - operations,

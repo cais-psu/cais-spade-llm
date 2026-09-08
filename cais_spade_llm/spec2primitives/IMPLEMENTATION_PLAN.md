@@ -16,7 +16,23 @@ The broader composition/execution architecture remains proposed in [ICRA_SCOPE.m
 | 5.1 | Exact selected-RA assignment, in-process activation/reuse, paired state/catalog snapshots |
 | 5.2 | One direct RA-authored program, minimal contracts, filtered reads and explicit selected dependencies |
 | 5.3–5.5 | Supplemental PA geometry, measured RA context, audited selected calculations, private Cartesian validation and bounded RA revision; no robot motion |
-| Later | Robot execution, simulator instance binding, force/contact validation, observed outcomes and broader assembly families |
+| Run in Gazebo | Separate simulation execution of a saved validated program, automatic CAD/instance binding, command feedback, stopping and execution records |
+| Later | Hardware execution, force/contact validation, independently observed assembly success and broader assembly families |
+
+## Robot-context parameter-service collision (2026-09-08)
+
+The shared [dual_moveit_gazebo.launch.py](../../ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py) no longer supplies `name='move_group'` to the MoveIt `Node`. The executable keeps `/move_group`; its internal helper keeps `/moveit_simple_controller_manager`. The removed global remap made both nodes advertise the same parameter services. In [run_0006](contexts/interaction_a2a6cd2e885943ec9dfca72ad3fc28ed/composition/refinement_runs/run_0006/result.json), consecutive captures returned different parameter sets and stopped as `stale` with `model_parameters_sha256` differing. That diagnostic did not establish physical robot motion.
+
+The repair adds the explanatory comment and `annotations` future import. Parameter contents, comparison fields and thresholds, PA/RA behavior, public interfaces and saved interactions remain unchanged. No refactoring was performed.
+
+Verification for this repair:
+
+- The isolated parameter-service fixture kept the main and helper service names distinct. All 24 repeated reads from the unchanged main node agreed; an explicit parameter change remained detectable.
+- `poetry run pytest -q cais_spade_llm/spec2primitives/tests/test_primitive_refinement.py -k robot_comparison`: **3 passed, 43 deselected**. Touched-file syntax checks and `git diff --check` passed.
+- `make bootstrap-gazebo`: **16 packages finished**. The installed launch file matched the corrected source byte-for-byte.
+- Dual Gazebo was already stopped and was started through its existing UI control. **Compose Primitive Program** then created [run_0007](contexts/interaction_a2a6cd2e885943ec9dfca72ad3fc28ed/composition/refinement_runs/run_0007/result.json). Its [first robot-context capture](contexts/interaction_a2a6cd2e885943ec9dfca72ad3fc28ed/composition/refinement_runs/run_0007/robot_context_0001.json) succeeded, validation ran, and PA completed one batch using five operations. The run stopped as `budget_exhausted` at the unchanged 300-second deadline during RA revision, before a second capture. Live comparison across decisions therefore remains unconfirmed. No robot motion was executed, and assembly validation remains incomplete.
+
+See [the comparison policy and deployment steps](VALIDATION_AND_REVISION.md#finite-modeled-validation). The fixture establishes the service contract; it does not prove complete live refinement, geometry availability or assembly success.
 
 ## Grounding changes
 
@@ -228,7 +244,7 @@ A final read-only reload of the actual saved program exposed an empty JSON Point
 
 ## Simulator identifier separation: implemented increment
 
-New RA composition interfaces omit `model_name` from parameters, nested helper schemas, outputs, required lists and custody effects. `part_name`, primitive names, geometry requirements and movement parameters remain intact. The prompt distinguishes the composition interface from directly callable runtime signatures. A future execution adapter must establish the simulator identifier for the recognized physical instance; no resolver, lookup or execution is implemented here.
+New RA composition interfaces omit `model_name` from parameters, nested helper schemas, outputs, required lists and custody effects. `part_name`, primitive names, geometry requirements and movement parameters remain intact. The prompt distinguishes the composition interface from directly callable runtime signatures. The separate [Run in Gazebo adapter](VALIDATION_AND_REVISION.md#run-in-gazebo) binds the recognized instance after composition; composition performs no simulator lookup or execution.
 
 New proposals reject supplied `model_name`, including nested and referenced objects, and references to removed helper outputs. Rejected submissions remain exact in the trace. Missing geometry and deferred numerical outputs remain composition findings; a simulator identifier is no longer a new composition input requirement.
 
