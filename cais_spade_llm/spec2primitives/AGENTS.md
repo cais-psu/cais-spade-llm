@@ -212,8 +212,9 @@ explicitly under the corresponding heading.
   Reject new submissions containing that execution-only argument. Filter recovery
   examples/decompositions from initial state and every model-facing record read.
 - Preserve nested schemas and distinguish signature-required arguments from
-  grounding requirements. Binding diagnostics inspect RA-selected sources only;
-  they never fill values, select sources or repair steps. Only the separate strict
+  grounding requirements. Binding diagnostics inspect supplied sources without changing the proposal. The
+  owned deterministic binder fills only checked PA answers at requested missing or
+  incompatible paths in a separate PrimitiveProgramBinding. Only the strict
   calculation adapter evaluates RA-selected helper calls with grounded inputs.
 - Read each saved attempt against the composition catalog in its own hash-checked
   request. Preserve old programs and reports; use the current projection only for
@@ -224,7 +225,9 @@ explicitly under the corresponding heading.
 - Phase 4 supplies observed product evidence and desired relationships. Phase 5
   owns bounded supplemental evidence, measured robot context, strict selected
   target calculations and isolated Cartesian validation with execution disabled.
-  RA alone binds evidence and revises steps. Helper waypoints prescribe no order.
+  RA alone chooses and revises primitive steps. PA input resolution and parameter
+  binding are deterministic, using scoped SPADE messaging and pinned answers.
+  Helper waypoints prescribe no order.
   Preserve Phase 4 ontology/views and historical programs. Follow
   `VALIDATION_AND_REVISION.md` for implemented scope and subsequent physical work,
   and `COMPOSITION_EVALUATION.md` for experiments and claim limits.

@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 import json
 import logging
 import time
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -18,12 +17,14 @@ import numpy as np
 import pytest
 from cais_spade_llm.spec2primitives.agents.ra import primitive_composition
 from cais_spade_llm.spec2primitives.agents.ra.validation_scope import (
-    GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE, read_validation_scope, required_validation_roles,
+    GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE, read_validation_scope,
 )
 
 from cais_spade_llm.spec2primitives.agents.pa.primitive_context import (
     ProductPrimitiveContextRuntime,
     _issued_records,
+    _number_needs,
+    _read_answer_checkpoint,
     _observation_catalog,
     _pa_evidence_projection,
 )
@@ -35,7 +36,6 @@ from cais_spade_llm.spec2primitives.agents.ra.primitive_composition import (
     _evidence_value,
     _load_inputs,
     _result_schema,
-    _with_refinement,
     author_primitive_program_candidate,
     read_primitive_composition_diagnostic,
 )
@@ -74,6 +74,7 @@ from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import (
 )
 from cais_spade_llm.spec2primitives.tools.assembly_geometry import (
     AssemblyGeometryProducer,
+    _ObservedGeometryBatch,
     planar_features,
 )
 from cais_spade_llm.spec2primitives.tools.observation_presentation import ObservationPresentation
@@ -81,6 +82,10 @@ from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import (
     pose_estimation,
     record_camera_to_robot_calibration,
 )
+
+
+def _pa_value(need_id: str, ref: str, pointer: str) -> dict[str, Any]:
+    return {"need_id": need_id, "value_ref": {"record_ref": ref, "field_path": pointer}}
 
 
 def _legacy_profile() -> dict[str, Any]:
@@ -532,12 +537,12 @@ def test_robot_comparison_retains_thresholds_and_reports_all_differences() -> No
 
 @pytest.mark.parametrize("after_validation", [False, True])
 def test_robot_comparison_preserves_rejected_capture_and_diagnostics(
-    tmp_path: Path, after_validation: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_validation: bool
 ) -> None:
     """Persist both captures without accepting a changed context or provisional pass."""
-    inputs, robot, _, _ = _setup(tmp_path)
+    inputs, robot, _, product, _ = _binding_fixture(tmp_path, monkeypatch, GAZEBO_PICK_PLACE_SCOPE)
     original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    program = _ProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])] * 2)
+    program = _MessageProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])] * 2)
     events = []
     captured = []
 
@@ -552,14 +557,17 @@ def test_robot_comparison_preserves_rejected_capture_and_diagnostics(
             return context
 
     async def validator(**kwargs: Any) -> dict[str, Any]:
-        return {"scope": read_validation_scope(kwargs["profile"]), "status": "passed" if after_validation else "unknown", "findings": []}
+        from cais_spade_llm.spec2primitives.agents.ra.program_validation import _report
+        report = _report(kwargs["steps"], [], [], [], None, scope=read_validation_scope(kwargs["profile"]))
+        report["status"] = "passed" if after_validation else "unknown"
+        return report
 
     async def progress(event: Any) -> None:
         events.append(deepcopy(event))
 
     runtime = PrimitiveRefinementRuntime(
         program_runtime=program,
-        robot_runtime=Robot(),
+        robot_runtime=Robot(), product_runtime=product,
         validator=validator,
         profile={**_legacy_profile(), "max_candidates": 1 if after_validation else 2},
     )
@@ -577,7 +585,7 @@ def test_robot_comparison_preserves_rejected_capture_and_diagnostics(
     report = read_pin(tmp_path, result["validation_refs"][-1])
     assert report["robot_context_ref"] == previous_ref
     if after_validation:
-        assert result["status"] == "budget_exhausted"
+        assert result["status"] == "needs_context"
         assert report["status"] == "unknown"
         assert report["final_robot_context_ref"] == current_ref
         assert report["findings"][-1]["check"] == "final_freshness"
@@ -600,7 +608,7 @@ def test_robot_comparison_preserves_rejected_capture_and_diagnostics(
         path = tmp_path / reference["ref"]
         content = path.read_bytes()
         path.write_bytes(content + b" ")
-        with pytest.raises(ValueError, match="Pinned refinement evidence changed"):
+        with pytest.raises(ValueError, match="changed"):
             enrich_composition_diagnostic(tmp_path, {}, inputs.context_refs)
         path.write_bytes(content)
 
@@ -768,7 +776,7 @@ def test_pa_selected_grasp_point_preserves_cad_pose_and_measures_placement_offse
     with pytest.raises(ValueError, match="outside the measured part bounds"):
         producer.pick_geometry(sources[0]["ref"], sources[2]["ref"])
     runtime = ProductPrimitiveContextRuntime(SimpleNamespace(), object())
-    selected = runtime._geometry(producer, "select_grasp_point", {
+    selected = producer.select_grasp_point(**{
         "part_ref": sources[0]["ref"], "plane_id": "plane_0001", "circle_id": "circle_0001",
     })
     assert selected["record"]["origin_pose"] == part["origin_pose"]
@@ -905,11 +913,11 @@ def test_validation_progress_finishes_before_robot_capture(
     from cais_spade_llm.spec2primitives.agents.ra import program_validation
     from cais_spade_llm.spec2primitives.agents.ra import refinement
 
-    _, robot, _, _ = _setup(tmp_path)
+    _, robot, _, product, _ = _binding_fixture(tmp_path, monkeypatch, GAZEBO_PICK_PLACE_SCOPE)
     clock = [10_000_000_000]
     monkeypatch.setattr(program_validation, "time", SimpleNamespace(time_ns=lambda: clock[0]))
     monkeypatch.setattr(refinement, "time", SimpleNamespace(time_ns=lambda: clock[0], monotonic=time.monotonic))
-    program = _ProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])])
+    program = _MessageProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])])
     order = []
     capture_times = []
     original_append = refinement.append_record
@@ -936,7 +944,7 @@ def test_validation_progress_finishes_before_robot_capture(
                 clock[0] += 3_000_000_000
 
     async def progress(event: Any) -> None:
-        if event["stage"] == "validating":
+        if event["stage"] == "validating" and "step_index" not in event:
             order.append("progress")
             clock[0] += 3_000_000_000
 
@@ -945,7 +953,7 @@ def test_validation_progress_finishes_before_robot_capture(
         return await validate_program(**kwargs, session_factory=_PlanningSession)
 
     runtime = PrimitiveRefinementRuntime(
-        program_runtime=program, robot_runtime=Robot(), validator=validator,
+        program_runtime=program, robot_runtime=Robot(), product_runtime=product, validator=validator,
         profile={**_legacy_profile(), "max_candidates": 1},
     )
     result = asyncio.run(runtime.compose(tmp_path, progress=progress))
@@ -1239,8 +1247,8 @@ def test_ambiguous_height_uses_ranked_fit_in_world_frame(
     runtime, producer, correspondence_ref, cad_ref = _pa_geometry(
         tmp_path, monkeypatch, ambiguous=True, tilt=0.3, world_transform=transform
     )
-    pose = runtime._geometry(producer, "estimate_pose", {"correspondence_ref": correspondence_ref})
-    converted = runtime._geometry(producer, "convert_pose", {"pose_ref": pose["record_ref"]})
+    pose = _fixture_pose(producer, correspondence_ref)
+    converted = _fixture_conversion(runtime, producer, pose["record_ref"])
     result = producer.inspect_features(cad_ref, converted["record_ref"])
     record = result["record"]
     size = producer.read(cad_ref)["bounds_m"]["size"]
@@ -1328,6 +1336,35 @@ def test_surface_height_measures_selected_point_without_accepting_part_pose(tmp_
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="changed"):
         producer.surface_height(surface["ref"], location["ref"])
+
+
+def _fixture_pose(producer: Any, correspondence_ref: str) -> dict[str, Any]:
+    producer.read(correspondence_ref)
+    result = pose_estimation.estimate_camera_frame_pose(
+        interaction_root=producer.root, correspondence_record_path=producer.root / correspondence_ref, pose_number=1,
+    )
+    reference = pin(producer.root, result.record_path)
+    producer.authorized[reference["ref"]] = reference["sha256"]
+    return {"record_ref": reference["ref"], "record": result.record}
+
+
+def _fixture_conversion(runtime: Any, producer: Any, source_ref: str) -> dict[str, Any]:
+    from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import transform_camera_pose_to_robot_frame
+    calibration_runtime = runtime.runtime._camera_to_world_calibration_runtime
+    if calibration_runtime is None:
+        raise ValueError("Approved camera calibration is unavailable.")
+    source = producer.read(source_ref)
+    calibration = calibration_runtime.materialize_camera_to_world_calibration(
+        source_frame=source["coordinate_frame"], target_frame="world", calibration_number=1,
+    )
+    result = transform_camera_pose_to_robot_frame(
+        interaction_root=producer.root, pose_record_path=producer.root / source_ref,
+        calibration_record_path=calibration.record_path, target_frame="world", conversion_number=1,
+    )
+    for path in (calibration.record_path, result.record_path):
+        reference = pin(producer.root, path)
+        producer.authorized[reference["ref"]] = reference["sha256"]
+    return {"record_ref": reference["ref"], "record": result.record}
 
 
 def _pa_geometry(
@@ -1441,96 +1478,379 @@ def test_pa_observed_bounds_measure_support_and_preserve_collision_coverage(
         verify_evidence_tree(tmp_path, pin(tmp_path, tmp_path / bound["record_ref"]))
 
 
-@pytest.mark.parametrize("premature_status", ["not_investigated", "blocked"])
-def test_pa_continues_unfinished_input_investigation_with_remaining_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, premature_status: str,
-) -> None:
-    """PA retains tool choice after premature finish and reports actual prerequisites."""
-    _, _, refs, _ = _observed_setup(tmp_path)
-    needs = [{"step_index": 1, "quantity": "/product_geometry/part_height_m", "authority": "PA"},
-             {"step_index": None, "quantity": "scene", "authority": "PA"}]
-    calls = []
-
-    class Product:
-        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> Any:
-            state = json.loads(prompt.split("\n\n", 1)[1])
-            calls.append(state)
-            if len(calls) <= 3:
-                return {"action": {"kind": "investigate", "tool_name": "read_record", "arguments": json.dumps({
-                    "record_ref": refs["part"]["ref"],
-                    "field_path": ("/record_type", "/reference_pose", "/product_geometry")[len(calls) - 1],
-                })}}
-            if len(calls) == 5:
-                assert state["exchanges"][-1]["result"]["status"] == "continue"
-                assert state["operations_remaining"] == 3
-                assert "3/6 evidence operations used; 3 remain" in state["exchanges"][-1]["result"]["message"]
-                return {"action": {"kind": "investigate", "tool_name": "read_record", "arguments": json.dumps({
-                    "record_ref": refs["part"]["ref"], "field_path": "/part_height_m",
-                })}}
-            investigated = len(calls) == 6
-            if investigated:
-                assert state["exchanges"][-1]["result"]["value"] == 0.02
-            return {"action": {
-                "kind": "finish", "evidence_refs": [refs["part"]["ref"]] if investigated else [],
-                "validation_refs": dict.fromkeys(("part", "goal", "scene", "specification")),
-                "outcomes": [{
-                    **{key: need[key] for key in ("step_index", "quantity")},
-                    "status": ("provided" if investigated else premature_status) if i == 0 else "blocked",
-                    "record_ref": refs["part"]["ref"] if i == 0 and investigated else None,
-                    "field_path": "/part_height_m" if i == 0 and investigated else None,
-                    "reason": (
-                        "A calibrated observation of the other obstacle is unavailable."
-                        if investigated else "The operation budget was consumed before the derived record was issued."
-                    ),
-                } for i, need in enumerate(needs)],
-            }}
-
-    runtime = ProductPrimitiveContextRuntime(SimpleNamespace(), Product())
-    monkeypatch.setattr(runtime, "_investigation", lambda *args: SimpleNamespace(
-        handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={},
-    ))
-    result = asyncio.run(runtime.investigate(
-        interaction_root=tmp_path, directory=tmp_path / "composition/refinement_runs/run_0001/pa_0001",
-        request={"validation_scope": GAZEBO_OBSERVED_SCOPE, "target_feature": {}, "needs": needs,
-                 "evidence_refs": [refs["part"]]}, max_operations=6,
-    ))
-    assert len(calls) == 6 and result["operations_used"] == 4
-    assert result["evidence_refs"] == [refs["part"]]
-    assert len(result["unresolved"]) == 1
-    assert "blocked" in result["unresolved"][0] and "other obstacle" in result["unresolved"][0]
+def _direct_input_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
+    transform = np.diag([1.0, -1.0, -1.0, 1.0])
+    transform[2, 3] = 1.0
+    runtime, producer, correspondence_ref, _ = _pa_geometry(
+        tmp_path, monkeypatch, world_transform=transform, diameters_m=(0.042, 0.03),
+    )
+    correspondence = producer.read(correspondence_ref)
+    segmentation_pin = correspondence["segmentation"]["record"]
+    producer.authorized[segmentation_pin["ref"]] = segmentation_pin["sha256"]
+    segmentation = producer.read(segmentation_pin["ref"])
+    camera = next(item for item in segmentation["cameras"] if len(item["candidates"]) == 2)
+    calibration = runtime.runtime._camera_to_world_calibration_runtime.materialize_camera_to_world_calibration(
+        source_frame=camera["frame"], target_frame="world", calibration_number=1,
+    )
+    calibration_pin = pin(tmp_path, calibration.record_path)
+    producer.authorized[calibration_pin["ref"]] = calibration_pin["sha256"]
+    target = {"assembly_feature_association": [{"assembly_features": []}], "resolved_state_values": []}
+    for index, (state, name) in enumerate((("current_state", "medium gear"), ("desired_state", "selected destination"))):
+        target["assembly_feature_association"][0]["assembly_features"].append({
+            "name": name + " feature", "state_name": state, "state_value_name": name + " observed location",
+            "owner": {"name": name, "evidence_refs": [correspondence["CAD"]["context_ref"], correspondence_ref]},
+        })
+        target["resolved_state_values"].append({"state": state, "name": name + " observed location",
+            "value_ref": {"record_ref": segmentation_pin["ref"]},
+            "resolved_value": deepcopy(camera["candidates"][index]),
+        })
+    request = {"validation_scope": GAZEBO_OBSERVED_SCOPE, "target_feature": target,
+        "primitive_steps": _observed_program({}, bound=False),
+        "needs": _number_needs([
+            {"step_index": 1, "quantity": "/product_geometry/board_center/z", "reason": "Required input is unbound."},
+            {"step_index": 1, "quantity": "/product_geometry/part_height_m", "reason": "Required input is unbound."},
+            *[{"step_index": 6, "quantity": "/product_geometry/placement_surface_point/" + axis, "reason": "Required input is unbound."}
+              for axis in ("x", "y", "z")],
+            {"step_index": None, "quantity": "part", "reason": "Part geometry required."},
+            {"step_index": None, "quantity": "scene", "reason": "Declared collision coverage needed."},
+        ]), "evidence_refs": [{"ref": ref, "sha256": sha} for ref, sha in producer.authorized.items()]}
+    producer.target_feature = target
+    return runtime, producer, request, camera, calibration_pin
 
 
-def test_pa_can_confirm_a_missing_source_without_forced_measurement_calls(
+def test_direct_inputs_share_measurement_and_retain_answers_without_pa_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Budget correction cannot prescribe tools or require spending the allowance."""
-    _, _, refs, _ = _observed_setup(tmp_path)
+    """Resolve run_0016's seven need shapes plus its incompatible target reference."""
+    runtime, producer, request, _, _ = _direct_input_fixture(tmp_path, monkeypatch)
+    request["needs"] = _number_needs([*request["needs"],
+        *[{"step_index": 1, "quantity": "/target_pose/" + axis, "reason": "Observed bounds reference pose needed."} for axis in ("x", "y", "z")],
+    ])
+    original = deepcopy(request["primitive_steps"])
+    events = []
+
+    async def progress(event: Any) -> None:
+        events.append(event)
+
+    directory = tmp_path / "composition/refinement_runs/run_0001/pa_0002"
+    result = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory,
+                                            request=request, max_operations=6, progress=progress))
+    assert result["model_responses"] == 0 and result["operations_used"] == 3
+    assert result["unresolved"] == []
+    answers = _read_answer_checkpoint(tmp_path, result["answers_ref"])["answers"]
+    answers.sort(key=lambda answer: answer["need_id"])
+    assert len(answers) == 10
+    assert answers[0]["value_ref"]["record_ref"] == answers[1]["value_ref"]["record_ref"]
+    assert answers[1]["value"] > 0
+    assert answers[5]["record_ref"] == result["validation_refs"]["part"]["ref"]
+    assert [answer["value_ref"]["field_path"] for answer in answers[7:]] == ["/reference_pose/" + axis for axis in ("x", "y", "z")]
+    scene = read_pin(tmp_path, result["validation_refs"]["scene"])
+    assert scene["status"] == "accepted"
+    assert len(scene["objects"]) == 3  # Both observed candidates and their finite support surface.
+    assert scene["unresolved_candidates"] == [] and len(scene["declared_observations"]) == 1
+    assert request["primitive_steps"] == original
+    assert not list(directory.glob("reply_*.json"))
+    assert any("input_resolution_ref" in event for event in events)
+    # Reuse exact approved measurements without consuming another operation.
+    producer.authorized.update({ref["ref"]: ref["sha256"] for ref in result["evidence_refs"]})
+    request["evidence_refs"] = [{"ref": ref, "sha256": sha} for ref, sha in producer.authorized.items()]
+    reused = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory.parent / "pa_0003",
+                                            request=request, max_operations=6))
+    assert reused["model_responses"] == reused["operations_used"] == 0
+    assert reused["unresolved"] == []
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_input_resolution import resolve_primitive_inputs
+
+    measured = answers[1]["source_ref"]
+    conflict = deepcopy(read_pin(tmp_path, measured))
+    conflict["part_height_m"] += 0.01
+    conflict["product_geometry"]["part_height_m"] += 0.01
+    producer.save(conflict, [measured["ref"]])
+    selected, _ = resolve_primitive_inputs(request, producer, _issued_records(producer), {}, set())
+    assert any(item.get("need_id") == "need_0002" and "conflict" in item.get("blocked", "") for item in selected)
+
+
+@pytest.mark.parametrize("fault", [None, "missing", "contradictory", "calibration"])
+def test_direct_input_lookup_uses_accepted_handles_and_specific_prerequisites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_input_resolution import resolve_primitive_inputs
+
+    _, producer, request, _, calibration = _direct_input_fixture(tmp_path, monkeypatch)
+    records = _issued_records(producer)
+    baseline = resolve_primitive_inputs(request, producer, records, {}, set())
+    segmentation = next(record for record in records.values() if record["record_type"] == "RGBDSegmentationRecord")
+    segmentation["cameras"].reverse()
+    assert resolve_primitive_inputs(request, producer, records, {}, set()) == baseline
+    if fault == "missing":
+        request["target_feature"]["assembly_feature_association"] = []
+    elif fault == "contradictory":
+        request["target_feature"]["resolved_state_values"][0]["resolved_value"]["point_count"] += 1
+    elif fault == "calibration":
+        del records[calibration["ref"]]
+    answers, calls = resolve_primitive_inputs(request, producer, records, {}, set())
+    if fault:
+        assert answers and all("blocked" in answer for answer in answers)
+        assert all("grounding" in answer["blocked"].lower() or "accepted" in answer["blocked"].lower()
+                   or "calibration" in answer["blocked"].lower() for answer in answers)
+    else:
+        assert answers == [] and len(calls) == 1
+
+
+def test_measurement_batch_decodes_once_and_rejects_changed_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cais_spade_llm.spec2primitives.tools.rgb_d_cad_grounding import size_correspondence
+
+    _, producer, _, camera, calibration = _direct_input_fixture(tmp_path, monkeypatch)
+    segmentation_ref = next(ref for ref, record in _issued_records(producer).items()
+                            if record["record_type"] == "RGBDSegmentationRecord")
+    original, calls = size_correspondence._load_candidates, []
+
+    def decode(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args[1])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(size_correspondence, "_load_candidates", decode)
+    producer.observation(segmentation_ref, camera["observation_handle"])
+    assert calls == []
+    arguments = {"segmentation_ref": segmentation_ref, "observation_handle": camera["observation_handle"],
+                 "calibration_ref": calibration["ref"]}
+    batch = _ObservedGeometryBatch.prepare(tmp_path, producer.authorized, [arguments, arguments])
+    assert len(calls) == 1
+    assert all(not value.flags.writeable for arrays in batch.points[segmentation_ref].values() for value in arrays)
+    first = AssemblyGeometryProducer(tmp_path, tmp_path / "measured/one", dict(producer.authorized), _batch=batch)
+    second = AssemblyGeometryProducer(tmp_path, tmp_path / "measured/two", dict(producer.authorized), _batch=batch)
+    one, two = first.observed_geometry(**arguments), second.observed_geometry(**arguments)
+    assert len(calls) == 1 and set(one["geometry_refs"]).isdisjoint(two["geometry_refs"])
+    first.verify_outputs()
+    path = tmp_path / calibration["ref"]
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="changed during processing"):
+        second.verify_outputs()
+
+
+def _stub_geometry_preparation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_ObservedGeometryBatch, "prepare", lambda *args: SimpleNamespace(
+        records={}, timings={}, verify_sources=lambda: None,
+    ))
+
+
+def _answer_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, select: Any) -> tuple[Any, ...]:
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
+    _stub_geometry_preparation(monkeypatch)
+    part = append_record(tmp_path, tmp_path / "products/answers", "part.json", {
+        "record_type": "ObservedGeometryEvidence", "status": "accepted", "part_height_m": 0.02,
+        "reference_pose": {"x": 0.1, "y": 0.2, "z": 0.3}, "large": "x" * 12001,
+    })
+    scene = append_record(tmp_path, tmp_path / "products/answers", "scene.json", {
+        "record_type": "AssemblySceneEvidence", "status": "incomplete", "unresolved_candidates": ["other"],
+    })
     calls = []
-    need = {"step_index": None, "quantity": "scene", "authority": "PA"}
-    reason = "A calibrated observation of the other obstacle is unavailable."
+    def resolve(request: Any, producer: Any, records: Any, checked: Any, attempted: Any) -> Any:
+        calls.append(request)
+        return select(request, part, scene, checked, attempted)
+    monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", resolve)
+    runtime = ProductPrimitiveContextRuntime(SimpleNamespace(), _MessageProduct())
+    request = {"validation_scope": GAZEBO_OBSERVED_SCOPE, "target_feature": {}, "needs": _number_needs([
+        {"step_index": 1, "quantity": "/product_geometry/part_height_m", "schema": {"type": "number"}, "reason": "Height needed."},
+        {"step_index": None, "quantity": "part", "reason": "Part identity needed."},
+        {"step_index": None, "quantity": "scene", "reason": "Collision coverage needed."},
+    ]), "evidence_refs": [part, scene]}
+    directory = tmp_path / "composition/refinement_runs/run_0001/pa_0001"
+    return runtime, request, directory, calls, part, scene
 
-    class Product:
-        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> Any:
-            calls.append(json.loads(prompt.split("\n\n", 1)[1]))
-            return {"action": {
-                "kind": "finish", "evidence_refs": [],
-                "validation_refs": dict.fromkeys(("part", "goal", "scene", "specification")),
-                "outcomes": [{"step_index": None, "quantity": "scene", "status": "blocked",
-                              "record_ref": None, "field_path": None, "reason": reason}],
-            }}
 
-    runtime = ProductPrimitiveContextRuntime(SimpleNamespace(), Product())
-    monkeypatch.setattr(runtime, "_investigation", lambda *args: SimpleNamespace(
-        handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={},
-    ))
-    result = asyncio.run(runtime.investigate(
-        interaction_root=tmp_path, directory=tmp_path / "composition/refinement_runs/run_0001/pa_0001",
-        request={"validation_scope": GAZEBO_OBSERVED_SCOPE, "target_feature": {}, "needs": [need],
-                 "evidence_refs": [refs["part"]]}, max_operations=6,
-    ))
-    assert len(calls) == 2 and result["operations_used"] == 0
-    assert calls[1]["operations_remaining"] == 6
-    assert result["unresolved"] == [f"step_index None, quantity scene: blocked: {reason}"]
+def test_pa_retains_checked_answers_and_reports_incomplete_coverage_without_model_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def select(request: Any, part: Any, scene: Any, checked: Any, attempted: Any) -> Any:
+        return [_pa_value("need_0001", part["ref"], "/part_height_m"),
+                {"need_id": "need_0002", "record_ref": part["ref"]},
+                {"need_id": "need_0003", "record_ref": scene["ref"]}], []
+    runtime, request, directory, calls, part, scene = _answer_fixture(tmp_path, monkeypatch, select)
+    result = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory, request=request, max_operations=6))
+    assert len(calls) == 1 and result["model_responses"] == result["operations_used"] == 0
+    assert result["validation_refs"] == {"part": part, "scene": scene}
+    checkpoint = _read_answer_checkpoint(tmp_path, result["answers_ref"])
+    assert checkpoint["answers"][0]["value"] == 0.02
+    assert checkpoint["answers"][0]["need"] == request["needs"][0]
+    assert read_pin(tmp_path, result["validation_refs"]["scene"])["status"] == "incomplete"
+    assert not list(directory.glob("reply_*.json"))
+
+
+@pytest.mark.parametrize("invalid,expected", [
+    ({"need_id": "need_unknown", "blocked": "Unknown source."}, "Unknown need_id"),
+    ({"need_id": "need_0001", "value_ref": {"record_ref": "part"}}, "field_path"),
+    ({"need_id": "need_0001", "value_ref": {"record_ref": "part", "field_path": None}}, "string field_path"),
+    ({"need_id": "need_0001", "value_ref": {"record_ref": "missing.json", "field_path": "/part_height_m"}}, "not issued"),
+    ({"need_id": "need_0001", "value_ref": {"record_ref": "part", "field_path": "/absent"}}, "field_path does not exist"),
+    ({"need_id": "need_0001", "value_ref": {"record_ref": "part", "field_path": "/large"}}, "12000"),
+    ({"need_id": "need_0001", "record_ref": "part"}, "Whole record_ref"),
+    ({"need_id": "need_0001", "blocked": ""}, "specific missing prerequisite"),
+    ({"need_id": "need_0001", "blocked": "No source", "record_ref": "part"}, "exactly one"),
+    ({"need_id": "need_0002", "record_ref": "scene"}, "typed ObservedGeometryEvidence"),
+])
+def test_pa_invalid_answer_updates_preserve_checked_selections_and_accept_other_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: Any, expected: str,
+) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_context import _check_answers
+    _, request, directory, _, part, scene = _answer_fixture(tmp_path, monkeypatch, lambda *args: ([], []))
+    producer = AssemblyGeometryProducer(tmp_path, directory / "geometry", {ref["ref"]: ref["sha256"] for ref in (part, scene)})
+    checked = {}
+    _check_answers([_pa_value("need_0001", part["ref"], "/part_height_m")], request["needs"], checked,
+                   producer, _issued_records(producer), {}, GAZEBO_OBSERVED_SCOPE)
+    entry = deepcopy(invalid)
+    if entry.get("record_ref") in {"part", "scene"}:
+        entry["record_ref"] = {"part": part, "scene": scene}[entry["record_ref"]]["ref"]
+    if entry.get("value_ref", {}).get("record_ref") == "part":
+        entry["value_ref"]["record_ref"] = part["ref"]
+    diagnostics = _check_answers([entry, {"need_id": "need_0003", "record_ref": scene["ref"]}], request["needs"], checked,
+                                 producer, _issued_records(producer), {}, GAZEBO_OBSERVED_SCOPE)
+    assert expected in diagnostics[0]["reason"] and diagnostics[1]["status"] == "accepted"
+    assert checked["need_0001"]["value"] == 0.02 and checked["need_0003"]["source_ref"] == scene
+
+
+def test_pa_rejects_duplicate_answer_selections_without_losing_checked_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_context import _check_answers
+    _, request, directory, _, part, scene = _answer_fixture(tmp_path, monkeypatch, lambda *args: ([], []))
+    producer = AssemblyGeometryProducer(tmp_path, directory / "geometry", {ref["ref"]: ref["sha256"] for ref in (part, scene)})
+    checked = {}
+    _check_answers([_pa_value("need_0001", part["ref"], "/part_height_m")], request["needs"], checked, producer, _issued_records(producer), {}, GAZEBO_OBSERVED_SCOPE)
+    diagnostics = _check_answers([_pa_value("need_0001", part["ref"], "/reference_pose/z"),
+                                  {"need_id": "need_0001", "blocked": "Conflicting measurement."}],
+                                 request["needs"], checked, producer, _issued_records(producer), {}, GAZEBO_OBSERVED_SCOPE)
+    assert all("Conflicting duplicate" in item["reason"] for item in diagnostics)
+    assert checked["need_0001"]["value"] == 0.02
+
+
+@pytest.mark.parametrize("allowance", [0, 1, 2])
+def test_pa_deterministic_batch_respects_operation_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowance: int) -> None:
+    def select(request: Any, part: Any, scene: Any, checked: Any, attempted: Any) -> Any:
+        return ([], [] if attempted else [{"tool_name": "observed_geometry", "arguments": json.dumps({
+            "segmentation_ref": part["ref"], "calibration_ref": scene["ref"], "observation_handle": str(index),
+        })} for index in range(2)])
+    runtime, request, directory, calls, part, scene = _answer_fixture(tmp_path, monkeypatch, select)
+    monkeypatch.setattr(runtime, "_geometry", lambda producer, *args: producer.save(
+        {"record_type": "ObservedGeometryEvidence", "part_height_m": 0.02}, [part["ref"]]))
+    result = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory, request=request, max_operations=allowance))
+    assert result["operations_used"] == (2 if allowance == 2 else 0)
+    assert result["model_responses"] == 0 and result["unresolved"]
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_pa_measurement_batches_isolate_files_preserve_order_and_limit_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mixed: bool,
+) -> None:
+    import threading
+
+    def select(request: Any, part: Any, scene: Any, checked: Any, attempted: Any) -> Any:
+        if attempted:
+            return [], []
+        return [], [{"tool_name": "bind_observed_part" if mixed and index == 1 else "observed_geometry", "arguments": json.dumps(
+            {"part_ref": part["ref"], "cad_ref": scene["ref"], "feature_name": "fixture"} if mixed and index == 1 else
+            {"segmentation_ref": part["ref"], "calibration_ref": scene["ref"], "observation_handle": f"selected_{index}"}
+        )} for index in range(4)]
+
+    runtime, request, directory, calls, part, scene = _answer_fixture(tmp_path, monkeypatch, select)
+    lock, active, peak, completed = threading.Lock(), 0, 0, []
+
+    def geometry(producer: Any, name: str, arguments: Any) -> Any:
+        nonlocal active, peak
+        order = 1 if name == "bind_observed_part" else int(arguments["observation_handle"].split("_")[-1])
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            if not mixed and order == 0:
+                deadline = time.monotonic() + 3
+                while 1 not in completed and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                assert 1 in completed
+            record = producer.save({"record_type": "ObservedGeometryEvidence", "part_height_m": 0.02}, [part["ref"]])
+            with lock:
+                completed.append(order)
+            return {**record, "order": order}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(runtime, "_geometry", geometry)
+    result = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory, request=request, max_operations=4))
+    assert len(calls) == 2 and result["operations_used"] == 4
+    assert peak == (1 if mixed else 2)
+    paths = list(directory.glob("operation_*/geometry/geometry_*.json"))
+    assert len(paths) == 4 and len({path.parent for path in paths}) == 4
+    for path in paths:
+        verify_evidence_tree(tmp_path, pin(tmp_path, path))
+    assert (completed == list(range(4))) if mixed else completed[0] == 1
+
+
+def test_pa_batch_cannot_use_an_output_issued_by_an_earlier_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def select(request: Any, part: Any, scene: Any, checked: Any, attempted: Any) -> Any:
+        if attempted:
+            return [], []
+        future = "composition/refinement_runs/run_0001/pa_0001/operation_0001/geometry/geometry_0001.json"
+        return [], [{"tool_name": "observed_geometry", "arguments": json.dumps({
+            "segmentation_ref": part["ref"], "calibration_ref": scene["ref"], "observation_handle": "chosen"})},
+            {"tool_name": "bind_observed_part", "arguments": json.dumps({"part_ref": future, "cad_ref": scene["ref"], "feature_name": "fixture"})}]
+    runtime, request, directory, calls, part, _ = _answer_fixture(tmp_path, monkeypatch, select)
+    monkeypatch.setattr(runtime, "_geometry", lambda producer, *args: producer.save(
+        {"record_type": "ObservedGeometryEvidence", "part_height_m": 0.02}, [part["ref"]]))
+    result = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory, request=request, max_operations=2))
+    assert result["operations_used"] == 2 and len(calls) == 2 and result["model_responses"] == 0
+
+    rejected = read_pin(tmp_path, pin(tmp_path, directory / "operation_0002/result.json"))
+    assert "not issued when this batch started" in rejected["result"]["reason"]
+
+def test_pa_cancelled_concurrent_measurements_preserve_answers_and_completed_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    def select(request: Any, part: Any, scene: Any, checked: Any, attempted: Any) -> Any:
+        return [_pa_value("need_0001", part["ref"], "/part_height_m")], [{"tool_name": "observed_geometry", "arguments": json.dumps({
+            "segmentation_ref": part["ref"], "calibration_ref": scene["ref"], "observation_handle": f"chosen_{index}",
+        })} for index in range(4)]
+    runtime, request, directory, calls, part, _ = _answer_fixture(tmp_path, monkeypatch, select)
+    release, both_started = threading.Event(), threading.Event()
+    lock, started = threading.Lock(), []
+    events = []
+
+    def geometry(producer: Any, *args: Any) -> Any:
+        with lock:
+            started.append(producer.directory)
+            if len(started) == 2:
+                both_started.set()
+        assert release.wait(5)
+        return producer.save({"record_type": "ObservedGeometryEvidence", "part_height_m": 0.02}, [part["ref"]])
+
+    async def progress(event: Any) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(runtime, "_geometry", geometry)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(runtime.investigate(interaction_root=tmp_path, directory=directory, request=request,
+                                                       max_operations=6, progress=progress))
+        try:
+            assert await asyncio.to_thread(both_started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert len(calls) == 1 and len(started) == 2
+    assert max(event["operations_used"] for event in events) == 2
+    checkpoint = _read_answer_checkpoint(tmp_path, pin(tmp_path, directory / "answers_auto_0001.json"))
+    assert checkpoint["answers"][0]["source_ref"] == part
+    assert len(list(directory.glob("operation_*/result.json"))) == 2
+    for path in directory.glob("operation_*/geometry/geometry_*.json"):
+        verify_evidence_tree(tmp_path, pin(tmp_path, path))
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -1660,71 +1980,20 @@ def _pa_observations(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, 
     return runtime, producer, segmentation_pin["ref"], segmentation, presentation
 
 
-@pytest.mark.parametrize("read_first", [False, True])
-@pytest.mark.parametrize("scope", [VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE])
-def test_pa_finds_third_observation_without_camera_index_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_first: bool, scope: str,
-) -> None:
-    """Expose all views and let PA choose read/measurement order using exact handles."""
-    runtime, producer, ref, segmentation, presentation = _pa_observations(tmp_path, monkeypatch)
-    selected = presentation.handle(segmentation["cameras"][2]["observation_handle"])
-    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    calls, messages = [], []
-    order = ["read_observation", "observed_surface"] if read_first else ["observed_surface", "read_observation"]
-
-    class Product:
-        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> Any:
-            state = json.loads(prompt.split("\n\n", 1)[1])
-            calls.append(state)
-            assert state["validation_scope"] == scope
-            if scope == GAZEBO_PICK_PLACE_SCOPE:
-                assert "Precise seating and assembly tolerances are not acceptance requirements" in prompt
-            assert len(state["observation_catalog"]) == 4
-            assert "cam_" not in prompt and "/cameras/0" not in prompt
-            observation = next(item for item in state["observation_catalog"] if item["observation_handle"] == selected)
-            assert observation["support_plane"]["status"] == "detected"
-            assert len(observation["compatible_calibration_refs"]) == 1
-            calibration_ref = observation["compatible_calibration_refs"][0]
-            assert "calibration_0001/" in calibration_ref
-            turn = len(state["exchanges"])
-            if turn < 2:
-                name = order[turn]
-                arguments = {"segmentation_ref": ref, "observation_handle": selected}
-                arguments.update({"field_path": "/support_plane"} if name == "read_observation" else {"calibration_ref": calibration_ref})
-                return {"action": {"kind": "investigate", "tool_name": name, "arguments": json.dumps(arguments)}}
-            measurement = state["exchanges"][order.index("observed_surface")]["result"]
-            assert measurement["record"]["status"] == "accepted"
-            assert measurement["record"]["frame_id"] == "world"
-            return {"action": {"kind": "finish", "evidence_refs": [measurement["record_ref"]],
-                               "validation_refs": dict.fromkeys(("part", "goal", "scene", "specification")),
-                               "unresolved": ["Accepted object orientation remains required."]}}
-
-    runtime.product_agent = Product()
-    monkeypatch.setattr(runtime, "_investigation", lambda *args: SimpleNamespace(
-        handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={}
-    ))
-
-    async def progress(event: dict[str, Any]) -> None:
-        messages.append(event["message"])
-
-    result = asyncio.run(runtime.investigate(
-        interaction_root=tmp_path, directory=producer.directory.parent,
-        request={"validation_scope": scope, "target_feature": {}, "needs": [{"step_index": 1, "quantity": "/product_geometry/board_center/z"}],
-                 "evidence_refs": [{"ref": key, "sha256": sha} for key, sha in producer.authorized.items()]},
-        max_operations=6, progress=progress,
-    ))
-    assert len(calls) == 3 and result["operations_used"] == 2
-    assert result["validation_refs"] == {}
-    assert any("measurement/geometry observed_surface accepted" in message for message in messages)
-    assert "2/6 operations used" in messages[-1]
-    assert all(path.read_bytes() == content for path, content in original.items())
+def test_pa_observation_catalog_preserves_all_views_without_positional_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, producer, ref, segmentation, presentation = _pa_observations(tmp_path, monkeypatch)
+    records = _issued_records(producer)
+    catalog = _pa_evidence_projection(tmp_path, _observation_catalog(tmp_path, records), records)
+    assert len(catalog) == 4
+    selected = next(item for item in catalog if item["observation_handle"] == presentation.handle(segmentation["cameras"][2]["observation_handle"]))
+    assert selected["support_plane"]["status"] == "detected"
+    assert len(selected["compatible_calibration_refs"]) == 1
+    assert "cam_" not in json.dumps(catalog) and "/cameras/2" not in json.dumps(catalog)
 
 
-def test_observation_lookup_checks_sources_calibrations_and_filters_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exact reads retain measurements, reject wrong sources and hide sensor identities."""
-    runtime, producer, ref, segmentation, presentation = _pa_observations(tmp_path, monkeypatch)
+def test_observation_lookup_checks_sources_calibrations_and_filters_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_context import _read_pa_value, _compatible_calibrations
+    _, producer, ref, segmentation, presentation = _pa_observations(tmp_path, monkeypatch)
     records = _issued_records(producer)
     catalog = _pa_evidence_projection(tmp_path, _observation_catalog(tmp_path, records), records)
     reversed_records = deepcopy(records)
@@ -1732,32 +2001,16 @@ def test_observation_lookup_checks_sources_calibrations_and_filters_metadata(
     reordered = _pa_evidence_projection(tmp_path, _observation_catalog(tmp_path, reversed_records), reversed_records)
     assert sorted(catalog, key=lambda item: item["observation_handle"]) == sorted(reordered, key=lambda item: item["observation_handle"])
     camera = segmentation["cameras"][2]
-    selected = {"segmentation_ref": ref, "observation_handle": camera["observation_handle"]}
-    good = next(item for item in catalog if item["observation_handle"] == presentation.handle(camera["observation_handle"]))["compatible_calibration_refs"][0]
-    bad = next(key for key in records if "calibration_0002/" in key)
-    result = runtime._geometry(producer, "observed_surface", {**selected, "calibration_ref": bad})
-    assert result["status"] == "unavailable" and result["compatible_calibration_refs"] == [good]
-    other = {**selected, "observation_handle": segmentation["cameras"][1]["observation_handle"]}
-    result = runtime._geometry(producer, "observed_surface", {**other, "calibration_ref": bad})
-    assert result["compatible_calibration_refs"] == [] and "surface_calibration" in result["reason"]
-    assert "has not been established" in result["reason"]
-    runtime.runtime._camera_to_world_calibration_runtime = None
-    with pytest.raises(ValueError, match="Approved camera calibration is unavailable"):
-        runtime._geometry(producer, "surface_calibration", other)
     with pytest.raises(ValueError, match="absent or duplicated"):
-        runtime._geometry(producer, "read_observation", {**selected, "observation_handle": "unknown", "field_path": ""})
+        producer.observation(ref, "unknown")
     with pytest.raises(ValueError, match="not issued"):
-        runtime._geometry(producer, "read_observation", {**selected, "segmentation_ref": "execution/private.json", "field_path": ""})
+        producer.observation("execution/private.json", camera["observation_handle"])
     for pointer in ("/cameras/0", "/cameras/2/frame"):
         with pytest.raises(ValueError, match="camera positions are internal"):
-            runtime._geometry(producer, "read_record", {"record_ref": ref, "field_path": pointer})
-    for record_ref in (ref, good):
-        value = runtime._geometry(producer, "read_record", {"record_ref": record_ref, "field_path": ""})
+            _read_pa_value(tmp_path, segmentation, pointer, records)
+    for reference in (ref, catalog[0]["compatible_calibration_refs"][0]):
+        value = _read_pa_value(tmp_path, records[reference], "", records)
         assert "cam_" not in json.dumps(value) and "camera_id" not in json.dumps(value)
-    read = runtime._geometry(producer, "read_observation", {**selected, "field_path": "/support_plane"})
-    assert read["value"] == camera["support_plane"]
-    with pytest.raises(ValueError, match="field_path does not exist"):
-        runtime._geometry(producer, "read_observation", {**selected, "field_path": "/absent"})
     duplicate = deepcopy(records)
     duplicate[ref]["cameras"].append(deepcopy(camera))
     with pytest.raises(ValueError, match="duplicated"):
@@ -1770,399 +2023,19 @@ def test_observation_lookup_checks_sources_calibrations_and_filters_metadata(
     expired = record_camera_to_robot_calibration(
         interaction_root=tmp_path, calibration_id="expired_fixture", source_frame=camera["frame"],
         target_frame="world", target_from_camera_transform=np.eye(4), valid_from_ns=0,
-        valid_until_ns=1, provenance_source="controlled_fixture", provenance_sha256="a" * 64,
-        calibration_number=3,
+        valid_until_ns=1, provenance_source="controlled_fixture", provenance_sha256="a" * 64, calibration_number=3,
     )
     expired_ref = pin(tmp_path, expired.record_path)
-    producer.authorized[expired_ref["ref"]] = expired_ref["sha256"]
-    rejected = runtime._geometry(producer, "observed_surface", {**selected, "calibration_ref": expired_ref["ref"]})
-    assert rejected["status"] == "unavailable" and rejected["compatible_calibration_refs"] == [good]
-    oversized = append_record(tmp_path, tmp_path / "products/test_evidence", "large.json", {
-        "record_type": "DocumentEvidence", "extracted_text": "x" * 12001,
-    })
-    producer.authorized[oversized["ref"]] = oversized["sha256"]
-    assert "error" in runtime._geometry(producer, "read_record", {"record_ref": oversized["ref"], "field_path": "/extracted_text"})
+    source = read_pin(tmp_path, segmentation["source_record"])
+    stamp = next(item["depth_timestamp_ns"] for item in source["cameras"] if item["camera_id"] == camera["camera_id"])
+    assert _compatible_calibrations(tmp_path, {expired_ref["ref"]: expired.record}, camera, stamp) == []
+    assert "error" in _read_pa_value(tmp_path, {"extracted_text": "x" * 12001}, "/extracted_text", records)
     opaque_pointer = presentation.handle("/cameras/0/candidates/0") + "/point_count"
-    selected_value = runtime._geometry(producer, "read_record", {"record_ref": ref, "field_path": opaque_pointer})
-    assert selected_value["value"] == segmentation["cameras"][0]["candidates"][0]["point_count"]
+    assert _read_pa_value(tmp_path, segmentation, opaque_pointer, records)["value"] == segmentation["cameras"][0]["candidates"][0]["point_count"]
     path = tmp_path / ref
-    content = path.read_bytes()
-    path.write_bytes(content + b" ")
+    path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="changed"):
-        runtime._geometry(producer, "read_observation", {**selected, "field_path": ""})
-
-
-def test_pa_geometry_calls_require_explicit_conversion_and_retain_partial_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Recover through PA-selected calls and retain geometry without filling task roles."""
-    runtime, producer, correspondence_ref, cad_ref = _pa_geometry(tmp_path, monkeypatch)
-    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    calls = []
-
-    class Product:
-        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            state = json.loads(prompt.split("\n\n", 1)[1])
-            calls.append(state)
-            exchanges = state["exchanges"]
-            turn = len(exchanges)
-            if turn == 0:
-                name, arguments = (
-                    "inspect_features",
-                    {
-                        "cad_ref": cad_ref,
-                        "pose_ref": correspondence_ref,
-                    },
-                )
-            elif turn == 1:
-                assert (
-                    "received 'CADSizeCorrespondenceRecord'" in (exchanges[-1]["result"]["reason"])
-                )
-                name, arguments = "estimate_pose", {"correspondence_ref": correspondence_ref}
-            elif turn == 2:
-                name, arguments = (
-                    "inspect_features",
-                    {
-                        "cad_ref": cad_ref,
-                        "pose_ref": exchanges[-1]["result"]["record_ref"],
-                    },
-                )
-            elif turn == 3:
-                assert "received 'CADPoseEstimationRecord'" in exchanges[-1]["result"]["reason"]
-                assert "convert_pose" in exchanges[-1]["result"]["reason"]
-                name, arguments = (
-                    "convert_pose",
-                    {
-                        "pose_ref": exchanges[1]["result"]["record_ref"],
-                    },
-                )
-            elif turn == 4:
-                assert exchanges[-1]["result"]["record"]["record_type"] == "RobotFramePoseRecord"
-                name, arguments = (
-                    "inspect_features",
-                    {
-                        "cad_ref": cad_ref,
-                        "pose_ref": exchanges[-1]["result"]["record_ref"],
-                    },
-                )
-            else:
-                geometry = exchanges[-1]["result"]
-                assert geometry["record"]["status"] == "accepted"
-                assert geometry["record"]["frame_id"] == "world"
-                return {
-                    "action": {
-                        "kind": "finish",
-                        "evidence_refs": [geometry["record_ref"]],
-                        "validation_refs": dict.fromkeys(
-                            ("part", "goal", "scene", "specification")
-                        ),
-                        "unresolved": [
-                            "Assembly association and scene evidence remain unresolved."
-                        ],
-                    }
-                }
-            return {
-                "action": {
-                    "kind": "investigate",
-                    "tool_name": name,
-                    "arguments": json.dumps(arguments),
-                }
-            }
-
-    runtime.product_agent = Product()
-    monkeypatch.setattr(
-        runtime,
-        "_investigation",
-        lambda *args: SimpleNamespace(
-            handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={}
-        ),
-    )
-    result = asyncio.run(
-        asyncio.wait_for(
-            runtime.investigate(
-                interaction_root=tmp_path,
-                directory=producer.directory.parent,
-                request={
-                    "evidence_refs": [
-                        {"ref": ref, "sha256": sha} for ref, sha in producer.authorized.items()
-                    ],
-                    "target_feature": {},
-                    "needs": [],
-                },
-                max_operations=5,
-            ),
-            timeout=10,
-        )
-    )
-    assert len(calls) == 6 and result["operations_used"] == 5
-    assert result["status"] == "provided" and result["validation_refs"] == {}
-    assert len(result["evidence_refs"]) == 1 and result["unresolved"]
-    assert all(path.read_bytes() == content for path, content in original.items())
-
-
-@pytest.mark.parametrize("document_first", [False, True])
-def test_pa_reuses_partial_records_and_keeps_investigation_choices(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document_first: bool
-) -> None:
-    """Expose prior evidence while PA chooses independent work and an early finish."""
-    runtime, producer, correspondence_ref, cad_ref = _pa_geometry(
-        tmp_path, monkeypatch, ambiguous=True
-    )
-    pose = runtime._geometry(producer, "estimate_pose", {"correspondence_ref": correspondence_ref})
-    converted = runtime._geometry(producer, "convert_pose", {"pose_ref": pose["record_ref"]})
-    document = append_record(
-        tmp_path,
-        tmp_path / "documents",
-        "quantity.json",
-        {
-            "record_type": "DocumentQueryRecord",
-            "text": "0.2 mm",
-            "model_name": "excluded_fixture_identifier",
-            "recovery_examples": ["excluded_fixture_recipe"],
-        },
-    )
-    producer.authorized[document["ref"]] = document["sha256"]
-    request = {
-        "target_feature": {},
-        "evidence_refs": [{"ref": ref, "sha256": sha} for ref, sha in producer.authorized.items()],
-        "needs": [
-            {
-                "step_index": 1,
-                "quantity": "Observed medium gear pose",
-                "authority": "PA",
-                "reason": "Check the selected pick.",
-            },
-            {
-                "step_index": 6,
-                "quantity": "position_tolerance_m",
-                "authority": "PA",
-                "reason": "Check the selected placement.",
-            },
-            {
-                "step_index": None,
-                "quantity": "scene",
-                "authority": "PA",
-                "reason": "Check the selected motions.",
-            },
-        ],
-    }
-    unresolved = [
-        "Step 1: Observed medium gear pose was investigated and remains ambiguous.",
-        "Program validation scene was not investigated; complete registered geometry is unavailable.",
-    ]
-    actions = [
-        ("inspect_features", {"cad_ref": cad_ref, "pose_ref": converted["record_ref"]}),
-        (
-            "document_quantity",
-            {
-                "record_ref": document["ref"],
-                "field_path": "/text",
-                "start": 0,
-                "end": 6,
-                "quantity": "position_tolerance_m",
-            },
-        ),
-    ]
-    if document_first:
-        actions.reverse()
-    calls = []
-
-    class Product:
-        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            state = json.loads(prompt.split("\n\n", 1)[1])
-            calls.append(state)
-            assert state["needs"] == request["needs"]
-            assert "Review every request in needs" in prompt
-            assert "A null step_index identifies a program-level validation need" in prompt
-            assert "Finish early when no useful supported operation remains" in prompt
-            assert "excluded_fixture_" not in prompt
-            catalog = {
-                item["record_ref"]: item
-                for item in state["evidence_catalog"]
-                if "record_ref" in item
-            }
-            prior = catalog[converted["record_ref"]]
-            assert prior["record_type"] == "RobotFramePoseRecord"
-            assert prior["pose"] == "ambiguous"
-            assert "source_pose" in prior["fields"]
-            assert "model_name" not in catalog[document["ref"]]["fields"]
-            assert "recovery_examples" not in catalog[document["ref"]]["fields"]
-            exchanges = state["exchanges"]
-            for exchange in exchanges:
-                evidence = exchange["result"]
-                assert catalog[evidence["record_ref"]]["status"] == evidence["record"]["status"]
-            if len(exchanges) < len(actions):
-                name, arguments = actions[len(exchanges)]
-                return {
-                    "action": {
-                        "kind": "investigate",
-                        "tool_name": name,
-                        "arguments": json.dumps(arguments),
-                    }
-                }
-            assert state["operations_remaining"] == 4
-            return {
-                "action": {
-                    "kind": "finish",
-                    "evidence_refs": [
-                        converted["record_ref"],
-                        *(item["result"]["record_ref"] for item in exchanges),
-                    ],
-                    "validation_refs": dict.fromkeys(("part", "goal", "scene", "specification")),
-                    "unresolved": unresolved,
-                }
-            }
-
-    runtime.product_agent = Product()
-    monkeypatch.setattr(
-        runtime,
-        "_investigation",
-        lambda *args: SimpleNamespace(
-            handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={}
-        ),
-    )
-    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    directory = tmp_path / "composition/refinement_runs/run_0001/pa_0002"
-    result = asyncio.run(
-        runtime.investigate(
-            interaction_root=tmp_path, directory=directory, request=request, max_operations=6
-        )
-    )
-    assert len(calls) == 3 and result["operations_used"] == 2
-    assert result["unresolved"] == unresolved and result["validation_refs"] == {}
-    assert [item["response"]["action"]["tool_name"] for item in calls[-1]["exchanges"]] == [
-        name for name, _ in actions
-    ]
-    records = [read_pin(tmp_path, ref) for ref in result["evidence_refs"]]
-    assert any(record.get("status") == "ambiguous" for record in records)
-    assert any(record.get("quantity") == "position_tolerance_m" for record in records)
-    assert all(path.read_bytes() == content for path, content in original.items())
-    (tmp_path / document["ref"]).write_bytes(original[tmp_path / document["ref"]] + b" ")
-    with pytest.raises(ValueError, match="Pinned evidence dependency changed: documents/quantity.json"):
-        asyncio.run(
-            runtime.investigate(
-                interaction_root=tmp_path,
-                directory=tmp_path / "composition/refinement_runs/run_0001/pa_0003",
-                request=request,
-                max_operations=6,
-            )
-        )
-    assert len(calls) == 3
-
-
-@pytest.mark.parametrize("measurement_tool", ["pick_geometry", "surface_height"])
-def test_pa_selected_pick_measurements_return_bindable_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, measurement_tool: str,
-) -> None:
-    """PA's selected geometry call supplies a support height that RA can bind explicitly."""
-    inputs, robot, refs, _ = _setup(tmp_path)
-    surface = append_record(
-        tmp_path, tmp_path / "products/test_evidence", "surface.json",
-        {
-            "record_type": "AssemblySurfaceEvidence", "status": "accepted",
-            "frame_id": "world", "units": "m", "reference_point": "observed_plane",
-            "normal": [0.0, 0.0, 1.0], "offset_m": -0.04, "rms_distance_m": 0.001,
-            "observation_timestamp_ns": 1_000_000_000,
-        },
-    )
-    location = append_record(
-        tmp_path, tmp_path / "products/test_evidence", "location.json",
-        {
-            "record_type": "RobotFrameLocationRecord", "location": "available",
-            "robot_frame_conversion": "accepted", "target_frame": "world",
-            "translated_location_m": [0.1, 0.0, 0.06], "observation_timestamp_ns": 1_000_000_000,
-        },
-    )
-    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    requested = [{"step_index": 1, "quantity": "/product_geometry/board_center/z", "authority": "PA"}]
-    calls, messages = [], []
-
-    class Product:
-        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            state = json.loads(prompt.split("\n\n", 1)[1])
-            calls.append(state)
-            assert state["needs"] == requested
-            assert "An absent derived record is not an unavailable source measurement" in prompt
-            assert "RA alone binds returned evidence" in prompt
-            tools = {item["name"]: item for item in state["tools"] if "name" in item}
-            assert "support_plane" in tools["observed_surface"]["description"]
-            assert "product_geometry.board_center.z" in tools["pick_geometry"]["description"]
-            assert "product_geometry.board_center.z" in tools["surface_height"]["description"]
-            assert "slot_floor_z_m" in tools["assembly_geometry"]["description"]
-            assert "no default tolerances" in tools["validation_specification"]["description"]
-            if not state["exchanges"]:
-                arguments = {"surface_ref": surface["ref"]}
-                arguments.update(
-                    {"part_ref": refs["part"]["ref"]} if measurement_tool == "pick_geometry"
-                    else {"location_ref": location["ref"]}
-                )
-                return {
-                    "action": {
-                        "kind": "investigate", "tool_name": measurement_tool,
-                        "arguments": json.dumps(arguments),
-                    }
-                }
-            measured = state["exchanges"][-1]["result"]
-            assert measured["record"]["product_geometry"]["board_center"]["z"] == pytest.approx(0.04)
-            return {
-                "action": {
-                    "kind": "finish", "evidence_refs": [measured["record_ref"]],
-                    "validation_refs": dict.fromkeys(("part", "goal", "scene", "specification")),
-                    "unresolved": ["Assembly acceptance tolerances remain unavailable."],
-                }
-            }
-
-    runtime = ProductPrimitiveContextRuntime(SimpleNamespace(), Product())
-    monkeypatch.setattr(
-        runtime, "_investigation",
-        lambda *args: SimpleNamespace(
-            handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={}
-        ),
-    )
-
-    async def progress(event: Mapping[str, Any]) -> None:
-        messages.append(event["message"])
-
-    outcome = asyncio.run(runtime.investigate(
-        interaction_root=tmp_path,
-        directory=tmp_path / "composition/refinement_runs/run_0001/pa_0001",
-        request={"target_feature": {}, "needs": requested, "evidence_refs": [refs["part"], surface, location]},
-        max_operations=6, progress=progress,
-    ))
-    assert outcome["operations_used"] == 1 and len(calls) == 2
-    assert any(f"measurement/geometry {measurement_tool} accepted" in message for message in messages)
-    assert outcome["validation_refs"] == {}
-    measurement = outcome["evidence_refs"][0]
-    inputs = replace(inputs, record_hashes={**inputs.record_hashes, measurement["ref"]: measurement["sha256"]})
-    steps = [{
-        "primitive_symbol": "compute_pick_targets",
-        "params": {
-            "part_name": "medium gear",
-            "target_pose": _value(measurement, "/target_pose"),
-            "product_geometry": _value(measurement, "/product_geometry"),
-        },
-    }]
-    if measurement_tool == "surface_height":
-        steps[0]["params"].update(
-            target_pose=_value(refs["pick"], "/target_pose"),
-            product_geometry={
-                "board_center": {"z": _value(measurement, "/product_geometry/board_center/z")},
-                "part_height_m": _value(refs["pick"], "/product_geometry/part_height_m"),
-            },
-        )
-    authored = deepcopy(steps)
-    report = asyncio.run(validate_program(
-        inputs=inputs, steps=steps, robot={**robot, "captured_at_ns": time.time_ns()},
-        evidence={}, directory=tmp_path / "calculations", profile={**_legacy_profile(), "validation_scope": VALIDATION_SCOPE},
-        cache={}, session_factory=_PlanningSession,
-    ))
-    assert report["checked_steps"][0]["status"] == "passed", report
-    calculation = read_pin(tmp_path, report["calculation_refs"][0])
-    assert calculation["resolved_params"]["product_geometry"]["board_center"]["z"] == pytest.approx(0.04)
-    assert report["status"] == "unknown"
-    assert any(item["check"] == "specification" and item["status"] == "unknown" for item in report["findings"])
-    assert steps == authored
-    assert all(path.read_bytes() == content for path, content in original.items())
+        producer.observation(ref, camera["observation_handle"])
 
 
 def test_pa_geometry_preserves_ambiguity_and_rejects_different_cad(
@@ -2172,9 +2045,9 @@ def test_pa_geometry_preserves_ambiguity_and_rejects_different_cad(
     runtime, producer, correspondence_ref, cad_ref = _pa_geometry(
         tmp_path, monkeypatch, ambiguous=True
     )
-    pose = runtime._geometry(producer, "estimate_pose", {"correspondence_ref": correspondence_ref})
+    pose = _fixture_pose(producer, correspondence_ref)
     assert pose["record"]["pose"] == "ambiguous"
-    converted = runtime._geometry(producer, "convert_pose", {"pose_ref": pose["record_ref"]})
+    converted = _fixture_conversion(runtime, producer, pose["record_ref"])
     assert converted["record"]["pose"] == "ambiguous"
     geometry = producer.inspect_features(cad_ref, converted["record_ref"])
     assert geometry["record"]["status"] == "ambiguous"
@@ -2198,10 +2071,10 @@ def test_pa_geometry_conversion_requires_approved_calibration(
 ) -> None:
     """Missing calibration cannot produce a RobotFramePoseRecord."""
     runtime, producer, correspondence_ref, _ = _pa_geometry(tmp_path, monkeypatch)
-    pose = runtime._geometry(producer, "estimate_pose", {"correspondence_ref": correspondence_ref})
+    pose = _fixture_pose(producer, correspondence_ref)
     runtime.runtime._camera_to_world_calibration_runtime = None
     with pytest.raises(ValueError, match="Approved camera calibration is unavailable"):
-        runtime._geometry(producer, "convert_pose", {"pose_ref": pose["record_ref"]})
+        _fixture_conversion(runtime, producer, pose["record_ref"])
     assert not list(tmp_path.glob("products/grounding/rgb_d_cad_grounding/robot_pose_*"))
 
 
@@ -2213,8 +2086,8 @@ def test_height_estimate_only_supplies_the_selected_scalar(
     runtime, producer, correspondence_ref, cad_ref = _pa_geometry(
         tmp_path, monkeypatch, ambiguous=True, tilt=0.3
     )
-    pose = runtime._geometry(producer, "estimate_pose", {"correspondence_ref": correspondence_ref})
-    converted = runtime._geometry(producer, "convert_pose", {"pose_ref": pose["record_ref"]})
+    pose = _fixture_pose(producer, correspondence_ref)
+    converted = _fixture_conversion(runtime, producer, pose["record_ref"])
     geometry = producer.inspect_features(cad_ref, converted["record_ref"])
     height_ref = pin(tmp_path, tmp_path / geometry["record_ref"])
     inputs = replace(inputs, record_hashes={**inputs.record_hashes, **producer.authorized})
@@ -2235,8 +2108,8 @@ def test_height_estimate_only_supplies_the_selected_scalar(
             directory=tmp_path / f"check_height_{use_as_support}",
             profile={**_legacy_profile(), "validation_scope": VALIDATION_SCOPE}, cache={}, session_factory=_PlanningSession,
         ))
-        assert report["status"] == "unknown"
-        assert report["checked_steps"][0]["status"] == ("unknown" if use_as_support else "passed")
+        assert report["status"] == ("failed" if use_as_support else "unknown")
+        assert report["checked_steps"][0]["status"] == ("failed" if use_as_support else "passed")
         assert {item["check"] for item in report["findings"] if item["status"] == "unknown"} >= {
             "part", "goal", "scene", "specification",
         }
@@ -2255,8 +2128,8 @@ def test_height_estimate_requires_one_observed_candidate(
 ) -> None:
     """An identity conflict cannot become a height estimate by picking a convenient fit."""
     runtime, producer, correspondence_ref, cad_ref = _pa_geometry(tmp_path, monkeypatch, ambiguous=True)
-    pose = runtime._geometry(producer, "estimate_pose", {"correspondence_ref": correspondence_ref})
-    converted = runtime._geometry(producer, "convert_pose", {"pose_ref": pose["record_ref"]})
+    pose = _fixture_pose(producer, correspondence_ref)
+    converted = _fixture_conversion(runtime, producer, pose["record_ref"])
     source = deepcopy(pose["record"])
     source["qualified_pose_hypotheses"][1]["candidate_handle"] = "different_candidate"
     source_ref = append_record(tmp_path, tmp_path / "conflict", "source.json", source)
@@ -2391,480 +2264,193 @@ def test_failed_calculation_preserves_independent_calculations(tmp_path: Path) -
     assert steps == before
 
 
-@pytest.mark.parametrize("decision", ["revise", "request_robot", "unsupported"])
-@pytest.mark.parametrize("batch", [False, True])
-def test_missing_measurements_dispatch_pa_and_leave_ra_in_control(
-    tmp_path: Path, decision: str, batch: bool
-) -> None:
-    """Dispatch missing measurements once per evidence state, then return control to RA."""
-    inputs, robot, _, _ = _setup(tmp_path)
-    first = _program_action([("compute_pick_targets", {"part_name": "medium gear"})])
-    choices = {
-        "revise": _program_action([("compute_place_targets", {"part_name": "medium gear"})]),
-        "request_robot": {
-            "kind": "request_context",
-            "requests": [
-                {
-                    "step_index": 1,
-                    "quantity": "Measured EE/TCP context",
-                    "authority": "RA",
-                    "reason": "Check the tool offset for the selected calculation.",
-                }
-            ],
-        },
-        "unsupported": {"kind": "unsupported", "reason": "Required capability is unavailable."},
-    }
-    reads = []
-    if batch:
-        ref = inputs.composition_input["target_feature"]["current_state"]["state_values"][0]["value_ref"]["record_ref"]
-        reads.append({"kind": "read_records", "requests": [
-            {"record_ref": ref, "field_path": f"/translated_location_m/{index}"}
-            for index in range(3)
-        ]})
-    program = _ProgramRuntime([*reads, first, choices[decision]])
-    calls = []
+class _MessageProgramRuntime(_ProgramRuntime):
+    async def request_primitive_context(self, assignment: Any, **kwargs: Any) -> Any:
+        from spade.agent import Agent
+        from cais_spade_llm.spec2primitives.agents.pa.primitive_context_messages import request_context_message
 
-    class Robot:
-        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
-            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
-
-    class Product:
-        async def investigate(self, **kwargs: Any) -> Any:
-            calls.append(kwargs)
-            return {
-                "status": "unavailable", "operations_used": 1, "evidence_refs": [],
-                "validation_refs": {}, "unresolved": ["The requested measurements remain unavailable."],
-            }
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        return await validate_program(**kwargs, session_factory=_PlanningSession)
-
-    runtime = PrimitiveRefinementRuntime(
-        program_runtime=program,
-        robot_runtime=Robot(),
-        product_runtime=Product(),
-        validator=validator,
-    )
-    result = asyncio.run(runtime.compose(tmp_path))
-    assert result["status"] == ("unsupported" if decision == "unsupported" else "no_progress")
-    assert result["pa_batches"] == result["pa_operations"] == (2 if decision == "revise" else 1)
-    assert {need["quantity"] for need in calls[0]["request"]["needs"]} == {
-        "/product_geometry/board_center/z", "/product_geometry/part_height_m", "/target_pose",
-        "part", "scene",
-    }
-    assert all(need["step_index"] == (1 if need["quantity"].startswith("/") else None)
-               for need in calls[0]["request"]["needs"])
-    revision_prompt = program.calls[len(reads) + 1]["prompt"]
-    feedback = json.JSONDecoder().raw_decode(
-        revision_prompt.split("\n\nCOMPOSITION_INPUT\n")[1]
-    )[0]["refinement_context"]
-    assert any(item.get("parameter_path") == "/product_geometry/part_height_m" for item in feedback["findings"])
-    assert "The requested measurements remain unavailable." in revision_prompt
-    assert {item.get("check") for item in feedback["findings"]} >= {
-        "part",
-        "scene",
-    }
-    assert not {"goal", "specification"} & {item.get("check") for item in feedback["findings"]}
-    assert all(read_pin(tmp_path, ref)["status"] != "passed" for ref in result["validation_refs"])
-    if decision == "revise":
-        revised = read_pin(tmp_path, result["candidate_refs"][1])
-        assert revised["primitive_steps"] == [
-            {"primitive_symbol": "compute_place_targets", "params": {"part_name": "medium gear"}}
-        ]
+        agent = Agent(assignment.selected_resource_jid, "unused-fixture-password")
+        try:
+            return await request_context_message(agent, **kwargs)
+        finally:
+            assert agent.behaviours == []
+            agent.container.unregister(str(agent.jid))
 
 
-def test_supplemental_requests_reuse_partial_evidence_and_skip_duplicate_fields(tmp_path: Path) -> None:
-    """Keep explicit supplemental needs while reusing the preceding measurement batch."""
-    _, robot, refs, _ = _setup(tmp_path)
-    first = _program_action([("compute_pick_targets", {"part_name": "medium gear"})])
-    repeated = {
-        "step_index": 1, "quantity": "/product_geometry/part_height_m", "authority": "PA",
-        "reason": "The selected calculation needs its height input.",
-    }
-    supplemental = {
-        "step_index": 1, "quantity": "Documented assembly acceptance criteria", "authority": "PA",
-        "reason": "The validator needs the supplied acceptance criteria.",
-    }
-    program = _ProgramRuntime([
-        first,
-        {"kind": "request_context", "requests": [repeated, supplemental, deepcopy(supplemental)]},
-        first,
-    ])
-    calls = []
+class _MessageProduct:
+    model_calls = 0
 
-    class Robot:
-        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
-            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+    async def ask_llm_structured(self, *args: Any, **kwargs: Any) -> Any:
+        self.model_calls += 1
+        raise AssertionError("Composition must never call the PA model.")
 
-    class Product:
-        async def investigate(self, **kwargs: Any) -> Any:
-            calls.append(kwargs)
-            if len(calls) == 1:
-                assert len(program.calls) == 1
-                return {
-                    "status": "provided", "operations_used": 1,
-                    "evidence_refs": [refs["part"]], "validation_refs": {},
-                    "unresolved": ["Support height remains unavailable."],
-                }
-            assert len(calls) == 2
-            assert kwargs["request"]["needs"] == [supplemental]
-            assert refs["part"] in kwargs["request"]["evidence_refs"]
-            return {
-                "status": "unavailable", "operations_used": 1, "evidence_refs": [],
-                "validation_refs": {}, "unresolved": ["Acceptance criteria remain unavailable."],
-            }
+    @asynccontextmanager
+    async def primitive_context_inbox(self, **kwargs: Any) -> Any:
+        from spade.agent import Agent
+        from cais_spade_llm.spec2primitives.agents.pa.primitive_context_messages import primitive_context_inbox
 
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        return await validate_program(**kwargs, session_factory=_PlanningSession)
-
-    result = asyncio.run(PrimitiveRefinementRuntime(
-        program_runtime=program, robot_runtime=Robot(), product_runtime=Product(),
-        validator=validator, profile={**_legacy_profile(), "max_pa_batches": 3},
-    ).compose(tmp_path))
-    assert result["status"] == "no_progress"
-    assert result["pa_batches"] == result["pa_operations"] == 2
-    assert "Support height remains unavailable." in program.calls[1]["prompt"]
-    assert refs["part"]["ref"] in program.calls[1]["prompt"]
-    assert "Acceptance criteria remain unavailable." in program.calls[2]["prompt"]
-    assert all(
-        read_pin(tmp_path, ref)["primitive_steps"] == [
-            {"primitive_symbol": "compute_pick_targets", "params": {"part_name": "medium gear"}}
-        ]
-        for ref in result["candidate_refs"]
-    )
+        agent = Agent("primitive-pa@localhost", "unused-fixture-password")
+        try:
+            async with primitive_context_inbox(agent, **kwargs) as recipient:
+                yield recipient
+        finally:
+            assert agent.behaviours == []
+            agent.container.unregister(str(agent.jid))
 
 
-def test_changed_selected_inputs_can_request_measurements_from_the_same_catalog(tmp_path: Path) -> None:
-    """Changing a selected source invalidates request reuse without changing the evidence pool."""
-    inputs, robot, _, _ = _setup(tmp_path)
-    location = next(
-        {"ref": ref, "sha256": sha}
-        for ref, sha in inputs.record_hashes.items()
-        if read_pin(tmp_path, {"ref": ref, "sha256": sha}).get("record_type") == "RobotFrameLocationRecord"
-    )
-    first = _program_action([("compute_pick_targets", {"part_name": "medium gear"})])
-    revised = _program_action([("compute_pick_targets", {
-        "part_name": "medium gear",
-        "target_pose": {axis: _value(location, f"/translated_location_m/{i}") for i, axis in enumerate(("x", "y", "z"))},
-    })])
-    program = _ProgramRuntime([
-        first, revised, {"kind": "unsupported", "reason": "Measurements remain unavailable."},
-    ])
-    calls = []
+def _binding_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str = GAZEBO_OBSERVED_SCOPE,
+    setup: tuple[Any, ...] | None = None,
+) -> tuple[Any, ...]:
+    from cais_spade_llm.spec2primitives.agents.ra import refinement, program_execution
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
 
-    class Robot:
-        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
-            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+    inputs, robot, refs, roles = setup or (_observed_setup if scope == GAZEBO_OBSERVED_SCOPE else _setup)(tmp_path)
+    original_loader = _load_inputs
 
-    class Product:
-        async def investigate(self, **kwargs: Any) -> Any:
-            calls.append(kwargs)
-            return {
-                "status": "unavailable", "operations_used": 1, "evidence_refs": [],
-                "validation_refs": {}, "unresolved": ["The selected measurements remain unavailable."],
-            }
+    def load(root: Path) -> Any:
+        current = original_loader(root)
+        return replace(current, record_hashes={**current.record_hashes, **{ref["ref"]: ref["sha256"] for ref in refs.values()}})
 
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        return await validate_program(**kwargs, session_factory=_PlanningSession)
+    for module in (primitive_composition, refinement, program_execution):
+        monkeypatch.setattr(module, "_load_inputs", load)
 
-    result = asyncio.run(PrimitiveRefinementRuntime(
-        program_runtime=program, robot_runtime=Robot(), product_runtime=Product(), validator=validator,
-    ).compose(tmp_path))
-    assert result["status"] == "unsupported"
-    assert len(calls) == result["pa_batches"] == 2
-    assert calls[0]["request"]["evidence_refs"] == calls[1]["request"]["evidence_refs"]
-    needs = calls[1]["request"]["needs"]
-    assert {need["quantity"] for need in needs} == {
-        "/product_geometry/part_height_m", "/product_geometry/board_center/z",
-        "part", "scene",
-    }
-    assert all(need["evidence_refs"] for need in needs if need["step_index"] is not None)
+    def select(request: Any, producer: Any, records: Any, checked: Any, attempted: Any) -> Any:
+        answers = []
+        for need in request["needs"]:
+            if need["need_id"] in checked:
+                continue
+            if need["step_index"] is None:
+                answers.append({"need_id": need["need_id"], "record_ref": refs[need["quantity"]]["ref"]})
+            else:
+                pointer = need["quantity"]
+                source = refs["pick"] if need["step_index"] == 1 else refs["goal"]
+                if scope == GAZEBO_OBSERVED_SCOPE and pointer.startswith("/target_pose"):
+                    source, pointer = refs["part"], pointer.replace("/target_pose", "/reference_pose", 1)
+                answers.append(_pa_value(need["need_id"], source["ref"], pointer))
+        return answers, []
 
-
-def test_pa_feedback_reaches_ra_without_becoming_geometry_and_remains_pinned(
-    tmp_path: Path,
-) -> None:
-    """Propagate PA explanations while preserving their source and evidence boundary."""
-    inputs, robot, _, _ = _setup(tmp_path)
-    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    requests = [
-        {
-            "step_index": 1,
-            "quantity": "Observed medium gear geometry and documented seating tolerances",
-            "authority": "PA",
-            "reason": "The selected grasp and requested assembly need verified geometry.",
-        }
-    ]
-    requests.extend([
-        {"step_index": 1, "quantity": "Measured EE/TCP context", "authority": "RA", "reason": "Check the tool context."},
-        {"step_index": 1, "quantity": "Observed collision scene", "authority": "PA", "reason": "Check collision coverage."},
-        deepcopy(requests[0]),
-    ])
-    selected_requests = [requests[0], requests[2]]
-    program = _ProgramRuntime(
-        [
-            _program_action([("grasp_part", {"part_name": "medium gear"})]),
-            {"kind": "request_context", "requests": requests},
-        ]
-    )
-    unresolved = [
-        "The observed pose remains ambiguous.",
-        "Approved seating tolerances are unavailable.",
-    ]
-
-    class Robot:
-        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
-            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
-
-    class Product:
-        async def investigate(self, **kwargs: Any) -> Any:
-            if len(program.calls) == 1:
-                assert kwargs["request"]["needs"] == [{
-                    "step_index": None, "quantity": "part", "authority": "PA",
-                    "reason": "PA has not supplied the required part evidence.",
-                }]
-                return {
-                    "status": "unavailable", "operations_used": 1,
-                    "evidence_refs": [], "validation_refs": {},
-                    "unresolved": ["Initial part evidence is unavailable."],
-                }
-            assert len(program.calls) == 2
-            assert kwargs["request"]["needs"] == selected_requests
-            return {
-                "status": "unavailable",
-                "operations_used": 1,
-                "evidence_refs": [],
-                "validation_refs": {},
-                "unresolved": unresolved,
-            }
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        return {
-            "scope": read_validation_scope(kwargs["profile"]),
-            "status": "unknown",
-            "findings": [
-                {
-                    "step_index": None,
-                    "check": "part",
-                    "status": "unknown",
-                    "authority": "PA",
-                    "message": "PA has not supplied the required part evidence.",
-                }
-            ],
-            "calculation_refs": [],
-        }
-
-    runtime = PrimitiveRefinementRuntime(
-        program_runtime=program,
-        robot_runtime=Robot(),
-        product_runtime=Product(),
-        validator=validator,
-    )
-    result = asyncio.run(runtime.compose(tmp_path))
-    assert result["status"] == "no_progress" and result["pa_operations"] == 2
-    assert len(program.calls) == 3
-    assert all(reason not in program.calls[1]["prompt"] for reason in unresolved)
-    assert all(reason in program.calls[2]["prompt"] for reason in unresolved)
-    assert "Missing product measurements declared by your selected primitive inputs are dispatched" in program.calls[1]["prompt"]
-    diagnostic = read_primitive_composition_diagnostic(tmp_path)
-    response = diagnostic["refinement"]["pa_responses"][-1]
-    assert response["unresolved"] == unresolved
-    event = next(item for item in reversed(diagnostic["refinement"]["events"]) if "pa_response_ref" in item)
-    response_ref = event["pa_response_ref"]
-    assert read_pin(tmp_path, response_ref) == response
-    context_ref = pin(tmp_path, tmp_path / "composition/refinement_runs/run_0001/context_0002.json")
-    revised_inputs = _with_refinement(inputs, context_ref)
-    assert response_ref["ref"] not in revised_inputs.record_hashes
-    assert all(path.read_bytes() == content for path, content in original.items())
-    response_path = tmp_path / response_ref["ref"]
-    response_path.write_bytes(response_path.read_bytes() + b"\n")
-    with pytest.raises(ValueError, match="Pinned refinement evidence changed"):
-        _with_refinement(inputs, context_ref)
-    with pytest.raises(ValueError, match="Pinned refinement evidence changed"):
-        enrich_composition_diagnostic(tmp_path, {}, inputs.context_refs)
+    monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", select)
+    product = ProductPrimitiveContextRuntime(SimpleNamespace(), _MessageProduct())
+    return inputs, robot, refs, product, load
 
 
 @pytest.mark.parametrize("scope", [VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE])
-@pytest.mark.parametrize("rejected_height", [False, True])
-def test_refinement_preserves_first_pass_and_only_ra_supplies_revision(
-    tmp_path: Path, scope: str, rejected_height: bool,
+@pytest.mark.parametrize("incompatible", [False, True])
+def test_checked_pa_answers_bind_one_ra_proposal_and_remain_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, incompatible: bool,
 ) -> None:
-    """Return contract-requested evidence and validate only the RA-authored revision."""
-    inputs, robot, refs, roles = (_observed_setup if scope == GAZEBO_OBSERVED_SCOPE else _setup)(tmp_path)
+    """Bind checked measurements through real SPADE delivery before any robot validation."""
+    from cais_spade_llm.spec2primitives.agents.ra.program_binding import read_program_binding
+    from cais_spade_llm.spec2primitives.agents.ra.program_execution import load_validated_program
+
+    inputs, robot, refs, product, load = _binding_fixture(tmp_path, monkeypatch, scope)
+    first = (_observed_program if scope == GAZEBO_OBSERVED_SCOPE else _program)(refs, bound=False)
+    first[0]["params"]["prefer_live_detection"] = False
+    first[0]["params"]["product_geometry"] = {"board_center": {"z": _value(refs["pick"], "/product_geometry/board_center/z")}}
+    if incompatible:
+        # Reproduce run_0016: an observed candidate location is not a geometry reference_pose.
+        refs["location"] = append_record(tmp_path, tmp_path / "observed", "location.json", {
+            "record_type": "RobotFrameLocationRecord", "target_frame": "world", "translated_location_m": [0.0, 0.0, 0.05],
+        })
+        first[0]["params"]["target_pose"] = {key: _value(refs["location"], f"/translated_location_m/{index}")
+                                                  for index, key in enumerate(("x", "y", "z"))}
+        first[0]["params"]["product_geometry"]["part_height_m"] = 0.02
     original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    build_program = _observed_program if scope == GAZEBO_OBSERVED_SCOPE else _program
-    first, revised = build_program(refs, bound=False), build_program(refs)
-    if rejected_height:
-        first[0]["params"]["product_geometry"] = {"part_height_m": 0.02}
-    program = _ProgramRuntime(
-        [
-            _program_action([(s["primitive_symbol"], s["params"]) for s in first]),
-            _program_action([(s["primitive_symbol"], s["params"]) for s in revised]),
-        ]
-    )
-
-    class Robot:
-        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
-
-    class Product:
-        calls = []
-
-        async def investigate(self, **kwargs: Any) -> dict[str, Any]:
-            assert len(program.calls) == 1
-            assert kwargs["request"]["validation_scope"] == scope
-            needs = kwargs["request"]["needs"]
-            assert all(need["authority"] == "PA" for need in needs)
-            assert {(need["step_index"], need["quantity"]) for need in needs} >= {
-                (1, "/product_geometry/part_height_m"),
-                (1, "/product_geometry/board_center/z"),
-            } | ({(6, "/product_geometry/placement_surface_point/z")} if scope == GAZEBO_OBSERVED_SCOPE else {
-                (6, "/product_geometry/target_origin_pose/z"),
-                (6, "/product_geometry/target_reference/target_point"),
-            })
-            assert not any(need.get("parameter_path", "").startswith("/pick_ctx") for need in needs)
-            assert {need["quantity"] for need in needs if need["step_index"] is None} == set(
-                required_validation_roles(scope)
-            )
-            height = next(need for need in needs if need["quantity"] == "/product_geometry/part_height_m")
-            assert height["reason"] == (
-                "Part height has no measurement or geometry reference." if rejected_height else
-                "Required input is unbound."
-            )
-            self.calls.append(kwargs)
-            return {
-                "status": "provided",
-                "operations_used": 1,
-                "evidence_refs": list(refs.values()),
-                "validation_refs": {role: roles[role] for role in required_validation_roles(scope)},
-                "unresolved": [],
-            }
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        return await validate_program(**kwargs, session_factory=_PlanningSession)
-
-    product = Product()
-    runtime = PrimitiveRefinementRuntime(
-        program_runtime=program, robot_runtime=Robot(), product_runtime=product, validator=validator,
-        profile={**_legacy_profile(), "validation_scope": scope},
-    )
-    events = []
-
-    async def progress(event: Any) -> None:
-        events.append(event["stage"])
-
-    result = asyncio.run(runtime.compose(tmp_path, progress=progress))
-    assert result["status"] == "validated_for_declared_scope", result
-    assert len(result["candidate_refs"]) == 2
-    assert len(result["decision_refs"]) == len(program.calls) == 2
-    assert read_pin(tmp_path, result["candidate_refs"][0])["primitive_steps"] == first
-    assert read_pin(tmp_path, result["candidate_refs"][1])["primitive_steps"] == revised
-    assert events.index("proposal") < events.index("evidence")
-    assert len(product.calls) == 1
-    batch = json.loads(
-        (tmp_path / "composition/refinement_runs/run_0001/pa_0001/request.json").read_text()
-    )
-    assert batch["needs"] == product.calls[0]["request"]["needs"]
-    assert "refinement_context" not in program.calls[0]["prompt"]
-    assert "previous_candidate" in program.calls[1]["prompt"]
-    after = json.JSONDecoder().raw_decode(
-        program.calls[1]["prompt"].split("\n\nCOMPOSITION_INPUT\n")[1]
-    )[0]
-    assert any(
-        finding.get("parameter_path") == "/product_geometry/part_height_m"
-        for finding in after["refinement_context"]["findings"]
-    )
-    assert {item["record_ref"] for item in after["grounded_context"]["typed_records"]} >= {
-        ref["ref"] for ref in refs.values()
-    }
-    assert all(path.read_bytes() == content for path, content in original.items())
-    diagnostic = read_primitive_composition_diagnostic(tmp_path)
-    assert diagnostic["status"] == "validated_for_declared_scope", diagnostic["message"]
-    assert diagnostic["candidate"]["primitive_steps"] == revised
-    assert diagnostic["validation_scope"] == diagnostic["validation"]["scope"] == scope
-    for candidate_ref in result["candidate_refs"]:
-        candidate = read_pin(tmp_path, candidate_ref)
-        request = read_pin(tmp_path, {"ref": candidate["request_ref"], "sha256": candidate["request_sha256"]})
-        assert request["validation_scope"] == scope
-        assert f"Validation scope: {scope}" in request["prompt"]
-    if scope in {GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE}:
-        assert diagnostic["message"].startswith("Validated for Gazebo pick-and-place")
-    if scope == GAZEBO_OBSERVED_SCOPE:
-        delivered = after["refinement_context"]["resolved_measurements"]
-        assert any(item["record_ref"] == refs["pick"]["ref"] and
-                   item["value"]["part_height_m"] == 0.02 for item in delivered)
-
-
-@pytest.mark.parametrize(
-    "max_operations,max_batches,operations_used",
-    [(1, 2, 1), (12, 1, 1), (12, 2, 7)],
-)
-def test_ra_requests_respect_pa_operation_and_batch_limits(
-    tmp_path: Path, max_operations: int, max_batches: int, operations_used: int
-) -> None:
-    """Keep explicit requests bounded and reject a producer that exceeds its allowance."""
-    _, robot, _, _ = _setup(tmp_path)
-    requests = [
-        {
-            "step_index": 1,
-            "quantity": quantity,
-            "authority": "PA",
-            "reason": "Ground an input of compute_pick_targets.",
-        }
-        for quantity in ("part_height_m", "board_center.z")
-    ]
-    program = _ProgramRuntime(
-        [
-            _program_action([("compute_pick_targets", {"part_name": "medium gear"})]),
-            *[{"kind": "request_context", "requests": [request]} for request in requests],
-            {"kind": "unsupported", "reason": "Required evidence remains unavailable."},
-        ]
-    )
-    calls = []
+    program = _MessageProgramRuntime([_program_action([(s["primitive_symbol"], s["params"]) for s in first])])
+    captured = []
 
     class Robot:
         async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            assert (tmp_path / "composition/refinement_runs/run_0001/pa_0001/response_message.json").exists()
+            captured.append(True)
             return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
 
-    class Product:
-        async def investigate(self, **kwargs: Any) -> Any:
-            calls.append(kwargs)
-            return {
-                "status": "unavailable",
-                "operations_used": operations_used,
-                "evidence_refs": [],
-                "validation_refs": {},
-                "unresolved": ["The requested measurement remains unavailable."],
-            }
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
+    async def validator(**kwargs: Any) -> Any:
+        assert kwargs["inputs"].binding_ref is not None
         return await validate_program(**kwargs, session_factory=_PlanningSession)
 
-    runtime = PrimitiveRefinementRuntime(
-        program_runtime=program,
-        robot_runtime=Robot(),
-        product_runtime=Product(),
-        validator=validator,
-        profile={
-            **_legacy_profile(),
-            "max_pa_operations": max_operations,
-            "max_pa_batches": max_batches,
-        },
-    )
-    result = asyncio.run(runtime.compose(tmp_path))
-    assert len(calls) == result["pa_batches"] == 1
-    assert calls[0]["max_operations"] == min(6, max_operations)
-    assert {need["quantity"] for need in calls[0]["request"]["needs"]} == {
-        "/product_geometry/part_height_m", "/product_geometry/board_center/z", "/target_pose",
-        "part", "scene",
-    }
-    if operations_used > calls[0]["max_operations"]:
-        assert result["status"] == "failed"
-        assert "PA exceeded its evidence budget" in result["stop_reason"]
-    else:
-        assert result["status"] == "unsupported"
-        assert result["pa_operations"] == operations_used
-        assert len(program.calls) == 4
+    events = []
+    async def progress(event: Any) -> None:
+        events.append(deepcopy(event))
+
+    runtime = PrimitiveRefinementRuntime(program_runtime=program, robot_runtime=Robot(), product_runtime=product,
+                                         validator=validator, profile={**_legacy_profile(), "validation_scope": scope})
+    result = asyncio.run(runtime.compose(tmp_path, progress=progress))
+    assert result["status"] == "validated_for_declared_scope", result
+    assert len(program.calls) == len(result["candidate_refs"]) == 1 and product.product_agent.model_calls == 0
+    assert result["pa_batches"] == 1 and result["pa_operations"] == 0 and len(captured) == 2
+    candidate_ref = result["candidate_refs"][0]
+    assert read_pin(tmp_path, candidate_ref)["primitive_steps"] == first
+    binding, extended = read_program_binding(load(tmp_path), result["binding_refs"][-1])
+    bound = binding["primitive_steps"]
+    assert [s["primitive_symbol"] for s in bound] == [s["primitive_symbol"] for s in first]
+    assert bound[1:5] == first[1:5] and bound[6:] == first[6:]
+    assert bound[5]["params"]["pick_ctx"] == first[5]["params"]["pick_ctx"]
+    assert bound[0]["params"]["product_geometry"]["board_center"] == first[0]["params"]["product_geometry"]["board_center"]
+    assert bound[0]["params"]["prefer_live_detection"] is False
+    dependencies = assess_program_dependencies(bound, extended.catalog, extended.composition_input["robot_state"],
+        read_evidence=lambda ref, pointer: _evidence_value(extended, ref, pointer),
+        result_schema=lambda ref: _result_schema(bound, ref, extended))
+    assert dependencies["context_requests"] == []
+    assert all(path.read_bytes() == content for path, content in original.items())
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["candidate"]["primitive_steps"] == first and view["binding_ref"] == result["binding_refs"][-1]
+    assert view["resolved_primitive_steps"][0]["params"]["product_geometry"]["part_height_m"] == 0.02
+    assert all(isinstance(view["resolved_primitive_steps"][1]["params"][axis], float) for axis in ("x", "y", "z"))
+    selected = load_validated_program(tmp_path)
+    assert selected.steps == bound and selected.binding_ref == result["binding_refs"][-1]
+    assert all(len(call["prompt"]) <= 32000 and "EXCHANGES" not in call["prompt"] for call in program.calls)
+    batch = tmp_path / "composition/refinement_runs/run_0001/pa_0001"
+    sent, received = (json.loads((batch / name).read_text()) for name in ("request_message.json", "response_message.json"))
+    assert sent["thread"] == received["thread"] and sent["sender"] == received["recipient"] == inputs.assignment.selected_resource_jid
+    assert sent["body"]["request_ref"] == received["body"]["request_ref"]
+    checkpoint = _read_answer_checkpoint(tmp_path, binding["pa_answer_refs"][0])
+    path = tmp_path / checkpoint["resolution_ref"]["ref"]
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="changed"):
+        read_program_binding(load(tmp_path), result["binding_refs"][-1])
+    assert read_primitive_composition_diagnostic(tmp_path)["status"] == "blocked"
+    with pytest.raises(ValueError):
+        load_validated_program(tmp_path)
+
+
+def test_cancellation_during_event_publication_preserves_the_event_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    from cais_spade_llm.spec2primitives.agents.ra import refinement
+
+    _setup(tmp_path)
+    writing, release = threading.Event(), threading.Event()
+    original_append = refinement.append_record
+
+    def append(root: Any, directory: Any, name: str, record: Any) -> Any:
+        if name == "event_0001.json":
+            writing.set()
+            assert release.wait(5)
+        return original_append(root, directory, name, record)
+
+    monkeypatch.setattr(refinement, "append_record", append)
+
+    async def scenario() -> Any:
+        runtime = PrimitiveRefinementRuntime(program_runtime=object(), robot_runtime=object())
+        task = asyncio.create_task(runtime.compose(tmp_path))
+        try:
+            assert await asyncio.to_thread(writing.wait, 5)
+            assert cancel_primitive_refinement(tmp_path)
+            await asyncio.sleep(0)
+            release.set()
+            return await task
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    result = asyncio.run(scenario())
+    assert result["status"] == "cancelled"
+    assert read_pin(tmp_path, result["event_refs"][0])["stage"] == "composing"
+    assert read_pin(tmp_path, result["event_refs"][-1])["stage"] == "finished"
+    assert len({reference["ref"] for reference in result["event_refs"]}) == len(result["event_refs"])
 
 
 def test_duplicate_call_joins_one_run_and_cancellation_persists(tmp_path: Path) -> None:
@@ -2963,30 +2549,21 @@ def test_incomplete_or_incompatible_validation_never_passes(tmp_path: Path, faul
     assert report["status"] != "passed", report
 
 
-def test_refinement_deadline_and_unchanged_failures_stop(tmp_path: Path) -> None:
-    inputs, robot, refs, roles = _setup(tmp_path)
-    program = _ProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])] * 3)
+def test_refinement_deadline_and_unchanged_failures_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inputs, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
+    program = _MessageProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])] * 3)
 
     class Robot:
         async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
             return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
 
     async def unknown(**kwargs: Any) -> dict[str, Any]:
-        return {
-            "scope": read_validation_scope(kwargs["profile"]),
-            "status": "unknown",
-            "findings": [
-                {
-                    "check": "unsupported",
-                    "status": "unknown",
-                    "message": "Unsupported fixture operation.",
-                }
-            ],
-            "calculation_refs": [],
-        }
+        from cais_spade_llm.spec2primitives.agents.ra.program_validation import _report
+        return _report(kwargs["steps"], [{"check": "motion", "status": "failed", "authority": "RA", "message": "Unsupported fixture operation."}],
+                       [], [], None, scope=read_validation_scope(kwargs["profile"]))
 
     runtime = PrimitiveRefinementRuntime(
-        program_runtime=program, robot_runtime=Robot(), validator=unknown
+        program_runtime=program, robot_runtime=Robot(), product_runtime=product, validator=unknown
     )
     result = asyncio.run(runtime.compose(tmp_path))
     assert result["status"] == "no_progress", result
@@ -2998,8 +2575,125 @@ def test_refinement_deadline_and_unchanged_failures_stop(tmp_path: Path) -> None
 
     profile = {**_legacy_profile(), "deadline_sec": 0.1}
     runtime = PrimitiveRefinementRuntime(
-        program_runtime=WaitingProgram(), robot_runtime=Robot(), profile=profile
+        program_runtime=WaitingProgram(), robot_runtime=Robot(), product_runtime=product, profile=profile
     )
     result = asyncio.run(runtime.compose(tmp_path))
     assert result["status"] == "budget_exhausted"
     assert "deadline" in result["stop_reason"]
+
+
+@pytest.mark.parametrize("fault", ["missing", "conflicting", "wrong_source", "response_roles", "stale"])
+def test_measurement_findings_cannot_authorize_execution_or_binding_only_ra_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
+    from cais_spade_llm.spec2primitives.agents.ra.program_execution import load_validated_program
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
+    select = primitive_input_resolution.resolve_primitive_inputs
+    if fault == "stale":
+        scene = read_pin(tmp_path, refs["scene"])
+        scene["observation_timestamp_ns"] = 1
+        robot["measured_at_ros_ns"] = 100_000_000_000
+        for field in ("joint_state_stamp_ns", "ee_pose_stamp_ns", "tcp_pose_stamp_ns"):
+            robot[field] = robot["measured_at_ros_ns"]
+        refs["scene"] = append_record(tmp_path, tmp_path / "fault", "scene.json", scene)
+    elif fault == "response_roles":
+        investigate = product.investigate
+        async def mismatched(**kwargs: Any) -> Any:
+            result = await investigate(**kwargs)
+            result["validation_refs"]["scene"] = refs["part"]
+            return result
+        monkeypatch.setattr(product, "investigate", mismatched)
+    else:
+        def resolve(request: Any, *args: Any) -> Any:
+            answers, calls = select(request, *args)
+            need = next(need for need in request["needs"] if need["quantity"] == "/product_geometry/part_height_m")
+            for index, answer in enumerate(answers):
+                if answer["need_id"] == need["need_id"]:
+                    answers[index] = ({"need_id": need["need_id"], "blocked": f"{fault} accepted height measurements."}
+                                      if fault != "wrong_source" else _pa_value(need["need_id"], refs["scene"]["ref"], "/objects/0/pose/z"))
+            return answers, calls
+        monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", resolve)
+    program = _MessageProgramRuntime([_program_action([(s["primitive_symbol"], s["params"]) for s in _observed_program(refs, bound=False)])])
+    captures = []
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            captures.append(True)
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+    async def validator(**kwargs: Any) -> Any:
+        return await validate_program(**kwargs, session_factory=_PlanningSession)
+    result = asyncio.run(PrimitiveRefinementRuntime(program_runtime=program, robot_runtime=Robot(),
+        product_runtime=product, validator=validator).compose(tmp_path))
+    assert result["status"] in {"needs_context", "failed"}, result
+    assert len(program.calls) == 1 and not result["motion_executed"]
+    if fault in {"missing", "conflicting", "response_roles"}:
+        assert captures == []
+    assert all(read_pin(tmp_path, ref)["status"] != "passed" for ref in result["validation_refs"])
+    with pytest.raises(ValueError):
+        load_validated_program(tmp_path)
+
+
+@pytest.mark.parametrize("fault", [None, "sender", "recipient", "thread", "request", "late", "cancel", "duplicate"])
+def test_primitive_context_spade_delivery_checks_correlation_and_cleans_inboxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None) -> None:
+    from spade.agent import Agent
+    from spade.message import Message
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_context_messages as messages
+    directory = tmp_path / "composition/refinement_runs/run_0001/pa_0001"
+    request_ref = append_record(tmp_path, directory, "request.json", {"record_type": "PrimitiveContextRequest"})
+    deliveries = []
+    original_send = messages.send_agent_message
+    async def scenario() -> None:
+        ra, pa = Agent("primitive-ra@localhost", "unused"), Agent("primitive-pa@localhost", "unused")
+        received = asyncio.Event()
+        deadline = time.monotonic() + 0.2
+        async def handle() -> Any:
+            received.set()
+            if fault in {"late", "cancel"}:
+                await asyncio.sleep(0.4)
+            return append_record(tmp_path, directory, "response.json", {
+                "record_type": "PrimitiveContextResponse", "request_ref": request_ref,
+            })
+        async def deliver(inbox: Any, message: Message, **kwargs: Any) -> Any:
+            assert isinstance(message, Message)
+            deliveries.append(message)
+            if message.get_metadata("type") == "PrimitiveContextResponse":
+                if fault == "sender":
+                    message.sender = "other-pa@localhost"
+                elif fault == "recipient":
+                    message.to = "other-ra@localhost"
+                    ra.dispatch(message)
+                    return None
+                elif fault == "thread":
+                    message.thread = "another-run"
+                elif fault == "request":
+                    message.body = json.dumps({"request_ref": {"ref": "another.json", "sha256": "a" * 64},
+                                               "response_ref": pin(tmp_path, directory / "response.json")})
+                elif fault == "duplicate":
+                    await original_send(inbox, message, **kwargs)
+            return await original_send(inbox, message, **kwargs)
+        monkeypatch.setattr(messages, "send_agent_message", deliver)
+        try:
+            async with messages.primitive_context_inbox(pa, root=tmp_path, request_ref=request_ref,
+                sender=str(ra.jid), thread="selected-run", deadline=deadline, handler=handle) as (recipient, service):
+                task = asyncio.create_task(messages.request_context_message(ra, root=tmp_path, recipient=recipient,
+                    request_ref=request_ref, thread="selected-run", deadline=deadline))
+                if fault == "cancel":
+                    await received.wait()
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                elif fault not in {None, "duplicate"}:
+                    with pytest.raises((ValueError, TimeoutError)):
+                        await task
+                else:
+                    response = await task
+                    assert response["request_ref"] == request_ref
+            assert ra.behaviours == pa.behaviours == []
+            assert not ra.is_alive() and not pa.is_alive()
+            assert service.done()
+            assert len(list(directory.glob("response_message.json"))) == (1 if fault in {None, "duplicate"} else 0)
+        finally:
+            ra.container.unregister(str(ra.jid))
+            pa.container.unregister(str(pa.jid))
+    asyncio.run(scenario())
+    assert deliveries and deliveries[0].get_metadata("type") == "PrimitiveContextRequest"

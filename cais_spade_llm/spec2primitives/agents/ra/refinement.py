@@ -9,6 +9,7 @@ import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -18,13 +19,13 @@ from .primitive_composition import (
     _assert_inputs_unchanged,
     _evidence_value,
     _load_inputs,
-    _read_record,
     _result_schema,
     _with_refinement,
     _with_scope,
     author_primitive_program_candidate,
 )
 from .program_dependencies import assess_program_dependencies
+from .program_binding import apply_primitive_bindings
 from .program_validation import validate_program
 from ...adapters.robot_validation_context import validation_capture
 from .validation_scope import is_pick_place_scope, read_validation_scope, required_validation_roles
@@ -286,9 +287,11 @@ class PrimitiveRefinementRuntime:
         candidate_refs: list[dict[str, str]] = []
         decisions: list[dict[str, str]] = []
         reports: list[dict[str, str]] = []
+        binding_refs: list[dict[str, str]] = []
         source_pins: dict[str, dict[str, str]] = {}
         validation_refs: dict[str, dict[str, str]] = {}
         pa_findings: list[dict[str, Any]] = []
+        pa_answer_refs: list[dict[str, str]] = []
         robot_ref = None
         robot = None
         cache: dict[str, dict[str, Any]] = {}
@@ -296,25 +299,51 @@ class PrimitiveRefinementRuntime:
         stop_reason = "The refinement budget was exhausted."
         status = "budget_exhausted"
         started = time.monotonic()
+        event_lock = asyncio.Lock()
+        current_stage = "composing"
 
         async def emit(stage: str, message: str, **details: Any) -> None:
-            record = {
-                "record_type": "PrimitiveRefinementEvent",
-                "stage": stage,
-                "message": message,
-                "elapsed_sec": time.monotonic() - started,
-                "created_at_ns": time.time_ns(),
-                **deepcopy(details),
-            }
-            reference = await asyncio.to_thread(
-                append_record, root, directory, f"event_{len(events) + 1:04d}.json", record
-            )
-            events.append(reference)
-            if progress is not None:
-                await progress(record)
+            nonlocal current_stage
+            current_stage = stage
+            # Concurrent PA measurements publish into one append-only event chain.
+            async with event_lock:
+                record = {
+                    "record_type": "PrimitiveRefinementEvent",
+                    "stage": stage,
+                    "message": message,
+                    "elapsed_sec": time.monotonic() - started,
+                    "created_at_ns": time.time_ns(),
+                    **deepcopy(details),
+                }
+                publication = asyncio.create_task(asyncio.to_thread(
+                    append_record, root, directory, f"event_{len(events) + 1:04d}.json", record
+                ))
+                cancelled = False
+                try:
+                    reference = await asyncio.shield(publication)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    reference = await publication
+                events.append(reference)
+                if cancelled:
+                    raise asyncio.CancelledError
+                if progress is not None:
+                    await progress(record)
 
         async def composition_progress(message: str) -> None:
             await emit("composing", message)
+
+        async def validation_progress(event: Mapping[str, Any]) -> None:
+            details: dict[str, Any] = {"step_index": event["step_index"]}
+            if "calculation_ref" in event:
+                from .program_binding import display_primitive_steps
+
+                completed_calculations.append(event["calculation_ref"])
+                displayed = await asyncio.to_thread(display_primitive_steps, extended, steps,
+                                                    calculation_refs=completed_calculations)
+                details.update(calculation_ref=event["calculation_ref"], candidate_ref=candidate_ref,
+                               binding_ref=binding_ref, resolved_primitive_steps=displayed)
+            await emit(event["stage"], event["message"], **details)
 
         try:
             async with _deadline(float(profile["deadline_sec"])):
@@ -330,75 +359,187 @@ class PrimitiveRefinementRuntime:
                     source_pins[specification_ref["ref"]] = specification_ref
                 refinement_ref = None
                 seen: set[str] = set()
-                attempted_requests: set[tuple[str, str]] = set()
-                pending_requests: list[dict[str, Any]] = []
-                while (
-                    len(candidate_refs) < profile["max_candidates"]
-                    and len(decisions)
-                    < profile["max_candidates"] + profile["max_pa_batches"]
-                ):
+                for _ in range(profile["max_candidates"]):
                     await asyncio.to_thread(_assert_inputs_unchanged, inputs)
-                    await emit(
-                        "composing",
-                        "RA is authoring the initial proposal."
-                        if not candidate_refs
-                        else "RA is revising its program using the recorded findings.",
-                    )
+                    await emit("composing", "RA is authoring the initial proposal." if not candidate_refs
+                               else "RA is revising primitive or motion decisions using validation findings.")
                     candidate = await author_primitive_program_candidate(
-                        self.program_runtime,
-                        root,
-                        refinement_ref=refinement_ref,
-                        progress=composition_progress,
-                        validation_scope=scope,
+                        self.program_runtime, root, refinement_ref=refinement_ref,
+                        progress=composition_progress, validation_scope=scope,
                     )
                     candidate_ref = pin(root, candidate.path)
                     decisions.append(candidate_ref)
-                    if candidate.record["status"] == "needs_context" and candidate_refs:
-                        latest = await asyncio.to_thread(
-                            _read_record,
-                            candidate.path.parent
-                            / f"exchange_{len(candidate.record['exchange_refs']):04d}.json",
-                        )
-                        pending_requests = deepcopy(latest["response"]["action"]["requests"])
-                        previous = read_pin(root, candidate_refs[-1])
-                        if any(
-                            need["step_index"] > len(previous["primitive_steps"])
-                            for need in pending_requests
-                        ):
-                            raise ValueError(
-                                "RA context request refers to a step absent from its preceding candidate."
-                            )
-                    elif candidate.record["status"] != "proposed":
-                        status, stop_reason = (
-                            candidate.record["status"],
-                            candidate.record.get("reason")
-                            or "RA did not submit a valid candidate.",
-                        )
+                    if candidate.record["status"] != "proposed":
+                        status, stop_reason = candidate.record["status"], candidate.record["reason"]
                         break
-                    else:
-                        candidate_refs.append(candidate_ref)
-                        previous = candidate.record
-                        await emit(
-                            "proposal",
-                            "RA's program proposal is recorded; validation is still pending.",
-                            candidate_ref=candidate_ref,
-                            candidate=previous,
-                            candidate_count=len(candidate_refs),
+                    candidate_refs.append(candidate_ref)
+                    await emit("proposal", "RA's program proposal is recorded; deterministic input binding is pending.",
+                               candidate_ref=candidate_ref, candidate=candidate.record, candidate_count=len(candidate_refs))
+                    candidate_inputs = (await asyncio.to_thread(_with_refinement, inputs, refinement_ref)
+                                        if refinement_ref else inputs)
+                    extended, steps = candidate_inputs, deepcopy(candidate.record["primitive_steps"])
+                    submission = read_pin(root, candidate.record["exchange_refs"][-1])["response"]["action"]
+                    explicit_needs = deepcopy(submission.get("context_requests", []))
+                    answers_by_batch: dict[int, dict[str, str]] = {}
+                    binding_ref = None
+                    completed_calculations = []
+                    bound_answers = None
+                    pa_findings = []
+
+                    async def save_binding() -> None:
+                        nonlocal steps, extended, binding_ref, bound_answers
+                        from .program_binding import display_primitive_steps
+
+                        answer_refs = list(answers_by_batch.values())
+                        if binding_ref is not None and answer_refs == bound_answers:
+                            return
+                        steps, extended = await asyncio.to_thread(
+                            apply_primitive_bindings, candidate_inputs, candidate_ref, answer_refs,
                         )
-                    extended = (
-                        await asyncio.to_thread(_with_refinement, inputs, refinement_ref)
-                        if refinement_ref
-                        else inputs
-                    )
-                    steps = deepcopy(previous["primitive_steps"])
-                    dependencies = await asyncio.to_thread(
-                        assess_program_dependencies,
-                        steps,
-                        extended.catalog,
-                        extended.composition_input["robot_state"],
-                        read_evidence=lambda ref, pointer: _evidence_value(extended, ref, pointer),
-                        result_schema=lambda ref: _result_schema(steps, ref, extended),
-                    )
+                        payload = {"record_type": "PrimitiveProgramBinding", "run_request_ref": request_ref,
+                                   "candidate_ref": candidate_ref, "pa_answer_refs": deepcopy(answer_refs),
+                                   "primitive_steps": steps, "created_at_ns": time.time_ns()}
+                        binding_ref = await asyncio.to_thread(
+                            append_record, root, directory, f"binding_{len(binding_refs) + 1:04d}.json", payload,
+                        )
+                        binding_refs.append(binding_ref)
+                        bound_answers = deepcopy(answer_refs)
+                        extended = replace(extended, binding_ref=binding_ref)
+                        displayed = await asyncio.to_thread(display_primitive_steps, extended, steps)
+                        await emit("binding", "Checked PA answers have been bound deterministically; calculations remain pending.",
+                                   binding_ref=binding_ref, binding=payload, resolved_primitive_steps=displayed)
+
+                    def input_needs() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                        dependencies = assess_program_dependencies(
+                            steps, extended.catalog, extended.composition_input["robot_state"],
+                            read_evidence=lambda ref, pointer: _evidence_value(extended, ref, pointer),
+                            result_schema=lambda ref: _result_schema(steps, ref, extended),
+                        )
+                        needs = [need for need in dependencies["context_requests"] if need["authority"] == "PA"]
+                        for role in required_validation_roles(scope):
+                            evidence = (verify_evidence_tree(root, validation_refs[role])
+                                        if role in validation_refs else {})
+                            reason = None
+                            if not evidence:
+                                reason = f"Required {role} evidence is missing."
+                            elif evidence.get("status") != "accepted":
+                                reason = f"Required {role} evidence is {evidence.get('status', 'unavailable')}."
+                            elif role == "scene" and (evidence.get("coverage") != "all_observed_candidates"
+                                                       or evidence.get("unresolved_candidates")):
+                                reason = "Required scene evidence does not cover all declared observed candidates."
+                            if reason:
+                                needs.append({"step_index": None, "quantity": role, "authority": "PA",
+                                              "reason": reason})
+                        return dependencies, needs
+
+                    while True:
+                        dependencies, product_needs = await asyncio.to_thread(input_needs)
+                        unique = {(need["step_index"], need.get("parameter_path", need["quantity"])): need
+                                  for need in product_needs}
+                        for need in explicit_needs:
+                            if need["authority"] == "PA":
+                                unique.setdefault((need["step_index"], need["quantity"]), need)
+                        product_needs = list(unique.values())
+                        if (not product_needs or self.product_runtime is None
+                                or pa_batches >= profile["max_pa_batches"] or pa_operations >= profile["max_pa_operations"]):
+                            break
+                        pa_batches += 1
+                        batch_number = pa_batches
+                        allowance = min(6, profile["max_pa_operations"] - pa_operations)
+                        operations_before_batch = pa_operations
+                        available = {ref: sha for ref, sha in inputs.record_hashes.items() if not ref.startswith("resources/")}
+                        available.update({ref: source["sha256"] for ref, source in source_pins.items()
+                                          if read_pin(root, source).get("record_type") not in {
+                                              "RobotValidationContext", "PrimitiveCalculationRecord"}})
+                        from ..pa.primitive_context import _answer_result, _number_needs, _read_answer_checkpoint
+
+                        product_needs = _number_needs(product_needs)
+                        batch_request = {
+                            "record_type": "PrimitiveContextRequest", "run_request_ref": request_ref,
+                            "candidate_ref": candidate_ref, "assignment_fingerprint": inputs.assignment.fingerprint,
+                            "validation_scope": scope, "target_feature": deepcopy(inputs.composition_input["target_feature"]),
+                            "needs": product_needs, "primitive_steps": deepcopy(candidate.record["primitive_steps"]),
+                            "validation_refs": deepcopy(validation_refs),
+                            "evidence_refs": [{"ref": ref, "sha256": sha} for ref, sha in available.items()],
+                            "base_context_refs": inputs.context_refs,
+                        }
+                        batch_dir = directory / f"pa_{batch_number:04d}"
+                        await asyncio.to_thread(append_record, root, batch_dir, "request.json", batch_request)
+                        await emit("evidence", "RA is sending PA a pinned SPADE input request.", pa_batch=batch_number)
+
+                        async def pa_progress(event: Mapping[str, Any]) -> None:
+                            nonlocal pa_operations
+                            used = event["operations_used"]
+                            if type(used) is not int or not 0 <= used <= allowance:
+                                raise ValueError("PA exceeded its deterministic operation budget.")
+                            pa_operations = operations_before_batch + used
+                            await emit("evidence", f"PA batch {batch_number}: {event['message']}",
+                                       pa_batch=batch_number, pa_operations=pa_operations,
+                                       **{key: event[key] for key in ("pa_answers_ref", "pa_operation_ref", "input_resolution_ref") if key in event})
+                            if event.get("pa_answers_ref"):
+                                answers_by_batch[batch_number] = deepcopy(event["pa_answers_ref"])
+                                await save_binding()
+
+                        outcome = await self.product_runtime.request_primitive_context(
+                            robot_runtime=self.program_runtime, assignment=inputs.assignment, interaction_root=root,
+                            directory=batch_dir, request=batch_request, max_operations=allowance,
+                            deadline=started + float(profile["deadline_sec"]), progress=pa_progress,
+                        )
+                        used = outcome["operations_used"]
+                        if type(used) is not int or not 0 <= used <= allowance or outcome.get("model_responses") != 0:
+                            raise ValueError("PA response violates the deterministic operation contract.")
+                        pa_operations = operations_before_batch + used
+                        if outcome.get("answers_ref"):
+                            checkpoint = _read_answer_checkpoint(root, outcome["answers_ref"])
+                            if Path(outcome["answers_ref"]["ref"]).parent != batch_dir.relative_to(root):
+                                raise ValueError("PA answers belong to another batch.")
+                            checked_outcome = _answer_result(product_needs, {
+                                answer["need_id"]: answer for answer in checkpoint["answers"]
+                            }, used)
+                            if any(outcome.get(key) != value for key, value in checked_outcome.items()):
+                                raise ValueError("PA response evidence differs from its checked answers.")
+                            answers_by_batch[batch_number] = deepcopy(outcome["answers_ref"])
+                            pa_answer_refs.append(deepcopy(outcome["answers_ref"]))
+                        elif outcome.get("evidence_refs") or outcome.get("validation_refs"):
+                            raise ValueError("PA evidence requires a checked answer checkpoint.")
+                        pa_response_ref = outcome["response_ref"]
+                        saved_response = verify_record(root, pa_response_ref)
+                        if saved_response != {key: value for key, value in outcome.items() if key != "response_ref"}:
+                            raise ValueError("PA reply differs from its saved response.")
+                        await emit("evidence", "PA's SPADE reply contains checked measurements and input findings.",
+                                   pa_batch=batch_number, pa_response_ref=pa_response_ref)
+                        pa_findings = [{"step_index": None, "authority": "PA", "status": "unknown",
+                                        "message": message, "pa_response_ref": pa_response_ref}
+                                       for message in outcome.get("unresolved", [])]
+                        for reference in outcome.get("evidence_refs", []):
+                            await asyncio.to_thread(verify_evidence_tree, root, reference)
+                            source_pins[reference["ref"]] = deepcopy(reference)
+                        roles = outcome.get("validation_refs", {})
+                        if set(roles) - set(required_validation_roles(scope)):
+                            raise ValueError("PA returned a validation role outside this scope.")
+                        validation_refs.update(deepcopy(roles))
+                        explicit_needs = []
+                        await save_binding()
+                        if used < allowance:
+                            break
+                    await save_binding()
+                    dependencies, unresolved_inputs = await asyncio.to_thread(input_needs)
+                    if unresolved_inputs or pa_findings:
+                        from .program_validation import _report
+
+                        findings = [{"step_index": need["step_index"], "check": need["quantity"],
+                                     "status": "unknown", "authority": "PA", "message": need["reason"]}
+                                    for need in unresolved_inputs] + pa_findings
+                        report = _report(steps, findings, [], [], None, scope=scope)
+                        report.update(candidate_ref=candidate_ref, binding_ref=binding_ref,
+                                      robot_context_ref=None, evidence_refs=deepcopy(validation_refs))
+                        report_ref = await asyncio.to_thread(append_record, root, directory,
+                                                            f"validation_{len(decisions):04d}.json", report)
+                        reports.append(report_ref)
+                        await emit("validation_result", "Input validation found unresolved measurement prerequisites.",
+                                   validation_ref=report_ref, validation=report)
+                        status, stop_reason = "needs_context", "Required measurements remain unresolved; inspect the recorded input findings."
+                        break
                     await emit(
                         "robot_context", "Capturing measured robot state and EE/TCP context."
                     )
@@ -464,6 +605,7 @@ class PrimitiveRefinementRuntime:
                             profile=profile,
                             cache=cache,
                             _validation_started_at_ns=validation_entry_ns,
+                            progress=validation_progress,
                         )
                     if report.get("scope") != scope:
                         raise ValueError("The validation report scope differs from its refinement run.")
@@ -540,6 +682,7 @@ class PrimitiveRefinementRuntime:
                     for reference in report.get("calculation_refs", []):
                         source_pins[reference["ref"]] = reference
                     report["candidate_ref"] = candidate_refs[-1]
+                    report["binding_ref"] = binding_ref
                     report["robot_context_ref"] = robot_ref
                     report["evidence_refs"] = deepcopy(validation_refs)
                     report_ref = await asyncio.to_thread(
@@ -564,231 +707,30 @@ class PrimitiveRefinementRuntime:
                             "Program validated against the pinned rigid vertical geometry and direct-motion model; no motion was executed.",
                         )
                         break
-                    product_pins = [
-                        reference
-                        for reference in source_pins.values()
-                        if read_pin(root, reference).get("record_type")
-                        not in {"RobotValidationContext", "PrimitiveCalculationRecord"}
-                    ]
-                    state_key = fingerprint(
-                        {
-                            "steps": steps,
-                            "findings": report["findings"],
-                            "evidence": product_pins,
-                            "requests": pending_requests,
-                            "robot_state": {
-                                key: robot[key]
-                                for key in ("configuration_sha256", "ee_pose", "ee_from_tcp")
-                            }
-                            if robot
-                            else None,
-                        }
-                    )
+                    state_key = fingerprint({"steps": steps, "findings": report["findings"]})
                     if state_key in seen:
-                        status, stop_reason = (
-                            "no_progress",
-                            "RA repeated an unchanged candidate and unresolved findings.",
-                        )
+                        status, stop_reason = "no_progress", "RA repeated an unchanged program and validation findings."
                         break
                     seen.add(state_key)
-                    if len(candidate_refs) >= profile["max_candidates"]:
+                    if any(finding.get("authority") == "PA" or finding.get("check") in {
+                        "robot_context", "robot_freshness", "freshness", "final_freshness",
+                    } for finding in report["findings"]):
+                        status, stop_reason = "needs_context", "Measured robot or product context remains unresolved; inspect the recorded findings."
                         break
-                    available = [
-                        {"ref": ref, "sha256": sha}
-                        for ref, sha in inputs.record_hashes.items()
-                        if not ref.startswith("resources/")
-                    ]
-                    available.extend(product_pins)
-                    available_hashes = {item["ref"]: item["sha256"] for item in available}
-                    evidence_key = fingerprint(available_hashes)
-                    product_needs = []
-                    request_keys = set()
-                    validation_needs = [
-                        {
-                            "step_index": finding["step_index"],
-                            "quantity": finding["check"],
-                            "authority": "PA",
-                            "reason": finding["message"],
-                        }
-                        for finding in report["findings"]
-                        if finding.get("authority") == "PA"
-                        and finding["status"] in {"unknown", "failed"}
-                    ]
-                    # Explicit RA requests keep their wording and take precedence over
-                    # the same input need derived from its selected primitive.
-                    for need in [*pending_requests, *dependencies["context_requests"], *validation_needs]:
-                        if need["authority"] != "PA":
-                            continue
-                        index = need["step_index"]
-                        # Program-level findings already identify PA's responsibility;
-                        # waiting for RA to restate them wastes an investigation round.
-                        selected_context = (
-                            {"steps": steps, "reason": need["reason"]}
-                            if index is None else
-                            {
-                                "step_index": index,
-                                "primitive_symbol": steps[index - 1]["primitive_symbol"],
-                                "params": steps[index - 1]["params"],
-                            }
-                        )
-                        request_key = fingerprint(
-                            {
-                                **selected_context,
-                                "quantity": need.get("parameter_path", need["quantity"]),
-                            }
-                        )
-                        if (
-                            request_key in request_keys
-                            or (request_key, evidence_key) in attempted_requests
-                        ):
-                            continue
-                        request_keys.add(request_key)
-                        product_needs.append(deepcopy(need))
-                    if (
-                        product_needs
-                        and self.product_runtime is not None
-                        and pa_batches < profile["max_pa_batches"]
-                        and pa_operations < profile["max_pa_operations"]
-                    ):
-                        pa_batches += 1
-                        await emit(
-                            "evidence",
-                            "PA is investigating missing product and scene facts.",
-                            pa_batch=pa_batches,
-                        )
-                        attempted_requests.update((key, evidence_key) for key in request_keys)
-                        batch_request = {
-                            "record_type": "PrimitiveContextRequest",
-                            "validation_scope": scope,
-                            "target_feature": deepcopy(inputs.composition_input["target_feature"]),
-                            "needs": deepcopy(product_needs),
-                            "evidence_refs": available,
-                            "base_context_refs": inputs.context_refs,
-                        }
-                        batch_dir = directory / f"pa_{pa_batches:04d}"
-                        await asyncio.to_thread(
-                            append_record, root, batch_dir, "request.json", batch_request
-                        )
-                        remaining = profile["max_pa_operations"] - pa_operations
-                        operations_before_batch = pa_operations
-
-                        async def pa_progress(event: Mapping[str, Any]) -> None:
-                            nonlocal pa_operations
-                            consumed = event["operations_used"]
-                            if type(consumed) is not int or not 0 <= consumed <= min(6, remaining):
-                                raise ValueError("PA exceeded its evidence budget.")
-                            # Record consumption while the batch is active, including cancellation.
-                            pa_operations = operations_before_batch + consumed
-                            await emit(
-                                "evidence", f"PA batch {pa_batches}: {event['message']}",
-                                pa_batch=pa_batches, pa_operations=pa_operations,
-                                geometry_operations=event["geometry_operations"],
-                            )
-
-                        outcome = dict(
-                            await self.product_runtime.investigate(
-                                interaction_root=root,
-                                directory=batch_dir,
-                                request=batch_request,
-                                max_operations=min(6, remaining),
-                                progress=pa_progress,
-                            )
-                        )
-                        used = outcome["operations_used"]
-                        if type(used) is not int or not 0 <= used <= min(6, remaining):
-                            raise ValueError("PA exceeded its evidence budget.")
-                        pa_operations = operations_before_batch + used
-                        pa_response_ref = await asyncio.to_thread(
-                            append_record,
-                            root,
-                            batch_dir,
-                            "response.json",
-                            {"record_type": "PrimitiveContextResponse", **outcome},
-                        )
-                        await emit(
-                            "evidence",
-                            "PA evidence investigation completed. "
-                            f"Batches: {pa_batches}/{profile['max_pa_batches']}; "
-                            f"operations: {pa_operations}/{profile['max_pa_operations']}.",
-                            pa_batch=pa_batches,
-                            pa_response_ref=pa_response_ref,
-                        )
-                        # PA explanations are revision feedback, never geometry evidence.
-                        pa_findings = [
-                            {
-                                "step_index": None,
-                                "authority": "PA",
-                                "status": "unknown",
-                                "message": message,
-                                "pa_response_ref": pa_response_ref,
-                            }
-                            for message in outcome.get("unresolved", [])
-                        ]
-                        if outcome["status"] == "authority_conflict":
-                            status, stop_reason = "authority_conflict", outcome["reason"]
-                            break
-                        for reference in outcome.get("evidence_refs", []):
-                            await asyncio.to_thread(read_pin, root, reference)
-                            source_pins[reference["ref"]] = deepcopy(reference)
-                            available_hashes[reference["ref"]] = reference["sha256"]
-                        # Returning partial evidence does not itself warrant repeating
-                        # this investigation before RA has reviewed those records.
-                        returned_evidence_key = fingerprint(available_hashes)
-                        attempted_requests.update(
-                            (key, returned_evidence_key) for key in request_keys
-                        )
-                        returned_roles = outcome.get("validation_refs", {})
-                        if set(returned_roles) - set(required_validation_roles(scope)):
-                            raise ValueError("PA returned validation roles outside the recorded scope.")
-                        validation_refs.update(deepcopy(returned_roles))
-                        if (
-                            not outcome.get("evidence_refs")
-                            and not robot
-                            and candidate.record["status"] == "needs_context"
-                        ):
-                            status, stop_reason = (
-                                "needs_context",
-                                "Required product evidence and measured robot context remain unavailable.",
-                            )
-                            break
-                    pending_requests = []
-                    findings = [*dependencies["issues"], *report["findings"], *pa_findings]
-                    if (
-                        pa_batches >= profile["max_pa_batches"]
-                        or pa_operations >= profile["max_pa_operations"]
-                    ):
-                        findings.append({
-                            "step_index": None, "authority": "PA", "status": "unknown",
-                            "check": "pa_budget",
-                            "message": (
-                                "No further PA investigation is available in this run: "
-                                f"{pa_batches}/{profile['max_pa_batches']} batches and "
-                                f"{pa_operations}/{profile['max_pa_operations']} operations used. "
-                                "RA may use returned evidence to revise its program or report remaining prerequisites."
-                            ),
-                        })
                     context = {
-                        "record_type": "PrimitiveRefinementContext",
-                        "run_request_ref": request_ref,
-                        "base_context_refs": inputs.context_refs,
-                        "previous_candidate_ref": candidate_refs[-1],
-                        "evidence_refs": list(source_pins.values()),
-                        "robot_context_ref": robot_ref,
-                        "findings": findings,
-                        "validation_ref": report_ref,
+                        "record_type": "PrimitiveRefinementContext", "run_request_ref": request_ref,
+                        "base_context_refs": inputs.context_refs, "previous_candidate_ref": candidate_ref,
+                        "binding_ref": binding_ref, "evidence_refs": list(source_pins.values()),
+                        "pa_answer_refs": deepcopy(pa_answer_refs), "robot_context_ref": robot_ref,
+                        "findings": report["findings"], "validation_ref": report_ref,
                         "created_at_ns": time.time_ns(),
                     }
-                    refinement_ref = await asyncio.to_thread(
-                        append_record,
-                        root,
-                        directory,
-                        f"context_{len(decisions):04d}.json",
-                        context,
-                    )
+                    refinement_ref = await asyncio.to_thread(append_record, root, directory,
+                                                            f"context_{len(decisions):04d}.json", context)
         except TimeoutError:
             status, stop_reason = (
                 "budget_exhausted",
-                f"The configured refinement deadline ({profile['deadline_sec']} seconds) was reached.",
+                f"The configured refinement deadline ({profile['deadline_sec']} seconds) was reached during {current_stage}.",
             )
         except asyncio.CancelledError:
             status, stop_reason = "cancelled", "The operator cancelled refinement."
@@ -802,6 +744,7 @@ class PrimitiveRefinementRuntime:
             "candidate_refs": candidate_refs,
             "decision_refs": decisions,
             "validation_refs": reports,
+            "binding_refs": binding_refs,
             "event_refs": events,
             "pa_batches": pa_batches,
             "pa_operations": pa_operations,
@@ -846,6 +789,7 @@ def enrich_composition_diagnostic(
             *result["candidate_refs"],
             *result["decision_refs"],
             *result["validation_refs"],
+            *result.get("binding_refs", []),
             *result["event_refs"],
         ]:
             read_pin(root, reference)
@@ -867,6 +811,21 @@ def enrich_composition_diagnostic(
         candidate = read_pin(root, latest["candidate_ref"])
         view["candidate"] = candidate
         view["latest_candidate_ref"] = latest["candidate_ref"]["ref"]
+    view.pop("binding", None)
+    view.pop("binding_ref", None)
+    view.pop("resolved_primitive_steps", None)
+    bound_inputs = None
+    for event in reversed(events):
+        if "binding_ref" not in event or event["stage"] != "binding" or not proposed:
+            continue
+        from .program_binding import read_program_binding
+
+        binding, bound_inputs = read_program_binding(_load_inputs(root), event["binding_ref"])
+        if binding["candidate_ref"] == proposed[-1]["candidate_ref"]:
+            view["binding"], view["binding_ref"] = binding, event["binding_ref"]
+            view["composition_input"] = deepcopy(bound_inputs.composition_input)
+            break
+        bound_inputs = None
     validations = [event for event in events if event["stage"] == "validation_result"]
     view.pop("validation", None)
     if validations:
@@ -875,9 +834,28 @@ def enrich_composition_diagnostic(
             raise ValueError("The saved validation report scope differs from its refinement run.")
         # A revision can be saved just before cancellation or the deadline. Its
         # predecessor's report stays in the trace and cannot describe this proposal.
-        if proposed and validation.get("candidate_ref") == proposed[-1]["candidate_ref"]:
+        if (proposed and validation.get("candidate_ref") == proposed[-1]["candidate_ref"]
+                and validation.get("binding_ref") == view.get("binding_ref")):
+            effective_steps = view.get("binding", view["candidate"])["primitive_steps"]
+            if validation.get("candidate_fingerprint") != fingerprint(effective_steps):
+                raise ValueError("Validation does not match the displayed primitive binding.")
             view["validation"] = validation
+    if bound_inputs is not None:
+        from .program_binding import display_primitive_steps
+
+        steps = view["binding"]["primitive_steps"]
+        calculations = [event["calculation_ref"] for event in events if "calculation_ref" in event
+                        and event.get("binding_ref") == view["binding_ref"]]
+        view["resolved_primitive_steps"] = display_primitive_steps(
+            bound_inputs, steps, view.get("validation"), calculation_refs=calculations,
+        )
+        view["binding_issues"] = assess_program_dependencies(
+            steps, bound_inputs.catalog, bound_inputs.composition_input["robot_state"],
+            read_evidence=lambda ref, pointer: _evidence_value(bound_inputs, ref, pointer),
+            result_schema=lambda ref: _result_schema(steps, ref, bound_inputs),
+        )["issues"]
     pa_responses = []
+    pa_trace = []
     for event in events:
         if "previous_robot_context_ref" in event:
             for field in ("previous_robot_context_ref", "robot_context_ref"):
@@ -887,6 +865,25 @@ def enrich_composition_diagnostic(
                 context = verify_record(root, reference)
                 if context.get("record_type") != "RobotValidationContext":
                     raise ValueError("Robot comparison must reference a RobotValidationContext.")
+        for field, record_type in (("pa_reply_ref", "PrimitiveContextReply"),
+                                   ("input_resolution_ref", "PrimitiveInputResolution"),
+                                   ("pa_answers_ref", "PrimitiveContextAnswers"),
+                                   ("pa_operation_ref", "PrimitiveContextOperationResult")):
+            if field not in event:
+                continue
+            reference = event[field]
+            batch_dir = directory / f"pa_{event['pa_batch']:04d}"
+            if not owned_path(root, reference["ref"]).is_relative_to(batch_dir):
+                raise ValueError("PA progress record belongs to another investigation.")
+            if field == "pa_answers_ref":
+                from ..pa.primitive_context import _read_answer_checkpoint
+
+                record = _read_answer_checkpoint(root, reference)
+            else:
+                record = verify_record(root, reference)
+            if record.get("record_type") != record_type:
+                raise ValueError("PA progress references an unexpected record type.")
+            pa_trace.append({"reference": reference, "record": record})
         if "pa_response_ref" in event:
             response = verify_record(root, event["pa_response_ref"])
             expected = directory / f"pa_{event['pa_batch']:04d}" / "response.json"
@@ -901,5 +898,6 @@ def enrich_composition_diagnostic(
         "result": result,
         "events": events,
         "pa_responses": pa_responses,
+        "pa_trace": pa_trace,
     }
     return view

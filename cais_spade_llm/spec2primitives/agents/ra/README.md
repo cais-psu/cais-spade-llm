@@ -8,17 +8,17 @@ RA means RobotAgent. This directory owns selected-RA context handoff, direct pro
 
 Fresh `robot_state.motion_context` records the exact configured `frame_id`, `ee_link`, and `tcp_link` from `controller_config.move_group`. Unavailable values remain null. Configuration names are not measured feedback or a TCP transform. Allocation base-distance frames and the controller planning frame have different purposes.
 
-The captured catalog retains all runtime conditions/effects, parameter declarations, and output declarations. The model-facing projection limits `grasp_part` and `release_part` formal conditions/effects to `held_part` and removes `model_name` from parameters, nested helper inputs, outputs, required lists and custody effects. Primitive names, `part_name`, geometry requirements and movement parameters remain intact. This is a composition interface, not a directly executable Python signature. Recovery examples, decompositions and unrelated recovery metadata are excluded from initial state and subsequent `read_record` results. Raw catalog snapshots cannot be requested through that reader. The shared RA call has no execution tools or recovery instructions.
+The captured catalog retains all runtime conditions/effects, parameter declarations, and output declarations. The model-facing projection limits `grasp_part` and `release_part` formal conditions/effects to `held_part` and removes `model_name` from parameters, nested helper inputs, outputs, required lists and custody effects. Primitive names, `part_name`, geometry requirements and movement parameters remain intact. This is a composition interface, not a directly executable Python signature. Recovery examples, decompositions and unrelated recovery metadata are excluded from initial state and historical evidence displays. New authoring has no model-driven evidence reader. The shared RA call has no execution tools or recovery instructions.
 
 ## Composition and binding checks
 
 `author_primitive_program_candidate` reconstructs the grounded target, current/desired relationships, exact resource assignment, and accepted ontology projection from current completion and paired context. There is no preliminary sequence call or active draft stage.
 
-RA chooses every primitive, its order, intermediate movements and supplied parameters. It returns `read_record`, `query_ontology`, `propose`, or `unsupported`; within refinement it may also return a bounded `request_context` action. The initial ontology index lists subjects/predicates; exact filtered queries return up to 32 accepted assertions. Record reads use pinned refs and RFC 6901 field paths and do not follow embedded artifact paths. The default limit is 12 evidence requests plus one final model call.
+RA chooses every primitive, order, intermediate movement and control parameter in one authoring call per semantic revision. It returns `propose` with `primitive_steps` and optional `context_requests`, or `unsupported`. New prompts contain the complete catalog once, compact accepted task/robot context and current findings. The 32,000-character limit rejects oversized essential input before calling RA; no contracts are truncated. Raw correspondence records, observation inventories and previous evidence exchanges remain in disk audits.
 
-RA returns `primitive_steps`; each step's `params` is a JSON-encoded object in the structured response. The host parses it without adding, reordering or repairing steps/values. Values can be literals, `value_ref: {record_ref, field_path}`, or `result_ref: {step_index, field_path}` selecting an earlier one-based step's declared output. Unknown primitives/parameters, invalid supplied types/bounds/array lengths, duplicate keys, nonfinite numbers and malformed or unauthorized references remain errors.
+RA returns `primitive_steps`; each step's `params` is a JSON-encoded object in the structured response. The host preserves this proposal exactly. Deterministic binding produces a separate checked program without adding or reordering primitives. Values can be literals, `value_ref: {record_ref, field_path}`, or `result_ref: {step_index, field_path}` selecting an earlier one-based step's declared output. Unknown primitives/parameters, invalid supplied types/bounds/array lengths, duplicate keys, nonfinite numbers and malformed or unauthorized references remain errors.
 
-Omitted arguments and partial geometry objects remain visible proposals. Remaining `typed_parameters.required` declarations preserve their requirements after execution-only fields are excluded. `x-grounding-required` and `x-grounding-fields` describe extra information needed to ground a calculation; they do not add mandatory arguments to existing recovery calls. The checker resolves only RA-selected references, never alternative sources or helper values. New submissions containing `model_name` arguments, including nested or referenced objects, are rejected and preserved in the trace. References to removed helper outputs remain undeclared-field errors.
+Omitted arguments and partial geometry objects remain visible proposals. Remaining `typed_parameters.required` declarations preserve their requirements after execution-only fields are excluded. `x-grounding-required` and `x-grounding-fields` describe extra information needed to ground a calculation; they do not add mandatory arguments to existing recovery calls. The diagnostic checker leaves the proposal unchanged; deterministic PA resolution and binding fill only its requested missing or incompatible measurement paths. New submissions containing `model_name` arguments, including nested or referenced objects, are rejected and preserved in the trace. References to removed helper outputs remain undeclared-field errors.
 
 `read_primitive_composition_diagnostic` derives `binding_issues` with `step_index`, `parameter_path`, `status`, and `message`:
 
@@ -52,7 +52,7 @@ Each independent attempt writes `request.json`, `exchange_*.json`, and `candidat
 
 The history reader uses the catalog embedded in that attempt's saved `request.prompt` for validation, binding diagnostics and UI formatting. It checks the catalog against the pinned context after projection, without replacing the original declarations. Thus older programs may still contain or report `model_name`; the next attempt uses the current simplified interface. No historical bytes, hashes or parameter values change.
 
-The UI shows one numbered program, display-only `<unbound>` markers for missing required/calculation inputs, and a short input report. Full records, report and trace expand on demand. Supplied values/references remain as RA submitted them. Blocking validation and diagnostic refresh run outside the event loop; duplicate clicks cannot create another in-flight attempt. `proposed` means an unvalidated program proposal.
+The UI shows one numbered program, display-only `<unbound>` markers for missing required/calculation inputs, and a short input report. Full records, report and trace expand on demand. The displayed binding resolves measured numbers and completed calculations; uncomputed result dependencies show `<pending: step …>`. Original values/references remain in the expandable records. Blocking validation and diagnostic refresh run outside the event loop; duplicate clicks cannot create another in-flight attempt. `proposed` means an unvalidated program proposal.
 
 Restart an already running application to load the current composition code. Complete existing snapshots can supply the simplified projection to a new attempt; recapture only when metadata or robot context needs refreshing. New snapshots append; saved programs are not automatically regenerated. Incompatible authority records still cannot authorize new RA work.
 
@@ -60,55 +60,8 @@ Restart an already running application to load the current composition code. Com
 
 [VALIDATION_AND_REVISION.md](../../VALIDATION_AND_REVISION.md) specifies PA evidence requests, RA-owned geometry/identifier adapters, complete binding validation, modeled/physical/outcome checks, RA revisions, freshness and stopping rules. [COMPOSITION_EVALUATION.md](../../COMPOSITION_EVALUATION.md) defines fair experiments on intermediate dependencies absent from supplied formal contracts. Neither document describes an implemented physical execution loop.
 
-## Code-reading handoff
+## Deterministic refinement
 
-### Outcome
+Read `refinement.py` (`compose`, `_run`) → `primitive_context.py` (`request_primitive_context`) → `primitive_context_messages.py` → `primitive_input_resolution.py` → `program_binding.py` → `program_validation.py`. Input checks precede robot capture and motion validation. PA uses real correlated SPADE messages with deterministic measurements and no Phase 5 LLM fallback. `PrimitiveProgramBinding` pins the original proposal and checked answers. Readers replay the binding; validation, the UI and `program_execution.py` select that same pin. Only semantic or motion findings return to the RA model.
 
-New RA programs use a composition interface without `model_name`. Missing geometry remains visible. Saved attempts retain the catalog they were authored against; no target calculation, identifier lookup or robot execution is added.
-
-### Process flow
-
-UI → validated pinned context → composition catalog → selected RA → supplied-value checks → saved unchanged program. Reload → request's recorded catalog → validation and binding report → compact display.
-
-### Read these locations in order
-
-1. [Owned adapter](../../adapters/in_process_robot_agent.py): `request_assigned_context` captures configuration and full runtime data; `_phase_5_1_primitive_catalog` retains declared metadata.
-2. [Composition context](composition_context.py): `_composition_input`, `_composition_state_view`, and `_composition_catalog_view` define exactly what the model sees.
-3. [Composer](primitive_composition.py): `author_primitive_program_candidate` preserves RA decisions; `_recorded_request_inputs` restores an attempt's original catalog for inspection; `_validate_parameter` rejects execution-only arguments in new proposals and checks references/types without requiring complete geometry.
-4. [Binding assessment](parameter_binding.py): `assess_parameter_bindings` and `_BindingReport.visit` inspect only selected inputs and distinguish gaps from deferred outputs.
-5. [UI](../../spec2primitives_ui.py): `_format_primitive_program` and `_format_binding_issues` produce the concise display; `_start_primitive_composition` retains the in-flight guard and worker dispatch.
-6. Shared metadata: [FunctionAnalyzer](../../../function_analyzer.py) `analyze_function`; [controller declarations](../../../resources/robot/gazebo_pick_place_controller.py) for target helpers and moves; [output schemas/extractors](../../../resources/robot/robot_primitives.py) preserve actual pick context and conditional placement fields.
-
-### Read this test
-
-In [RA tests](../../tests/test_ra_context_handoff.py), `test_geometry_gaps_and_conditional_results_preserve_the_exact_program` proves missing geometry remains visible while RA's steps/parameters stay exact. `test_composition_projects_minimal_contracts_and_filters_every_state_read` checks both model-input paths and immutable snapshots. [UI tests](../../tests/test_pa_ui_connection.py) cover compact gaps, full expandable reports, real worker responsiveness, duplicate clicks and detached pages. Shared catalog/extractor tests use no helper/controller execution.
-
-`test_saved_attempt_uses_its_recorded_catalog_and_next_attempt_uses_new_interface` checks an older identifier-bearing program, unchanged saved files, and a subsequent mocked proposal without `model_name`. Nested-argument and removed-output tests prove identifiers cannot be supplied through helper inputs. `test_primitive_program_uses_attempt_catalog_for_execution_bindings` checks the corresponding old/new UI displays.
-
-### Runtime evidence
-
-Read-only reload of `interaction_116f33c8cce64d33b0066891bf228572` and `interaction_4178296ec9e04fb19e6e780371fd062b` returns the same 10-step `proposed` programs under their recorded catalogs. Their 141 and 179 files respectively match the before-change hashes, with no additions or removals. The history display retains their original identifier arguments/findings, while the inputs prepared for a new attempt exclude `model_name`. No live model request, context capture or program regeneration was performed.
-
-### You can ignore
-
-Shared ProductAgent/RobotAgent internals, `SystemBridge`, PA allocation/proximity/reassignment implementation, collision-scene synchronization and ground-truth answers are outside this increment's changed runtime path. Earlier local changes to those owned paths remain present.
-
-### Refactoring performed
-
-No unrelated refactoring. A recursive projection removes the same execution field from nested declarations and custody effects. The saved-request reader reuses the recorded catalog instead of introducing another record format. Shared source files, controller actions, output extractors and recovery sequences are unchanged from this increment's baseline.
-
-### Verification and intentionally unchanged behavior
-
-For identifier separation, 30 focused offline tests passed in two disjoint batches of 15. They cover new/old contracts, rejected inputs, exact history, recovery metadata requirements, UI rendering, and worker responsiveness. The initial sandbox batch timed out without results; passing batches ran with normal worker-thread access and mocked RA responses. Scoped Ruff (`F401,F821,E9`), compilation of the four touched Python files, and `git diff --check -- .` within Spec2Primitives passed. Local links in the 17 changed maintained Markdown files resolved. The two saved interactions and three shared source files retained their baseline hashes. No live model, target-helper, ROS/MoveIt or robot execution test ran. See [implementation status](../../IMPLEMENTATION_PLAN.md) for the earlier primitive-input increment's separate verification.
-
-### Changed-file index for this increment
-
-Runtime and tests are linked above. Affected maintained documents are:
-
-- [Local instructions](../../AGENTS.md), [overview](../../README.md), [implementation status](../../IMPLEMENTATION_PLAN.md), [research scope](../../ICRA_SCOPE.md), [research positioning](../../RESEARCH_POSITIONING.md), [ontology](../../ASSEMBLY_ONTOLOGY.md), [bias audit](../../BIAS_VALIDATION.md), [validation/revision](../../VALIDATION_AND_REVISION.md), and [composition evaluation](../../COMPOSITION_EVALUATION.md).
-- [RA](README.md), [adapters](../../adapters/README.md), [contexts](../../contexts/README.md), [schemas](../../schemas/README.md), [tests](../../tests/README.md), and [fixtures](../../tests/fixtures/README.md).
-- [References](../../references/README.md) and [primitive catalogs](../../references/resources/primitive_catalogs/README.md).
-
-## Bounded refinement implementation
-
-Read `refinement.py` (`compose`, `_run`) → `program_dependencies.py` and the measured RA adapter → `program_validation.py` → RA's next decision. Missing product inputs declared by RA-selected primitives reach PA `primitive_context.py` automatically with exact field paths, schemas and step references. RA-authored supplemental `request_context` entries with `authority: PA` retain their contents; duplicate requests and automatic repeats with unchanged evidence are suppressed. Invalid bindings and separate validation requirements return to RA as findings. PA selects measurement tools and features, then RA binds returned evidence or revises its program. A height estimate from an ambiguous pose can supply only `part_height_m`, with a warning; complete physical geometry remains unresolved. `refinement_records.py` supplies immutable records and source-chain checks. Only the current run's previous candidate is refinement input. Default limits are three candidate versions, two PA batches, twelve PA operations and five minutes. A finite supported validation model yields `validated_for_declared_scope`; unknown coverage stays explicit. See [the full scope](../../VALIDATION_AND_REVISION.md).
+The existing deterministic-input and SPADE binding regressions are in [test_primitive_refinement.py](../../tests/test_primitive_refinement.py); [handoff tests](../../tests/test_ra_context_handoff.py) cover bounded single-call prompts and immutable history. [UI](../../tests/test_pa_ui_connection.py) and [execution tests](../../tests/test_primitive_execution.py) cover numerical display, pending calculations, reconnect and rejected binding/report substitutions. These are controlled fixtures, not live LLM or physical-success evidence. See [validation and revision](../../VALIDATION_AND_REVISION.md) for freshness, budgets and scope limits.

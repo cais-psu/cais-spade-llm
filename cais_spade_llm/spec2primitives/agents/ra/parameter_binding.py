@@ -175,6 +175,11 @@ class _BindingReport:
         if isinstance(value, dict) and set(value) == {"value_ref"}:
             ref = value["value_ref"]
             document = self.record(ref["record_ref"])
+            if (path == "/target_pose" or path.startswith("/target_pose/")) and document.get("record_type") == "RobotFrameLocationRecord":
+                self.add(index, path, "incompatible",
+                         "The observed candidate location does not establish the required geometry reference_pose.")
+            elif path.split("/")[1] in {"target_pose", "product_geometry"}:
+                self.check_measurement_source(index, path, ref, document)
             resolved = self.selected_value(value)
             self.visit(index, path, resolved, schema, document)
             return
@@ -329,6 +334,34 @@ class _BindingReport:
         if kind in {"ObservedGeometryEvidence", "AssemblyGeometryEvidence", "AssemblySurfaceEvidence", "AssemblySceneEvidence", "AssemblyGoalEvidence", "RobotValidationContext", "PrimitiveCalculationRecord"}:
             return source.get("frame_id")
         return None
+
+    def check_measurement_source(
+        self, index: int, path: str, ref: Mapping[str, Any], source: Mapping[str, Any],
+    ) -> None:
+        kind = source.get("record_type")
+        if kind == "CADMeshRecord":
+            return  # Existing dimension/frame checks give the precise CAD-local finding.
+        uncertainty = source.get("uncertainty", {})
+        height_estimate = (
+            path == "/product_geometry/part_height_m" and ref["field_path"] == "/part_height_m"
+            and kind == "AssemblyGeometryEvidence" and source.get("status") == "ambiguous"
+            and uncertainty.get("method") == "highest_ranked_qualified_pose_hypothesis"
+            and uncertainty.get("hypothesis_index") == 0
+            and uncertainty.get("complete_pose_established") is False
+            and isinstance(uncertainty.get("source_pose"), dict) and isinstance(source.get("warning"), str)
+        )
+        if (kind not in {"ObservedGeometryEvidence", "AssemblyGeometryEvidence", "AssemblySurfaceEvidence", "AssemblyGoalEvidence"}
+                or (source.get("status") != "accepted" and not height_estimate)
+                or source.get("frame_id") != "world" or source.get("units") != "m"):
+            self.add(index, path, "incompatible", "The selected input requires accepted geometry in world metres with an established semantic reference.")
+        elif path == "/product_geometry/board_center/z" and kind == "AssemblySurfaceEvidence" and ref["field_path"] != path:
+            self.add(index, path, "incompatible", "A plane coefficient is not a measured world support height.")
+        elif path == "/target_pose" or path.startswith("/target_pose/"):
+            if kind == "ObservedGeometryEvidence" and (
+                source.get("reference_point") != "observed_bounds_center"
+                or ref["field_path"] != path.replace("/target_pose", "/reference_pose", 1)
+            ):
+                self.add(index, path, "incompatible", "The target must select the observed bounds reference_pose for this parameter.")
 
     def check_geometry_record(self, index: int, value: Any) -> None:
         value = self.selected_value(value)

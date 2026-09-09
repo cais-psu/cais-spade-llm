@@ -56,9 +56,10 @@ from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import (
     _PlanningSession,
     _observed_setup,
     _observed_program,
+    _binding_fixture,
+    _MessageProgramRuntime,
 )
 from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import (
-    _ProgramRuntime,
     _program_action,
 )
 from cais_spade_llm.spec2primitives.tools.assembly_geometry import AssemblyGeometryProducer
@@ -161,26 +162,9 @@ def _validated(
         np.savez(root / "observed_cad.npz", triangles_m=vertices[None, :, :])
         part["CAD_mesh"] = pin(root, root / "observed_cad.npz")
     roles["part"] = refs["part"] = append_record(root, root / "evidence", "part_cad.json", part)
-    steps = build_program(refs)
-    model = _ProgramRuntime(
-        [
-            _program_action(
-                [(s["primitive_symbol"], s["params"]) for s in build_program(refs, bound=False)]
-            ),
-            {
-                "kind": "request_context",
-                "requests": [
-                    {
-                        "step_index": 1,
-                        "quantity": "Part, goal and scene evidence",
-                        "authority": "PA",
-                        "reason": "Bind selected geometry.",
-                    }
-                ],
-            },
-            _program_action([(s["primitive_symbol"], s["params"]) for s in steps]),
-        ]
-    )
+    model = _MessageProgramRuntime([_program_action([
+        (step["primitive_symbol"], step["params"]) for step in build_program(refs, bound=False)
+    ])])
 
     class Robot:
         async def capture_validation_context(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -200,24 +184,13 @@ def _validated(
                 ],
             }
 
-    class Product:
-        async def investigate(self, **kwargs: Any) -> dict[str, Any]:
-            return {
-                "status": "provided",
-                "operations_used": 1,
-                "evidence_refs": list(refs.values()),
-                "validation_refs": roles,
-                "unresolved": [],
-            }
-
-    runtime = PrimitiveRefinementRuntime(
-        program_runtime=model,
-        robot_runtime=Robot(),
-        product_runtime=Product(),
-        validator=_validator,
-        profile=validation_profile,
-    )
-    result = asyncio.run(runtime.compose(root))
+    with pytest.MonkeyPatch.context() as patch:
+        _, _, _, product, _ = _binding_fixture(root, patch, scope, setup=(inputs, robot, refs, roles))
+        runtime = PrimitiveRefinementRuntime(
+            program_runtime=model, robot_runtime=Robot(), product_runtime=product,
+            validator=_validator, profile=validation_profile,
+        )
+        result = asyncio.run(runtime.compose(root))
     assert result["status"] == "validated_for_declared_scope", result
     return Robot(), part, model
 
@@ -342,7 +315,7 @@ def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(
         ("detach", "gear_medium"),
         "move_cartesian",
     ]
-    assert len(model.calls) == 3, "Execution must not call composition again."
+    assert len(model.calls) == 1, "Execution must not call composition again."
     assert all(path.read_bytes() == data for path, data in original.items())
     assert result["assembly_success"] is None
     assert (root / result["observation_ref"]).is_file()
@@ -413,7 +386,7 @@ def test_duplicate_clicks_join_and_stop_waits_for_terminal_acknowledgment(tmp_pa
         assert a == b
         assert a["status"] == "stopped", a
         assert transport.calls == ["move_cartesian"]
-        assert len(model.calls) == 3
+        assert len(model.calls) == 1
 
     asyncio.run(scenario())
     assert not execution_busy()
@@ -505,7 +478,7 @@ def test_saved_assembly_scope_survives_pick_place_default(tmp_path: Path) -> Non
     assert all(path.read_bytes() == data for path, data in original.items())
 
 
-@pytest.mark.parametrize("scope", [VALIDATION_SCOPE, "unknown", None])
+@pytest.mark.parametrize("scope", [VALIDATION_SCOPE, "unknown", None, "different_binding"])
 def test_fresh_validation_scope_mismatch_blocks_before_transport(tmp_path: Path, scope: str | None) -> None:
     """A passing report for another scope never authorizes a Gazebo command."""
     root = tmp_path / "interaction"
@@ -515,7 +488,10 @@ def test_fresh_validation_scope_mismatch_blocks_before_transport(tmp_path: Path,
     async def mismatched(**kwargs: Any) -> dict[str, Any]:
         result = await _validator(**kwargs)
         assert result["status"] == "passed"
-        result["scope"] = scope
+        if scope == "different_binding":
+            result["binding_ref"] = {"ref": "different_binding.json", "sha256": "a" * 64}
+        else:
+            result["scope"] = scope
         return result
 
     executor = PrimitiveExecutionRuntime(
@@ -775,3 +751,49 @@ def test_interrupted_execution_does_not_resume_or_assume_empty_custody(tmp_path:
         assert_execution_available(tmp_path)
     with pytest.raises(ValueError, match="no final custody"):
         execution_custody(tmp_path, "xarm6@localhost")
+
+
+@pytest.mark.parametrize("replacement", ["binding", "proposal", "report", "bound_steps"])
+def test_execution_rejects_replaced_program_binding_proposal_or_report(tmp_path: Path, replacement: str) -> None:
+    from cais_spade_llm.spec2primitives.agents.ra.primitive_composition import _write_record
+    root = tmp_path / "interaction"
+    robot, part, _ = _validated(root, validation_profile=load_refinement_profile())
+    program = load_validated_program(root)
+    result = read_pin(root, program.result_ref)
+    directory = (root / program.result_ref["ref"]).parent
+    if replacement == "binding":
+        payload = read_pin(root, program.binding_ref)
+        result["binding_refs"].append(append_record(root, directory, "different_binding.json", payload))
+    elif replacement == "proposal":
+        payload = read_pin(root, program.candidate_ref)
+        result["candidate_refs"][-1] = append_record(root, directory, "different_proposal.json", payload)
+    elif replacement == "report":
+        payload = read_pin(root, program.validation_ref)
+        payload["different_report"] = True
+        result["validation_refs"][-1] = append_record(root, directory, "different_report.json", payload)
+    else:
+        payload = read_pin(root, program.binding_ref)
+        payload["primitive_steps"][1]["params"]["x"] = 1.2
+        result["binding_refs"].append(append_record(root, directory, "different_steps.json", payload))
+    (root / program.result_ref["ref"]).unlink()
+    _write_record(root / program.result_ref["ref"], {key: value for key, value in result.items() if key != "fingerprint"})
+    transport = _Transport(part)
+    executor = PrimitiveExecutionRuntime(robot_runtime=robot, validator=_validator, session_factory=transport, share=_SHARE)
+    with pytest.raises(ValueError):
+        asyncio.run(executor.run(root))
+    assert transport.calls == [] and not (root / "execution").exists()
+
+
+def test_validation_and_run_selection_require_the_same_binding(tmp_path: Path) -> None:
+    root = tmp_path / "interaction"
+    robot, part, _ = _validated(root, validation_profile=load_refinement_profile())
+    program = load_validated_program(root)
+    steps = deepcopy(program.steps)
+    steps[1]["params"]["z"] = 0.99
+    with pytest.raises(ValueError, match="pinned primitive binding"):
+        asyncio.run(_validator(inputs=program.inputs, steps=steps, robot=program.robot,
+            evidence=program.report["evidence_refs"], directory=root / "should_not_validate", profile=program.profile, cache={}))
+    executor = PrimitiveExecutionRuntime(robot_runtime=robot, validator=_validator, session_factory=_Transport(part), share=_SHARE)
+    with pytest.raises(ValueError, match="binding"):
+        asyncio.run(executor.run(root, binding_ref="composition/different_binding.json"))
+    assert not (root / "execution").exists()

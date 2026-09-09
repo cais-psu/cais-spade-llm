@@ -45,7 +45,11 @@ _GROUNDING_VALIDATION_CODES = frozenset(
 
 
 class ProductAgentContextRuntime(Protocol):
-    """Expose the shared ProductAgent's controlled structured-call boundary."""
+    """Expose owned PA grounding calls and the scoped primitive-context inbox."""
+
+    def primitive_context_inbox(self, **kwargs: Any) -> Any:
+        """Return a scoped SPADE inbox without starting PA's production lifecycle."""
+        ...
 
     async def ask_llm_structured(
         self,

@@ -13,6 +13,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -2709,6 +2710,7 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
         "execution_trace": execution_trace,
         "execution_expansion": execution_expansion,
         "execution_candidate_ref": None,
+        "execution_binding_ref": None,
     }
 
 
@@ -2849,7 +2851,9 @@ def _apply_phase_5_1_diagnostic(
     _set_enabled(elements["start_button"], action_enabled)
 
 
-def _format_primitive_program(steps: list[dict[str, Any]], catalog: list[dict[str, Any]]) -> str:
+def _format_primitive_program(
+    steps: list[dict[str, Any]], catalog: list[dict[str, Any]], *, pending_results: bool = False,
+) -> str:
     """Render numbered calls without binding or changing the RA-authored program."""
     declarations = {item["primitive_symbol"]: item for item in catalog}
     lines = []
@@ -2858,7 +2862,7 @@ def _format_primitive_program(steps: list[dict[str, Any]], catalog: list[dict[st
         declaration = declarations.get(symbol, {})
         schemas = declaration.get("parameter_schemas", {})
         arguments = [
-            f"{name}={_format_parameter_binding(value, schemas.get(name, {}))}"
+            f"{name}={_format_parameter_binding(value, schemas.get(name, {}), pending_results=pending_results)}"
             for name, value in params.items()
         ]
         for parameter in declaration.get("typed_parameters", []):
@@ -2871,15 +2875,18 @@ def _format_primitive_program(steps: list[dict[str, Any]], catalog: list[dict[st
     return "\n".join(lines)
 
 
-def _format_parameter_binding(value: Any, schema: Any) -> str:
+def _format_parameter_binding(value: Any, schema: Any, *, pending_results: bool = False) -> str:
     """Show omitted geometry fields without changing supplied values or references."""
+    if pending_results and isinstance(value, Mapping) and set(value) == {"result_ref"}:
+        ref = value["result_ref"]
+        return f"<pending: step {ref['step_index']} {ref['field_path']}>"
     if not isinstance(schema, Mapping) or not isinstance(value, Mapping) or set(value) in (
         {"value_ref"}, {"result_ref"}
     ):
         return _format_primitive_value(value)
     properties = schema.get("properties", {})
     items = [
-        f"{json.dumps(name)}: {_format_parameter_binding(item, properties.get(name, {}))}"
+        f"{json.dumps(name)}: {_format_parameter_binding(item, properties.get(name, {}), pending_results=pending_results)}"
         for name, item in value.items()
     ]
     required = dict.fromkeys([*schema.get("required", []), *schema.get("x-grounding-fields", [])])
@@ -2975,7 +2982,7 @@ def _apply_primitive_composition_diagnostic(
     color = "green" if status == "validated_for_declared_scope" else "red" if status in {"invalid", "failed", "blocked"} else "amber"
     elements["candidate_status_badge"].props(f"color={color} outline")
     elements["candidate_message"].set_text(
-        "RA is inspecting evidence and composing a primitive program."
+        "RA is composing a primitive program; input binding and calculation use deterministic code."
         if authoring_busy
         else str(diagnostic.get("message", "Capture the selected RobotAgent context first."))
     )
@@ -3001,6 +3008,7 @@ def _apply_primitive_composition_diagnostic(
     if progress_only:
         return
     candidate = diagnostic.get("candidate")
+    elements["execution_binding_ref"] = (diagnostic.get("binding_ref") or {}).get("ref")
     if "execution_candidate_ref" in elements:
         elements["execution_candidate_ref"] = diagnostic.get("latest_candidate_ref") or (
             str(Path(candidate["request_ref"]).parent / "candidate.json")
@@ -3013,7 +3021,8 @@ def _apply_primitive_composition_diagnostic(
         else []
     )
     elements["candidate_steps"].content = (
-        _format_primitive_program(candidate["primitive_steps"], catalog)
+        _format_primitive_program(diagnostic.get("resolved_primitive_steps", candidate["primitive_steps"]), catalog,
+                                  pending_results="resolved_primitive_steps" in diagnostic)
         if isinstance(candidate, Mapping)
         else ""
     )
@@ -3043,6 +3052,8 @@ def _apply_primitive_composition_diagnostic(
         {
             "composition_input": composition_input,
             "candidate": candidate,
+            "binding": diagnostic.get("binding"),
+            "binding_ref": diagnostic.get("binding_ref"),
             "binding_issues": binding_issues,
             "exchanges": trace,
             **({"validation": validation, "refinement": diagnostic.get("refinement")} if "refinement" in diagnostic else {}),
@@ -3075,7 +3086,7 @@ def _apply_primitive_composition_diagnostic(
     if "diagnostic_deadline" in elements:
         _set_enabled(elements["diagnostic_deadline"], authoring_enabled)
     if "cancel_candidate_button" in elements:
-        elements["cancel_candidate_button"].set_visibility(authoring_busy or status in {"composing", "proposal", "robot_context", "validating", "evidence", "validation_result"})
+        elements["cancel_candidate_button"].set_visibility(authoring_busy or status in {"composing", "proposal", "robot_context", "binding", "calculating", "validating", "evidence", "validation_result"})
 
 
 def _calibration_readiness(
@@ -3719,6 +3730,18 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                                     )
                             if interaction_card.is_deleted:
                                 return
+                        for field in ("pa_reply_ref", "pa_answers_ref", "pa_operation_ref", "input_resolution_ref"):
+                            if field not in event:
+                                continue
+                            from .agents.pa.primitive_context import _read_answer_checkpoint
+
+                            reader = _read_answer_checkpoint if field == "pa_answers_ref" else verify_record
+                            record = await asyncio.to_thread(reader, root, event[field])
+                            if interaction_card.is_deleted:
+                                return
+                            progress_view["refinement"].setdefault("pa_trace", []).append(
+                                {"reference": event[field], "record": record}
+                            )
                         if "pa_response_ref" in event:
                             response = await asyncio.to_thread(
                                 verify_record, root, event["pa_response_ref"]
@@ -3738,12 +3761,25 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                             progress_view["attempt_count"] = event["candidate_count"]
                             progress_view["latest_candidate_ref"] = event["candidate_ref"]["ref"]
                             progress_view.pop("validation", None)
+                            for field in ("binding", "binding_ref", "resolved_primitive_steps"):
+                                progress_view.pop(field, None)
+                        if "binding" in event:
+                            for field in ("binding", "binding_ref", "resolved_primitive_steps"):
+                                progress_view[field] = deepcopy(event[field])
+                            progress_view.pop("validation", None)
+                        if "calculation_ref" in event:
+                            progress_view["resolved_primitive_steps"] = deepcopy(event["resolved_primitive_steps"])
                         if "validation" in event:
                             progress_view["validation"] = event["validation"]
+                            displayed = progress_view.get("resolved_primitive_steps")
+                            if displayed is not None:
+                                for checked in event["validation"].get("checked_steps", []):
+                                    if "resolved_params" in checked:
+                                        displayed[checked["step_index"] - 1]["params"] = deepcopy(checked["resolved_params"])
                         # Persist every event; rebuild the large program/trace view only
                         # when its contents change or the run reaches a terminal state.
                         progress_only = not (
-                            {"candidate", "validation", "pa_response_ref", "differences"}.intersection(event)
+                            {"candidate", "binding", "calculation_ref", "validation", "pa_response_ref", "pa_answers_ref", "differences"}.intersection(event)
                             or event["stage"] == "finished"
                         )
                         _apply_primitive_composition_diagnostic(
@@ -3853,7 +3889,8 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 candidate_ref = phase_5_elements["execution_candidate_ref"]
                 if not isinstance(candidate_ref, str):
                     raise ValueError("Display a saved validated program before Run in Gazebo.")
-                await executor.run(root, candidate_ref=candidate_ref, progress=progress)
+                await executor.run(root, candidate_ref=candidate_ref,
+                                   binding_ref=phase_5_elements.get("execution_binding_ref"), progress=progress)
             except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 action_state["execution_error"] = str(exc)
                 if not interaction_card.is_deleted:

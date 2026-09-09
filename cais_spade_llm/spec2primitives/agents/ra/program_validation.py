@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path
@@ -277,6 +277,7 @@ async def validate_program(
     cache: dict[str, dict[str, Any]],
     session_factory: Callable[..., Any] = IsolatedMoveItSession,
     _validation_started_at_ns: int | None = None,
+    progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Calculate and check the exact candidate in its recorded scope without repairing it."""
     # Snapshot freshness belongs to validation entry, before evidence verification
@@ -288,6 +289,12 @@ async def validate_program(
     if inputs.validation_scope != scope:
         from .primitive_composition import _with_scope
         inputs = _with_scope(inputs, scope)
+    if inputs.binding_ref is not None:
+        from .program_binding import read_program_binding
+
+        binding, _ = await asyncio.to_thread(read_program_binding, inputs, inputs.binding_ref)
+        if binding["primitive_steps"] != steps:
+            raise ValueError("Validation steps differ from the pinned primitive binding.")
     await asyncio.to_thread(_validate_steps, steps, inputs)
     supported = supported_primitive_symbols(scope)
     unsupported = [
@@ -301,7 +308,7 @@ async def validate_program(
         if step["primitive_symbol"] not in supported
     ]
     if unsupported:
-        return _report(steps, unsupported, [], [], None, scope=scope)
+        return _report(steps, unsupported, [], [], None, scope=scope, binding_ref=inputs.binding_ref)
     binding_report = await asyncio.to_thread(
         assess_program_dependencies,
         steps,
@@ -362,7 +369,7 @@ async def validate_program(
                 authority="RA",
             )
         )
-        return _report(steps, findings, [], [], None, scope=scope)
+        return _report(steps, findings, [], [], None, scope=scope, binding_ref=inputs.binding_ref)
     if (
         robot["resource_jid"] != inputs.assignment.selected_resource_jid
         or robot["assignment_fingerprint"] != inputs.assignment.fingerprint
@@ -415,7 +422,7 @@ async def validate_program(
                 authority="RA",
             )
         )
-        return _report(steps, findings, [], [], None, scope=scope)
+        return _report(steps, findings, [], [], None, scope=scope, binding_ref=inputs.binding_ref)
     for role in ("part", "goal", "scene"):
         if role in records:
             stamp = records[role].get("observation_timestamp_ns", 0)
@@ -627,6 +634,11 @@ async def validate_program(
                     }
                 )
                 continue
+            if progress is not None:
+                calculating = symbol in {"compute_pick_targets", "compute_place_targets"}
+                await progress({"stage": "calculating" if calculating else "validating",
+                                "message": f"{'Calculating' if calculating else 'Validating'} step {index}: {symbol}.",
+                                "step_index": index})
             try:
                 incompatible = [
                     item
@@ -777,6 +789,7 @@ async def validate_program(
                             "source_refs": source_refs,
                             "input_fingerprint": key,
                             "reused": reused,
+                            **({"binding_ref": inputs.binding_ref} if inputs.binding_ref is not None else {}),
                             "created_at_ns": time.time_ns(),
                         },
                     )
@@ -789,6 +802,9 @@ async def validate_program(
                             "calculation_ref": reference,
                         }
                     )
+                    if progress is not None:
+                        await progress({"stage": "calculating", "message": f"Calculated step {index}: {symbol}.",
+                                        "step_index": index, "calculation_ref": reference})
                 elif symbol == "move_cartesian":
                     target = {key: params[key] for key in ("x", "y", "z")}
                     orientation = {
@@ -960,6 +976,7 @@ async def validate_program(
         calculations,
         {"ee_pose": pose, "part_pose": part_pose, "held_part": held},
         scope=scope,
+        binding_ref=inputs.binding_ref,
     )
 
 
@@ -971,6 +988,7 @@ def _report(
     final_state: Any,
     *,
     scope: str,
+    binding_ref: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     statuses = {item["status"] for item in [*findings, *checked_steps]}
     status = (
@@ -985,6 +1003,7 @@ def _report(
         "status": status,
         "scope": scope,
         "candidate_fingerprint": fingerprint(steps),
+        **({"binding_ref": dict(binding_ref)} if binding_ref is not None else {}),
         "findings": findings,
         "checked_steps": checked_steps,
         "calculation_refs": calculations,

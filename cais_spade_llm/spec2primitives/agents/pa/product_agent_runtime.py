@@ -1,6 +1,6 @@
-"""Compose the shared ProductAgent behind the Phase 3.1 protocol."""
-
 from __future__ import annotations
+
+"""Compose the shared ProductAgent behind owned context and message boundaries."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
@@ -38,6 +38,12 @@ class _SharedProductAgentContextRuntime:
         # Keep the configured effort exact because the shared ProductAgent owns
         # the Chat Completions request and must not silently downgrade reasoning.
         self._product_agent.reasoning_effort = reasoning_effort
+
+    def primitive_context_inbox(self, **kwargs: Any) -> Any:
+        """Register one scoped SPADE inbox without running ProductAgent.setup."""
+        from .primitive_context_messages import primitive_context_inbox
+
+        return primitive_context_inbox(self._product_agent, **kwargs)
 
     async def ask_llm_structured(
         self,

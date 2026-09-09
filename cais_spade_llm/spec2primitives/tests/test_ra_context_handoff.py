@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 import asyncio
+import dataclasses
 import hashlib
 import inspect
 import json
@@ -521,8 +522,7 @@ def test_in_process_ra_adapter_asks_exact_robot_agent_for_primitive_program(tmp_
     assert call["include_agent_instructions"] is False
     composition_input = _composition_input_from_prompt(call["prompt"])
     assert composition_input["target_feature"]["product_requirement"] == "assemble medium gear"
-    projection = composition_input["ontology_projection"]
-    assert set(projection) == {"tbox_fingerprint", "abox_fingerprint", "subjects", "predicates"}
+    assert "ontology_projection" not in composition_input
     view = read_primitive_composition_diagnostic(tmp_path)
     final_view_path = sorted((tmp_path / "products/grounding/product_context").glob("view_*.json"))[
         -1
@@ -535,7 +535,7 @@ def test_in_process_ra_adapter_asks_exact_robot_agent_for_primitive_program(tmp_
     proposal = next(item for item in variants if item["properties"]["kind"]["enum"] == ["propose"])
     assert (
         proposal["properties"]["primitive_steps"]["items"]["properties"]["primitive_symbol"]["enum"]
-        == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS
+        == [symbol for symbol in _EXPECTED_XARM6_SYNTHESIS_SYMBOLS if symbol in supported_primitive_symbols(VALIDATION_SCOPE)]
     )
     assert not (tmp_path / "composition/primitive_program_drafts").exists()
 
@@ -610,6 +610,7 @@ def test_composition_pins_context_and_preserves_phase_4(tmp_path: Path) -> None:
         "robot_state",
         "primitive_catalog",
         "grounded_context",
+        "resolved_task_records",
     }
     assert composition_input["robot_state"] == context.robot_state.robot_state
     assert composition_input["primitive_catalog"] == composition_context._composition_catalog_view(
@@ -636,7 +637,8 @@ def test_composition_pins_context_and_preserves_phase_4(tmp_path: Path) -> None:
         for item in composition_input["grounded_context"]["typed_records"]
     )
     delivered = _composition_input_from_prompt(runtime.calls[0]["prompt"])
-    assert delivered["target_feature"] == target_feature
+    assert delivered["target_feature"]["product_requirement"] == target_feature["product_requirement"]
+    assert "value_ref" not in json.dumps(delivered["target_feature"])
     assert delivered["robot_state"] == composition_input["robot_state"]
     assert "structural_steps" not in delivered
     serialized = json.dumps(candidate.to_record())
@@ -667,8 +669,7 @@ def test_ra_receives_resolved_target_state_values_without_persisting_them(tmp_pa
     resolved = {item["name"]: item for item in target_feature["resolved_state_values"]}
     assert resolved["specified_finish"]["resolved_value"] == "matte"
     assert resolved["specified_coating"]["resolved_value"] == "primer"
-    assert resolved["specified_finish"]["value_ref"]["field_path"] == "/overview/summary"
-    assert resolved["specified_coating"]["value_ref"]["field_path"] == "/overview/observations/0"
+    assert "value_ref" not in json.dumps(resolved)
     serialized = json.dumps(candidate.to_record())
     assert "target_feature" not in serialized
     assert "specified_finish" not in serialized
@@ -1619,8 +1620,8 @@ def test_composition_proposes_with_unbound_parameters_and_ignores_draft_history(
     diagnostic = read_primitive_composition_diagnostic(tmp_path)
     assert diagnostic["status"] == "proposed"
     assert diagnostic["attempt_count"] == 1
-    assert "Omit any parameter" in runtime.calls[0]["prompt"]
-    assert "including required parameters" in runtime.calls[0]["prompt"]
+    assert "Omit unavailable measured inputs" in runtime.calls[0]["prompt"]
+    assert "including required inputs" in runtime.calls[0]["prompt"]
     variants = runtime.calls[0]["response_format"]["schema"]["properties"]["action"]["anyOf"]
     assert ["missing_context"] not in [item["properties"]["kind"]["enum"] for item in variants]
 
@@ -1631,24 +1632,19 @@ def test_composition_keeps_event_loop_responsive_during_evidence_checks(
 ) -> None:
     """Slow evidence I/O permits connection heartbeats between RA decisions."""
     _, _, current_ref = _prepare_composition(tmp_path)
-    runtime = _ProgramRuntime(
-        [
-            {"kind": "read_record", "record_ref": current_ref, "field_path": ""},
-            _program_action([("move_cartesian", {})]),
-        ]
-    )
+    runtime = _ProgramRuntime([_program_action([("move_cartesian", {})])])
     blocked: list[str] = []
 
     async def scenario() -> None:
         loop = asyncio.get_running_loop()
 
         def slow_check(reader: Callable) -> Callable:
-            def read(*args: Any) -> Any:
+            def read(*args: Any, **kwargs: Any) -> Any:
                 heartbeat = Event()
                 loop.call_soon_threadsafe(heartbeat.set)
                 if not heartbeat.wait(timeout=0.5):
                     blocked.append(reader.__name__)
-                return reader(*args)
+                return reader(*args, **kwargs)
 
             return read
 
@@ -1656,7 +1652,6 @@ def test_composition_keeps_event_loop_responsive_during_evidence_checks(
             for name in (
                 "_load_inputs",
                 "_read_composition_history",
-                "_serve_evidence",
                 "_validate_steps",
             ):
                 patch.setattr(
@@ -1666,160 +1661,65 @@ def test_composition_keeps_event_loop_responsive_during_evidence_checks(
         assert candidate.record["status"] == "proposed"
 
     asyncio.run(scenario())
-    assert len(runtime.calls) == 2
+    assert len(runtime.calls) == 1
     assert blocked == [], f"Evidence checks blocked connection heartbeats: {blocked}"
 
 
-def test_parameterized_composition_reads_evidence_and_preserves_ra_decisions(
-    tmp_path: Path,
-) -> None:
+def test_composition_preserves_ra_decisions_in_one_bounded_prompt(tmp_path: Path) -> None:
     _, agent, current_ref = _prepare_composition(tmp_path)
+    inputs = primitive_composition._load_inputs(tmp_path)
     location = {"value_ref": {"record_ref": current_ref, "field_path": "/translated_location_m/0"}}
-    output = {"result_ref": {"step_index": 1, "field_path": "/target_pose/y"}}
-    steps = [
-        ("compute_pick_targets", {"part_name": "medium gear", "target_pose": {"x": location}}),
-        ("move_cartesian", {"x": location, "y": output, "z": 1.2}),
-        ("move_cartesian", {"x": 0, "y": 0, "z": 1.27}),
-        ("move_cartesian", {"x": 0, "y": 0, "z": 1.25}),
-    ]
-    runtime = _ProgramRuntime(
-        [
-            {
-                "kind": "read_record",
-                "record_ref": current_ref,
-                "field_path": "/translated_location_m",
-            },
-            {
-                "kind": "query_ontology",
-                "subject": None,
-                "predicate": "http://PAonto.com#defines",
-                "object": None,
-                "offset": 0,
-            },
-            _program_action(steps),
-        ]
-    )
-
+    steps = [("compute_pick_targets", {"part_name": "medium gear", "target_pose": {"x": location}}),
+             ("move_cartesian", {"x": location, "y": {"result_ref": {"step_index": 1, "field_path": "/target_pose/y"}}, "z": 1.2}),
+             ("move_cartesian", {"x": 0, "y": 0, "z": 1.27})]
+    runtime = _ProgramRuntime([_program_action(steps)])
     candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
-
-    assert candidate.record["status"] == "proposed"
-    assert candidate.record["primitive_steps"] == [
-        {"primitive_symbol": symbol, "params": params} for symbol, params in steps
-    ]
-    assert not (tmp_path / "composition/primitive_program_drafts").exists()
-    assert len(runtime.calls) == 3
-    assert (
-        len(agent.composition_calls) == 0
-    )  # Context capture never calls the LLM or executes controller/observation APIs.
-    view = read_primitive_composition_diagnostic(tmp_path)
-    assert view["status"] == "proposed"
-    assert (
-        view["trace"][0]["result"]["value"]
-        == _read_json(tmp_path / current_ref)["translated_location_m"]
-    )
-    assert view["trace"][1]["result"]["assertions"]
-    assert all(
-        item["predicate"] == "http://PAonto.com#defines"
-        for item in view["trace"][1]["result"]["assertions"]
-    )
-    assert "unvalidated" in view["message"]
-    prompt = runtime.calls[0]["prompt"]
-    initial_input = json.loads(
-        prompt.split("COMPOSITION_INPUT\n", 1)[1].split("\n\nEXCHANGES", 1)[0]
-    )
-    assert "assertions" not in initial_input["ontology_projection"]
-    assert initial_input["ontology_projection"]["subjects"]
-    assert initial_input["target_feature"]["current_state"]
-    assert initial_input["target_feature"]["desired_state"]
-    assert (
-        initial_input["primitive_catalog"][5]["parameter_schemas"]["dz"]["description"]
-        == "Relative displacement in metres."
-    )
-    assert "/capability_decompositions/" not in prompt
-    assert "/memo/" not in prompt
-
-
-@pytest.mark.parametrize("unavailable", [False, True])
-def test_composition_progress_precedes_proposal_and_preserves_evidence_errors(
-    tmp_path: Path, unavailable: bool
-) -> None:
-    """Expose each model wait and completed evidence request without changing RA output."""
-    _, _, current_ref = _prepare_composition(tmp_path)
-    updates = []
-
-    def inspect_call() -> None:
-        assert "waiting for model response" in updates[-1]
-        assert not list((tmp_path / "composition/primitive_program_candidates").glob("*/candidate.json"))
-
-    steps = [("move_cartesian", {"x": 0.2})]
-    runtime = _ProgramRuntime(
-        [
-            {"kind": "read_record", "record_ref": current_ref, "field_path": "/missing" if unavailable else "/translated_location_m"},
-            _program_action(steps),
-        ],
-        on_call=inspect_call,
-    )
-
-    async def progress(message: str) -> None:
-        updates.append(message)
-        if "RA evidence request" in message:
-            assert list((tmp_path / "composition/primitive_program_candidates").glob("*/exchange_0001.json"))
-
-    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path, progress=progress))
-    waits = [message for message in updates if "waiting for model response" in message]
-    reads = [message for message in updates if "RA evidence request" in message]
-    assert len(waits) == 2 and len(reads) == 1
-    assert "RA request 1" in waits[0] and "0/12" in waits[0]
-    assert "RA evidence request 1/12 (read_record)" in reads[0]
-    assert ("could not be satisfied" in reads[0]) is unavailable
-    assert "RA request 2" in waits[1] and "1/12" in waits[1]
-    assert sum("integrity check completed in" in message for message in updates) == 5
-    assert sum("model response received in" in message for message in updates) == 2
-    for message, call in zip(waits, runtime.calls):
-        assert f"Prompt: {len(call['prompt'])} characters." in message
     assert candidate.record["status"] == "proposed"
     assert candidate.record["primitive_steps"] == [{"primitive_symbol": symbol, "params": params} for symbol, params in steps]
-    view = read_primitive_composition_diagnostic(tmp_path)
-    assert ("error" in view["trace"][0]["result"]) is unavailable
+    assert len(runtime.calls) == len(candidate.record["exchange_refs"]) == 1 and agent.composition_calls == []
+    prompt = runtime.calls[0]["prompt"]
+    delivered = _composition_input_from_prompt(prompt)
+    assert delivered["primitive_catalog"] == inputs.composition_input["primitive_catalog"]
+    assert delivered["robot_state"] == inputs.composition_input["robot_state"]
+    assert delivered["target_feature"]["product_requirement"] == "assemble medium gear"
+    assert len(prompt) <= 32000 and prompt.count('"primitive_catalog":') == 1
+    assert not {"ontology_projection", "grounded_context"} & delivered.keys()
+    assert all(word not in prompt for word in ("EXCHANGES", "observation_catalog", "CADSizeCorrespondenceRecord"))
+    kinds = {variant["properties"]["kind"]["enum"][0] for variant in runtime.calls[0]["response_format"]["schema"]["properties"]["action"]["anyOf"]}
+    assert kinds == {"propose", "unsupported"}
 
 
-def test_composition_batches_six_reads_and_preserves_compact_evidence(
-    tmp_path: Path,
-) -> None:
-    """One chosen batch and a proposal replace six separate read/model round trips."""
-    _, _, current_ref = _prepare_composition(tmp_path)
+
+def test_composition_progress_precedes_its_single_authoring_call(tmp_path: Path) -> None:
+    _prepare_composition(tmp_path)
+    updates = []
+    def inspect_call() -> None:
+        assert "RA is authoring the primitive program" in updates[-1]
+        assert not list((tmp_path / "composition/primitive_program_candidates").glob("*/candidate.json"))
+    runtime = _ProgramRuntime([_program_action([("move_cartesian", {"x": 0.2})])], on_call=inspect_call)
+    async def progress(message: str) -> None:
+        updates.append(message)
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path, progress=progress))
+    assert candidate.record["status"] == "proposed" and len(runtime.calls) == 1
+    assert f"Prompt: {len(runtime.calls[0]['prompt'])} characters." in updates[0]
+    assert "RA proposal received in" in updates[1]
+    assert all("evidence request" not in message for message in updates)
+
+
+
+def test_composition_rejects_oversized_essential_contract_without_truncating(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _prepare_composition(tmp_path)
     inputs = primitive_composition._load_inputs(tmp_path)
-    pointers = [
-        "/translated_location_m/2", "/translated_location_m/0", "/translated_location_m/1",
-        "/record_type", "/method", "/source_segmentation",
-    ]
-    requests = [{"record_ref": current_ref, "field_path": pointer} for pointer in pointers]
-    params = {
-        axis: {"value_ref": {"record_ref": current_ref, "field_path": f"/translated_location_m/{index}"}}
-        for index, axis in enumerate(("x", "y", "z"))
-    }
-    runtime = _ProgramRuntime([
-        {"kind": "read_records", "requests": requests},
-        _program_action([("move_cartesian", params)]),
-    ])
-    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path, max_evidence_requests=6))
-    assert candidate.record["status"] == "proposed"
-    assert candidate.record["primitive_steps"] == [{"primitive_symbol": "move_cartesian", "params": params}]
-    assert len(runtime.calls) == 2
-    assert "Evidence requests remaining: 0." in runtime.calls[1]["prompt"]
-    trace = read_primitive_composition_diagnostic(tmp_path)["trace"]
-    results = trace[0]["result"]["results"]
-    assert [result["field_path"] for result in results] == pointers
-    for request, result in zip(requests, results):
-        assert result == primitive_composition._serve_evidence({"kind": "read_record", **request}, inputs)
-    projected = _composition_input_from_prompt(runtime.calls[0]["prompt"])
-    for key in ("primitive_catalog", "target_feature", "robot_state", "selected_resource"):
-        assert projected[key] == inputs.composition_input[key]
-    serialized = runtime.calls[0]["prompt"].split("COMPOSITION_INPUT\n", 1)[1].split("\n\nEXCHANGES", 1)[0]
-    assert len(serialized) < len(json.dumps(projected, ensure_ascii=False))
-    history = runtime.calls[1]["prompt"].split("EXCHANGES\n", 1)[1].split("\nEvidence", 1)[0]
-    assert json.loads(history) == [{"response": trace[0]["response"], "result": trace[0]["result"]}]
-    assert "read_records" in str(runtime.calls[0]["response_format"])
+    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    payload = deepcopy(inputs.composition_input)
+    payload["primitive_catalog"][0]["description"] = "essential contract " * 3200
+    monkeypatch.setattr(primitive_composition, "_load_inputs", lambda root: dataclasses.replace(inputs, composition_input=payload))
+    runtime = _ProgramRuntime([_program_action([("release_part", {})])])
+    with pytest.raises(PrimitiveCompositionError, match="32000-character prompt budget"):
+        asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert runtime.calls == []
+    assert all(path.read_bytes() == content for path, content in original.items())
+
 
 
 @pytest.mark.parametrize("scope", [VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE])
@@ -1863,65 +1763,13 @@ def test_scope_with_no_supported_catalog_entries_can_report_unsupported(tmp_path
     )
 
 
-def test_composition_batch_records_errors_and_charges_each_item(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Unavailable, forbidden and oversized reads consume budget without hiding valid siblings."""
-    _, _, current_ref = _prepare_composition(tmp_path)
-    monkeypatch.setattr(primitive_composition, "_READ_LIMIT", 100)
-    requests = [
-        {"record_ref": current_ref, "field_path": "/translated_location_m/0"},
-        {"record_ref": current_ref, "field_path": "/missing"},
-        {"record_ref": "evaluations/answer.json", "field_path": ""},
-        {"record_ref": "../answer.json", "field_path": ""},
-        {"record_ref": current_ref, "field_path": ""},
-    ]
-    runtime = _ProgramRuntime([
-        {"kind": "read_records", "requests": requests},
-        _program_action([("move_cartesian", {})]),
-    ])
-    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path, max_evidence_requests=5))
-    assert candidate.record["status"] == "proposed"
-    trace = read_primitive_composition_diagnostic(tmp_path)["trace"]
-    results = trace[0]["result"]["results"]
-    assert len(results) == 5 and "value" in results[0]
-    assert all("error" in result for result in results[1:])
-    assert "narrower field_path" in results[-1]["error"]
-    assert [{key: result[key] for key in ("record_ref", "field_path")} for result in results] == requests
-    assert len(runtime.calls) == 2
-    assert "Evidence requests remaining: 0." in runtime.calls[1]["prompt"]
 
 
-@pytest.mark.parametrize("budget", [0, 1])
-def test_composition_rejects_over_budget_batch_without_partial_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: int
-) -> None:
-    """An over-budget decision remains recorded but no selected read is performed."""
-    _, _, current_ref = _prepare_composition(tmp_path)
-    def forbidden_read(*args: Any) -> Any:
-        raise AssertionError("An over-budget batch must not be partially served.")
-    monkeypatch.setattr(primitive_composition, "_serve_evidence", forbidden_read)
-    action = {"kind": "read_records", "requests": [
-        {"record_ref": current_ref, "field_path": f"/translated_location_m/{index}"}
-        for index in range(2)
-    ]}
-    runtime = _ProgramRuntime([action])
-    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path, max_evidence_requests=budget))
-    assert candidate.record["status"] == "budget_exhausted"
-    assert f"with {budget} remaining" in candidate.record["reason"]
-    assert len(runtime.calls) == 1
-    exchange = _read_json(candidate.path.parent / "exchange_0001.json")
-    assert exchange["response"] == {"action": action}
-    assert "error" in exchange["result"]
 
 
-@pytest.mark.parametrize("requests", [[], None, [{}], [{"record_ref": "x", "field_path": 0}], [
-    {"record_ref": "x", "field_path": "", "extra": True}
-]])
-def test_composition_rejects_malformed_batch(requests: Any) -> None:
-    """Malformed batches cannot be interpreted as host-selected record reads."""
-    with pytest.raises(PrimitiveCompositionError):
-        primitive_composition._action({"action": {"kind": "read_records", "requests": requests}})
+
+
+
 
 
 def test_parameterized_composition_uses_only_selected_ra_isolated_llm(tmp_path: Path) -> None:
@@ -2023,30 +1871,16 @@ def test_parameterized_composition_rejects_undeclared_result_paths(
     assert candidate.record["status"] == "invalid"
 
 
-def test_parameterized_composition_cannot_read_unapproved_or_traversing_refs(
-    tmp_path: Path,
-) -> None:
+@pytest.mark.parametrize("reference,pointer", [("evaluations/answer.json", ""), ("../answer.json", ""), (None, "/translated_location_m/01")])
+def test_composition_rejects_unapproved_or_traversing_value_refs(tmp_path: Path, reference: str | None, pointer: str) -> None:
     _, _, current_ref = _prepare_composition(tmp_path)
-    secret_path = tmp_path / "evaluations/answer.json"
-    secret_path.parent.mkdir()
-    secret_path.write_text('{"answer": "must not reach RA"}')
-    runtime = _ProgramRuntime(
-        [
-            {"kind": "read_record", "record_ref": "evaluations/answer.json", "field_path": ""},
-            {"kind": "read_record", "record_ref": "../answer.json", "field_path": ""},
-            {
-                "kind": "read_record",
-                "record_ref": current_ref,
-                "field_path": "/translated_location_m/01",
-            },
-            _program_action([("move_cartesian", {})]),
-        ]
-    )
+    runtime = _ProgramRuntime([_program_action([("move_cartesian", {"x": {"value_ref": {
+        "record_ref": reference or current_ref, "field_path": pointer,
+    }}})])])
     candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
-    assert candidate.record["status"] == "proposed"
-    assert all("must not reach RA" not in call["prompt"] for call in runtime.calls)
-    trace = read_primitive_composition_diagnostic(tmp_path)["trace"]
-    assert all("error" in exchange["result"] for exchange in trace[:3])
+    assert candidate.record["status"] == "invalid" and len(runtime.calls) == 1
+    assert "error" in read_primitive_composition_diagnostic(tmp_path)["trace"][0]["result"]
+
 
 
 def test_composition_load_validates_completion_once_per_integrity_check(
@@ -2109,38 +1943,19 @@ def test_parameterized_composition_stops_changed_evidence_and_preserves_response
     assert read_primitive_composition_diagnostic(tmp_path)["status"] == "blocked"
 
 
-def test_parameterized_composition_budget_and_independent_attempts(tmp_path: Path) -> None:
-    _, _, current_ref = _prepare_composition(tmp_path)
-    runtime = _ProgramRuntime(
-        [
-            {
-                "kind": "read_record",
-                "record_ref": current_ref,
-                "field_path": "/translated_location_m",
-            },
-        ]
-    )
-    first = asyncio.run(
-        author_primitive_program_candidate(runtime, tmp_path, max_evidence_requests=1)
-    )
-    assert first.record["status"] == "budget_exhausted"
-    assert len(runtime.calls) == 2
-    assert len(first.record["exchange_refs"]) == 2
+@pytest.mark.parametrize("kind", ["read_record", "read_records", "query_ontology", "request_context"])
+def test_composition_rejects_retired_evidence_actions_and_keeps_independent_attempts(tmp_path: Path, kind: str) -> None:
+    _prepare_composition(tmp_path)
+    runtime = _ProgramRuntime([{"kind": kind}])
+    first = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert first.record["status"] == "invalid" and len(runtime.calls) == len(first.record["exchange_refs"]) == 1
     before = first.path.read_bytes()
-    fresh = _ProgramRuntime(
-        [{"kind": "unsupported", "reason": "A required capability is unavailable."}]
-    )
-    second = asyncio.run(
-        author_primitive_program_candidate(fresh, tmp_path, max_evidence_requests=0)
-    )
-    assert second.path.parent.name == "attempt_0002"
-    assert second.record["status"] == "unsupported"
-    assert first.path.read_bytes() == before
-    assert (
-        json.loads(fresh.calls[0]["prompt"].split("EXCHANGES\n", 1)[1].split("\nEvidence", 1)[0])
-        == []
-    )
+    fresh = _ProgramRuntime([{"kind": "unsupported", "reason": "A required capability is unavailable."}])
+    second = asyncio.run(author_primitive_program_candidate(fresh, tmp_path))
+    assert second.path.parent.name == "attempt_0002" and second.record["status"] == "unsupported"
+    assert first.path.read_bytes() == before and "EXCHANGES" not in fresh.calls[0]["prompt"]
     assert read_primitive_composition_diagnostic(tmp_path)["attempt_count"] == 2
+
 
 
 def test_parameterized_composition_blocks_changed_trace_before_ra_call(tmp_path: Path) -> None:
@@ -2430,33 +2245,18 @@ def test_composition_projects_minimal_contracts_and_filters_every_state_read(
     state_ref = captured.robot_state_path.relative_to(tmp_path).as_posix()
     catalog_ref = captured.primitive_catalog_path.relative_to(tmp_path).as_posix()
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    runtime = _ProgramRuntime(
-        [
-            {"kind": "read_record", "record_ref": state_ref, "field_path": ""},
-            {
-                "kind": "read_record",
-                "record_ref": state_ref,
-                "field_path": "/robot_state/recovery_adapter",
-            },
-            {
-                "kind": "read_record",
-                "record_ref": state_ref,
-                "field_path": "/robot_state/resource_facets",
-            },
-            {"kind": "read_record", "record_ref": catalog_ref, "field_path": ""},
-            _program_action([("release_part", {}), ("grasp_part", {"part_name": "medium gear"})]),
-        ]
-    )
+    runtime = _ProgramRuntime([_program_action([("release_part", {}), ("grasp_part", {"part_name": "medium gear"})])])
     candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
     view = read_primitive_composition_diagnostic(tmp_path)
     assert candidate.record["status"] == view["status"] == "proposed"
     assert all(sentinel not in call["prompt"] for call in runtime.calls)
     assert "compute_pick_targets and compute_place_targets" not in runtime.calls[0]["prompt"]
-    assert view["trace"][0]["result"]["value"]["robot_state"]["held_part"] is None
-    assert "error" in view["trace"][1]["result"]
-    assert (
-        "error" in view["trace"][3]["result"]
-    )  # Full runtime contracts are not a model read surface.
+    inputs = primitive_composition._load_inputs(tmp_path)
+    assert primitive_composition._evidence_value(inputs, state_ref, "/robot_state/held_part") is None
+    with pytest.raises(PrimitiveCompositionError):
+        primitive_composition._evidence_value(inputs, state_ref, "/robot_state/recovery_adapter")
+    with pytest.raises(PrimitiveCompositionError):
+        primitive_composition._evidence_value(inputs, catalog_ref, "")
     projected = {
         item["primitive_symbol"]: item for item in view["composition_input"]["primitive_catalog"]
     }
@@ -2480,7 +2280,7 @@ def test_composition_projects_minimal_contracts_and_filters_every_state_read(
         "set_from_param_any_of": ["part_name"]
     }
     assert not view["binding_issues"]
-    assert "composition interface, not a directly executable Python signature" in runtime.calls[0][
+    assert "composition contract" in runtime.calls[0][
         "prompt"
     ]
     assert all(path.read_bytes() == payload for path, payload in before.items())
@@ -2999,3 +2799,31 @@ def test_binding_assessment_reads_only_selected_evidence_and_defers_identifier(f
         and issue["status"] == "incompatible"
         for issue in issues
     ) == (frame == "robot_base")
+
+
+@pytest.mark.parametrize("mismatched", [False, True])
+def test_selected_ra_adapter_owns_context_message_delivery_without_model_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatched: bool) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_context_messages
+    from cais_spade_llm.spec2primitives.agents.ra.refinement_records import append_record
+    runtime, agent, _ = _prepare_composition(tmp_path)
+    inputs = primitive_composition._load_inputs(tmp_path)
+    reference = append_record(tmp_path, tmp_path / "composition/refinement_runs/run_0001/pa_0001", "request.json", {
+        "record_type": "PrimitiveContextRequest",
+        "assignment_fingerprint": "different" if mismatched else inputs.assignment.fingerprint,
+    })
+    calls = []
+    async def deliver(selected: Any, **kwargs: Any) -> Any:
+        calls.append((selected, kwargs))
+        return {"record_type": "PrimitiveContextResponse", "request_ref": kwargs["request_ref"]}
+    monkeypatch.setattr(primitive_context_messages, "request_context_message", deliver)
+    async def request() -> Any:
+        return await runtime.request_primitive_context(inputs.assignment, root=tmp_path, recipient="fixture-pa@localhost",
+                                                       request_ref=reference, thread="fixture-thread", deadline=123.0)
+    if mismatched:
+        with pytest.raises(RAContextHandoffError, match="assignment"):
+            asyncio.run(request())
+        assert calls == []
+    else:
+        assert asyncio.run(request())["request_ref"] == reference
+        assert calls[0][0] is agent and calls[0][1]["thread"] == "fixture-thread"
+    assert agent.composition_calls == []

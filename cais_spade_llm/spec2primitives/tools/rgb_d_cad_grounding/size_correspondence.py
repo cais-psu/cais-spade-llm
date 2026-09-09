@@ -357,10 +357,11 @@ def _validated_cad_mesh(
     return triangles_m, str(mesh["ref"]), str(mesh["sha256"])
 
 
-def _load_candidates(
+def _load_segmentation_source(
     interaction_root: Path,
     record_path: Path,
-) -> tuple[Path, dict[str, Any], list[dict[str, object]]]:
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    """Validate record metadata and source provenance without decoding candidate arrays."""
     path, relative, record = _load_json_record(interaction_root, record_path)
     if path.name != "segmentation_record.json" or set(record) != _SEGMENTATION_RECORD_KEYS:
         raise CADSizeAssociationError("Segmentation record fields are invalid.")
@@ -398,6 +399,20 @@ def _load_candidates(
         raise CADSizeAssociationError("Observation preprocessing record is invalid.") from exc
     if validated_source_path != source_path:
         raise CADSizeAssociationError("Segmentation source record path is invalid.")
+    cameras = record["cameras"]
+    if not isinstance(cameras, list) or len(cameras) != len(CAMERA_IDS):
+        raise CADSizeAssociationError("Segmentation camera records are invalid.")
+    return path, record, validated_source
+
+
+def _load_candidates(
+    interaction_root: Path,
+    record_path: Path,
+    *,
+    _decoded_points: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+) -> tuple[Path, dict[str, Any], list[dict[str, object]]]:
+    path, record, validated_source = _load_segmentation_source(interaction_root, record_path)
+    segmentation_number = record["segmentation_number"]
     source_cameras = {
         source_camera["camera_id"]: source_camera for source_camera in validated_source["cameras"]
     }
@@ -418,6 +433,7 @@ def _load_candidates(
             segmentation_number=segmentation_number,
             source_camera=source_cameras[camera_id],
             operation_number=operation_number,
+            _decoded_points=_decoded_points,
         )
         candidate_inputs.extend(camera_candidates)
         total_candidates += len(camera_candidates)
@@ -428,16 +444,14 @@ def _load_candidates(
     return path, record, candidate_inputs
 
 
-def _load_camera_candidates(
+def _validate_camera_metadata(
     interaction_root: Path,
     camera: object,
     *,
     camera_id: str,
     camera_index: int,
-    segmentation_number: int,
     source_camera: Mapping[str, object],
-    operation_number: int,
-) -> list[dict[str, object]]:
+) -> None:
     if not isinstance(camera, dict) or set(camera) != _SEGMENTATION_CAMERA_KEYS:
         raise CADSizeAssociationError("Segmentation camera fields are invalid.")
     if (
@@ -464,12 +478,29 @@ def _load_camera_candidates(
     ):
         raise CADSizeAssociationError("Segmentation point-cloud provenance is invalid.")
     _validate_source_artifacts(interaction_root, camera, camera_id=camera_id)
+
+
+def _load_camera_candidates(
+    interaction_root: Path,
+    camera: object,
+    *,
+    camera_id: str,
+    camera_index: int,
+    segmentation_number: int,
+    source_camera: Mapping[str, object],
+    operation_number: int,
+    _decoded_points: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+) -> list[dict[str, object]]:
+    _validate_camera_metadata(interaction_root, camera, camera_id=camera_id,
+                              camera_index=camera_index, source_camera=source_camera)
     points_m, pixels_uv = _load_camera_points(
         interaction_root,
         camera,
-        source_artifact=source_artifact,
+        source_artifact=source_camera["point_cloud_artifact"],
         operation_number=operation_number,
     )
+    if _decoded_points is not None:
+        _decoded_points[camera["observation_handle"]] = (points_m, pixels_uv)
     labels = _load_camera_labels(
         interaction_root,
         camera,

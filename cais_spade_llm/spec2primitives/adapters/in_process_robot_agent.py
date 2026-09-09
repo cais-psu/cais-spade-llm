@@ -151,7 +151,7 @@ class InProcessRobotAgentCompositionRuntime:
         prompt: str,
         response_format: Mapping[str, object],
     ) -> Mapping[str, object]:
-        """Return an RA-authored evidence request or parameterized candidate.
+        """Return one RA-authored semantic proposal or unsupported decision.
 
         The owned composer serves evidence requests; shared execution tools and
         recovery instructions must never participate in this call.
@@ -191,6 +191,36 @@ class InProcessRobotAgentCompositionRuntime:
                 "Selected live RobotAgent composition response is unavailable."
             )
         return response
+
+    async def request_primitive_context(
+        self, assignment: SelectedRAAssignmentEnvelope, *, root: Path, recipient: str,
+        request_ref: Mapping[str, str], thread: str, deadline: float,
+    ) -> Mapping[str, Any]:
+        """Send one pinned evidence request from the exact assigned RA over SPADE.
+
+        Args:
+            assignment: Current selected RA authority.
+            root: Authorized interaction root.
+            recipient: PA's registered context inbox JID.
+            request_ref: Immutable request owned by the active refinement run.
+            thread: Host-issued conversation identifier.
+            deadline: Absolute monotonic deadline.
+
+        Returns:
+            PA's verified context response and its record pin.
+        """
+        from ..agents.pa.primitive_context_messages import request_context_message
+        from ..agents.ra.refinement_records import verify_record
+
+        request = await asyncio.to_thread(verify_record, root, request_ref)
+        if request.get("assignment_fingerprint") != assignment.fingerprint:
+            raise RAContextHandoffError("Primitive context request belongs to another assignment.")
+        agent = await self._selected_or_started_agent(assignment)
+        self._require_alive(agent, assignment.selected_resource_jid)
+        return await self._host._run_on_agent_runtime(request_context_message(
+            agent, root=root, recipient=recipient, request_ref=request_ref,
+            thread=thread, deadline=deadline,
+        ))
 
     async def capture_validation_context(
         self, assignment: SelectedRAAssignmentEnvelope, *, profile: Mapping[str, Any],

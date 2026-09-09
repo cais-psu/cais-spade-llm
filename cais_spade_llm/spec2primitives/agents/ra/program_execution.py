@@ -70,6 +70,7 @@ class ValidatedProgram:
     report: dict[str, Any]
     robot: dict[str, Any]
     profile: dict[str, Any]
+    binding_ref: dict[str, str] | None = None
 
 
 def load_validated_program(root: Path) -> ValidatedProgram:
@@ -104,7 +105,20 @@ def load_validated_program(root: Path) -> ValidatedProgram:
             "Compose a new program with the current composition interface before execution."
         )
     report = verify_record(root, validation_ref)
-    steps = deepcopy(candidate["primitive_steps"])
+    if report != view.get("validation"):
+        raise ValueError("The selected validation report differs from the displayed report.")
+    binding_ref = result.get("binding_refs", [None])[-1] if result.get("binding_refs") else None
+    if report.get("binding_ref") != binding_ref or view.get("binding_ref") != binding_ref:
+        raise ValueError("The displayed binding differs from the validated program.")
+    if binding_ref is not None:
+        from .program_binding import read_program_binding
+
+        binding, inputs = read_program_binding(_load_inputs(root), binding_ref)
+        if binding["candidate_ref"] != candidate_ref:
+            raise ValueError("The validated binding belongs to another RA proposal.")
+        steps = deepcopy(binding["primitive_steps"])
+    else:
+        steps = deepcopy(candidate["primitive_steps"])
     if (
         report["status"] != "passed"
         or report["scope"] != scope
@@ -122,7 +136,7 @@ def load_validated_program(root: Path) -> ValidatedProgram:
     ):
         raise ValueError("The validated robot context belongs to a different resource.")
     return ValidatedProgram(
-        inputs, candidate_ref, validation_ref, result_ref, steps, report, robot, request["profile"]
+        inputs, candidate_ref, validation_ref, result_ref, steps, report, robot, request["profile"], binding_ref
     )
 
 
@@ -155,6 +169,7 @@ class PrimitiveExecutionRuntime:
         root: Path,
         *,
         candidate_ref: str | None = None,
+        binding_ref: str | None = None,
         progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Join duplicate clicks; permit only one owned execution across interactions."""
@@ -165,7 +180,7 @@ class PrimitiveExecutionRuntime:
         if execution_busy() or any(not task.done() for task in tuple(ACTIVE_COMPOSITIONS.values())):
             raise ValueError("Another composition or Gazebo execution is active.")
         stop = threading.Event()
-        task = asyncio.create_task(self._run(root, stop, progress, candidate_ref))
+        task = asyncio.create_task(self._run(root, stop, progress, candidate_ref, binding_ref))
         ACTIVE[root] = _Session(task, stop)
         try:
             return await asyncio.shield(task)
@@ -190,7 +205,7 @@ class PrimitiveExecutionRuntime:
         return read_primitive_execution_diagnostic(root)
 
     async def _run(
-        self, root: Path, stop: threading.Event, progress: Any, candidate_ref: str | None
+        self, root: Path, stop: threading.Event, progress: Any, candidate_ref: str | None, binding_ref: str | None
     ) -> dict[str, Any]:
         lock_path = root.parent / ".gazebo_execution.lock"
         with lock_path.open("a") as lock:
@@ -198,13 +213,15 @@ class PrimitiveExecutionRuntime:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise ValueError("Another application owns Gazebo execution.") from exc
-            return await self._run_locked(root, stop, progress, candidate_ref)
+            return await self._run_locked(root, stop, progress, candidate_ref, binding_ref)
 
     async def _run_locked(
-        self, root: Path, stop: threading.Event, progress: Any, candidate_ref: str | None
+        self, root: Path, stop: threading.Event, progress: Any, candidate_ref: str | None, binding_ref: str | None
     ) -> dict[str, Any]:
         await asyncio.to_thread(assert_execution_available, root.parent)
         program = await asyncio.to_thread(load_validated_program, root)
+        if binding_ref is not None and (program.binding_ref or {}).get("ref") != binding_ref:
+            raise ValueError("The displayed parameter binding changed. Refresh before Run in Gazebo.")
         if candidate_ref is not None and candidate_ref != program.candidate_ref["ref"]:
             raise ValueError(
                 "The displayed program changed. Refresh the program before Run in Gazebo."
@@ -258,6 +275,7 @@ class PrimitiveExecutionRuntime:
             {
                 "record_type": "PrimitiveExecutionRequest",
                 "candidate_ref": program.candidate_ref,
+                "binding_ref": program.binding_ref,
                 "validation_ref": program.validation_ref,
                 "refinement_result_ref": program.result_ref,
                 "resource_jid": assignment.selected_resource_jid,
@@ -304,6 +322,8 @@ class PrimitiveExecutionRuntime:
             check_stop()
             await asyncio.to_thread(_assert_inputs_unchanged, program.inputs)
             await asyncio.to_thread(read_pin, root, program.candidate_ref)
+            if program.binding_ref is not None:
+                await asyncio.to_thread(read_pin, root, program.binding_ref)
             await asyncio.to_thread(verify_record, root, program.validation_ref)
             for reference in program.report["evidence_refs"].values():
                 await asyncio.to_thread(verify_evidence_tree, root, reference)
@@ -346,7 +366,9 @@ class PrimitiveExecutionRuntime:
             validation_ref = await record("validation.json", fresh_report)
             if fresh_report["status"] != "passed" or fresh_report[
                 "candidate_fingerprint"
-            ] != fingerprint(program.steps) or fresh_report.get("scope") != program.report["scope"]:
+            ] != fingerprint(program.steps) or fresh_report.get("scope") != program.report["scope"] or (
+                fresh_report.get("binding_ref") != program.binding_ref
+            ):
                 raise ValueError("Fresh validation did not pass for the unchanged program.")
             final = dict(
                 await self.robot_runtime.capture_execution_context(

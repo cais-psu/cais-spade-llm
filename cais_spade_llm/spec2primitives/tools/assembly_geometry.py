@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from copy import deepcopy
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from ..adapters.robot_validation_context import matrix_pose, pose_matrix
-from ..agents.ra.refinement_records import append_record, fingerprint, owned_path, read_pin
+from ..agents.ra.refinement_records import _verify_evidence_tree, append_record, fingerprint, owned_path, read_pin
 from .rgb_d_cad_grounding.size_correspondence import _load_cad_input
 
 
@@ -102,6 +103,58 @@ def planar_features(triangles: np.ndarray) -> list[dict[str, Any]]:
     return features
 
 
+class _ObservedGeometryBatch:
+    """Share checked, immutable observation inputs for one measurement batch only."""
+
+    def __init__(self, root: Path, authorized: Mapping[str, str]) -> None:
+        self.root = root
+        self.authorized = dict(authorized)
+        self.records: dict[str, tuple[str, Any]] = {}
+        self.candidates: dict[str, list[dict[str, Any]]] = {}
+        self.points: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+        self.timings: dict[str, float] = {}
+
+    @classmethod
+    def prepare(cls, root: Path, authorized: Mapping[str, str], requests: list[Mapping[str, Any]]) -> _ObservedGeometryBatch:
+        from .rgb_d_cad_grounding.size_correspondence import _load_candidates
+
+        batch = cls(root, authorized)
+        started = time.monotonic()
+        for request in requests:
+            for field in ("segmentation_ref", "calibration_ref"):
+                ref = request[field]
+                if ref not in authorized:
+                    raise ValueError("Measurement input was not issued when the batch started.")
+                _verify_evidence_tree(root, {"ref": ref, "sha256": authorized[ref]}, batch.records)
+        batch.timings["preparation_sec"] = time.monotonic() - started
+        started = time.monotonic()
+        for ref in dict.fromkeys(request["segmentation_ref"] for request in requests):
+            points: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            _, _, candidates = _load_candidates(root, owned_path(root, ref), _decoded_points=points)
+            for candidate in candidates:
+                for value in candidate.values():
+                    if isinstance(value, np.ndarray):
+                        value.flags.writeable = False
+            for arrays in points.values():
+                for value in arrays:
+                    value.flags.writeable = False
+            batch.points[ref], batch.candidates[ref] = points, candidates
+        batch.timings["decoding_sec"] = time.monotonic() - started
+        started = time.monotonic()
+        batch.verify_sources()
+        batch.timings["verification_sec"] = time.monotonic() - started
+        return batch
+
+    def verify_sources(self) -> None:
+        # Rehash prepared dependencies after decoding/processing. Reuse ends with
+        # this batch; it cannot refresh sensor time or survive a model response.
+        from ..agents.ra.refinement_records import pin
+
+        for ref, (sha, _) in self.records.items():
+            if pin(self.root, owned_path(self.root, ref))["sha256"] != sha:
+                raise ValueError("Measurement source changed during processing: " + ref)
+
+
 class AssemblyGeometryProducer:
     """Consume exact approved records; persist neutral geometry or selected derivations."""
 
@@ -111,10 +164,16 @@ class AssemblyGeometryProducer:
         directory: Path,
         authorized: dict[str, str],
         target_feature: Mapping[str, Any] | None = None,
+        *,
+        _batch: _ObservedGeometryBatch | None = None,
     ) -> None:
         """Pin the producer to an interaction and the investigation's issued evidence."""
         self.root, self.directory, self.authorized = root, directory, authorized
         self.target_feature = dict(target_feature or {})
+        self._batch = _batch
+        self._checked_records = dict(_batch.records) if _batch else None
+        self._issued: list[dict[str, str]] = []
+        self.timings = {"geometry_sec": 0.0, "verification_sec": 0.0, "persistence_sec": 0.0}
 
     def read(self, ref: str) -> dict[str, Any]:
         """Read only an issued record with its originally accepted bytes."""
@@ -122,10 +181,24 @@ class AssemblyGeometryProducer:
             raise ValueError("Geometry input was not issued to this investigation.")
         from ..agents.ra.refinement_records import verify_evidence_tree
 
-        return verify_evidence_tree(self.root, {"ref": ref, "sha256": self.authorized[ref]})
+        source = {"ref": ref, "sha256": self.authorized[ref]}
+        if self._checked_records is not None:
+            return deepcopy(_verify_evidence_tree(self.root, source, self._checked_records))
+        return verify_evidence_tree(self.root, source)
+
+    def verify_outputs(self) -> None:
+        """Recheck sources and issued output bytes before the coordinator admits them."""
+        started = time.monotonic()
+        if self._batch is not None:
+            self._batch.verify_sources()
+        checked: dict[str, tuple[str, Any]] = {}
+        for source in self._issued:
+            _verify_evidence_tree(self.root, source, checked)
+        self.timings["verification_sec"] += time.monotonic() - started
 
     def save(self, payload: Mapping[str, Any], sources: list[str]) -> dict[str, Any]:
         """Append a measurement with complete direct source pins."""
+        started = time.monotonic()
         for ref in sources:
             self.read(ref)
         number = len(list(self.directory.glob("geometry_*.json"))) + 1
@@ -142,6 +215,8 @@ class AssemblyGeometryProducer:
             },
         )
         self.authorized[reference["ref"]] = reference["sha256"]
+        self._issued.append(reference)
+        self.timings["persistence_sec"] += time.monotonic() - started
         return {
             "record_ref": reference["ref"],
             "record_sha256": reference["sha256"],
@@ -279,9 +354,26 @@ class AssemblyGeometryProducer:
         That support assumption and missing occluded geometry remain explicit.
         Identity, task role and CAD orientation are not inferred by this operation.
         """
-        from .rgb_d_cad_grounding.frame_conversion import _load_calibration
-        from .rgb_d_cad_grounding.size_correspondence import _load_candidates
+        standalone = self._batch is None
+        if standalone:
+            self._batch = _ObservedGeometryBatch.prepare(self.root, self.authorized, [{
+                "segmentation_ref": segmentation_ref, "calibration_ref": calibration_ref,
+                "observation_handle": observation_handle,
+            }])
+            self._checked_records = dict(self._batch.records)
+        try:
+            result = self._observed_geometry(segmentation_ref, observation_handle, calibration_ref)
+            if standalone:
+                self.verify_outputs()
+            return result
+        finally:
+            if standalone:
+                self._batch = self._checked_records = None
 
+    def _observed_geometry(self, segmentation_ref: str, observation_handle: str, calibration_ref: str) -> dict[str, Any]:
+        from .rgb_d_cad_grounding.frame_conversion import _load_calibration
+
+        started, persisted = time.monotonic(), self.timings["persistence_sec"]
         camera, stamp = self.observation(segmentation_ref, observation_handle)
         surface_result = self.observed_surface(segmentation_ref, observation_handle, calibration_ref)
         surface = surface_result["record"]
@@ -290,7 +382,7 @@ class AssemblyGeometryProducer:
         calibration = _load_calibration(
             self.root, owned_path(self.root, calibration_ref), observation_timestamp_ns=stamp,
         )
-        _, _, candidates = _load_candidates(self.root, owned_path(self.root, segmentation_ref))
+        candidates = self._batch.candidates[segmentation_ref]
         selected = [item for item in candidates if item["observation_handle"] == observation_handle]
         if not selected:
             raise ValueError("The selected observation contains no segmented candidates.")
@@ -336,13 +428,7 @@ class AssemblyGeometryProducer:
             }, [segmentation_ref, calibration_ref, surface_result["record_ref"]]))
         # A finite measured patch avoids treating an observed tabletop as an
         # infinite obstacle through unrelated parts of the robot's workspace.
-        from .rgb_d_cad_grounding.size_correspondence import _load_camera_points
-        preprocessing = read_pin(self.root, self.read(segmentation_ref)["source_record"])
-        source_camera = next(item for item in preprocessing["cameras"] if item["camera_id"] == camera["camera_id"])
-        camera_points, _ = _load_camera_points(
-            self.root, camera, source_artifact=source_camera["point_cloud_artifact"],
-            operation_number=int(preprocessing["operation_number"]),
-        )
+        camera_points, _ = self._batch.points[segmentation_ref][observation_handle]
         distance = np.abs(camera_points @ np.asarray(camera["support_plane"]["normal"]) + camera["support_plane"]["offset_m"])
         threshold = max(float(surface["rms_distance_m"]) * 3, 1e-6)
         patch = camera_points[distance <= threshold]
@@ -362,6 +448,7 @@ class AssemblyGeometryProducer:
             "mesh": pin(self.root, mesh_path),
             "coverage": "observed_plane_patch",
         }, [surface_result["record_ref"], segmentation_ref])
+        self.timings["geometry_sec"] += time.monotonic() - started - (self.timings["persistence_sec"] - persisted)
         return {"status": "accepted", "geometry_refs": [item["record_ref"] for item in measured],
                 "surface_ref": patch_result["record_ref"], "measurements": measured}
 
@@ -435,10 +522,15 @@ class AssemblyGeometryProducer:
         Returns:
             The selected camera entry and its source depth timestamp.
         """
-        from .rgb_d_cad_grounding.size_correspondence import _load_candidates
+        from .rgb_d_cad_grounding.size_correspondence import (
+            CAMERA_IDS, _load_segmentation_source, _validate_camera_metadata,
+        )
 
-        self.read(segmentation_ref)
-        _, segmentation, _ = _load_candidates(self.root, owned_path(self.root, segmentation_ref))
+        segmentation = self.read(segmentation_ref)
+        if self._batch is None:
+            _, segmentation, preprocessing = _load_segmentation_source(self.root, owned_path(self.root, segmentation_ref))
+        else:
+            preprocessing = self._checked_records[segmentation["source_record"]["ref"]][1]
         matches = [
             item
             for item in segmentation["cameras"]
@@ -449,10 +541,12 @@ class AssemblyGeometryProducer:
                 "The selected observation handle is absent or duplicated in this segmentation."
             )
         camera = matches[0]
-        preprocessing = read_pin(self.root, segmentation["source_record"])
         source_camera = next(
             item for item in preprocessing["cameras"] if item["camera_id"] == camera["camera_id"]
         )
+        if self._batch is None:
+            _validate_camera_metadata(self.root, camera, camera_id=camera["camera_id"],
+                                      camera_index=CAMERA_IDS.index(camera["camera_id"]), source_camera=source_camera)
         return camera, source_camera["depth_timestamp_ns"]
 
     def observed_surface(
