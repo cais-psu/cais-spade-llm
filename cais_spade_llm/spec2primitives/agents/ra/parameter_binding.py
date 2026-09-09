@@ -89,6 +89,29 @@ def _field_path(path: str, name: str) -> str:
     return path + "/" + name.replace("~", "~0").replace("/", "~1")
 
 
+def required_geometry_fields(
+    value: Mapping[str, Any], schema: Mapping[str, Any], *, resolve_value: Callable[[Any], Any],
+) -> set[str]:
+    """Read declared grounding conditions from selected values without choosing evidence."""
+    required = set(schema.get("required", [])) | set(schema.get("x-grounding-fields", []))
+    for name, declaration in schema.get("properties", {}).items():
+        if not isinstance(declaration, Mapping):
+            continue
+        condition = declaration.get("x-grounding-when", {})
+        if not condition:
+            continue
+        selected: Any = value
+        for field in condition["field_path"].split("/")[1:]:
+            selected = resolve_value(selected)
+            selected = (
+                selected.get(field.replace("~1", "/").replace("~0", "~"), _MISSING)
+                if isinstance(selected, Mapping) else _MISSING
+            )
+        if selected is not _MISSING and resolve_value(selected) == condition["equals"]:
+            required.add(name)
+    return required
+
+
 class _BindingReport:
     """Inspect one immutable proposal and cache its already-pinned evidence reads."""
 
@@ -114,6 +137,14 @@ class _BindingReport:
         if ref not in self._records:
             self._records[ref] = self._read_evidence(ref, "")
         return self._records[ref]
+
+    def selected_value(self, value: Any) -> Any:
+        """Resolve only an explicit selected reference through this check's verified reader."""
+        if isinstance(value, dict) and set(value) == {"value_ref"}:
+            ref = value["value_ref"]
+            document = self.record(ref["record_ref"])
+            return _resolve_json_pointer(document, ref["field_path"]) if ref["field_path"] else document
+        return value
 
     def visit(
         self,
@@ -144,9 +175,7 @@ class _BindingReport:
         if isinstance(value, dict) and set(value) == {"value_ref"}:
             ref = value["value_ref"]
             document = self.record(ref["record_ref"])
-            resolved = (
-                _resolve_json_pointer(document, ref["field_path"]) if ref["field_path"] else document
-            )
+            resolved = self.selected_value(value)
             self.visit(index, path, resolved, schema, document)
             return
         if isinstance(value, dict) and set(value) == {"result_ref"}:
@@ -207,7 +236,7 @@ class _BindingReport:
 
         if isinstance(value, dict):
             properties = schema.get("properties", {})
-            required = set(schema.get("required", [])) | set(schema.get("x-grounding-fields", []))
+            required = required_geometry_fields(value, schema, resolve_value=self.selected_value)
             for name in sorted(required - value.keys()):
                 self.visit(
                     index, _field_path(path, name), _MISSING, _schema(properties.get(name, {}))
@@ -297,17 +326,12 @@ class _BindingReport:
             state = source.get("robot_state")
             context = state.get("motion_context") if isinstance(state, Mapping) else None
             return context.get("frame_id") if isinstance(context, Mapping) else None
-        if kind in {"AssemblyGeometryEvidence", "AssemblySurfaceEvidence", "AssemblySceneEvidence", "AssemblyGoalEvidence", "RobotValidationContext", "PrimitiveCalculationRecord"}:
+        if kind in {"ObservedGeometryEvidence", "AssemblyGeometryEvidence", "AssemblySurfaceEvidence", "AssemblySceneEvidence", "AssemblyGoalEvidence", "RobotValidationContext", "PrimitiveCalculationRecord"}:
             return source.get("frame_id")
         return None
 
     def check_geometry_record(self, index: int, value: Any) -> None:
-        if isinstance(value, dict) and set(value) == {"value_ref"}:
-            ref = value["value_ref"]
-            document = self.record(ref["record_ref"])
-            value = (
-                _resolve_json_pointer(document, ref["field_path"]) if ref["field_path"] else document
-            )
+        value = self.selected_value(value)
         if isinstance(value, dict) and value.get("record_type") == "CADMeshRecord":
             self.add(
                 index,

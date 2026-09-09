@@ -16,7 +16,8 @@ from typing import Protocol
 
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
     GroundingContractError,
-    load_pa_context_grounding_completion,
+    PAContextGroundingCompletion,
+    _load_validated_completion,
 )
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -497,6 +498,15 @@ def load_selected_ra_context_snapshot(
     """Load the latest fully validated Phase 5.1 assignment/state/catalog set."""
     root = Path(interaction_root).resolve()
     assignment, selection = _build_assignment_envelope(root)
+    return _load_assigned_context_snapshot(root, assignment, selection)
+
+
+def _load_assigned_context_snapshot(
+    root: Path,
+    assignment: SelectedRAAssignmentEnvelope,
+    selection: Mapping[str, object],
+) -> SelectedRAContextSnapshot:
+    """Check saved snapshots against the assignment validated during this load."""
     assignment_path = root.joinpath(*_ASSIGNMENT_ROOT, _ASSIGNMENT_NAME)
     if not assignment_path.is_file():
         raise RAContextHandoffError(
@@ -570,19 +580,22 @@ def _build_assignment_envelope(
     root: Path,
 ) -> tuple[SelectedRAAssignmentEnvelope, Mapping[str, object]]:
     try:
-        completion = load_pa_context_grounding_completion(root)
+        completion, completion_path, _ = _load_validated_completion(root)
     except GroundingContractError as exc:
         raise RAContextHandoffError(
             "RobotAgent context capture requires one unchanged PAContextGroundingCompletion. "
             "Start a fresh interaction."
         ) from exc
+    return _assignment_from_completion(root, completion, completion_path)
+
+
+def _assignment_from_completion(
+    root: Path,
+    completion: PAContextGroundingCompletion,
+    completion_path: Path,
+) -> tuple[SelectedRAAssignmentEnvelope, Mapping[str, object]]:
+    """Reconstruct assignment lineage from the completion validated in this load."""
     completion_record = completion.to_record()
-    completion_paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
-    if len(completion_paths) != 1:
-        raise RAContextHandoffError(
-            "RobotAgent context capture requires exactly one grounding completion record."
-        )
-    completion_path = completion_paths[0]
     selection = _load_validated_selection(root, completion_record)
     _validate_assignment_delta(root, completion_record, selection)
 

@@ -363,6 +363,36 @@ def test_completion_loader_rejects_changed_native_inputs(
         load_pa_context_grounding_completion(tmp_path)
 
 
+def test_completed_view_reuses_the_view_checked_by_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return the validated view itself and revalidate on each public load."""
+    from cais_spade_llm.spec2primitives.agents.pa import grounding_contracts
+
+    expected = persist_native_completion_fixture(tmp_path)
+    reader = grounding_contracts._latest_product_context_view
+    checked = []
+
+    def read_view(root: Path):
+        view = reader(root)
+        checked.append(view)
+        return view
+
+    monkeypatch.setattr(grounding_contracts, "_latest_product_context_view", read_view)
+    completion, path, view = grounding_contracts._load_validated_completion(tmp_path)
+    assert checked == [view]
+    assert view is checked[0]
+    assert completion.to_record() == expected.to_record()
+    assert path == tmp_path / "interaction_record/context_completion_0001.json"
+    assert grounding_contracts.load_completed_product_context_view(tmp_path) is checked[-1]
+    assert len(checked) == 2
+    assert load_pa_context_grounding_completion(tmp_path).to_record() == expected.to_record()
+    assert len(checked) == 3
+    path.write_text(path.read_text().replace('"grounding complete"', '"incomplete"'))
+    with pytest.raises(GroundingContractError):
+        grounding_contracts.load_completed_product_context_view(tmp_path)
+
+
 def test_completion_loader_rejects_changed_decision(
     tmp_path: Path,
 ) -> None:

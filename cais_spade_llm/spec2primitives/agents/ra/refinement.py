@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
@@ -21,10 +21,13 @@ from .primitive_composition import (
     _read_record,
     _result_schema,
     _with_refinement,
+    _with_scope,
     author_primitive_program_candidate,
 )
 from .program_dependencies import assess_program_dependencies
 from .program_validation import validate_program
+from ...adapters.robot_validation_context import validation_capture
+from .validation_scope import is_pick_place_scope, read_validation_scope, required_validation_roles
 from .refinement_records import (
     append_record,
     fingerprint,
@@ -65,6 +68,7 @@ async def _deadline(seconds: float):
 def load_refinement_profile() -> dict[str, Any]:
     """Read finite owned budgets and sensor/planner policies, never goal coordinates."""
     profile = json.loads(_PROFILE.read_bytes())
+    read_validation_scope(profile)
     for field in ("max_candidates", "max_pa_batches", "max_pa_operations"):
         if type(profile.get(field)) is not int or not 1 <= profile[field] <= 32:
             raise ValueError(f"Invalid refinement budget: {field}.")
@@ -172,6 +176,8 @@ def _robot_change_message(differences: list[dict[str, Any]]) -> str:
 def _experiment_specification(
     root: Path, directory: Path, profile: Mapping[str, Any]
 ) -> tuple[dict[str, str] | None, Path | None, str | None]:
+    if is_pick_place_scope(read_validation_scope(profile)):
+        return None, None, None
     configured = profile.get("validation_specification_path")
     if configured is None:
         return None, None, None
@@ -224,13 +230,30 @@ class PrimitiveRefinementRuntime:
         self.validator = validator
 
     async def compose(
-        self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None
+        self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
+        deadline_sec: float | None = None,
     ) -> dict[str, Any]:
-        """Start one run or join the existing run; disconnects do not duplicate work."""
+        """Start or join a run with an optional deadline applying only to a new run.
+
+        Args:
+            root: Saved interaction to compose against.
+            progress: Optional persisted-event consumer.
+            deadline_sec: Finite per-run deadline; omitted uses the configured profile.
+
+        Returns:
+            The recorded result of the new or already active run.
+        """
+        if deadline_sec is not None and (
+            type(deadline_sec) not in (int, float) or not 0 < deadline_sec <= 3600
+        ):
+            raise ValueError("The composition deadline must be finite and between 0 and 3600 seconds.")
         root = root.resolve()
         task = _ACTIVE.get(root)
         if task is None or task.done():
-            task = asyncio.create_task(self._run(root, progress=progress))
+            profile = deepcopy(self.profile)
+            if deadline_sec is not None:
+                profile["deadline_sec"] = deadline_sec
+            task = asyncio.create_task(self._run(root, progress=progress, profile=profile))
             _ACTIVE[root] = task
             task.add_done_callback(
                 lambda done: _ACTIVE.pop(root, None) if _ACTIVE.get(root) is done else None
@@ -238,9 +261,12 @@ class PrimitiveRefinementRuntime:
         return await asyncio.shield(task)
 
     async def _run(
-        self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None
+        self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None,
+        profile: Mapping[str, Any],
     ) -> dict[str, Any]:
         inputs = await asyncio.to_thread(_load_inputs, root)
+        scope = read_validation_scope(profile)
+        inputs = _with_scope(inputs, scope)
         parent = root / _RUNS
         parent.mkdir(parents=True, exist_ok=True)
         directory = parent / f"run_{len(list(parent.glob('run_*'))) + 1:04d}"
@@ -252,7 +278,7 @@ class PrimitiveRefinementRuntime:
             {
                 "record_type": "PrimitiveRefinementRequest",
                 "base_context_refs": inputs.context_refs,
-                "profile": self.profile,
+                "profile": profile,
                 "created_at_ns": time.time_ns(),
             },
         )
@@ -287,10 +313,17 @@ class PrimitiveRefinementRuntime:
             if progress is not None:
                 await progress(record)
 
+        async def composition_progress(message: str) -> None:
+            await emit("composing", message)
+
         try:
-            async with _deadline(float(self.profile["deadline_sec"])):
+            async with _deadline(float(profile["deadline_sec"])):
+                await emit(
+                    "composing", f"Composition started with a {profile['deadline_sec']:g}-second deadline.",
+                    deadline_sec=profile["deadline_sec"],
+                )
                 specification_ref, specification_path, specification_hash = await asyncio.to_thread(
-                    _experiment_specification, root, directory, self.profile
+                    _experiment_specification, root, directory, profile
                 )
                 if specification_ref:
                     validation_refs["specification"] = specification_ref
@@ -300,9 +333,9 @@ class PrimitiveRefinementRuntime:
                 attempted_requests: set[tuple[str, str]] = set()
                 pending_requests: list[dict[str, Any]] = []
                 while (
-                    len(candidate_refs) < self.profile["max_candidates"]
+                    len(candidate_refs) < profile["max_candidates"]
                     and len(decisions)
-                    < self.profile["max_candidates"] + self.profile["max_pa_batches"]
+                    < profile["max_candidates"] + profile["max_pa_batches"]
                 ):
                     await asyncio.to_thread(_assert_inputs_unchanged, inputs)
                     await emit(
@@ -312,7 +345,11 @@ class PrimitiveRefinementRuntime:
                         else "RA is revising its program using the recorded findings.",
                     )
                     candidate = await author_primitive_program_candidate(
-                        self.program_runtime, root, refinement_ref=refinement_ref
+                        self.program_runtime,
+                        root,
+                        refinement_ref=refinement_ref,
+                        progress=composition_progress,
+                        validation_scope=scope,
                     )
                     candidate_ref = pin(root, candidate.path)
                     decisions.append(candidate_ref)
@@ -365,63 +402,71 @@ class PrimitiveRefinementRuntime:
                     await emit(
                         "robot_context", "Capturing measured robot state and EE/TCP context."
                     )
-                    robot_failure = None
-                    try:
-                        captured = dict(
-                            await self.robot_runtime.capture_validation_context(
-                                inputs.assignment, profile=self.profile
-                            )
-                        )
-                        captured_ref = await asyncio.to_thread(
-                            append_record,
-                            root,
-                            directory,
-                            f"robot_context_{len(decisions):04d}.json",
-                            captured,
-                        )
-                        differences = _robot_changed(robot, captured, self.profile) if robot else []
-                        if differences:
-                            status, stop_reason = (
-                                "stale",
-                                _robot_change_message(differences),
-                            )
-                            # Keep the rejected capture as diagnostics, without replacing
-                            # the context against which the previous candidate was checked.
-                            await emit(
-                                "robot_context",
-                                stop_reason,
-                                previous_robot_context_ref=robot_ref,
-                                robot_context_ref=captured_ref,
-                                differences=differences,
-                            )
-                            break
-                        robot = captured
-                        robot_ref = captured_ref
-                        source_pins[robot_ref["ref"]] = robot_ref
-                    except (
-                        ImportError,
-                        OSError,
-                        RuntimeError,
-                        KeyError,
-                        TypeError,
-                        ValueError,
-                    ) as exc:
-                        robot = None
-                        robot_ref = None
-                        robot_failure = str(exc)
+                    # Persist and render progress before capture so UI work cannot
+                    # consume the snapshot's two-second validation-entry allowance.
                     await emit(
                         "validating",
-                        "Calculating selected helpers and checking the program without motion.",
+                        "Preparing program checks and capturing fresh robot context without motion.",
                     )
-                    report = await self.validator(
-                        inputs=extended,
-                        steps=steps,
-                        robot=robot,
-                        evidence=validation_refs,
-                        directory=directory / f"validation_{len(decisions):04d}",
-                        profile=self.profile,
-                        cache=cache,
-                    )
+                    async with AsyncExitStack() as capture_stack:
+                        robot_failure = None
+                        validation_entry_ns = None
+                        try:
+                            captured = dict(
+                                await capture_stack.enter_async_context(validation_capture(
+                                    self.robot_runtime, inputs.assignment, profile=profile,
+                                ))
+                            )
+                            validation_entry_ns = time.time_ns()
+                            captured_ref = await asyncio.to_thread(
+                                append_record,
+                                root,
+                                directory,
+                                f"robot_context_{len(decisions):04d}.json",
+                                captured,
+                            )
+                            differences = _robot_changed(robot, captured, profile) if robot else []
+                            if differences:
+                                status, stop_reason = (
+                                    "stale",
+                                    _robot_change_message(differences),
+                                )
+                                # Keep the rejected capture as diagnostics, without replacing
+                                # the context against which the previous candidate was checked.
+                                await emit(
+                                    "robot_context",
+                                    stop_reason,
+                                    previous_robot_context_ref=robot_ref,
+                                    robot_context_ref=captured_ref,
+                                    differences=differences,
+                                )
+                                break
+                            robot = captured
+                            robot_ref = captured_ref
+                            source_pins[robot_ref["ref"]] = robot_ref
+                        except (
+                            ImportError,
+                            OSError,
+                            RuntimeError,
+                            KeyError,
+                            TypeError,
+                            ValueError,
+                        ) as exc:
+                            robot = None
+                            robot_ref = None
+                            robot_failure = str(exc)
+                        report = await self.validator(
+                            inputs=extended,
+                            steps=steps,
+                            robot=robot,
+                            evidence=validation_refs,
+                            directory=directory / f"validation_{len(decisions):04d}",
+                            profile=profile,
+                            cache=cache,
+                            _validation_started_at_ns=validation_entry_ns,
+                        )
+                    if report.get("scope") != scope:
+                        raise ValueError("The validation report scope differs from its refinement run.")
                     await asyncio.to_thread(_assert_inputs_unchanged, extended)
                     if robot_failure:
                         report["robot_context_failure"] = robot_failure
@@ -439,7 +484,7 @@ class PrimitiveRefinementRuntime:
                         try:
                             final_robot = dict(
                                 await self.robot_runtime.capture_validation_context(
-                                    inputs.assignment, profile=self.profile
+                                    inputs.assignment, profile=profile
                                 )
                             )
                             report["final_robot_context_ref"] = await asyncio.to_thread(
@@ -449,7 +494,7 @@ class PrimitiveRefinementRuntime:
                                 f"robot_final_{len(decisions):04d}.json",
                                 final_robot,
                             )
-                            differences = _robot_changed(robot, final_robot, self.profile)
+                            differences = _robot_changed(robot, final_robot, profile)
                             if differences:
                                 message = _robot_change_message(differences)
                                 await emit(
@@ -469,7 +514,7 @@ class PrimitiveRefinementRuntime:
                                     stamp is not None
                                     and not 0
                                     <= final_robot["measured_at_ros_ns"] - stamp
-                                    <= self.profile["scene_max_age_sec"] * 1e9
+                                    <= profile["scene_max_age_sec"] * 1e9
                                 ):
                                     raise ValueError(
                                         "Observed scene geometry became stale during validation."
@@ -514,6 +559,8 @@ class PrimitiveRefinementRuntime:
                     if report["status"] == "passed":
                         status, stop_reason = (
                             "validated_for_declared_scope",
+                            "Validated for Gazebo pick-and-place. No motion was executed."
+                            if is_pick_place_scope(scope) else
                             "Program validated against the pinned rigid vertical geometry and direct-motion model; no motion was executed.",
                         )
                         break
@@ -544,7 +591,7 @@ class PrimitiveRefinementRuntime:
                         )
                         break
                     seen.add(state_key)
-                    if len(candidate_refs) >= self.profile["max_candidates"]:
+                    if len(candidate_refs) >= profile["max_candidates"]:
                         break
                     available = [
                         {"ref": ref, "sha256": sha}
@@ -556,16 +603,37 @@ class PrimitiveRefinementRuntime:
                     evidence_key = fingerprint(available_hashes)
                     product_needs = []
                     request_keys = set()
+                    validation_needs = [
+                        {
+                            "step_index": finding["step_index"],
+                            "quantity": finding["check"],
+                            "authority": "PA",
+                            "reason": finding["message"],
+                        }
+                        for finding in report["findings"]
+                        if finding.get("authority") == "PA"
+                        and finding["status"] in {"unknown", "failed"}
+                    ]
                     # Explicit RA requests keep their wording and take precedence over
-                    # the same missing field derived from its selected primitive.
-                    for need in [*pending_requests, *dependencies["context_requests"]]:
+                    # the same input need derived from its selected primitive.
+                    for need in [*pending_requests, *dependencies["context_requests"], *validation_needs]:
                         if need["authority"] != "PA":
                             continue
+                        index = need["step_index"]
+                        # Program-level findings already identify PA's responsibility;
+                        # waiting for RA to restate them wastes an investigation round.
+                        selected_context = (
+                            {"steps": steps, "reason": need["reason"]}
+                            if index is None else
+                            {
+                                "step_index": index,
+                                "primitive_symbol": steps[index - 1]["primitive_symbol"],
+                                "params": steps[index - 1]["params"],
+                            }
+                        )
                         request_key = fingerprint(
                             {
-                                "step_index": need["step_index"],
-                                "primitive_symbol": steps[need["step_index"] - 1]["primitive_symbol"],
-                                "params": steps[need["step_index"] - 1]["params"],
+                                **selected_context,
                                 "quantity": need.get("parameter_path", need["quantity"]),
                             }
                         )
@@ -579,8 +647,8 @@ class PrimitiveRefinementRuntime:
                     if (
                         product_needs
                         and self.product_runtime is not None
-                        and pa_batches < self.profile["max_pa_batches"]
-                        and pa_operations < self.profile["max_pa_operations"]
+                        and pa_batches < profile["max_pa_batches"]
+                        and pa_operations < profile["max_pa_operations"]
                     ):
                         pa_batches += 1
                         await emit(
@@ -591,6 +659,7 @@ class PrimitiveRefinementRuntime:
                         attempted_requests.update((key, evidence_key) for key in request_keys)
                         batch_request = {
                             "record_type": "PrimitiveContextRequest",
+                            "validation_scope": scope,
                             "target_feature": deepcopy(inputs.composition_input["target_feature"]),
                             "needs": deepcopy(product_needs),
                             "evidence_refs": available,
@@ -600,19 +669,35 @@ class PrimitiveRefinementRuntime:
                         await asyncio.to_thread(
                             append_record, root, batch_dir, "request.json", batch_request
                         )
-                        remaining = self.profile["max_pa_operations"] - pa_operations
+                        remaining = profile["max_pa_operations"] - pa_operations
+                        operations_before_batch = pa_operations
+
+                        async def pa_progress(event: Mapping[str, Any]) -> None:
+                            nonlocal pa_operations
+                            consumed = event["operations_used"]
+                            if type(consumed) is not int or not 0 <= consumed <= min(6, remaining):
+                                raise ValueError("PA exceeded its evidence budget.")
+                            # Record consumption while the batch is active, including cancellation.
+                            pa_operations = operations_before_batch + consumed
+                            await emit(
+                                "evidence", f"PA batch {pa_batches}: {event['message']}",
+                                pa_batch=pa_batches, pa_operations=pa_operations,
+                                geometry_operations=event["geometry_operations"],
+                            )
+
                         outcome = dict(
                             await self.product_runtime.investigate(
                                 interaction_root=root,
                                 directory=batch_dir,
                                 request=batch_request,
                                 max_operations=min(6, remaining),
+                                progress=pa_progress,
                             )
                         )
                         used = outcome["operations_used"]
                         if type(used) is not int or not 0 <= used <= min(6, remaining):
                             raise ValueError("PA exceeded its evidence budget.")
-                        pa_operations += used
+                        pa_operations = operations_before_batch + used
                         pa_response_ref = await asyncio.to_thread(
                             append_record,
                             root,
@@ -622,7 +707,9 @@ class PrimitiveRefinementRuntime:
                         )
                         await emit(
                             "evidence",
-                            "PA evidence investigation completed.",
+                            "PA evidence investigation completed. "
+                            f"Batches: {pa_batches}/{profile['max_pa_batches']}; "
+                            f"operations: {pa_operations}/{profile['max_pa_operations']}.",
                             pa_batch=pa_batches,
                             pa_response_ref=pa_response_ref,
                         )
@@ -650,7 +737,10 @@ class PrimitiveRefinementRuntime:
                         attempted_requests.update(
                             (key, returned_evidence_key) for key in request_keys
                         )
-                        validation_refs.update(deepcopy(outcome.get("validation_refs", {})))
+                        returned_roles = outcome.get("validation_refs", {})
+                        if set(returned_roles) - set(required_validation_roles(scope)):
+                            raise ValueError("PA returned validation roles outside the recorded scope.")
+                        validation_refs.update(deepcopy(returned_roles))
                         if (
                             not outcome.get("evidence_refs")
                             and not robot
@@ -663,6 +753,20 @@ class PrimitiveRefinementRuntime:
                             break
                     pending_requests = []
                     findings = [*dependencies["issues"], *report["findings"], *pa_findings]
+                    if (
+                        pa_batches >= profile["max_pa_batches"]
+                        or pa_operations >= profile["max_pa_operations"]
+                    ):
+                        findings.append({
+                            "step_index": None, "authority": "PA", "status": "unknown",
+                            "check": "pa_budget",
+                            "message": (
+                                "No further PA investigation is available in this run: "
+                                f"{pa_batches}/{profile['max_pa_batches']} batches and "
+                                f"{pa_operations}/{profile['max_pa_operations']} operations used. "
+                                "RA may use returned evidence to revise its program or report remaining prerequisites."
+                            ),
+                        })
                     context = {
                         "record_type": "PrimitiveRefinementContext",
                         "run_request_ref": request_ref,
@@ -684,7 +788,7 @@ class PrimitiveRefinementRuntime:
         except TimeoutError:
             status, stop_reason = (
                 "budget_exhausted",
-                f"The configured refinement deadline ({self.profile['deadline_sec']} seconds) was reached.",
+                f"The configured refinement deadline ({profile['deadline_sec']} seconds) was reached.",
             )
         except asyncio.CancelledError:
             status, stop_reason = "cancelled", "The operator cancelled refinement."
@@ -728,8 +832,10 @@ def enrich_composition_diagnostic(
         return view
     directory = runs[-1]
     request = verify_record(root, pin(root, directory / "request.json"))
+    scope = read_validation_scope(request["profile"])
     if request["base_context_refs"] != context_refs:
         return view
+    view["validation_scope"] = scope
     events = [
         verify_record(root, pin(root, path)) for path in sorted(directory.glob("event_*.json"))
     ]
@@ -762,8 +868,15 @@ def enrich_composition_diagnostic(
         view["candidate"] = candidate
         view["latest_candidate_ref"] = latest["candidate_ref"]["ref"]
     validations = [event for event in events if event["stage"] == "validation_result"]
+    view.pop("validation", None)
     if validations:
-        view["validation"] = read_pin(root, validations[-1]["validation_ref"])
+        validation = read_pin(root, validations[-1]["validation_ref"])
+        if validation.get("scope") != scope:
+            raise ValueError("The saved validation report scope differs from its refinement run.")
+        # A revision can be saved just before cancellation or the deadline. Its
+        # predecessor's report stays in the trace and cannot describe this proposal.
+        if proposed and validation.get("candidate_ref") == proposed[-1]["candidate_ref"]:
+            view["validation"] = validation
     pa_responses = []
     for event in events:
         if "previous_robot_context_ref" in event:

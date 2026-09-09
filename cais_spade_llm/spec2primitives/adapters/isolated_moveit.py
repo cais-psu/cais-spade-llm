@@ -151,6 +151,7 @@ class IsolatedMoveItSession:
         if self._cancelled.is_set():
             raise RuntimeError("Private MoveIt validation was cancelled.")
         if suffix not in {
+            "get_planning_scene",
             "apply_planning_scene",
             "compute_cartesian_path",
             "check_state_validity",
@@ -264,6 +265,27 @@ class IsolatedMoveItSession:
             scene.world.collision_objects = [
                 self._object(item, self.robot["frame_id"]) for item in self.scene["objects"]
             ]
+            if self.scene.get("allowed_contacts"):
+                from moveit_msgs.msg import AllowedCollisionEntry, PlanningSceneComponents
+                from moveit_msgs.srv import GetPlanningScene
+
+                request = GetPlanningScene.Request(
+                    components=PlanningSceneComponents(components=PlanningSceneComponents.ALLOWED_COLLISION_MATRIX),
+                )
+                matrix = self._call(GetPlanningScene, "get_planning_scene", request).scene.allowed_collision_matrix
+                for contact in self.scene["allowed_contacts"]:
+                    for name in [contact["object_id"], *contact["links"]]:
+                        if name not in matrix.entry_names:
+                            matrix.entry_names.append(name)
+                            for row in matrix.entry_values:
+                                row.enabled.append(False)
+                            matrix.entry_values.append(AllowedCollisionEntry(enabled=[False] * len(matrix.entry_names)))
+                    item_index = matrix.entry_names.index(contact["object_id"])
+                    for link in contact["links"]:
+                        link_index = matrix.entry_names.index(link)
+                        matrix.entry_values[item_index].enabled[link_index] = True
+                        matrix.entry_values[link_index].enabled[item_index] = True
+                scene.allowed_collision_matrix = matrix
         if remove is not None:
             item = CollisionObject(id=remove, operation=CollisionObject.REMOVE)
             scene.world.collision_objects.append(item)

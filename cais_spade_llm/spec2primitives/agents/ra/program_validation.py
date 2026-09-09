@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Evaluate an immutable candidate under an explicit rigid vertical assembly model."""
+"""Evaluate an immutable candidate under its recorded motion and outcome scope."""
 
 import asyncio
 import math
@@ -29,7 +29,14 @@ from .program_dependencies import assess_program_dependencies
 from .primitive_composition import _result_schema
 from .refinement_records import append_record, fingerprint, verify_evidence_tree
 
-VALIDATION_SCOPE = "rigid_vertical_gear_assembly_direct_cartesian"
+from .validation_scope import (
+    GAZEBO_OBSERVED_SCOPE,
+    is_pick_place_scope,
+    read_validation_scope,
+    required_validation_roles,
+    supported_primitive_symbols,
+)
+from .validation_scope import VALIDATION_SCOPE as VALIDATION_SCOPE
 
 
 class BindingUnavailable(ValueError):
@@ -82,10 +89,12 @@ def _finding(
 
 
 def _complete(value: Any, schema: Mapping[str, Any], path: str) -> None:
+    from .parameter_binding import required_geometry_fields
+
     if not isinstance(schema, Mapping):
         return
     if isinstance(value, Mapping):
-        required = set(schema.get("required", [])) | set(schema.get("x-grounding-fields", []))
+        required = required_geometry_fields(value, schema, resolve_value=lambda item: item)
         missing = required - value.keys()
         if missing:
             raise BindingUnavailable(
@@ -130,6 +139,16 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
             if kind != "value_ref":
                 continue
             source = _evidence_value(inputs, ref["record_ref"], "")
+            if (
+                name == "product_geometry" and path == "/board_center/z"
+                and source.get("record_type") == "AssemblySurfaceEvidence"
+                and ref["field_path"] != "/product_geometry/board_center/z"
+            ):
+                raise BindingUnavailable(
+                    "A plane coefficient is not a measured world support height. "
+                    "PA can use surface_height with a selected world location, or pick_geometry "
+                    "with an accepted CAD origin, to establish /product_geometry/board_center/z."
+                )
             uncertainty = source.get("uncertainty", {})
             height_estimate = (
                 name == "product_geometry"
@@ -146,6 +165,8 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
             )
             if name == "target_pose" and source.get("record_type") == "RobotFrameLocationRecord":
                 raise BindingUnavailable(
+                    "/target_pose must select the measured observed bounds reference_pose used for the part."
+                    if inputs.validation_scope == GAZEBO_OBSERVED_SCOPE else
                     "/target_pose selects an observed candidate center, but the CAD-origin "
                     "reference and grasp offset required by this validation scope remain unresolved."
                 )
@@ -155,7 +176,7 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
                     "AssemblyGeometryEvidence",
                     "AssemblySurfaceEvidence",
                     "AssemblyGoalEvidence",
-                }
+                } | ({"ObservedGeometryEvidence"} if inputs.validation_scope == GAZEBO_OBSERVED_SCOPE else set())
                 or (source.get("status") != "accepted" and not height_estimate)
                 or source.get("frame_id") != "world"
                 or source.get("units") != "m"
@@ -163,9 +184,11 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
                 raise BindingUnavailable(
                     f"/{name} requires accepted geometry with its world frame and semantic reference point established."
                 )
-            if name == "target_pose" and source.get("reference_point") != "CAD_origin":
+            if name == "target_pose" and source.get("reference_point") not in {
+                "CAD_origin", "selected_CAD_feature",
+            } | ({"observed_bounds_center"} if inputs.validation_scope == GAZEBO_OBSERVED_SCOPE else set()):
                 raise BindingUnavailable(
-                    "The selected observed location does not establish the helper's part-origin reference point."
+                    "The selected observed location does not establish the helper's grasp reference point."
                 )
             if height_estimate:
                 warnings.append(source["warning"])
@@ -208,10 +231,28 @@ def _grasp_check(
     part_origin = pose_matrix(part_pose)
     bounds = part["bounds_m"]
     minimum, maximum = np.asarray(bounds["minimum"]), np.asarray(bounds["maximum"])
-    offset = part_origin[:3, 3] - np.asarray([part["origin_pose"][key] for key in ("x", "y", "z")])
+    observed = part.get("record_type") == "ObservedGeometryEvidence"
+    reference = part["reference_pose"] if observed else part["origin_pose"]
+    offset = part_origin[:3, 3] - np.asarray([reference[key] for key in ("x", "y", "z")])
     minimum, maximum = minimum + offset, maximum + offset
     tolerance = float(robot["position_tolerance_m"])
-    center = part_origin[:3, 3]
+    if observed:
+        # Link attachment needs a nearby intended part, not physical jaw fit.
+        relative = (np.linalg.inv(part_origin) @ tcp)[:3, 3]
+        half_size = np.asarray(part["size_m"], dtype=float) / 2
+        outside = np.maximum(np.abs(relative) - half_size, 0)
+        return bool(np.linalg.norm(outside) <= tolerance)
+    grasp = part.get("grasp_reference")
+    if grasp:
+        point = np.asarray(grasp["point_CAD_m"], dtype=float)
+        if (
+            grasp.get("reference_point") != "selected_CAD_feature"
+            or point.shape != (3,) or not np.isfinite(point).all()
+        ):
+            raise ValueError("The selected part has no valid measured grasp reference.")
+        center = part_origin[:3, :3] @ point + part_origin[:3, 3]
+    else:
+        center = part_origin[:3, 3]
     xy_error = np.linalg.norm(tcp[:2, 3] - center[:2])
     width = float(max(maximum[:2] - minimum[:2]))
     return bool(
@@ -219,6 +260,10 @@ def _grasp_check(
         and minimum[2] - tolerance <= tcp[2, 3] <= maximum[2] + tolerance
         and width <= float(robot["gripper"]["open_width_mm"]) / 1000
     )
+
+
+def _part_shape(part: Mapping[str, Any]) -> dict[str, Any]:
+    return {"size_m": part["size_m"]} if part.get("record_type") == "ObservedGeometryEvidence" else {"mesh": part["mesh"]}
 
 
 async def validate_program(
@@ -231,9 +276,32 @@ async def validate_program(
     profile: Mapping[str, Any],
     cache: dict[str, dict[str, Any]],
     session_factory: Callable[..., Any] = IsolatedMoveItSession,
+    _validation_started_at_ns: int | None = None,
 ) -> dict[str, Any]:
-    """Calculate and check the exact candidate; return findings, never repair actions."""
+    """Calculate and check the exact candidate in its recorded scope without repairing it."""
+    # Snapshot freshness belongs to validation entry, before evidence verification
+    # consumes time. Accepting a program still requires a fresh final capture.
+    validation_started_at_ns = time.time_ns() if _validation_started_at_ns is None else _validation_started_at_ns
+    if type(validation_started_at_ns) is not int or not 0 < validation_started_at_ns <= time.time_ns():
+        raise ValueError("Validation entry requires an actual host wall-clock timestamp.")
+    scope = read_validation_scope(profile)
+    if inputs.validation_scope != scope:
+        from .primitive_composition import _with_scope
+        inputs = _with_scope(inputs, scope)
     await asyncio.to_thread(_validate_steps, steps, inputs)
+    supported = supported_primitive_symbols(scope)
+    unsupported = [
+        _finding(
+            index, "primitive_capability", "failed",
+            f"{step['primitive_symbol']} has no validated execution path for {scope}. "
+            "RA must revise the primitive choice; additional product measurements cannot resolve this.",
+            authority="RA",
+        )
+        for index, step in enumerate(steps, start=1)
+        if step["primitive_symbol"] not in supported
+    ]
+    if unsupported:
+        return _report(steps, unsupported, [], [], None, scope=scope)
     binding_report = await asyncio.to_thread(
         assess_program_dependencies,
         steps,
@@ -246,7 +314,7 @@ async def validate_program(
     findings: list[dict[str, Any]] = []
     records = {}
     expected_types = {
-        "part": "AssemblyGeometryEvidence",
+        "part": "ObservedGeometryEvidence" if scope == GAZEBO_OBSERVED_SCOPE else "AssemblyGeometryEvidence",
         "goal": "AssemblyGeometryEvidence",
         "scene": "AssemblySceneEvidence",
         "specification": "AssemblyValidationSpecification",
@@ -257,7 +325,8 @@ async def validate_program(
         "scene": "observed scene coverage is needed for collision checking",
         "specification": "acceptance criteria must come from approved documents or an explicit experiment specification",
     }
-    for role, kind in expected_types.items():
+    for role in required_validation_roles(scope):
+        kind = expected_types[role]
         reference = evidence.get(role)
         if reference is None:
             findings.append(
@@ -293,7 +362,7 @@ async def validate_program(
                 authority="RA",
             )
         )
-        return _report(steps, findings, [], [], None)
+        return _report(steps, findings, [], [], None, scope=scope)
     if (
         robot["resource_jid"] != inputs.assignment.selected_resource_jid
         or robot["assignment_fingerprint"] != inputs.assignment.fingerprint
@@ -302,40 +371,77 @@ async def validate_program(
     captured = robot.get("captured_at_ns", 0)
     stamps = [robot.get("joint_state", {}).get("stamp_ns", 0), *robot.get("tf_stamps_ns", [])]
     now_ros = robot.get("measured_at_ros_ns", 0)
+    freshness_failure = None
     if (
         len(stamps) != 3
-        or captured <= 0
-        or not 0 <= time.time_ns() - captured <= profile["state_max_age_sec"] * 1e9
-        or any(
-            stamp <= 0 or not 0 <= now_ros - stamp <= profile["state_max_age_sec"] * 1e9
-            for stamp in stamps
-        )
-        or max(stamps) - min(stamps) > profile["max_capture_skew_sec"] * 1e9
+        or any(type(stamp) is not int or stamp <= 0 for stamp in (captured, now_ros, *stamps))
     ):
+        freshness_failure = (
+            "The measured robot context has missing or invalid capture, "
+            "joint-state or EE/TCP timestamps."
+        )
+    elif captured > validation_started_at_ns:
+        freshness_failure = (
+            "The robot capture timestamp is later than validation entry; "
+            "the wall clocks are inconsistent."
+        )
+    elif validation_started_at_ns - captured > profile["state_max_age_sec"] * 1e9:
+        freshness_failure = (
+            f"The robot snapshot was {(validation_started_at_ns - captured) / 1e9:.3f} seconds old "
+            f"at validation entry (limit {profile['state_max_age_sec']:g} seconds)."
+        )
+    elif any(stamp > now_ros for stamp in stamps):
+        freshness_failure = (
+            "Joint-state or EE/TCP timestamps are later than the recorded ROS capture clock."
+        )
+    elif any(now_ros - stamp > profile["state_max_age_sec"] * 1e9 for stamp in stamps):
+        freshness_failure = (
+            f"Joint-state or EE/TCP samples were stale at capture "
+            f"(oldest {(now_ros - min(stamps)) / 1e9:.3f} seconds; "
+            f"limit {profile['state_max_age_sec']:g} seconds)."
+        )
+    elif max(stamps) - min(stamps) > profile["max_capture_skew_sec"] * 1e9:
+        freshness_failure = (
+            f"Joint-state and EE/TCP capture skew was {(max(stamps) - min(stamps)) / 1e9:.3f} "
+            f"seconds (limit {profile['max_capture_skew_sec']:g} seconds)."
+        )
+    if freshness_failure is not None:
         findings.append(
             _finding(
                 None,
                 "robot_freshness",
                 "unknown",
-                "The measured robot context is stale or has incomplete timestamps.",
+                freshness_failure,
                 authority="RA",
             )
         )
-        return _report(steps, findings, [], [], None)
+        return _report(steps, findings, [], [], None, scope=scope)
     for role in ("part", "goal", "scene"):
         if role in records:
             stamp = records[role].get("observation_timestamp_ns", 0)
-            if (
-                type(stamp) is not int
-                or stamp <= 0
-                or not 0 <= now_ros - stamp <= profile["scene_max_age_sec"] * 1e9
-            ):
+            observation_failure = None
+            if type(stamp) is not int or stamp <= 0:
+                observation_failure = f"The {role} evidence has no valid observation timestamp."
+            elif stamp > now_ros:
+                observation_failure = (
+                    f"The {role} observation timestamp ({stamp / 1e9:.3f} ROS seconds) is later "
+                    f"than the measured robot clock ({now_ros / 1e9:.3f} ROS seconds); "
+                    "the observation and current simulation clock are inconsistent."
+                )
+            elif now_ros - stamp > profile["scene_max_age_sec"] * 1e9:
+                observation_failure = (
+                    f"The {role} observation is {(now_ros - stamp) / 1e9:.3f} ROS seconds old "
+                    f"(limit {profile['scene_max_age_sec']:g} seconds; observation {stamp / 1e9:.3f}, "
+                    f"robot clock {now_ros / 1e9:.3f}). Current RGB-D evidence is required. "
+                    "Recomputing geometry from the same observation does not refresh its timestamp."
+                )
+            if observation_failure is not None:
                 findings.append(
                     _finding(
                         None,
                         "scene_freshness",
                         "unknown",
-                        f"The {role} evidence is stale or has no valid observation timestamp.",
+                        observation_failure,
                         authority="PA",
                     )
                 )
@@ -437,8 +543,9 @@ async def validate_program(
         ]
         if (
             len(instances) != 1
-            or instances[0].get("mesh") != part_record.get("mesh")
-            or instances[0].get("pose") != part_record.get("origin_pose")
+            or any(instances[0].get(key) != value for key, value in _part_shape(part_record).items())
+            or instances[0].get("pose") != part_record.get(
+                "reference_pose" if scope == GAZEBO_OBSERVED_SCOPE else "origin_pose")
         ):
             findings.append(
                 _finding(
@@ -462,7 +569,7 @@ async def validate_program(
     calculations, checked_steps = [], []
     pose, joints = deepcopy(robot["ee_pose"]), deepcopy(robot["joint_state"])
     part = records.get("part")
-    part_pose = deepcopy(part.get("origin_pose")) if part else None
+    part_pose = deepcopy(part.get("reference_pose" if scope == GAZEBO_OBSERVED_SCOPE else "origin_pose")) if part else None
     held = deepcopy(
         robot.get("held_part", inputs.composition_input["robot_state"].get("held_part"))
     )
@@ -474,7 +581,12 @@ async def validate_program(
         if "scene" in records:
             try:
                 session = await stack.enter_async_context(
-                    session_factory(root, robot, records["scene"], profile)
+                    session_factory(root, robot, {
+                        **records["scene"],
+                        **({"allowed_contacts": [{"object_id": part["object_id"],
+                                                   "links": robot.get("touch_links", [robot["ee_link"]])}]}
+                           if scope == GAZEBO_OBSERVED_SCOPE and part else {}),
+                    }, profile)
                 )
             except (ImportError, OSError, RuntimeError, ValueError) as exc:
                 findings.append(
@@ -498,7 +610,7 @@ async def validate_program(
                 grasp_transform = np.linalg.inv(pose_matrix(pose)) @ pose_matrix(part_pose)
                 attached = {
                     "object_id": part["object_id"],
-                    "mesh": part["mesh"],
+                    **_part_shape(part),
                     "pose": matrix_pose(grasp_transform),
                     "touch_links": robot.get("touch_links", [robot["ee_link"]]),
                 }
@@ -585,6 +697,16 @@ async def validate_program(
                     )
                     _complete(value, schemas[name], "/" + name)
                 if symbol in {"compute_pick_targets", "compute_place_targets"}:
+                    if scope == GAZEBO_OBSERVED_SCOPE and symbol == "compute_pick_targets" and part is not None:
+                        selected = params.get("target_pose")
+                        if selected is None:
+                            detected = params.get("detected_parts", [])
+                            selected = detected[0] if len(detected) == 1 else {}
+                        if not np.allclose(
+                            [selected.get(axis, float("nan")) for axis in ("x", "y", "z")],
+                            [part["reference_pose"][axis] for axis in ("x", "y", "z")], rtol=0, atol=1e-9,
+                        ):
+                            raise BindingUnavailable("Pick coordinates must bind the selected part's observed bounds reference_pose.")
                     warnings = await asyncio.to_thread(_geometry_sources, step, inputs)
                     findings.extend(
                         _finding(index, "part_height_m", "warning", message)
@@ -613,6 +735,7 @@ async def validate_program(
                     key = fingerprint(
                         {
                             "primitive_symbol": symbol,
+                            "validation_scope": scope,
                             "params": params,
                             "robot": robot_inputs,
                             "source_refs": source_refs,
@@ -622,7 +745,7 @@ async def validate_program(
                     reused = key in cache
                     if not reused:
                         cache[key] = await asyncio.to_thread(
-                            calculate_target, symbol, params, robot, pose
+                            calculate_target, symbol, params, robot, pose, validation_scope=scope,
                         )
                     output = deepcopy(cache[key])
                     for name, value in output.items():
@@ -645,6 +768,7 @@ async def validate_program(
                             "record_type": "PrimitiveCalculationRecord",
                             "primitive_symbol": symbol,
                             "step_index": index,
+                            "validation_scope": scope,
                             "resolved_params": params,
                             "result": output,
                             "frame_id": robot["frame_id"],
@@ -714,7 +838,7 @@ async def validate_program(
                     grasp_transform = np.linalg.inv(pose_matrix(pose)) @ pose_matrix(part_pose)
                     attached = {
                         "object_id": part["object_id"],
-                        "mesh": part["mesh"],
+                        **_part_shape(part),
                         "pose": matrix_pose(grasp_transform),
                         "touch_links": robot.get("touch_links", [robot["ee_link"]]),
                     }
@@ -724,7 +848,11 @@ async def validate_program(
                         {
                             "step_index": index,
                             "status": "passed",
-                            "message": "Geometric grasp compatibility checked under the rigid-grasp assumption.",
+                            "message": (
+                                "Part identity and proximity checked for simulated link attachment."
+                                if scope == GAZEBO_OBSERVED_SCOPE else
+                                "Geometric grasp compatibility checked under the rigid-grasp assumption."
+                            ),
                         }
                     )
                 elif symbol == "release_part":
@@ -734,33 +862,41 @@ async def validate_program(
                         raise ValueError(
                             "The release selects a different part from the carried instance."
                         )
-                    if not {"goal", "specification"} <= records.keys() or part_pose is None:
+                    if part_pose is None:
                         raise BindingUnavailable(
-                            "A resolved seating relationship and acceptance tolerances are needed to assess release/support."
+                            "Observed carried-part geometry is needed to assess release."
                         )
-                    seated, metrics = _goal_check(
-                        part_pose, records["goal"], records["specification"]
-                    )
-                    if not seated:
-                        raise ValueError(
-                            "The proposed release does not establish the required seated part relationship: "
-                            + str(metrics)
+                    if not is_pick_place_scope(scope):
+                        if not {"goal", "specification"} <= records.keys():
+                            raise BindingUnavailable(
+                                "A resolved seating relationship and acceptance tolerances are needed to assess release/support."
+                            )
+                        seated, metrics = _goal_check(
+                            part_pose, records["goal"], records["specification"]
                         )
+                        if not seated:
+                            raise ValueError(
+                                "The proposed release does not establish the required seated part relationship: "
+                                + str(metrics)
+                            )
                     held, grasp_transform, attached = None, None, None
                     if session:
                         await session.change_custody(
                             add={
                                 "object_id": part["object_id"],
-                                "mesh": part["mesh"],
+                                **_part_shape(part),
                                 "pose": part_pose,
                             }
                         )
                     checked_steps.append(
-                        {"step_index": index, "status": "passed", "metrics": metrics}
+                        {"step_index": index, "status": "passed", **(
+                            {"message": "Predicted release custody checked; execution must acknowledge detachment."}
+                            if is_pick_place_scope(scope) else {"metrics": metrics}
+                        )}
                     )
                 else:
                     raise BindingUnavailable(
-                        "This primitive has no evaluator in the declared vertical assembly validation scope."
+                        "This primitive has no evaluator in the declared validation scope."
                     )
             except (BindingUnavailable, CalculationUnavailable) as exc:
                 findings.append(
@@ -787,7 +923,16 @@ async def validate_program(
                 checked_steps.append({"step_index": index, "status": "failed", "message": str(exc)})
                 if symbol not in {"compute_pick_targets", "compute_place_targets"}:
                     prefix_valid = False
-    if prefix_valid and {"part", "goal", "specification", "scene"} <= records.keys():
+    if is_pick_place_scope(scope):
+        complete = prefix_valid and {"part", "scene"} <= records.keys()
+        findings.append(_finding(
+            None, "pick_place_outcome",
+            "passed" if complete and held is None else "failed" if complete else "unknown",
+            "Predicted pick-and-place custody checked; execution and detachment remain unobserved."
+            if complete else "The complete predicted pick-and-place program could not be established.",
+            held_part=held,
+        ))
+    elif prefix_valid and {"part", "goal", "specification", "scene"} <= records.keys():
         seated, metrics = _goal_check(part_pose, records["goal"], records["specification"])
         findings.append(
             _finding(
@@ -814,6 +959,7 @@ async def validate_program(
         checked_steps,
         calculations,
         {"ee_pose": pose, "part_pose": part_pose, "held_part": held},
+        scope=scope,
     )
 
 
@@ -823,6 +969,8 @@ def _report(
     checked_steps: list[dict[str, Any]],
     calculations: list[dict[str, str]],
     final_state: Any,
+    *,
+    scope: str,
 ) -> dict[str, Any]:
     statuses = {item["status"] for item in [*findings, *checked_steps]}
     status = (
@@ -835,13 +983,14 @@ def _report(
     return {
         "record_type": "PrimitiveValidationReport",
         "status": status,
-        "scope": VALIDATION_SCOPE,
+        "scope": scope,
         "candidate_fingerprint": fingerprint(steps),
         "findings": findings,
         "checked_steps": checked_steps,
         "calculation_refs": calculations,
         "predicted_final_state": final_state,
         "unmodeled": [
+            *(["precise seating", "assembly tolerances"] if is_pick_place_scope(scope) else []),
             "force closure",
             "contact dynamics",
             "physical assembly success",

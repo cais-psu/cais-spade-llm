@@ -1,4 +1,5 @@
 {
+  "validation_scope": "gazebo_pick_place_observed_geometry_direct_cartesian",
   "max_candidates": 3,
   "max_pa_batches": 2,
   "max_pa_operations": 12,

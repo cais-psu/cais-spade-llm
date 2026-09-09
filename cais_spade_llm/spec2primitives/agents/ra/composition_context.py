@@ -10,11 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.spec2primitives.agents.pa.grounding_contracts import (
-    GroundingContractError,
     PAContextGroundingCompletion,
     ProductContextView,
-    load_completed_product_context_view,
-    load_pa_context_grounding_completion,
 )
 
 from .context_handoff import (
@@ -22,6 +19,7 @@ from .context_handoff import (
     SelectedRAAssignmentEnvelope,
     SelectedRAContextSnapshot,
 )
+from .validation_scope import GAZEBO_OBSERVED_SCOPE, VALIDATION_SCOPE, read_validation_scope
 
 _PPR_DEFINES = "http://PAonto.com#defines"
 _PPR_FEATURE = "http://PAonto.com#feature"
@@ -57,8 +55,11 @@ def _composition_state_view(value: object) -> Any:
     return deepcopy(value)
 
 
-def _composition_catalog_view(entries: tuple[Mapping[str, object], ...]) -> list[dict[str, Any]]:
+def _composition_catalog_view(
+    entries: tuple[Mapping[str, object], ...], *, validation_scope: str = VALIDATION_SCOPE,
+) -> list[dict[str, Any]]:
     """Project composition contracts while retaining full runtime snapshots."""
+    scope = read_validation_scope({"validation_scope": validation_scope})
     result = [_without_model_name(entry) for entry in entries]
     for entry in result:
         symbol = entry["primitive_symbol"]
@@ -90,6 +91,25 @@ def _composition_catalog_view(entries: tuple[Mapping[str, object], ...]) -> list
                     )["description"] = (
                         "part_origin or inserted_part_origin; the final part origin must be established."
                     )
+                    properties["target_reference"]["properties"]["grasp_point"] = {
+                        "type": "string",
+                        "description": (
+                            "selected_CAD_feature when pick uses a PA-selected grasp feature; "
+                            "requires the measured grasp_point_offset_world_m. Otherwise CAD_origin."
+                        ),
+                    }
+                    properties["grasp_point_offset_world_m"] = {
+                        "type": "array", "items": {"type": "number"},
+                        "minItems": 3, "maxItems": 3, "x-frame-source": "world",
+                        "x-grounding-when": {
+                            "field_path": "/target_reference/grasp_point", "equals": "selected_CAD_feature",
+                        },
+                        "description": (
+                            "Measured XYZ vector from the final CAD origin to the selected grasp "
+                            "feature, in world metres. Required for target_reference.grasp_point "
+                            "selected_CAD_feature; preserve it from PA's placement geometry."
+                        ),
+                    }
                     origin = properties["target_origin_pose"].setdefault("properties", {})
                     for axis in ("x", "y", "z"):
                         origin.setdefault(axis, {"type": "number", "x-frame-source": "world"})
@@ -101,14 +121,46 @@ def _composition_catalog_view(entries: tuple[Mapping[str, object], ...]) -> list
             if symbol == "compute_pick_targets" and isinstance(schemas.get("target_pose"), dict):
                 schemas["target_pose"]["description"] = (
                     "Observed product location in world metres, not an end-effector target. "
-                    "The current geometry validator requires an established CAD_origin "
-                    "reference to check the grasp offset; an observed candidate center alone "
-                    "does not establish that reference."
+                    "Select an established CAD_origin or selected_CAD_feature grasp reference. "
+                    "A CAD file origin can lie outside the physical part; PA can bind a measured "
+                    "feature with select_grasp_point and derive pick_geometry. An observed "
+                    "candidate center alone does not establish the reference or grasp offset."
                 )
         if entry["primitive_symbol"] in {"grasp_part", "release_part"}:
             for field in ("conditions", "effects"):
                 entry[field] = {
                     name: value for name, value in entry[field].items() if name == "held_part"
+                }
+        if (
+            scope == GAZEBO_OBSERVED_SCOPE
+            and symbol in {"compute_pick_targets", "compute_place_targets"}
+            and isinstance(entry.get("parameter_schemas", {}).get("product_geometry"), dict)
+        ):
+            schemas = entry["parameter_schemas"]
+            geometry = schemas["product_geometry"]
+            geometry["description"] = (
+                "PA-selected measured observed geometry in world metres; box axes are not CAD orientation."
+            )
+            if symbol == "compute_pick_targets" and isinstance(schemas.get("target_pose"), dict):
+                schemas["target_pose"]["description"] = (
+                    "ObservedGeometryEvidence reference_pose at observed_bounds_center in world metres. "
+                    "Use the same observed part for height, support and custody validation."
+                )
+            elif symbol == "compute_place_targets":
+                geometry["x-grounding-fields"] = ["placement_surface_point"]
+                geometry.pop("required", None)
+                geometry["properties"] = {
+                    "placement_surface_point": {
+                        "type": "object", "x-grounding-fields": ["x", "y", "z"],
+                        "properties": {axis: {"type": "number", "x-frame-source": "world"}
+                                       for axis in ("x", "y", "z")},
+                        "description": "Measured world point on the PA-selected destination support surface.",
+                    },
+                    "part_height_m": {
+                        "type": "number", "exclusiveMinimum": 0,
+                        "x-binding-role": "vertical_part_height",
+                        "description": "Measured part height; otherwise retain pick_ctx.part_height.",
+                    },
                 }
     return result
 
@@ -137,13 +189,10 @@ def _composition_input(
     root: Path,
     context: SelectedRAContextSnapshot,
     completion: PAContextGroundingCompletion,
+    product_context: ProductContextView,
 ) -> dict[str, object]:
     assignment = context.assignment
     completion_record = completion.to_record()
-    try:
-        product_context = load_completed_product_context_view(root)
-    except GroundingContractError as exc:
-        raise RAContextHandoffError(str(exc)) from exc
     ontology_projection = _validated_ontology_projection(
         product_context,
         assignment,
@@ -587,22 +636,6 @@ def _bounded_value_projection(value: object, *, depth: int = 0) -> object:
             projection.append({"projection_truncated": True})
         return projection
     raise RAContextHandoffError("target_feature resolved value is not JSON-compatible.")
-
-
-def _load_completion(root: Path) -> tuple[PAContextGroundingCompletion, Path]:
-    """Require current validated completion before primitive composition."""
-    completion = load_pa_context_grounding_completion(root)
-    if not isinstance(completion, PAContextGroundingCompletion):
-        raise RAContextHandoffError(
-            "Historical grounding has an incompatible completion contract. "
-            "Start a fresh interaction before primitive composition."
-        )
-    paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
-    if len(paths) != 1:
-        raise RAContextHandoffError(
-            "Structural primitive composition requires exactly one PA completion."
-        )
-    return completion, paths[0]
 
 
 def _resolve_ref(root: Path, record_ref: str) -> Path:

@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
 from threading import Event
@@ -16,6 +17,9 @@ from typing import Any
 import pytest
 
 from cais_spade_llm.spec2primitives import spec2primitives_ui
+from cais_spade_llm.spec2primitives.agents.ra.validation_scope import (
+    GAZEBO_PICK_PLACE_SCOPE, read_validation_scope,
+)
 from cais_spade_llm.spec2primitives.agents.pa import product_agent_runtime
 from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
     _write_location,
@@ -1626,6 +1630,18 @@ def test_compose_button_records_candidate_when_page_detaches(
     root = tmp_path / "interaction_composition"
     adapter, _, _ = _prepare_composition(root)
     buttons: dict[str, Callable] = {}
+    phase_elements: dict[str, Any] = {}
+    original_render = spec2primitives_ui._render_phase_5_diagnostics
+
+    def capture_elements() -> dict[str, Any]:
+        elements = original_render()
+        assert elements["diagnostic_deadline"].value is False
+        if refinement:
+            elements["diagnostic_deadline"].set_value(True)
+        phase_elements.update(elements)
+        return elements
+
+    monkeypatch.setattr(spec2primitives_ui, "_render_phase_5_diagnostics", capture_elements)
     original_on_click = spec2primitives_ui.ui.button.on_click
 
     def capture_on_click(button: Any, callback: Callable) -> Any:
@@ -1659,7 +1675,7 @@ def test_compose_button_records_candidate_when_page_detaches(
                 raise RuntimeError("Controlled UI fixture has no measured robot context.")
 
         async def validate_fixture(**kwargs: Any) -> dict[str, Any]:
-            return {"status": "unknown", "findings": [{"step_index": None, "check": "motion", "status": "unknown", "message": "No live motion validator in this controlled UI test."}], "calculation_refs": []}
+            return {"scope": read_validation_scope(kwargs["profile"]), "status": "unknown", "findings": [{"step_index": None, "check": "motion", "status": "unknown", "message": "No live motion validator in this controlled UI test."}], "calculation_refs": []}
 
         runtime = replace(runtime, primitive_refinement_runtime=PrimitiveRefinementRuntime(program_runtime=program_runtime, robot_runtime=MeasuredContext(), validator=validate_fixture, profile={**load_refinement_profile(), "max_candidates": 1}))
     monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", capture_on_click)
@@ -1720,6 +1736,12 @@ def test_compose_button_records_candidate_when_page_detaches(
         assert diagnostic["status"] == ("budget_exhausted" if refinement else "proposed")
         assert len(program_runtime.calls) == 1
         assert diagnostic["candidate"]["primitive_steps"][0]["params"] == {"z": 0.07}
+        if refinement:
+            request = json.loads(next((root / "composition/refinement_runs").glob("run_*/request.json")).read_text())
+            assert request["profile"]["deadline_sec"] == 900
+            assert runtime.primitive_refinement_runtime.profile["deadline_sec"] == 300
+            if detach == "never":
+                assert phase_elements["diagnostic_deadline"].value is False
         assert not (root / "composition/primitive_program_drafts").exists()
     finally:
         if not container.is_deleted:
@@ -1765,6 +1787,8 @@ def test_primitive_composition_ui_gates_and_displays_candidate(status: str) -> N
         assert (not elements["create_candidate_button"]._props.get("disable", False)) == (
             status in {"ready_for_composition", "proposed"}
         )
+        assert elements["diagnostic_deadline"].value is False
+        assert elements["diagnostic_deadline"]._props.get("disable", False) == elements["create_candidate_button"]._props.get("disable", False)
         assert elements["candidate_steps"].visible == (status == "proposed")
         if status == "proposed":
             assert elements["candidate_steps"].content == (
@@ -1780,6 +1804,7 @@ def test_primitive_composition_ui_gates_and_displays_candidate(status: str) -> N
             authoring_busy=True,
         )
         assert elements["create_candidate_button"]._props.get("disable") is True
+        assert elements["diagnostic_deadline"]._props.get("disable") is True
         assert elements["candidate_status_badge"].text == "composing"
     finally:
         container.delete()
@@ -2007,6 +2032,271 @@ def test_primitive_program_displays_nested_gaps_without_filling_parameters() -> 
     assert json.dumps(steps) == original
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("batch", [False, True])
+def test_composition_progress_is_visible_before_proposal_and_after_reconnect(
+    tmp_path: Path, cancel: bool, batch: bool
+) -> None:
+    """Restore persisted request progress without duplicating authoring or counting reads as proposals."""
+    from cais_spade_llm.spec2primitives.agents.ra.primitive_composition import read_primitive_composition_diagnostic
+    from cais_spade_llm.spec2primitives.agents.ra.refinement import (
+        PrimitiveRefinementRuntime, cancel_primitive_refinement, load_refinement_profile,
+    )
+    from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import _setup
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import _program_action
+
+    inputs, _, _, _ = _setup(tmp_path)
+    current_ref = inputs.composition_input["target_feature"]["current_state"]["state_values"][0]["value_ref"]["record_ref"]
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    events = []
+
+    class Program:
+        async def author_composition_action(self, *args: Any, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            if len(calls) == 1:
+                if batch:
+                    return {"action": {"kind": "read_records", "requests": [
+                        {"record_ref": current_ref, "field_path": f"/translated_location_m/{index}"}
+                        for index in range(3)
+                    ]}}
+                return {"action": {"kind": "read_record", "record_ref": current_ref, "field_path": "/translated_location_m"}}
+            waiting.set()
+            await release.wait()
+            return {"action": _program_action([("move_cartesian", {"x": 0.2})])}
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("No measured robot context in this UI fixture.")
+
+    async def validator(**kwargs: Any) -> dict[str, Any]:
+        return {"scope": read_validation_scope(kwargs["profile"]), "status": "unknown", "findings": [], "calculation_refs": []}
+
+    runtime = PrimitiveRefinementRuntime(
+        program_runtime=Program(), robot_runtime=Robot(), validator=validator,
+        profile={**load_refinement_profile(), "max_candidates": 1},
+    )
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+        reconnected = spec2primitives_ui._render_phase_5_diagnostics()
+    view = {"candidate": None, "attempt_count": 0, "trace": [], "refinement": {"events": events}}
+
+    async def progress(event: Mapping[str, Any]) -> None:
+        events.append(event)
+        view.update(status=event.get("status", event["stage"]), message=event["message"])
+        if "candidate" in event:
+            view.update(candidate=event["candidate"], attempt_count=event["candidate_count"])
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view)
+
+    async def scenario() -> None:
+        first = asyncio.create_task(runtime.compose(tmp_path, progress=progress))
+        second = None
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=10)
+            assert elements["candidate_attempts"].text == "Attempts: 0"
+            assert "RA request 2" in elements["candidate_message"].text
+            count = 3 if batch else 1
+            assert f"{count}/12 evidence requests completed" in elements["candidate_message"].text
+            assert elements["candidate_progress"].visible
+            assert elements["candidate_progress"].text == f"Elapsed at last update: {events[-1]['elapsed_sec']:.1f} s"
+            assert any("RA evidence request 1/12" in event["message"] for event in events)
+            assert sum("RA evidence request" in event["message"] for event in events) == count
+            assert any("integrity check completed in" in event["message"] for event in events)
+            assert any("model response received in" in event["message"] for event in events)
+            assert f"Prompt: {len(calls[-1]['prompt'])} characters." in elements["candidate_message"].text
+            restored = await asyncio.to_thread(read_primitive_composition_diagnostic, tmp_path)
+            spec2primitives_ui._apply_primitive_composition_diagnostic(reconnected, restored)
+            assert reconnected["candidate_message"].text == elements["candidate_message"].text
+            assert reconnected["candidate_progress"].text == elements["candidate_progress"].text
+            assert reconnected["candidate_attempts"].text == "Attempts: 0"
+            second = asyncio.create_task(runtime.compose(tmp_path))
+            await asyncio.sleep(0)
+            assert len(calls) == 2
+            if cancel:
+                assert cancel_primitive_refinement(tmp_path)
+            else:
+                release.set()
+            outcomes = await asyncio.gather(first, second)
+            assert all(outcome["status"] == ("cancelled" if cancel else "budget_exhausted") for outcome in outcomes)
+            assert elements["candidate_attempts"].text == ("Attempts: 0" if cancel else "Attempts: 1")
+            assert len(calls) == 2
+            assert len(list((tmp_path / "composition/refinement_runs").glob("run_*"))) == 1
+        finally:
+            release.set()
+            await first
+            if second is not None:
+                await second
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_pa_progress_survives_reconnect_without_counting_reads_as_proposals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool,
+) -> None:
+    """Persist real PA-loop progress while the UI detaches or the operator cancels."""
+    from types import SimpleNamespace
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_context import ProductPrimitiveContextRuntime
+    from cais_spade_llm.spec2primitives.agents.ra.primitive_composition import read_primitive_composition_diagnostic
+    from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime, cancel_primitive_refinement
+    from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import _setup
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import _ProgramRuntime, _program_action
+
+    inputs, robot, _, _ = _setup(tmp_path)
+    current_ref = inputs.composition_input["target_feature"]["current_state"]["state_values"][0]["value_ref"]["record_ref"]
+    waiting, release = asyncio.Event(), asyncio.Event()
+    calls, events = [], []
+
+    class Product:
+        async def ask_llm_structured(self, prompt: str, **kwargs: Any) -> Any:
+            calls.append(prompt)
+            if len(calls) == 1:
+                return {"action": {"kind": "investigate", "tool_name": "read_record", "arguments": json.dumps({"record_ref": current_ref, "field_path": "/translated_location_m"})}}
+            waiting.set()
+            await release.wait()
+            needs = json.loads(prompt.split("\n\n", 1)[1])["needs"]
+            return {"action": {"kind": "finish", "evidence_refs": [], "outcomes": [{
+                "step_index": need["step_index"], "quantity": need["quantity"], "status": "blocked",
+                "record_ref": None, "field_path": None,
+                "reason": "The fixture provides no calibrated support observation.",
+            } for need in needs], "validation_refs": dict.fromkeys(("part", "goal", "scene", "specification"))}}
+
+    product = ProductPrimitiveContextRuntime(SimpleNamespace(), Product())
+    monkeypatch.setattr(product, "_investigation", lambda *args: SimpleNamespace(handles={}, _canonical_by_pa_ref={}, prior_evidence=(), retrieved_results={}))
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            return {**robot, "captured_at_ns": time.time_ns()}
+
+    async def validator(**kwargs: Any) -> Any:
+        return {"scope": read_validation_scope(kwargs["profile"]), "status": "unknown", "findings": [], "calculation_refs": []}
+
+    program = _ProgramRuntime([
+        _program_action([("compute_pick_targets", {"part_name": "medium gear"})]),
+        {"kind": "unsupported", "reason": "Required measurements remain unavailable."},
+    ])
+    runtime = PrimitiveRefinementRuntime(program_runtime=program, robot_runtime=Robot(), product_runtime=product, validator=validator)
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    view = {"candidate": None, "attempt_count": 0, "trace": [], "refinement": {"events": events}}
+
+    async def progress(event: Mapping[str, Any]) -> None:
+        events.append(event)
+        view.update(status=event.get("status", event["stage"]), message=event["message"])
+        if "candidate" in event:
+            view.update(candidate=event["candidate"], attempt_count=event["candidate_count"])
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(runtime.compose(tmp_path, progress=progress))
+        joined = None
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=20)
+            assert elements["candidate_attempts"].text == "Attempts: 1"
+            assert "PA request 2" in elements["candidate_message"].text
+            assert "1/6 operations completed" in elements["candidate_message"].text
+            restored = await asyncio.to_thread(read_primitive_composition_diagnostic, tmp_path)
+            assert restored["message"] == elements["candidate_message"].text
+            assert restored["attempt_count"] == 1
+            joined = asyncio.create_task(runtime.compose(tmp_path, deadline_sec=900))
+            await asyncio.sleep(0)
+            assert len(calls) == 2
+            if cancel:
+                assert cancel_primitive_refinement(tmp_path)
+            else:
+                release.set()
+            results = await asyncio.gather(task, joined)
+            assert all(result["status"] == ("cancelled" if cancel else "unsupported") for result in results)
+            assert len(results[0]["candidate_refs"]) == 1
+            assert results[0]["pa_operations"] == 1
+            if not cancel:
+                assert any("No measurement/geometry operations were attempted" in event["message"] for event in events)
+                assert results[0]["pa_operations"] == 1
+        finally:
+            release.set()
+            await task
+            if joined is not None:
+                await joined
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        container.delete()
+
+
+def test_pick_place_scope_wording_survives_ui_restoration() -> None:
+    """Reopened composition and execution retain the simulation claim and real missing roles."""
+    with spec2primitives_ui.ui.column() as container:
+        first = spec2primitives_ui._render_phase_5_diagnostics()
+        restored = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        validation = {
+            "scope": GAZEBO_PICK_PLACE_SCOPE, "status": "unknown",
+            "findings": [{"step_index": None, "check": role, "status": "unknown", "authority": "PA",
+                          "message": f"Required {role} evidence is missing: observed geometry is required."}
+                         for role in ("part", "scene")],
+        }
+        message = spec2primitives_ui._format_validation_findings(validation, None)
+        assert message == "Pick-and-place validation incomplete: part, scene."
+        view = {
+            "status": "validated_for_declared_scope", "validation_scope": GAZEBO_PICK_PLACE_SCOPE,
+            "message": "Validated for Gazebo pick-and-place. No motion was executed.",
+            "attempt_count": 2, "candidate": None, "trace": [],
+            "validation": {"scope": GAZEBO_PICK_PLACE_SCOPE, "status": "passed", "findings": []},
+        }
+        for elements in (first, restored):
+            spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view)
+            assert elements["candidate_message"].text == view["message"]
+            assert elements["candidate_attempts"].text == "Attempts: 2"
+            spec2primitives_ui._apply_primitive_execution_diagnostic(
+                elements,
+                {"status": "completed", "message": "Pick-and-place completed.",
+                 "result": {"assembly_success": None}},
+                available=True, gazebo_running=True, composition_status=view["status"],
+            )
+            assert elements["execution_message"].text == "Pick-and-place completed."
+            assert elements["candidate_message"].text == view["message"]
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("deadline", [300, 900])
+def test_saved_deadline_is_separate_from_next_run_option_and_progress_is_lightweight(deadline: int) -> None:
+    """Restore the actual request deadline without rebuilding the trace for every wait."""
+    from cais_spade_llm.spec2primitives.agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE
+
+    events = [{"stage": "composing", "message": "Waiting for RA", "elapsed_sec": 2.0, "deadline_sec": deadline}]
+    view = {"status": "composing", "message": "Waiting for RA", "attempt_count": 0,
+            "refinement": {"events": events, "request": {"profile": {"deadline_sec": deadline}}},
+            "validation": {"scope": GAZEBO_OBSERVED_SCOPE, "status": "unknown", "findings": [
+                {"check": "scene", "status": "unknown", "authority": "PA", "message": "Required scene evidence is missing: observed coverage is needed."},
+            ]}}
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        elements["diagnostic_deadline"].set_value(False)
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view)
+        assert elements["candidate_deadline"].text == f"This run's deadline: {deadline} seconds"
+        assert elements["diagnostic_deadline"].value is False
+        assert elements["candidate_bindings"].text.startswith("Pick-and-place validation incomplete")
+        trace = elements["candidate_trace"].content
+        events.append({"stage": "evidence", "message": "PA measurement completed", "elapsed_sec": 8.0})
+        view["message"] = events[-1]["message"]
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view, progress_only=True)
+        assert elements["candidate_message"].text == "PA measurement completed"
+        assert elements["candidate_progress"].text == "Elapsed at last update: 8.0 s"
+        assert elements["candidate_attempts"].text == "Attempts: 0"
+        assert elements["candidate_trace"].content == trace
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view)
+        assert json.loads(elements["candidate_trace"].content)["refinement"]["events"] == events
+    finally:
+        container.delete()
+
+
 def test_primitive_binding_summary_is_short_and_full_report_remains_expandable() -> None:
     issues = [
         {
@@ -2050,6 +2340,154 @@ def test_primitive_binding_summary_is_short_and_full_report_remains_expandable()
         container.delete()
 
 
+@pytest.mark.parametrize("complete_validation", [False, True])
+def test_revised_proposal_does_not_inherit_previous_validation_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, complete_validation: bool,
+) -> None:
+    """Live and restored views keep the first report separate while revision checks wait."""
+    from copy import deepcopy
+
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
+    from cais_spade_llm.spec2primitives.agents.ra.refinement import (
+        PrimitiveRefinementRuntime, cancel_primitive_refinement, load_refinement_profile,
+    )
+    from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import (
+        _observed_program, _observed_setup,
+    )
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import _ProgramRuntime, _program_action
+
+    root = tmp_path / "interaction_composition"
+    _, robot, refs, roles = _observed_setup(root)
+    old_message = "Required inputs remain unbound: ['product_geometry']."
+    current_message = "The revised motion could not be fully checked."
+    revised = _observed_program(refs)
+    program = _ProgramRuntime([
+        _program_action([("compute_pick_targets", {"part_name": "medium gear"})]),
+        _program_action([(step["primitive_symbol"], step["params"]) for step in revised]),
+    ])
+    waiting, release = asyncio.Event(), asyncio.Event()
+    validations = []
+
+    class Robot:
+        captures = 0
+
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            self.captures += 1
+            if self.captures == 2:
+                waiting.set()
+                await release.wait()
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+
+    class Product:
+        async def investigate(self, **kwargs: Any) -> Any:
+            return {"status": "provided", "operations_used": 1, "evidence_refs": list(refs.values()),
+                    "validation_refs": roles, "unresolved": []}
+
+    async def validator(**kwargs: Any) -> Any:
+        validations.append(deepcopy(kwargs["steps"]))
+        return {"scope": read_validation_scope(kwargs["profile"]), "status": "unknown", "calculation_refs": [],
+                "findings": [{"step_index": 1, "check": "bindings", "status": "unknown",
+                              "message": old_message if len(validations) == 1 else current_message}]}
+
+    runtime = Spec2PrimitivesUIRuntime(
+        dual_gazebo=object(), product_agent=object(), contexts_root=tmp_path,
+        robot_agent_context_runtime=object(), robot_agent_program_runtime=program,
+        primitive_refinement_runtime=PrimitiveRefinementRuntime(
+            program_runtime=program, robot_runtime=Robot(), product_runtime=Product(), validator=validator,
+            profile={**load_refinement_profile(), "max_candidates": 2},
+        ),
+    )
+    buttons, elements = {}, {}
+    original_on_click = spec2primitives_ui.ui.button.on_click
+    original_render = spec2primitives_ui._render_phase_5_diagnostics
+
+    def on_click(button: Any, callback: Callable) -> Any:
+        buttons[button.text] = callback
+        return original_on_click(button, callback)
+
+    def render() -> dict[str, Any]:
+        elements.update(original_render())
+        return elements
+
+    monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", on_click)
+    monkeypatch.setattr(spec2primitives_ui, "_render_phase_5_diagnostics", render)
+    with spec2primitives_ui.ui.column() as container:
+        spec2primitives_ui._render_pa_interaction(runtime)
+
+    def check_latest(*, finished: bool) -> None:
+        assert elements["candidate_attempts"].text == "Attempts: 2"
+        summary = elements["candidate_bindings"].text
+        assert old_message not in summary
+        if finished and complete_validation:
+            assert current_message in summary
+            assert "no completed validation" not in summary
+        else:
+            assert "This proposal has no completed validation result." in summary
+            assert ("The run ended before validation completed." in summary) is finished
+        trace = json.loads(elements["candidate_trace"].content)
+        reports = [event["validation"] for event in trace["refinement"]["events"]
+                   if event["stage"] == "validation_result"]
+        assert reports[0]["findings"][0]["message"] == old_message
+        assert trace["candidate"]["primitive_steps"] == revised
+
+    async def scenario() -> None:
+        task = asyncio.create_task(buttons["Compose Primitive Program"]())
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=20)
+            check_latest(finished=False)
+            restored = await asyncio.to_thread(spec2primitives_ui.read_primitive_composition_diagnostic, root)
+            assert "validation" not in restored
+            spec2primitives_ui._apply_primitive_composition_diagnostic(elements, restored)
+            check_latest(finished=False)
+            if complete_validation:
+                release.set()
+            else:
+                assert cancel_primitive_refinement(root)
+            await task
+            check_latest(finished=True)
+            restored = await asyncio.to_thread(spec2primitives_ui.read_primitive_composition_diagnostic, root)
+            assert restored["attempt_count"] == 2
+            if complete_validation:
+                assert restored["validation"]["candidate_ref"]["ref"] == restored["latest_candidate_ref"]
+            else:
+                assert restored["status"] == "cancelled" and "validation" not in restored
+                # Deadline termination has the same unvalidated revision and report history.
+                restored.update(status="budget_exhausted", message="The configured refinement deadline (300 seconds) was reached.")
+            spec2primitives_ui._apply_primitive_composition_diagnostic(elements, restored)
+            check_latest(finished=True)
+        finally:
+            release.set()
+            await task
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        container.delete()
+
+
+def test_current_validation_blockers_precede_older_pa_explanations() -> None:
+    """A newer calculation failure must not be hidden by earlier missing-height feedback."""
+    current = "The selected target calculation cannot resolve the supplied tool transform."
+    old = "Earlier investigation did not derive part height."
+    validation = {
+        "status": "unknown",
+        "findings": [
+            {"step_index": None, "check": "part", "status": "unknown", "authority": "PA",
+             "message": "Required part evidence is missing: observed geometry is needed."},
+            {"step_index": 1, "check": "part_height_m", "status": "warning",
+             "message": "Height is an estimate."},
+            {"step_index": 1, "check": "calculation", "status": "unknown", "message": current},
+            {"step_index": 2, "check": "bindings", "status": "unknown",
+             "message": "Selected result from step 1 is not available."},
+        ],
+    }
+    text = spec2primitives_ui._format_validation_findings(validation, {"unresolved": [old]})
+    assert text.index(current) < text.index(old)
+    assert "Open the program records for all findings." in text
+    assert "Selected result from step 1" not in text
+    assert len(validation["findings"]) == 4
+
+
 @pytest.mark.parametrize("robot_change", [False, True])
 def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, robot_change: bool
@@ -2059,7 +2497,8 @@ def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
     from copy import deepcopy
 
     from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
-    from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime
+    from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime, load_refinement_profile
+    from cais_spade_llm.spec2primitives.agents.ra.validation_scope import VALIDATION_SCOPE
     from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import _setup
     from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import (
         _ProgramRuntime,
@@ -2115,10 +2554,10 @@ def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
     def inspect_revision() -> None:
         if len(program.calls) == 2:
             assert elements["candidate_attempts"].text == "Attempts: 1"
-            assert all(reason not in elements["candidate_bindings"].text for reason in unresolved)
+            assert all(reason in elements["candidate_bindings"].text for reason in unresolved[:2])
             trace = json.loads(elements["candidate_trace"].content)
-            assert not trace["refinement"].get("pa_responses")
-            assert height_warning["message"] in elements["candidate_bindings"].text
+            assert trace["refinement"]["pa_responses"][0]["unresolved"] == unresolved
+            assert height_warning in trace["validation"]["findings"]
         elif len(program.calls) == 3:
             assert elements["candidate_attempts"].text == "Attempts: 1"
             text = elements["candidate_bindings"].text
@@ -2151,8 +2590,15 @@ def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
 
     class Product:
         async def investigate(self, **kwargs: Any) -> Any:
-            assert len(program.calls) == 2
-            assert kwargs["request"]["needs"] == requests
+            if len(program.calls) == 1:
+                assert kwargs["request"]["needs"] == [
+                    {"step_index": None, "quantity": role, "authority": "PA",
+                     "reason": f"PA has not supplied the required {role} evidence."}
+                    for role in ("part", "goal", "scene", "specification")
+                ]
+            else:
+                assert len(program.calls) == 2
+                assert kwargs["request"]["needs"] == requests
             return {
                 "status": "unavailable",
                 "operations_used": 1,
@@ -2163,6 +2609,7 @@ def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
 
     async def validator(**kwargs: Any) -> dict[str, Any]:
         return {
+            "scope": read_validation_scope(kwargs["profile"]),
             "status": "unknown",
             "findings": [
                 {
@@ -2188,6 +2635,7 @@ def test_pa_evidence_feedback_is_visible_live_and_after_refresh(
             robot_runtime=Robot(),
             product_runtime=Product(),
             validator=validator,
+            profile={**load_refinement_profile(), "validation_scope": VALIDATION_SCOPE},
         ),
     )
     monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", capture_on_click)

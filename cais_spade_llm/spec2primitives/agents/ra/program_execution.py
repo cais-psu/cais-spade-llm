@@ -9,6 +9,8 @@ import logging
 import threading
 import time
 import uuid
+import time
+from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -30,7 +32,8 @@ from .primitive_composition import (
     _recorded_request_inputs,
     read_primitive_composition_diagnostic,
 )
-from .program_validation import VALIDATION_SCOPE, resolve_selected_values, validate_program
+from .program_validation import resolve_selected_values, validate_program
+from .validation_scope import is_pick_place_scope, read_validation_scope, supported_primitive_symbols
 from .refinement import _ACTIVE as ACTIVE_COMPOSITIONS
 from .refinement import _robot_changed
 from .refinement_records import (
@@ -50,15 +53,9 @@ from ...adapters.gazebo_execution import (
     prepare_trajectory,
 )
 from ...adapters.target_calculation import calculate_target
+from ...adapters.robot_validation_context import validation_capture
 
 logger = logging.getLogger(__name__)
-_SUPPORTED = {
-    "compute_pick_targets",
-    "compute_place_targets",
-    "move_cartesian",
-    "grasp_part",
-    "release_part",
-}
 
 
 @dataclass
@@ -86,6 +83,7 @@ def load_validated_program(root: Path) -> ValidatedProgram:
     result = view["refinement"]["result"]
     request_ref = result["request_ref"]
     request = verify_record(root, request_ref)
+    scope = read_validation_scope(request["profile"])
     result_ref = pin(root, owned_path(root, request_ref["ref"]).parent / "result.json")
     if (
         verify_record(root, result_ref) != result
@@ -98,6 +96,8 @@ def load_validated_program(root: Path) -> ValidatedProgram:
         raise ValueError("The displayed candidate differs from the validated program.")
     saved_request = _read_record(owned_path(root, candidate["request_ref"]))
     read_pin(root, {"ref": candidate["request_ref"], "sha256": candidate["request_sha256"]})
+    if read_validation_scope(saved_request) != scope:
+        raise ValueError("The authored program and refinement run have different validation scopes.")
     inputs = _recorded_request_inputs(inputs, saved_request)
     if inputs.includes_execution_identifiers:
         raise ValueError(
@@ -107,10 +107,10 @@ def load_validated_program(root: Path) -> ValidatedProgram:
     steps = deepcopy(candidate["primitive_steps"])
     if (
         report["status"] != "passed"
-        or report["scope"] != VALIDATION_SCOPE
+        or report["scope"] != scope
         or report["candidate_ref"] != candidate_ref
         or report["candidate_fingerprint"] != fingerprint(steps)
-        or any(step["primitive_symbol"] not in _SUPPORTED for step in steps)
+        or any(step["primitive_symbol"] not in supported_primitive_symbols(scope) for step in steps)
     ):
         raise ValueError("The saved report does not validate this exact supported program.")
     for reference in report["evidence_refs"].values():
@@ -263,6 +263,7 @@ class PrimitiveExecutionRuntime:
                 "resource_jid": assignment.selected_resource_jid,
                 "total_steps": len(program.steps),
                 "profile": transport_profile,
+                "validation_scope": program.report["scope"],
                 "configuration_sha256": fingerprint(configuration),
                 "created_at_ns": time.time_ns(),
             },
@@ -318,31 +319,34 @@ class PrimitiveExecutionRuntime:
                 "preparing", "Checking the saved program, current robot state and Gazebo binding."
             )
             check_stop()
-            fresh = dict(
-                await self.robot_runtime.capture_execution_context(
-                    assignment, profile=program.profile, custody={"held_part": held}
+            async with AsyncExitStack() as capture_stack:
+                fresh = dict(
+                    await capture_stack.enter_async_context(validation_capture(
+                        self.robot_runtime, assignment, profile=program.profile, custody={"held_part": held},
+                    ))
                 )
-            )
-            fresh_ref = await record("robot_initial.json", fresh)
-            if fingerprint(configuration) != fresh["configuration_sha256"] or _robot_changed(
-                program.robot, fresh, program.profile
-            ):
-                raise ValueError(
-                    "Robot state or configuration changed after validation. Capture current context and compose again."
+                validation_entry_ns = time.time_ns()
+                fresh_ref = await record("robot_initial.json", fresh)
+                if fingerprint(configuration) != fresh["configuration_sha256"] or _robot_changed(
+                    program.robot, fresh, program.profile
+                ):
+                    raise ValueError(
+                        "Robot state or configuration changed after validation. Capture current context and compose again."
+                    )
+                fresh_report = await self.validator(
+                    inputs=program.inputs,
+                    steps=program.steps,
+                    robot=fresh,
+                    evidence=program.report["evidence_refs"],
+                    directory=directory / "validation",
+                    profile=program.profile,
+                    cache={},
+                    _validation_started_at_ns=validation_entry_ns,
                 )
-            fresh_report = await self.validator(
-                inputs=program.inputs,
-                steps=program.steps,
-                robot=fresh,
-                evidence=program.report["evidence_refs"],
-                directory=directory / "validation",
-                profile=program.profile,
-                cache={},
-            )
             validation_ref = await record("validation.json", fresh_report)
             if fresh_report["status"] != "passed" or fresh_report[
                 "candidate_fingerprint"
-            ] != fingerprint(program.steps):
+            ] != fingerprint(program.steps) or fresh_report.get("scope") != program.report["scope"]:
                 raise ValueError("Fresh validation did not pass for the unchanged program.")
             final = dict(
                 await self.robot_runtime.capture_execution_context(
@@ -416,6 +420,7 @@ class PrimitiveExecutionRuntime:
                     part,
                     cad_scale=0.001 if cad["units"] == "mm" else 1.0,
                     profile=self.profile,
+                    interaction_root=root, validation_scope=program.report["scope"],
                 )
                 binding_ref = await record(
                     "binding.json",
@@ -467,7 +472,7 @@ class PrimitiveExecutionRuntime:
                     )
                     check_stop()
                     if symbol in {"compute_pick_targets", "compute_place_targets"}:
-                        output = calculate_target(symbol, params, fresh, pose)
+                        output = calculate_target(symbol, params, fresh, pose, validation_scope=program.report["scope"])
                         calculation = verify_record(root, checked[index]["calculation_ref"])
                         if output != calculation["result"]:
                             raise ValueError(
@@ -502,6 +507,7 @@ class PrimitiveExecutionRuntime:
                             part,
                             cad_scale=0.001 if cad["units"] == "mm" else 1.0,
                             profile=self.profile,
+                            interaction_root=root, validation_scope=program.report["scope"],
                         )
                         if held is not None:
                             raise ValueError("grasp_part requires held_part to be null.")
@@ -514,6 +520,8 @@ class PrimitiveExecutionRuntime:
                         gripper_state = "closed"
                         check_stop()
                         output = await transport.attachment(binding, True)
+                        if output.get("success") is not True or output.get("attached") is not True:
+                            raise RuntimeError("Gazebo attachment was not acknowledged.")
                         output["gripper_feedback"] = grip
                         held = params["part_name"]
                         custody_known = True
@@ -528,6 +536,8 @@ class PrimitiveExecutionRuntime:
                         gripper_state = "open"
                         check_stop()
                         output = await transport.attachment(binding, False)
+                        if output.get("success") is not True or output.get("attached") is not False:
+                            raise RuntimeError("Gazebo detachment was not acknowledged.")
                         output["gripper_feedback"] = grip
                         held, custody_known = None, True
                     results[index] = deepcopy(output)
@@ -546,6 +556,8 @@ class PrimitiveExecutionRuntime:
                 check_stop()
                 status, message = (
                     "completed",
+                    "Pick-and-place completed. All motion, gripper and attach/detach commands acknowledged."
+                    if is_pick_place_scope(program.report["scope"]) else
                     "Execution completed. All commands acknowledged; assembly success has not been established.",
                 )
         except asyncio.CancelledError:

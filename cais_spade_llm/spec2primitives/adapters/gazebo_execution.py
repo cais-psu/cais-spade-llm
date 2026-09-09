@@ -19,6 +19,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from .robot_validation_context import matrix_pose, pose_matrix
+from ..agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, VALIDATION_SCOPE
 
 
 def load_execution_profile() -> dict[str, Any]:
@@ -139,11 +140,29 @@ def match_instance(
     *,
     cad_scale: float,
     profile: Mapping[str, Any],
+    interaction_root: Path | None = None,
+    validation_scope: str = VALIDATION_SCOPE,
 ) -> dict[str, Any]:
-    """Require one live instance of the accepted CAD at its observed CAD pose."""
-    if part.get("frame_id") != "world" or part.get("reference_point") != "CAD_origin":
-        raise ValueError("Instance binding requires the accepted world-frame CAD origin.")
-    observed = pose_matrix(part["origin_pose"])
+    """Require one live instance matching the accepted CAD and scoped observed geometry."""
+    observed_bounds = validation_scope == GAZEBO_OBSERVED_SCOPE
+    reference = "observed_bounds_center" if observed_bounds else "CAD_origin"
+    if part.get("frame_id") != "world" or part.get("reference_point") != reference:
+        raise ValueError(f"Instance binding requires the accepted world-frame {reference} reference.")
+    observed = pose_matrix(part["reference_pose"] if observed_bounds else part["origin_pose"])
+    vertices = None
+    if observed_bounds:
+        from ..agents.ra.refinement_records import owned_path
+
+        if interaction_root is None:
+            raise ValueError("Observed instance matching requires its approved CAD evidence root.")
+        mesh = part["CAD_mesh"]
+        path = owned_path(interaction_root, mesh["ref"])
+        if hashlib.sha256(path.read_bytes()).hexdigest() != mesh["sha256"]:
+            raise ValueError("The selected CAD mesh changed before instance matching.")
+        with np.load(path, allow_pickle=False) as arrays:
+            vertices = np.asarray(arrays["triangles_m"], dtype=float).reshape(-1, 3)
+        if not len(vertices) or not np.isfinite(vertices).all():
+            raise ValueError("The selected CAD mesh does not establish finite instance bounds.")
     matches = []
     for instance in instances:
         if instance["model_name"] not in live:
@@ -153,12 +172,21 @@ def match_instance(
         actual = pose_matrix(live[instance["model_name"]]["pose"]) @ np.asarray(
             instance["model_from_CAD"]
         )
-        distance = float(np.linalg.norm(actual[:3, 3] - observed[:3, 3]))
-        angle = float(Rotation.from_matrix(actual[:3, :3].T @ observed[:3, :3]).magnitude())
-        if (
-            distance <= profile["instance_position_tolerance_m"]
-            and angle <= profile["instance_orientation_tolerance_rad"]
-        ):
+        if observed_bounds:
+            points = vertices @ actual[:3, :3].T + actual[:3, 3]
+            minimum, maximum = points.min(axis=0), points.max(axis=0)
+            center = (minimum + maximum) / 2
+            distance = float(np.linalg.norm(center - observed[:3, 3]))
+            bounds_error = float(np.max(np.abs(np.asarray([minimum, maximum]) - np.asarray([
+                part["bounds_m"]["minimum"], part["bounds_m"]["maximum"]]))))
+            compatible = max(distance, bounds_error) <= profile["instance_position_tolerance_m"]
+            metrics = {"bounds_difference_m": bounds_error, "orientation_difference_rad": None}
+        else:
+            distance = float(np.linalg.norm(actual[:3, 3] - observed[:3, 3]))
+            angle = float(Rotation.from_matrix(actual[:3, :3].T @ observed[:3, :3]).magnitude())
+            compatible = distance <= profile["instance_position_tolerance_m"] and angle <= profile["instance_orientation_tolerance_rad"]
+            metrics = {"orientation_difference_rad": angle}
+        if compatible:
             matches.append(
                 {
                     **deepcopy(instance),
@@ -166,7 +194,7 @@ def match_instance(
                     "origin_pose": matrix_pose(actual),
                     "live_state": deepcopy(live[instance["model_name"]]),
                     "position_difference_m": distance,
-                    "orientation_difference_rad": angle,
+                    **metrics,
                 }
             )
     if len(matches) != 1:

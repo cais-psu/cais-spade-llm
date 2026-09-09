@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+import threading
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any
 
@@ -104,12 +106,47 @@ class MeasuredRobotContextRuntime:
             deepcopy(dict(profile)),
         )
 
+    @asynccontextmanager
+    async def validation_context(
+        self, *, resource_jid: str, assignment_fingerprint: str,
+        configuration: Mapping[str, Any], profile: Mapping[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Deliver a measured snapshot before tearing down its owned ROS context."""
+        loop = asyncio.get_running_loop()
+        ready = loop.create_future()
+        release = threading.Event()
+
+        def deliver(record: dict[str, Any]) -> None:
+            def publish() -> None:
+                if not ready.done():
+                    ready.set_result(record)
+            loop.call_soon_threadsafe(publish)
+            release.wait()
+
+        async def capture() -> None:
+            try:
+                await asyncio.to_thread(self._capture, resource_jid, assignment_fingerprint,
+                                        deepcopy(dict(configuration)), deepcopy(dict(profile)), deliver)
+            except (ImportError, OSError, RuntimeError, KeyError, TypeError, ValueError) as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+                else:
+                    raise
+
+        worker = asyncio.create_task(capture())
+        try:
+            yield await ready
+        finally:
+            release.set()
+            await asyncio.shield(worker)
+
     def _capture(
         self,
         resource_jid: str,
         assignment_fingerprint: str,
         configuration: dict[str, Any],
         profile: dict[str, Any],
+        publish: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         import rclpy
         from rcl_interfaces.srv import GetParameters, ListParameters
@@ -245,7 +282,7 @@ class MeasuredRobotContextRuntime:
                 for stamp in stamps
             ):
                 raise RuntimeError("Measured robot feedback became stale during parameter capture.")
-            return {
+            record = {
                 "record_type": "RobotValidationContext",
                 "resource_jid": resource_jid,
                 "assignment_fingerprint": assignment_fingerprint,
@@ -279,12 +316,30 @@ class MeasuredRobotContextRuntime:
                 "model_parameters": model_parameters,
                 "model_parameters_sha256": fingerprint(model_parameters),
             }
+            if publish is not None:
+                publish(record)
+            return record
         finally:
             node.destroy_subscription(subscription)
             listener.unregister()
             node.destroy_node()
             executor.shutdown()
             context.try_shutdown()
+
+
+@asynccontextmanager
+async def validation_capture(
+    runtime: Any, assignment: Any, *, profile: Mapping[str, Any], custody: Mapping[str, Any] | None = None,
+) -> AsyncIterator[Mapping[str, Any]]:
+    """Keep the owned live capture open across validation; retain standalone adapters."""
+    context = getattr(runtime, "validation_context", None)
+    if context is not None:
+        async with context(assignment, profile=profile, _execution_custody=custody) as record:
+            yield record
+    elif custody is not None:
+        yield await runtime.capture_execution_context(assignment, profile=profile, custody=custody)
+    else:
+        yield await runtime.capture_validation_context(assignment, profile=profile)
 
 
 def composition_robot_context(record: Mapping[str, Any]) -> dict[str, Any]:

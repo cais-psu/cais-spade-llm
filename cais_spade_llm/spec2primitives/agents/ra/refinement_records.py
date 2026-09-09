@@ -82,6 +82,13 @@ def verify_record(root: Path, reference: Mapping[str, str]) -> dict[str, Any]:
 
 def verify_evidence_tree(root: Path, reference: Mapping[str, str]) -> Any:
     """Check selected evidence and every embedded local artifact pin, including meshes."""
+    return _verify_evidence_tree(root, reference, {})
+
+
+def _verify_evidence_tree(
+    root: Path, reference: Mapping[str, str], records: dict[str, tuple[str, Any]],
+) -> Any:
+    """Reuse byte checks only within the caller's current synchronous input check."""
     seen: dict[str, str] = {}
 
     def visit(source: Mapping[str, str]) -> Any:
@@ -94,13 +101,17 @@ def verify_evidence_tree(root: Path, reference: Mapping[str, str]) -> Any:
             return None
         if len(seen) >= 512:
             raise ValueError("Evidence dependency chain exceeds its record budget.")
-        data = owned_path(root, ref).read_bytes()
-        if hashlib.sha256(data).hexdigest() != sha:
-            raise ValueError("Pinned evidence dependency changed: " + ref)
         seen[ref] = sha
-        if Path(ref).suffix.lower() != ".json":
-            return None
-        value = json.loads(data)
+        if ref in records:
+            checked_sha, value = records[ref]
+            if checked_sha != sha:
+                raise ValueError("Evidence contains conflicting source hashes.")
+        else:
+            data = owned_path(root, ref).read_bytes()
+            if hashlib.sha256(data).hexdigest() != sha:
+                raise ValueError("Pinned evidence dependency changed: " + ref)
+            value = json.loads(data) if Path(ref).suffix.lower() == ".json" else None
+            records[ref] = (sha, value)
         if isinstance(value, dict) and (
             str(value.get("record_type", "")).startswith("PrimitiveExecution")
             or value.get("record_type") == "GazeboInstanceBinding"

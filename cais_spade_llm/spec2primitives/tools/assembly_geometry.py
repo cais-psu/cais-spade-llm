@@ -193,11 +193,15 @@ class AssemblyGeometryProducer:
                 # Pose estimation already ranks these by registration quality. Its
                 # first qualified fit supplies an estimate, without resolving pose.
                 hypothesis = hypotheses[0]
-                transform = calibration.target_from_camera @ np.asarray(
-                    hypothesis["camera_from_CAD_transform"]
-                )
-                matrix_pose(transform)
-                height = float(np.ptp(cad.triangles_m.reshape(-1, 3) @ transform[2, :3]))
+                vertices = cad.triangles_m.reshape(-1, 3)
+                heights = []
+                for qualified in hypotheses:
+                    qualified_transform = calibration.target_from_camera @ np.asarray(
+                        qualified["camera_from_CAD_transform"]
+                    )
+                    matrix_pose(qualified_transform)
+                    heights.append(float(np.ptp(vertices @ qualified_transform[2, :3])))
+                height = heights[0]
                 record.update(
                     part_height_m=height,
                     cad_context_ref=cad.context_ref,
@@ -209,11 +213,14 @@ class AssemblyGeometryProducer:
                         "hypothesis_index": 0,
                         "registration": hypothesis["registration"],
                         "complete_pose_established": False,
+                        "qualified_height_estimates_m": heights,
+                        "qualified_height_range_m": [min(heights), max(heights)],
                     },
                     warning=(
                         "part_height_m is a world-vertical CAD extent estimate from the "
                         "highest-ranked qualified observed pose. Full pose and mating geometry "
-                        "remain ambiguous; this estimate does not establish sensor accuracy."
+                        "remain ambiguous; the range across all qualified hypotheses is recorded "
+                        "in uncertainty. These estimates do not establish sensor accuracy."
                     ),
                 )
             return self.save(record, [cad_ref, pose_ref])
@@ -263,6 +270,114 @@ class AssemblyGeometryProducer:
             [cad_ref, pose_ref],
         )
 
+    def observed_geometry(
+        self, segmentation_ref: str, observation_handle: str, calibration_ref: str,
+    ) -> dict[str, Any]:
+        """Measure all candidate boxes and the detected support in a PA-selected view.
+
+        Boxes describe the visible points extended to the observed support plane.
+        That support assumption and missing occluded geometry remain explicit.
+        Identity, task role and CAD orientation are not inferred by this operation.
+        """
+        from .rgb_d_cad_grounding.frame_conversion import _load_calibration
+        from .rgb_d_cad_grounding.size_correspondence import _load_candidates
+
+        camera, stamp = self.observation(segmentation_ref, observation_handle)
+        surface_result = self.observed_surface(segmentation_ref, observation_handle, calibration_ref)
+        surface = surface_result["record"]
+        if surface["frame_id"] != "world" or abs(surface["normal"][2]) < 1e-9:
+            raise ValueError("Observed geometry requires a world-frame support plane with finite vertical height.")
+        calibration = _load_calibration(
+            self.root, owned_path(self.root, calibration_ref), observation_timestamp_ns=stamp,
+        )
+        _, _, candidates = _load_candidates(self.root, owned_path(self.root, segmentation_ref))
+        selected = [item for item in candidates if item["observation_handle"] == observation_handle]
+        if not selected:
+            raise ValueError("The selected observation contains no segmented candidates.")
+        normal, offset = np.asarray(surface["normal"]), float(surface["offset_m"])
+        measured = []
+        for candidate in selected:
+            points = np.asarray(candidate["points_m"], dtype=float)
+            transform = calibration.target_from_camera
+            points = points @ transform[:3, :3].T + transform[:3, 3]
+            minimum, maximum = points.min(axis=0), points.max(axis=0)
+            center_xy = (minimum[:2] + maximum[:2]) / 2
+            support_z = -(offset + normal[:2] @ center_xy) / normal[2]
+            # Extend visible object points to the selected view's measured support;
+            # never substitute a CAD-local dimension for observed world height.
+            corners = np.array([[x, y] for x in (minimum[0], maximum[0])
+                                for y in (minimum[1], maximum[1])])
+            minimum[2] = min(minimum[2], float(np.min(-(offset + corners @ normal[:2]) / normal[2])))
+            size = maximum - minimum
+            if not np.isfinite(size).all() or np.any(size <= 0):
+                raise ValueError("Candidate points do not establish finite positive observed bounds.")
+            center = (minimum + maximum) / 2
+            reference_pose = dict(zip(("x", "y", "z"), map(float, center)))
+            reference_pose.update(qx=0.0, qy=0.0, qz=0.0, qw=1.0)
+            measured.append(self.save({
+                "record_type": "ObservedGeometryEvidence", "status": "accepted",
+                "frame_id": "world", "units": "m", "reference_point": "observed_bounds_center",
+                "reference_pose": reference_pose,
+                "bounds_m": {"minimum": minimum.tolist(), "maximum": maximum.tolist()},
+                "size_m": size.tolist(), "part_height_m": float(size[2]),
+                "product_geometry": {"part_height_m": float(size[2]), "board_center": {"z": float(support_z)}},
+                "placement_surface_point": {"x": float(center[0]), "y": float(center[1]), "z": float(maximum[2])},
+                "object_id": "observed_" + fingerprint({"segmentation_ref": segmentation_ref,
+                    "candidate_handle": candidate["candidate_handle"]})[:20],
+                "segmentation_ref": segmentation_ref,
+                "candidate_reference": {"observation_handle": observation_handle,
+                                        "candidate_handle": candidate["candidate_handle"]},
+                "observation_timestamp_ns": stamp,
+                "uncertainty": {"geometry_model": "observed_bounds",
+                    "support_assumption": "visible_points_extended_to_selected_observed_plane",
+                    "partial_visibility": candidate["partial_visibility"],
+                    "CAD_orientation": "not_established", "occluded_geometry": "unmeasured",
+                    "support_rms_distance_m": surface["rms_distance_m"]},
+            }, [segmentation_ref, calibration_ref, surface_result["record_ref"]]))
+        # A finite measured patch avoids treating an observed tabletop as an
+        # infinite obstacle through unrelated parts of the robot's workspace.
+        from .rgb_d_cad_grounding.size_correspondence import _load_camera_points
+        preprocessing = read_pin(self.root, self.read(segmentation_ref)["source_record"])
+        source_camera = next(item for item in preprocessing["cameras"] if item["camera_id"] == camera["camera_id"])
+        camera_points, _ = _load_camera_points(
+            self.root, camera, source_artifact=source_camera["point_cloud_artifact"],
+            operation_number=int(preprocessing["operation_number"]),
+        )
+        distance = np.abs(camera_points @ np.asarray(camera["support_plane"]["normal"]) + camera["support_plane"]["offset_m"])
+        threshold = max(float(surface["rms_distance_m"]) * 3, 1e-6)
+        patch = camera_points[distance <= threshold]
+        if len(patch) < 3:
+            raise ValueError("The selected plane has insufficient observed support coverage.")
+        patch = patch @ calibration.target_from_camera[:3, :3].T + calibration.target_from_camera[:3, 3]
+        low, high = patch.min(axis=0), patch.max(axis=0)
+        vertices = np.array([[x, y, -(offset + normal[0] * x + normal[1] * y) / normal[2]]
+                             for x, y in ((low[0], low[1]), (high[0], low[1]),
+                                          (high[0], high[1]), (low[0], high[1]))])
+        mesh_path = self.directory / (Path(surface_result["record_ref"]).stem + "_surface.npz")
+        with mesh_path.open("xb") as stream:
+            np.savez_compressed(stream, triangles_m=vertices[[[0, 1, 2], [0, 2, 3]]])
+        from ..agents.ra.refinement_records import pin
+        patch_result = self.save({**{key: value for key, value in surface.items()
+                                    if key not in {"fingerprint", "source_refs", "created_at_ns"}},
+            "mesh": pin(self.root, mesh_path),
+            "coverage": "observed_plane_patch",
+        }, [surface_result["record_ref"], segmentation_ref])
+        return {"status": "accepted", "geometry_refs": [item["record_ref"] for item in measured],
+                "surface_ref": patch_result["record_ref"], "measurements": measured}
+
+    def bind_observed_part(self, part_ref: str, cad_ref: str, feature_name: str) -> dict[str, Any]:
+        """Bind PA-selected observed bounds and CAD to an already accepted feature."""
+        part, cad = self.read(part_ref), self.read(cad_ref)
+        if part.get("record_type") != "ObservedGeometryEvidence" or cad.get("record_type") != "CADMeshRecord":
+            raise ValueError("Select ObservedGeometryEvidence and an issued CADMeshRecord.")
+        cad_input = _load_cad_input(self.root, owned_path(self.root, cad_ref))
+        selected = self.save({**{key: value for key, value in part.items()
+                                if key not in {"fingerprint", "source_refs", "created_at_ns"}},
+            "cad_context_ref": cad_input.context_ref,
+            "CAD_mesh": {"ref": cad_input.mesh_ref, "sha256": cad_input.mesh_sha256},
+        }, [part_ref, cad_ref])
+        return self.bind_part(selected["record_ref"], feature_name)
+
     def bind_part(self, part_ref: str, feature_name: str) -> dict[str, Any]:
         """Associate measured geometry with an exact already-accepted assembly feature."""
         part = self.read(part_ref)
@@ -308,29 +423,49 @@ class AssemblyGeometryProducer:
         )
         return self.save(payload, [part_ref])
 
+    def observation(
+        self, segmentation_ref: str, observation_handle: str
+    ) -> tuple[dict[str, Any], int]:
+        """Resolve one exact observed view and its verified depth timestamp.
+
+        Args:
+            segmentation_ref: Issued segmentation record reference.
+            observation_handle: Exact canonical handle resolved by the PA adapter.
+
+        Returns:
+            The selected camera entry and its source depth timestamp.
+        """
+        from .rgb_d_cad_grounding.size_correspondence import _load_candidates
+
+        self.read(segmentation_ref)
+        _, segmentation, _ = _load_candidates(self.root, owned_path(self.root, segmentation_ref))
+        matches = [
+            item
+            for item in segmentation["cameras"]
+            if item["observation_handle"] == observation_handle
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "The selected observation handle is absent or duplicated in this segmentation."
+            )
+        camera = matches[0]
+        preprocessing = read_pin(self.root, segmentation["source_record"])
+        source_camera = next(
+            item for item in preprocessing["cameras"] if item["camera_id"] == camera["camera_id"]
+        )
+        return camera, source_camera["depth_timestamp_ns"]
+
     def observed_surface(
         self, segmentation_ref: str, observation_handle: str, calibration_ref: str
     ) -> dict[str, Any]:
         """Transform one observed support-plane candidate without assigning its role."""
         from .rgb_d_cad_grounding.frame_conversion import _load_calibration
-        from .rgb_d_cad_grounding.size_correspondence import _load_candidates
 
-        self.read(segmentation_ref)
+        camera, stamp = self.observation(segmentation_ref, observation_handle)
         self.read(calibration_ref)
-        _, segmentation, _ = _load_candidates(self.root, owned_path(self.root, segmentation_ref))
-        camera = next(
-            item
-            for item in segmentation["cameras"]
-            if item["observation_handle"] == observation_handle
-        )
         plane = camera["support_plane"]
         if plane.get("status") != "detected":
             raise ValueError("No support-plane candidate was measured in this view.")
-        preprocessing = read_pin(self.root, segmentation["source_record"])
-        source_camera = next(
-            item for item in preprocessing["cameras"] if item["camera_id"] == camera["camera_id"]
-        )
-        stamp = source_camera["depth_timestamp_ns"]
         calibration = _load_calibration(
             self.root, owned_path(self.root, calibration_ref), observation_timestamp_ns=stamp
         )
@@ -354,6 +489,69 @@ class AssemblyGeometryProducer:
             [segmentation_ref, calibration_ref],
         )
 
+    def surface_height(self, surface_ref: str, location_ref: str) -> dict[str, Any]:
+        """Measure an issued plane's height at a PA-selected observed world location."""
+        surface, location = self.read(surface_ref), self.read(location_ref)
+        _same_frame(surface)
+        if surface.get("record_type") != "AssemblySurfaceEvidence":
+            raise ValueError("Select accepted observed plane evidence for surface_ref.")
+        if (
+            location.get("record_type") != "RobotFrameLocationRecord"
+            or location.get("location") != "available"
+            or location.get("robot_frame_conversion") != "accepted"
+            or location.get("target_frame") != surface["frame_id"]
+            or surface["frame_id"] != "world"
+        ):
+            raise ValueError("Select a calibrated RobotFrameLocationRecord in the plane's world frame.")
+        point = np.asarray(location["translated_location_m"], dtype=float)
+        normal = np.asarray(surface["normal"], dtype=float)
+        offset = float(surface["offset_m"])
+        if (
+            point.shape != (3,) or normal.shape != (3,)
+            or not np.isfinite(point).all() or not np.isfinite(normal).all()
+            or not math.isfinite(offset) or abs(normal[2]) < 1e-9
+        ):
+            raise ValueError("The selected plane and point do not establish a finite vertical height.")
+        height = -(offset + normal[0] * point[0] + normal[1] * point[1]) / normal[2]
+        return self.save({
+            "record_type": "AssemblySurfaceEvidence", "status": "accepted",
+            "frame_id": "world", "units": "m", "normal": normal.tolist(),
+            "offset_m": offset, "rms_distance_m": surface["rms_distance_m"],
+            "reference_point": "observed_plane_at_selected_location",
+            "evaluation_point_m": point.tolist(),
+            "product_geometry": {"board_center": {"z": float(height)}},
+            "observation_timestamp_ns": min(
+                surface["observation_timestamp_ns"], location["observation_timestamp_ns"]
+            ),
+        }, [surface_ref, location_ref])
+
+    def select_grasp_point(
+        self, part_ref: str, plane_id: str, circle_id: str
+    ) -> dict[str, Any]:
+        """Bind a PA-selected circular feature as the grasp reference, retaining the CAD frame."""
+        part = self.read(part_ref)
+        _same_frame(part)
+        if part.get("reference_point") != "CAD_origin":
+            raise ValueError("A grasp feature requires registered CAD geometry.")
+        plane = next(item for item in part["features"] if item["plane_id"] == plane_id)
+        circle = next(item for item in plane["circles"] if item["circle_id"] == circle_id)
+        point = np.asarray(circle["center_m"], dtype=float)
+        transform = pose_matrix(part["origin_pose"])
+        if point.shape != (3,) or not np.isfinite(point).all():
+            raise ValueError("The selected grasp feature has no finite CAD-local centre.")
+        payload = {
+            key: value for key, value in part.items()
+            if key not in {"fingerprint", "source_refs", "created_at_ns"}
+        }
+        payload["grasp_reference"] = {
+            "reference_point": "selected_CAD_feature",
+            "plane_id": plane_id,
+            "circle_id": circle_id,
+            "point_CAD_m": point.tolist(),
+            "point_world_m": (transform[:3, :3] @ point + transform[:3, 3]).tolist(),
+        }
+        return self.save(payload, [part_ref])
+
     def pick_geometry(self, part_ref: str, surface_ref: str) -> dict[str, Any]:
         """Build helper geometry from PA-selected object and support evidence."""
         part, surface = self.read(part_ref), self.read(surface_ref)
@@ -366,8 +564,22 @@ class AssemblyGeometryProducer:
                 "The vertical helper cannot represent the selected inclined support plane."
             )
         origin = part["origin_pose"]
+        grasp = part.get("grasp_reference")
+        point = (
+            np.asarray(grasp["point_world_m"], dtype=float) if grasp
+            else np.asarray([origin[key] for key in ("x", "y", "z")])
+        )
+        bounds = part["bounds_m"]
+        if np.any(point < np.asarray(bounds["minimum"]) - 1e-6) or np.any(
+            point > np.asarray(bounds["maximum"]) + 1e-6
+        ):
+            raise ValueError(
+                "The selected grasp reference lies outside the measured part bounds. "
+                "A CAD file origin is not automatically a physical grasp point; "
+                "select_grasp_point can bind a PA-selected measured feature."
+            )
         support_z = (
-            -(surface["offset_m"] + normal[0] * origin["x"] + normal[1] * origin["y"]) / normal[2]
+            -(surface["offset_m"] + normal[0] * point[0] + normal[1] * point[1]) / normal[2]
         )
         return self.save(
             {
@@ -375,8 +587,8 @@ class AssemblyGeometryProducer:
                 "status": "accepted",
                 "frame_id": part["frame_id"],
                 "units": "m",
-                "reference_point": "CAD_origin",
-                "target_pose": {key: origin[key] for key in ("x", "y", "z")},
+                "reference_point": "selected_CAD_feature" if grasp else "CAD_origin",
+                "target_pose": dict(zip(("x", "y", "z"), point.tolist(), strict=True)),
                 "product_geometry": {
                     "board_center": {"z": float(support_z)},
                     "part_height_m": part["part_height_m"],
@@ -386,6 +598,7 @@ class AssemblyGeometryProducer:
                     "support_rms_m": surface["rms_distance_m"],
                     "pose_record_ref": part_ref,
                 },
+                **({"grasp_reference": grasp} if grasp else {}),
             },
             [part_ref, surface_ref],
         )
@@ -431,6 +644,11 @@ class AssemblyGeometryProducer:
         matrix[1, 3] = target_circle["world_center_m"][1] - part_axis_offset[1]
         matrix[2, 3] = target_plane["world_point_m"][2] - part_seat_offset[2]
         origin = matrix_pose(matrix)
+        grasp = part.get("grasp_reference")
+        grasp_offset = (
+            (matrix[:3, :3] @ np.asarray(grasp["point_CAD_m"], dtype=float)).tolist()
+            if grasp else None
+        )
         return self.save(
             {
                 "record_type": "AssemblyGeometryEvidence",
@@ -452,8 +670,10 @@ class AssemblyGeometryProducer:
                     "target_reference": {
                         "target_point": "inserted_part_origin",
                         "surface_role": "assembly_slot",
+                        **({"grasp_point": "selected_CAD_feature"} if grasp else {}),
                     },
                     "target_origin_pose": {key: origin[key] for key in ("x", "y", "z")},
+                    **({"grasp_point_offset_world_m": grasp_offset} if grasp else {}),
                 },
                 "selected_features": {
                     "part_plane_id": part_plane_id,
@@ -482,6 +702,13 @@ class AssemblyGeometryProducer:
                 "Scene coverage needs observed object geometry, support surfaces and segmentation records."
             )
         _same_frame(*geometry, *surfaces)
+        observed = all(item.get("record_type") == "ObservedGeometryEvidence" for item in geometry)
+        if not observed and any(item.get("record_type") == "ObservedGeometryEvidence" for item in geometry):
+            raise ValueError("Select one consistent observed-box or registered-mesh scene representation.")
+        declared_views = {(item["segmentation_ref"], item["candidate_reference"]["observation_handle"])
+                          for item in geometry}
+        if observed and {ref for ref, _ in declared_views} != set(segmentation_refs):
+            raise ValueError("Declared observed geometry and segmentation coverage must reference the same observations.")
         covered = {
             (item["segmentation_ref"], item["candidate_reference"]["candidate_handle"])
             for item in geometry
@@ -492,6 +719,8 @@ class AssemblyGeometryProducer:
             if segmentation.get("record_type") != "RGBDSegmentationRecord":
                 raise ValueError("Scene coverage must cite actual segmentation evidence.")
             for camera in segmentation["cameras"]:
+                if observed and (ref, camera["observation_handle"]) not in declared_views:
+                    continue
                 for candidate in camera["candidates"]:
                     if (ref, candidate["candidate_handle"]) not in covered:
                         unresolved.append(
@@ -501,7 +730,9 @@ class AssemblyGeometryProducer:
                             }
                         )
         objects = [
-            {"object_id": item["object_id"], "mesh": item["mesh"], "pose": item["origin_pose"]}
+            {"object_id": item["object_id"], **(
+                {"size_m": item["size_m"], "pose": item["reference_pose"]} if observed else
+                {"mesh": item["mesh"], "pose": item["origin_pose"]})}
             for item in geometry
         ]
         if len({item["object_id"] for item in objects}) != len(objects):
@@ -512,7 +743,8 @@ class AssemblyGeometryProducer:
         objects.extend(
             {
                 "object_id": "surface_" + str(index),
-                "plane": [*item["normal"], item["offset_m"]],
+                **({"mesh": item["mesh"]} if observed and "mesh" in item else
+                   {"plane": [*item["normal"], item["offset_m"]]}),
                 "pose": identity_pose,
             }
             for index, item in enumerate(surfaces)
@@ -525,6 +757,9 @@ class AssemblyGeometryProducer:
                 "units": "m",
                 "objects": objects,
                 "coverage": "all_observed_candidates" if not unresolved else "incomplete",
+                **({"geometry_model": "observed_bounds", "declared_observations": [
+                    {"segmentation_ref": ref, "observation_handle": handle}
+                    for ref, handle in sorted(declared_views)]} if observed else {}),
                 "unresolved_candidates": unresolved,
                 "unobserved_space": "unmodeled",
                 "observation_timestamp_ns": min(

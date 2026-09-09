@@ -39,7 +39,7 @@ def assess_program_dependencies(
     read_evidence: Callable[[str, str], Any],
     result_schema: Callable[[dict[str, Any]], Any],
 ) -> dict[str, Any]:
-    """Extend the historical binding assessment with transitive producer gaps."""
+    """Route unresolved selected measurements and trace their dependent outputs."""
     issues = assess_parameter_bindings(
         steps, catalog, robot_state, read_evidence=read_evidence, result_schema=result_schema
     )
@@ -84,12 +84,15 @@ def assess_program_dependencies(
                 )
         blocked[index] = causes
         for issue in direct:
-            if issue["status"] != "missing":
-                continue
             path = issue["parameter_path"]
             fields = [
                 name.replace("~1", "/").replace("~0", "~") for name in path.split("/")[1:]
             ]
+            product_input = fields[0] in {"product_geometry", "target_pose", "detected_parts"}
+            if issue["status"] != "missing" and not (
+                product_input and issue["status"] in {"incompatible", "unverified"}
+            ):
+                continue
             schema = catalog[step["primitive_symbol"]]["parameter_schemas"].get(fields[0], {})
             for name in fields[1:]:
                 schema = (
@@ -97,11 +100,9 @@ def assess_program_dependencies(
                     if schema.get("type") == "array"
                     else schema.get("properties", {}).get(name, {})
                 )
-            route = (
-                "PA" if fields[0] in {"product_geometry", "target_pose", "detected_parts"} else "RA"
-            )
-            # Only absent measurements authorize acquisition. Incompatible sources
-            # and unverified literals remain findings for the RA author to correct.
+            route = "PA" if product_input else "RA"
+            # A populated but rejected measurement is still an unresolved input.
+            # PA can investigate evidence; only RA can replace the rejected binding.
             needs.append(
                 {
                     "step_index": index,

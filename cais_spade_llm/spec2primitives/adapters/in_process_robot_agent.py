@@ -4,7 +4,8 @@ from __future__ import annotations
 
 
 import asyncio
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any, Protocol
 from pathlib import Path
@@ -196,6 +197,15 @@ class InProcessRobotAgentCompositionRuntime:
         _execution_custody: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """Measure the selected resource through owned read-only ROS interfaces."""
+        async with self.validation_context(assignment, profile=profile, _execution_custody=_execution_custody) as record:
+            return dict(record)
+
+    @asynccontextmanager
+    async def validation_context(
+        self, assignment: SelectedRAAssignmentEnvelope, *, profile: Mapping[str, Any],
+        _execution_custody: Mapping[str, Any] | None = None,
+    ) -> AsyncIterator[Mapping[str, Any]]:
+        """Finish authority/custody reads before delivering fresh measured feedback."""
         from .robot_validation_context import MeasuredRobotContextRuntime
         from ..agents.ra.refinement_records import fingerprint
         from ..agents.ra.execution_state import execution_busy, execution_custody
@@ -216,15 +226,6 @@ class InProcessRobotAgentCompositionRuntime:
             return deepcopy(dict(value))
 
         config = await self._host._run_on_agent_runtime(configuration())
-        measured = await MeasuredRobotContextRuntime().capture(
-            resource_jid=assignment.selected_resource_jid,
-            assignment_fingerprint=assignment.fingerprint,
-            configuration=config,
-            profile=profile,
-        )
-        current = await self._host._run_on_agent_runtime(configuration())
-        if fingerprint(current) != measured["configuration_sha256"]:
-            raise RAContextHandoffError("Robot tool/configuration changed during measurement.")
         async def custody() -> Any:
             state = selected.get_recovery_snapshot()
             if not isinstance(state, Mapping) or "held_part" not in state:
@@ -232,15 +233,23 @@ class InProcessRobotAgentCompositionRuntime:
             return deepcopy(state["held_part"])
         from ..agents.ra.composition_context import _without_model_name
 
-        measured["held_part"] = _without_model_name(await self._host._run_on_agent_runtime(custody()))
+        held_part = _without_model_name(await self._host._run_on_agent_runtime(custody()))
         acknowledged = _execution_custody
         if acknowledged is None:
             acknowledged = await asyncio.to_thread(
                 execution_custody, self._contexts_root, assignment.selected_resource_jid
             )
         if acknowledged is not None:
-            measured["held_part"] = acknowledged["held_part"]
-        return measured
+            held_part = acknowledged["held_part"]
+        async with MeasuredRobotContextRuntime().validation_context(
+            resource_jid=assignment.selected_resource_jid, assignment_fingerprint=assignment.fingerprint,
+            configuration=config, profile=profile,
+        ) as measured:
+            measured["held_part"] = held_part
+            yield measured
+            current = await self._host._run_on_agent_runtime(configuration())
+            if fingerprint(current) != measured["configuration_sha256"]:
+                raise RAContextHandoffError("Robot tool/configuration changed during measurement.")
 
     async def execution_configuration(
         self, assignment: SelectedRAAssignmentEnvelope

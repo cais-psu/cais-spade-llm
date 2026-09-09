@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Calculate selected vertical helpers from explicit inputs and frozen robot context."""
+"""Calculate vertical assembly targets using explicit geometry and measured tool transforms."""
 
 import math
 from collections.abc import Mapping
@@ -17,7 +17,8 @@ from cais_spade_llm.resources.robot.target_calculations import (
 )
 
 from ..agents.ra.composition_context import _without_model_name
-from .robot_validation_context import pose_matrix
+from ..agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, VALIDATION_SCOPE, read_validation_scope
+from .robot_validation_context import matrix_pose, pose_matrix
 
 
 class CalculationUnavailable(ValueError):
@@ -42,10 +43,13 @@ def calculate_target(
     params: Mapping[str, Any],
     robot_context: Mapping[str, Any],
     preceding_pose: Mapping[str, Any],
+    *,
+    validation_scope: str = VALIDATION_SCOPE,
 ) -> dict[str, Any]:
     """Evaluate one authored helper; do not infer inputs, invoke perception or move."""
     from cais_spade_llm.resources.robot.robot_primitives import ROBOT_EXTRACT_OUTPUT_MAP
 
+    scope = read_validation_scope({"validation_scope": validation_scope})
     if primitive_symbol not in {"compute_pick_targets", "compute_place_targets"}:
         raise CalculationUnavailable("No audited calculation adapter exists for this primitive.")
     if robot_context.get("frame_id") != "world":
@@ -58,14 +62,24 @@ def calculate_target(
         )
     try:
         ee = pose_matrix(preceding_pose)
+        orientation = {key: preceding_pose[key] for key in ("qx", "qy", "qz", "qw")}
+        if primitive_symbol == "compute_place_targets":
+            pick = params["pick_ctx"]
+            if not isinstance(pick, Mapping):
+                raise CalculationUnavailable("pick_ctx requires an explicitly bound object.")
+            handoff = pick.get("held_part_handoff", {})
+            positions = pick.get("resolved_cartesian_positions", {})
+            if not isinstance(handoff, Mapping) or not isinstance(positions, Mapping):
+                raise CalculationUnavailable("Selected grasp orientation containers must be objects.")
+            raw_pose = handoff.get("world_tool0_pose_at_grasp") or positions.get("descend")
+            if raw_pose:
+                ee = pose_matrix(raw_pose)
+                orientation = {key: raw_pose[key] for key in ("qx", "qy", "qz", "qw")}
         tool = np.asarray(robot_context["ee_from_tcp"], dtype=float)
         if tool.shape != (4, 4) or not np.isfinite(tool).all():
             raise CalculationUnavailable("A measured full EE–TCP transform is required.")
-        offset = (ee @ tool)[:3, 3] - ee[:3, 3]
-        if not np.allclose(offset[:2], 0, atol=1e-6):
-            raise CalculationUnavailable(
-                "The vertical helper cannot represent this lateral EE–TCP offset at the proposed orientation."
-            )
+        matrix_pose(tool)
+        offset = ee[:3, :3] @ tool[:3, 3]
         geometry = params["product_geometry"]
         if not isinstance(geometry, Mapping) or "record_type" in geometry:
             raise CalculationUnavailable(
@@ -74,8 +88,17 @@ def calculate_target(
         policy = robot_context["policy"]
         if primitive_symbol == "compute_pick_targets":
             result = _pick(params, geometry, policy, preceding_pose, float(offset[2]))
+        elif scope == GAZEBO_OBSERVED_SCOPE:
+            result = _place_observed(params, geometry, policy, float(offset[2]), orientation)
         else:
-            result = _place(params, geometry, policy, float(offset[2]))
+            result = _place(params, geometry, policy, float(offset[2]), orientation)
+        # Scalar object/slot coordinates retain their meaning. Only controlled-link
+        # targets receive the measured XY correction; vertical arithmetic already
+        # subtracts the Z offset. Validation and owned execution use this same path.
+        for name in ("approach_pose", "target_pose", "pre_insert_pose", "insert_pose"):
+            if name in result:
+                result[name]["x"] -= float(offset[0])
+                result[name]["y"] -= float(offset[1])
         output, error = ROBOT_EXTRACT_OUTPUT_MAP[primitive_symbol](
             dict(params), {"success": True, **result}
         )
@@ -150,6 +173,8 @@ def _pick(
         "tz": z,
         "pick_z": pick_z,
         "travel_z": travel_z,
+        "approach_pose": {"x": x, "y": y, "z": travel_z},
+        "target_pose": {"x": x, "y": y, "z": pick_z},
         "part_height": height,
         "tcp_offset_z": tcp_offset_z,
         "pick_tcp_z": tcp_z,
@@ -159,11 +184,43 @@ def _pick(
     }
 
 
+def _place_observed(
+    params: Mapping[str, Any], geometry: Mapping[str, Any], policy: Mapping[str, Any],
+    measured_offset: float, orientation: Mapping[str, float],
+) -> dict[str, Any]:
+    if params.get("destination_location"):
+        raise CalculationUnavailable("Select a measured placement_surface_point instead of a destination token.")
+    pick = params["pick_ctx"]
+    if pick.get("origin_pose"):
+        raise CalculationUnavailable("pick_ctx.origin_pose cannot override the selected observed placement surface.")
+    height = _number(geometry.get("part_height_m", pick["part_height"]), "part_height", positive=True)
+    tcp_offset = _number(pick["tcp_offset_z"], "pick_ctx.tcp_offset_z")
+    if not math.isclose(tcp_offset, measured_offset, abs_tol=1e-6):
+        raise CalculationUnavailable("The pick tool offset is incompatible with the placement orientation.")
+    surface = geometry["placement_surface_point"]
+    x, y, z = (_number(surface[axis], "placement_surface_point." + axis) for axis in ("x", "y", "z"))
+    reference_z = z + height / 2 + _number(policy["place_surface_gap_m"], "place surface gap")
+    grasp_offset = _number(pick["pick_tcp_z"], "pick_tcp_z") - _number(pick["tz"], "pick reference Z")
+    tcp_z = reference_z + grasp_offset
+    place_z = controlled_link_height(tcp_z, tcp_offset, _number(params.get("z_adjustment_m", 0.0), "z adjustment"))
+    return {
+        "part_name": params.get("part_name", pick.get("part_name", "")),
+        "slot_x": x, "slot_y": y, "board_top_z": z,
+        "place_z": place_z, "place_tcp_z": tcp_z, "place_part_origin_z": reference_z,
+        "part_height": height, "tcp_offset_z": tcp_offset,
+        "grasp_tcp_to_part_origin_z": grasp_offset,
+        "target_reference": {"target_point": "observed_bounds_center", "surface_role": "observed_surface"},
+        **placement_poses(x, y, place_z, dict(orientation), simulation_assembly_slot=False,
+                          insertion_depth=policy["insertion_depth_m"]),
+    }
+
+
 def _place(
     params: Mapping[str, Any],
     geometry: Mapping[str, Any],
     policy: Mapping[str, Any],
     measured_offset: float,
+    orientation: Mapping[str, float],
 ) -> dict[str, Any]:
     if params.get("destination_location"):
         raise CalculationUnavailable(
@@ -205,23 +262,32 @@ def _place(
             "The final part origin and selected slot coordinates disagree."
         )
     origin_z = _number(origin["z"], "target_origin_pose.z")
+    reference_point = reference.get("grasp_point", "CAD_origin")
+    if reference_point == "selected_CAD_feature":
+        raw_offset = geometry.get("grasp_point_offset_world_m")
+        if not isinstance(raw_offset, list) or len(raw_offset) != 3:
+            raise CalculationUnavailable(
+                "A selected CAD grasp feature requires the measured grasp_point_offset_world_m XYZ vector."
+            )
+        point_offset = [_number(value, "grasp_point_offset_world_m") for value in raw_offset]
+    elif reference_point == "CAD_origin":
+        if "grasp_point_offset_world_m" in geometry:
+            raise CalculationUnavailable(
+                "A grasp-point offset requires its explicitly selected target_reference.grasp_point."
+            )
+        point_offset = [0.0, 0.0, 0.0]
+    else:
+        raise CalculationUnavailable("The selected grasp reference is not supported by this calculation.")
+    grasp_offset += point_offset[2]
     tcp_z = origin_z + grasp_offset
     place_z = controlled_link_height(
         tcp_z, tcp_offset, _number(params.get("z_adjustment_m", 0.0), "z adjustment policy")
     )
-    raw_handoff = pick.get("held_part_handoff", {})
-    raw_pose = raw_handoff.get("world_tool0_pose_at_grasp") or pick.get(
-        "resolved_cartesian_positions", {}
-    ).get("descend", {})
-    orientation = {}
-    if raw_pose:
-        pose_matrix(raw_pose)
-        orientation = {key: raw_pose[key] for key in ("qx", "qy", "qz", "qw")}
     poses = placement_poses(
-        x,
-        y,
+        x + point_offset[0],
+        y + point_offset[1],
         place_z,
-        orientation,
+        dict(orientation),
         simulation_assembly_slot=reference.get("surface_role") == "assembly_slot",
         insertion_depth=policy["insertion_depth_m"],
     )

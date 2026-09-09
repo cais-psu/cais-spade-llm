@@ -2077,27 +2077,36 @@ def load_pa_context_grounding_completion(
     interaction_root: Path,
 ) -> PAContextGroundingCompletion:
     """Load the single current completion shape and verify its entire evidence chain."""
+    completion, _, _ = _load_validated_completion(interaction_root)
+    return completion
+
+
+def _load_validated_completion(
+    interaction_root: Path,
+) -> tuple[PAContextGroundingCompletion, Path, ProductContextView]:
+    """Return one validated completion and the product view checked with it.
+
+    The returned objects belong to this load only. Callers must load again at
+    each integrity boundary rather than carrying validation across model calls.
+    """
     root = Path(interaction_root).resolve()
     paths = sorted((root / "interaction_record").glob("context_completion_*.json"))
     if len(paths) != 1:
         raise GroundingContractError("Exactly one PAContextGroundingCompletion record is required.")
     value = _read_json_mapping(paths[0], "PAContextGroundingCompletion")
-    return PAContextGroundingCompletion(_validated_two_decision_completion(root, value))
+    completion, view = _validated_two_decision_completion(root, value)
+    return PAContextGroundingCompletion(completion), paths[0], view
 
 
 def load_completed_product_context_view(interaction_root: Path) -> ProductContextView:
     """Reload the final ProductContextView pinned by the validated completion."""
-    root = Path(interaction_root).resolve()
-    completion = load_pa_context_grounding_completion(root)
-    view = _latest_product_context_view(root)
-    if view.abox_fingerprint != completion.to_record()["abox_fingerprint"]:
-        raise GroundingContractError("Completed ProductContextView changed.")
+    _, _, view = _load_validated_completion(interaction_root)
     return view
 
 
 def _validated_two_decision_completion(
     root: Path, value: Mapping[str, object]
-) -> Mapping[str, object]:
+) -> tuple[Mapping[str, object], ProductContextView]:
     """Validate the current validated completion and its entire pinned lineage."""
     completion_label = "PAContextGroundingCompletion"
     proposal_label = "OntologyGroundingProposal"
@@ -2352,7 +2361,7 @@ def _validated_two_decision_completion(
     )
     if assignment_ref != value["resource_assignment_delta_ref"]:
         raise GroundingContractError("Assignment ontology lineage changed.")
-    return dict(value)
+    return dict(value), final_view
 
 
 def _is_sha256_value(value: object) -> bool:

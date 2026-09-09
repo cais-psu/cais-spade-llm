@@ -37,10 +37,15 @@ from cais_spade_llm.spec2primitives.agents.ra.program_execution import (
     load_validated_program,
 )
 from cais_spade_llm.spec2primitives.agents.ra.program_validation import validate_program
-from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime
+from cais_spade_llm.spec2primitives.agents.ra.refinement import PrimitiveRefinementRuntime, load_refinement_profile
+from cais_spade_llm.spec2primitives.agents.ra.validation_scope import (
+    GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE, read_validation_scope, required_validation_roles,
+    supported_primitive_symbols,
+)
 from cais_spade_llm.spec2primitives.agents.ra.refinement_records import (
     append_record,
     fingerprint,
+    pin,
     read_pin,
     verify_evidence_tree,
 )
@@ -49,6 +54,8 @@ from cais_spade_llm.spec2primitives.tests.test_primitive_refinement import (
     _setup,
     _program,
     _PlanningSession,
+    _observed_setup,
+    _observed_program,
 )
 from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import (
     _ProgramRuntime,
@@ -58,6 +65,38 @@ from cais_spade_llm.spec2primitives.tools.assembly_geometry import AssemblyGeome
 from cais_spade_llm.spec2primitives.tools.exact_ref_resolver import approved_cad_path
 
 _SHARE = Path(__file__).resolve().parents[3] / "ros2/cais_lab_robotics"
+
+
+@pytest.mark.parametrize("fault", [None, "ambiguous", "position", "changed_mesh"])
+def test_observed_instance_matching_uses_bounds_and_requires_one_match(tmp_path: Path, fault: str | None) -> None:
+    """Post-composition matching accepts symmetric orientation without guessing an instance."""
+    vertices = np.asarray([[-0.02, -0.02, -0.01], [0.02, 0.02, 0.01], [0.02, -0.02, -0.01]])
+    np.savez(tmp_path / "cad.npz", triangles_m=vertices[None, :, :])
+    part = {"frame_id": "world", "reference_point": "observed_bounds_center", "object_id": "selected",
+            "reference_pose": matrix_pose(np.eye(4)), "CAD_mesh": pin(tmp_path, tmp_path / "cad.npz"),
+            "bounds_m": {"minimum": vertices.min(axis=0).tolist(), "maximum": vertices.max(axis=0).tolist()}}
+    actual = np.diag([-1.0, -1.0, 1.0, 1.0])
+    if fault == "position":
+        actual[0, 3] = 0.05
+    instances = [{"model_name": "first", "mesh_scale": [1.0] * 3, "model_from_CAD": np.eye(4).tolist()}]
+    if fault == "ambiguous":
+        instances.append({**instances[0], "model_name": "second"})
+    live = {item["model_name"]: {"pose": matrix_pose(actual)} for item in instances}
+    if fault == "changed_mesh":
+        (tmp_path / "cad.npz").write_bytes(b"changed")
+
+    def match() -> Any:
+        return match_instance(instances, live, part, cad_scale=1.0, profile=load_execution_profile(),
+                              interaction_root=tmp_path, validation_scope=GAZEBO_OBSERVED_SCOPE)
+
+    if fault:
+        with pytest.raises(ValueError, match="changed|exactly one"):
+            match()
+    else:
+        result = match()
+        assert result["model_name"] == "first"
+        assert result["orientation_difference_rad"] is None
+        assert result["bounds_difference_m"] == pytest.approx(0.0)
 
 
 class _TimedPlanner(_PlanningSession):
@@ -83,9 +122,23 @@ async def _validator(**kwargs: Any) -> dict[str, Any]:
     return await validate_program(**kwargs, session_factory=_TimedPlanner)
 
 
-def _validated(root: Path) -> tuple[Any, Any, Any]:
+def _validated(
+    root: Path, *, lateral_offset: float = 0.0,
+    cad_origin_offset: tuple[float, float, float] | None = None,
+    validation_profile: dict[str, Any] | None = None,
+) -> tuple[Any, Any, Any]:
     root.mkdir()
-    inputs, robot, refs, roles = _setup(root)
+    validation_profile = validation_profile if validation_profile is not None else {**load_refinement_profile(), "validation_scope": GAZEBO_PICK_PLACE_SCOPE}
+    scope = read_validation_scope(validation_profile)
+    inputs, robot, refs, roles = (
+        _observed_setup(root) if scope == GAZEBO_OBSERVED_SCOPE else
+        _setup(root, cad_origin_offset=cad_origin_offset)
+    )
+    build_program = _observed_program if scope == GAZEBO_OBSERVED_SCOPE else _program
+    roles = {role: roles[role] for role in required_validation_roles(scope)}
+    if scope == GAZEBO_PICK_PLACE_SCOPE:
+        refs.pop("specification")
+    robot["ee_from_tcp"][0][3] = lateral_offset
     configuration = {
         "gripper": {"joint": "gripper_joint", "open": 0.0, "close": 1.0},
         "services": {},
@@ -102,13 +155,17 @@ def _validated(root: Path) -> tuple[Any, Any, Any]:
     robot["model_parameters_sha256"] = fingerprint(robot["model_parameters"])
     robot["policy"]["trajectory_time_scale"] = 1.0
     part = read_pin(root, roles["part"])
-    part.update(cad_context_ref="Gear_Medium.STL", reference_point="CAD_origin")
+    part["cad_context_ref"] = "Gear_Medium.STL"
+    if scope == GAZEBO_OBSERVED_SCOPE:
+        vertices = np.asarray([[-0.02, -0.02, -0.01], [0.02, 0.02, 0.01], [0.02, -0.02, -0.01]])
+        np.savez(root / "observed_cad.npz", triangles_m=vertices[None, :, :])
+        part["CAD_mesh"] = pin(root, root / "observed_cad.npz")
     roles["part"] = refs["part"] = append_record(root, root / "evidence", "part_cad.json", part)
-    steps = _program(refs)
+    steps = build_program(refs)
     model = _ProgramRuntime(
         [
             _program_action(
-                [(s["primitive_symbol"], s["params"]) for s in _program(refs, bound=False)]
+                [(s["primitive_symbol"], s["params"]) for s in build_program(refs, bound=False)]
             ),
             {
                 "kind": "request_context",
@@ -158,6 +215,7 @@ def _validated(root: Path) -> tuple[Any, Any, Any]:
         robot_runtime=Robot(),
         product_runtime=Product(),
         validator=_validator,
+        profile=validation_profile,
     )
     result = asyncio.run(runtime.compose(root))
     assert result["status"] == "validated_for_declared_scope", result
@@ -188,7 +246,7 @@ class _Transport:
         instance = fixture_instances(
             _SHARE, "table_spec2primitives.world", approved_cad_path("Gear_Medium.STL")
         )[0]
-        pose = pose_matrix(self.part["origin_pose"]) @ np.linalg.inv(
+        pose = pose_matrix(self.part.get("reference_pose", self.part.get("origin_pose"))) @ np.linalg.inv(
             np.asarray(instance["model_from_CAD"])
         )
         return {name: {"pose": matrix_pose(pose)} for name in names}
@@ -222,14 +280,26 @@ class _Transport:
 
     async def attachment(self, binding: Any, attach: bool) -> dict[str, Any]:
         self.calls.append(("attach" if attach else "detach", binding["model_name"]))
-        if self.fail == "attach":
+        if self.fail == ("attach" if attach else "detach"):
             raise TimeoutError("Attachment has no acknowledgment.")
+        if self.fail == "negative_ack":
+            return {"success": False, "attached": False}
         return {"success": True, "attached": attach}
 
 
-def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(tmp_path: Path) -> None:
+@pytest.mark.parametrize("lateral_offset,cad_origin_offset", [
+    (0.0, None), (0.02, None), (0.02, (0.213, 0.182, 0.070)),
+])
+@pytest.mark.parametrize("scope", [GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE])
+def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(
+    tmp_path: Path, lateral_offset: float, cad_origin_offset: tuple[float, float, float] | None,
+    scope: str,
+) -> None:
     root = tmp_path / "interaction"
-    robot, part, model = _validated(root)
+    robot, part, model = _validated(
+        root, lateral_offset=lateral_offset, cad_origin_offset=cad_origin_offset,
+        validation_profile={**load_refinement_profile(), "validation_scope": scope},
+    )
     original = {path: path.read_bytes() for path in root.rglob("*.json")}
     transport = _Transport(part)
 
@@ -249,6 +319,16 @@ def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(tmp_path: P
     )
     result = asyncio.run(executor.run(root))
     assert result["status"] == "completed", result
+    assert result["message"].startswith("Pick-and-place completed")
+    program = load_validated_program(root)
+    assert program.report["scope"] == scope
+    supported = supported_primitive_symbols(program.report["scope"])
+    assert {step["primitive_symbol"] for step in program.steps} == supported
+    for call in model.calls:
+        variants = call["response_format"]["schema"]["properties"]["action"]["anyOf"]
+        proposal = next(item for item in variants if item["properties"]["kind"]["enum"] == ["propose"])
+        assert set(proposal["properties"]["primitive_steps"]["items"]["properties"]["primitive_symbol"]["enum"]) == supported
+    assert set(program.report["evidence_refs"]) == {"part", "scene"}
     assert result["completed_steps"] == 10
     assert transport.calls == [
         "move_cartesian",
@@ -283,13 +363,16 @@ def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(tmp_path: P
         ("move", "failed", 1),
         ("timeout", "unknown", 1),
         ("attach", "unknown", 4),
+        ("detach", "unknown", 9),
+        ("negative_ack", "failed", 4),
     ],
 )
+@pytest.mark.parametrize("scope", [GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE])
 def test_failures_stop_dispatch_and_keep_unknown_custody(
-    tmp_path: Path, failure: str, expected_status: str, expected_calls: int
+    tmp_path: Path, failure: str, expected_status: str, expected_calls: int, scope: str,
 ) -> None:
     root = tmp_path / "interaction"
-    robot, part, _ = _validated(root)
+    robot, part, _ = _validated(root, validation_profile={**load_refinement_profile(), "validation_scope": scope})
     transport = _Transport(part, fail=failure)
     executor = PrimitiveExecutionRuntime(
         robot_runtime=robot, validator=_validator, session_factory=transport, share=_SHARE
@@ -299,7 +382,9 @@ def test_failures_stop_dispatch_and_keep_unknown_custody(
     assert len(transport.calls) == expected_calls
     if expected_calls <= 1:
         assert result["gripper_state"] is None
-    if expected_status == "unknown":
+    if failure in {"attach", "detach", "negative_ack"}:
+        assert result["custody_known"] is False
+    if expected_status == "unknown" or failure == "negative_ack":
         with pytest.raises(ValueError, match="uncertain"):
             execution_custody(tmp_path, "xarm6@localhost")
         with pytest.raises(ValueError, match="both robots"):
@@ -403,6 +488,43 @@ def test_stop_awaits_outstanding_gripper_and_service_results(tmp_path: Path, pen
         assert result["custody_known"] is (pending == "attachment")
 
     asyncio.run(scenario())
+
+
+def test_saved_assembly_scope_survives_pick_place_default(tmp_path: Path) -> None:
+    """An older profile without a scope keeps assembly validation after the default changes."""
+    root = tmp_path / "interaction"
+    historical_profile = load_refinement_profile()
+    historical_profile.pop("validation_scope")
+    _validated(root, validation_profile=historical_profile)
+    original = {path: path.read_bytes() for path in root.rglob("*.json")}
+    program = load_validated_program(root)
+    assert load_refinement_profile()["validation_scope"] == GAZEBO_OBSERVED_SCOPE
+    assert program.report["scope"] == VALIDATION_SCOPE
+    assert "validation_scope" not in program.profile
+    assert set(program.report["evidence_refs"]) == {"part", "goal", "scene", "specification"}
+    assert all(path.read_bytes() == data for path, data in original.items())
+
+
+@pytest.mark.parametrize("scope", [VALIDATION_SCOPE, "unknown", None])
+def test_fresh_validation_scope_mismatch_blocks_before_transport(tmp_path: Path, scope: str | None) -> None:
+    """A passing report for another scope never authorizes a Gazebo command."""
+    root = tmp_path / "interaction"
+    robot, part, _ = _validated(root)
+    transport = _Transport(part)
+
+    async def mismatched(**kwargs: Any) -> dict[str, Any]:
+        result = await _validator(**kwargs)
+        assert result["status"] == "passed"
+        result["scope"] = scope
+        return result
+
+    executor = PrimitiveExecutionRuntime(
+        robot_runtime=robot, validator=mismatched, session_factory=transport, share=_SHARE,
+    )
+    result = asyncio.run(executor.run(root))
+    assert result["status"] == "blocked", result
+    assert result["command_dispatched"] is False
+    assert transport.stop is None and transport.calls == []
 
 
 def test_fresh_robot_mismatch_blocks_before_any_command(tmp_path: Path) -> None:

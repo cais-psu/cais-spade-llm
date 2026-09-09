@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from nicegui import ui
+from .agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE
 from nicegui.elements.badge import Badge
 from nicegui.elements.button import Button
 from nicegui.elements.label import Label
@@ -2659,6 +2660,9 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
         stop_execution_button.set_visibility(False)
         cancel_button = ui.button("Cancel composition", icon="cancel").props("flat")
         cancel_button.set_visibility(False)
+    diagnostic_deadline = ui.checkbox("Use 900 seconds for the next Compose run", value=False).props("disable")
+    deadline = ui.label("").classes("text-xs text-slate-600")
+    deadline.set_visibility(False)
     message = ui.label("Capture the selected RobotAgent context first.").classes(
         "text-sm text-slate-700 whitespace-pre-wrap break-words"
     )
@@ -2667,6 +2671,8 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
         "the saved validated program. <unbound> marks required parameters that still need values."
     ).classes("text-xs text-slate-500")
     attempts = ui.label("Attempts: 0").classes("text-xs text-slate-600")
+    progress = ui.label("").classes("text-xs text-slate-600")
+    progress.set_visibility(False)
     steps = ui.code("", language="python").classes("w-full text-xs overflow-x-auto")
     steps.set_visibility(False)
     bindings = ui.label("").classes("text-xs text-amber-800 whitespace-pre-wrap")
@@ -2686,9 +2692,12 @@ def _render_primitive_candidate_diagnostics() -> dict[str, Any]:
     return {
         "candidate_status_badge": status_badge,
         "create_candidate_button": create_button,
+        "diagnostic_deadline": diagnostic_deadline,
+        "candidate_deadline": deadline,
         "cancel_candidate_button": cancel_button,
         "candidate_message": message,
         "candidate_attempts": attempts,
+        "candidate_progress": progress,
         "candidate_steps": steps,
         "candidate_bindings": bindings,
         "candidate_trace": trace,
@@ -2894,12 +2903,13 @@ def _format_validation_findings(
     validation: Mapping[str, Any] | None,
     pa_response: Mapping[str, Any] | None,
 ) -> str:
-    """Summarize missing roles and PA explanations while keeping full records expandable."""
+    """Show current validation blockers before prior PA explanations and warnings."""
     findings = [
         item for item in (validation or {}).get("findings", []) if item["status"] != "passed"
     ]
     missing_roles = []
     details = []
+    secondary = []
     for item in findings:
         role = item.get("check")
         if (
@@ -2913,15 +2923,25 @@ def _format_validation_findings(
             missing_roles.append(role)
         else:
             prefix = f"Step {item['step_index']}: " if item.get("step_index") else ""
-            details.append(prefix + item["message"])
+            if item["status"] == "warning" or (
+                role == "bindings" and item["message"].startswith("Selected result from step ")
+            ) or role in {"assembly_outcome", "pick_place_outcome"}:
+                secondary.append(prefix + item["message"])
+            else:
+                details.append(prefix + item["message"])
     # Retain old PA responses in the trace without presenting them as blockers after a pass.
     unresolved = (
         (pa_response or {}).get("unresolved", [])
         if (validation or {}).get("status") != "passed"
         else []
     )
-    lines = ["Assembly validation incomplete: " + ", ".join(missing_roles) + "."] if missing_roles else []
-    details = [f"PA: {message}" for message in unresolved[:2]] + details
+    label = (
+        "Pick-and-place validation incomplete: "
+        if (validation or {}).get("scope") in {GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE} else
+        "Assembly validation incomplete: "
+    )
+    lines = [label + ", ".join(missing_roles) + "."] if missing_roles else []
+    details += [f"PA: {message}" for message in unresolved[:2]] + secondary
     available = 3 - len(lines)
     lines.extend(details[:available])
     if len(unresolved) > 2 or len(details) > available:
@@ -2947,6 +2967,7 @@ def _apply_primitive_composition_diagnostic(
     *,
     authoring_available: bool = False,
     authoring_busy: bool = False,
+    progress_only: bool = False,
 ) -> None:
     """Display a candidate and its read-only trace without implying execution."""
     status = str(diagnostic.get("status", "waiting_for_context"))
@@ -2959,6 +2980,26 @@ def _apply_primitive_composition_diagnostic(
         else str(diagnostic.get("message", "Capture the selected RobotAgent context first."))
     )
     elements["candidate_attempts"].set_text(f"Attempts: {diagnostic.get('attempt_count', 0)}")
+    refinement = diagnostic.get("refinement") or {}
+    events = refinement.get("events", [])
+    deadline = (refinement.get("request") or {}).get("profile", {}).get("deadline_sec")
+    if deadline is None and events:
+        deadline = events[0].get("deadline_sec")
+    if "candidate_deadline" in elements:
+        has_deadline = type(deadline) in (int, float)
+        elements["candidate_deadline"].set_text(
+            f"This run's deadline: {deadline:g} seconds" if has_deadline else ""
+        )
+        elements["candidate_deadline"].set_visibility(has_deadline)
+    elapsed = events[-1].get("elapsed_sec") if events else None
+    if "candidate_progress" in elements:
+        has_elapsed = type(elapsed) in (int, float)
+        elements["candidate_progress"].set_text(
+            f"Elapsed at last update: {elapsed:.1f} s" if has_elapsed else ""
+        )
+        elements["candidate_progress"].set_visibility(has_elapsed)
+    if progress_only:
+        return
     candidate = diagnostic.get("candidate")
     if "execution_candidate_ref" in elements:
         elements["execution_candidate_ref"] = diagnostic.get("latest_candidate_ref") or (
@@ -2981,11 +3022,20 @@ def _apply_primitive_composition_diagnostic(
     binding_issues = diagnostic.get("binding_issues", [])
     validation = diagnostic.get("validation")
     pa_responses = (diagnostic.get("refinement") or {}).get("pa_responses", [])
-    summary = (
-        _format_validation_findings(validation, pa_responses[-1] if pa_responses else None)
-        if isinstance(validation, Mapping) or pa_responses
-        else _format_binding_issues(binding_issues)
-    )
+    if isinstance(candidate, Mapping) and refinement and not isinstance(validation, Mapping):
+        summary = "This proposal has no completed validation result."
+        if status in {"budget_exhausted", "cancelled", "interrupted", "failed", "stale"}:
+            summary += " The run ended before validation completed."
+        else:
+            summary += " Validation is pending."
+        if any(event["stage"] == "validation_result" for event in events):
+            summary += " Earlier proposal findings remain in the program records."
+    else:
+        summary = (
+            _format_validation_findings(validation, pa_responses[-1] if pa_responses else None)
+            if isinstance(validation, Mapping) or pa_responses
+            else _format_binding_issues(binding_issues)
+        )
     elements["candidate_bindings"].set_text(summary)
     elements["candidate_bindings"].set_visibility(bool(summary))
     trace = diagnostic.get("trace", [])
@@ -3005,8 +3055,7 @@ def _apply_primitive_composition_diagnostic(
     elements["candidate_trace_expansion"].set_visibility(
         bool(trace) or candidate is not None or composition_input is not None
     )
-    _set_enabled(
-        elements["create_candidate_button"],
+    authoring_enabled = (
         authoring_available
         and not authoring_busy
         and not execution_busy()
@@ -3020,8 +3069,11 @@ def _apply_primitive_composition_diagnostic(
             "failed",
             "incomplete",
             "validated_for_declared_scope", "needs_context", "no_progress", "cancelled", "interrupted", "stale", "authority_conflict",
-        },
+        }
     )
+    _set_enabled(elements["create_candidate_button"], authoring_enabled)
+    if "diagnostic_deadline" in elements:
+        _set_enabled(elements["diagnostic_deadline"], authoring_enabled)
     if "cancel_candidate_button" in elements:
         elements["cancel_candidate_button"].set_visibility(authoring_busy or status in {"composing", "proposal", "robot_context", "validating", "evidence", "validation_result"})
 
@@ -3145,6 +3197,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
 
         final_result_elements = _render_final_grounding_result()
         phase_5_elements = _render_phase_5_diagnostics()
+        phase_5_elements["diagnostic_deadline"].set_visibility(runtime.primitive_refinement_runtime is not None)
         _apply_phase_5_1_diagnostic(
             phase_5_elements,
             _phase_5_1_waiting_view(),
@@ -3549,7 +3602,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             # Claim the action before the first await so queued clicks remain exclusive.
             action_state[flag] = True
             _update_start_enabled()
-            for name in ("start_button", "refresh_button", "create_candidate_button", "run_program_button"):
+            for name in ("start_button", "refresh_button", "create_candidate_button", "diagnostic_deadline", "run_program_button"):
                 _set_enabled(phase_5_elements[name], False)
             return root
 
@@ -3631,6 +3684,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             root = _begin_phase_5_action("primitive_composing")
             if root is None:
                 return
+            deadline_sec = 900 if phase_5_elements["diagnostic_deadline"].value else None
             phase_5_elements["candidate_status_badge"].set_text("composing")
             phase_5_elements["candidate_message"].set_text(
                 "RA is composing a primitive program from the current context."
@@ -3653,6 +3707,9 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                     async def progress(event: Mapping[str, Any]) -> None:
                         if interaction_card.is_deleted:
                             return
+                        # The first saved event confirms that the one-run option was consumed.
+                        if not progress_view["refinement"]["events"]:
+                            phase_5_elements["diagnostic_deadline"].set_value(False)
                         if "previous_robot_context_ref" in event:
                             for field in ("previous_robot_context_ref", "robot_context_ref"):
                                 context = await asyncio.to_thread(verify_record, root, event[field])
@@ -3679,11 +3736,21 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                         if "candidate" in event:
                             progress_view["candidate"] = event["candidate"]
                             progress_view["attempt_count"] = event["candidate_count"]
+                            progress_view["latest_candidate_ref"] = event["candidate_ref"]["ref"]
+                            progress_view.pop("validation", None)
                         if "validation" in event:
                             progress_view["validation"] = event["validation"]
-                        _apply_primitive_composition_diagnostic(phase_5_elements, progress_view)
+                        # Persist every event; rebuild the large program/trace view only
+                        # when its contents change or the run reaches a terminal state.
+                        progress_only = not (
+                            {"candidate", "validation", "pa_response_ref", "differences"}.intersection(event)
+                            or event["stage"] == "finished"
+                        )
+                        _apply_primitive_composition_diagnostic(
+                            phase_5_elements, progress_view, progress_only=progress_only,
+                        )
 
-                    await runtime.primitive_refinement_runtime.compose(root, progress=progress)
+                    await runtime.primitive_refinement_runtime.compose(root, progress=progress, deadline_sec=deadline_sec)
             except (
                 OSError,
                 PrimitiveCompositionError,
