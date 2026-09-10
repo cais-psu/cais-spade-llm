@@ -330,6 +330,10 @@ def _setup(
 
 def _observed_setup(root: Path) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
     inputs, robot, old_refs, _ = _setup(root)
+    # This fixture exercises ordinary surface placement. Assembly fixtures below
+    # supply an explicit desired relationship and checked goal instead.
+    inputs = replace(inputs, composition_input={**inputs.composition_input,
+        "target_feature": {**inputs.composition_input["target_feature"], "assembly_feature_association": []}})
     part = read_pin(root, old_refs["part"])
     part.update(
         record_type="ObservedGeometryEvidence", reference_point="observed_bounds_center",
@@ -416,10 +420,16 @@ def test_observed_heights_drive_the_corresponding_controlled_link_poses(quantity
 
 @pytest.mark.parametrize("fault", [
     None, "missing_input", "scene", "identity", "stale", "custody", "legacy_scope",
-    "literal_geometry", "literal_target_pose",
+    "literal_geometry", "literal_target_pose", "collision",
 ])
 def test_observed_scope_validates_boxes_without_cad_orientation_or_jaw_fit(tmp_path: Path, fault: str | None) -> None:
     inputs, robot, refs, roles = _observed_setup(tmp_path)
+    for role, stamp in (("part", 168_674_000_000), ("scene", 168_522_000_000)):
+        record = read_pin(tmp_path, roles[role])
+        record["observation_timestamp_ns"] = stamp
+        roles[role] = append_record(tmp_path, tmp_path / "timestamps", f"{role}.json", record)
+    robot.update(measured_at_ros_ns=102_400_000_000, tf_stamps_ns=[102_400_000_000] * 2)
+    robot["joint_state"]["stamp_ns"] = 102_400_000_000
     steps = _observed_program(refs)
     profile = load_refinement_profile()
     if fault == "missing_input":
@@ -432,6 +442,8 @@ def test_observed_scope_validates_boxes_without_cad_orientation_or_jaw_fit(tmp_p
         robot["captured_at_ns"] -= 3_000_000_000
     elif fault == "custody":
         steps = [step for step in steps if step["primitive_symbol"] != "release_part"]
+    elif fault == "collision":
+        steps[4]["params"] = deepcopy(steps[2]["params"])
     elif fault == "legacy_scope":
         profile = _legacy_profile()
     elif fault in {"literal_geometry", "literal_target_pose"}:
@@ -458,6 +470,8 @@ def test_observed_scope_validates_boxes_without_cad_orientation_or_jaw_fit(tmp_p
         if fault in {"literal_geometry", "literal_target_pose"}:
             assert any("literal measurement without selected evidence" in finding["message"]
                        for finding in report["findings"])
+        if fault == "collision":
+            assert any("The carried part intersects" in finding["message"] for finding in report["findings"])
         return
     assert report["status"] == "passed", report["findings"]
     assert scenes[0]["allowed_contacts"] == [{"object_id": "observed_part", "links": ["configured_finger"]}]
@@ -861,6 +875,7 @@ def test_robot_freshness_is_checked_at_validation_entry(
     assert robot == original_robot
 
 
+@pytest.mark.parametrize("scope", [GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE])
 @pytest.mark.parametrize(
     "stamp,now_ros,expected",
     [
@@ -873,26 +888,33 @@ def test_robot_freshness_is_checked_at_validation_entry(
     ],
 )
 def test_observation_freshness_uses_sensor_time_and_explains_the_prerequisite(
-    tmp_path: Path, stamp: Any, now_ros: int, expected: str | None,
+    tmp_path: Path, scope: str, stamp: Any, now_ros: int, expected: str | None,
 ) -> None:
-    """A newly written geometry record cannot refresh an expired RGB-D observation."""
-    inputs, robot, refs, roles = _observed_setup(tmp_path)
-    for role, observation_stamp in (("part", stamp), ("scene", now_ros)):
+    """Reuse observed Gazebo geometry while retaining timestamp checks in other scopes."""
+    inputs, robot, refs, roles = _observed_setup(tmp_path) if scope == GAZEBO_OBSERVED_SCOPE else _setup(tmp_path)
+    for role in ("part", "goal", "scene"):
+        if role not in roles:
+            continue
         record = read_pin(tmp_path, roles[role])
-        record["observation_timestamp_ns"] = observation_stamp
+        record["observation_timestamp_ns"] = stamp if role == "part" else now_ros
         record["created_at_ns"] = time.time_ns()
         roles[role] = append_record(tmp_path, tmp_path / "timestamps", f"{role}.json", record)
     robot.update(measured_at_ros_ns=now_ros, tf_stamps_ns=[now_ros, now_ros])
     robot["joint_state"]["stamp_ns"] = now_ros
     robot["captured_at_ns"] = time.time_ns()
     original_roles = deepcopy(roles)
+    original_records = {reference["ref"]: (tmp_path / reference["ref"]).read_bytes() for reference in roles.values()}
+    steps = _observed_program(refs) if scope == GAZEBO_OBSERVED_SCOPE else _program(refs)
     report = asyncio.run(validate_program(
-        inputs=inputs, steps=_observed_program(refs), robot=robot, evidence=roles,
-        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={},
+        inputs=inputs, steps=steps, robot=robot, evidence=roles,
+        directory=tmp_path / "validation", profile={**load_refinement_profile(), "validation_scope": scope}, cache={},
         session_factory=_PlanningSession,
     ))
     assert roles == original_roles
+    assert all((tmp_path / ref).read_bytes() == content for ref, content in original_records.items())
     findings = [finding for finding in report["findings"] if finding["check"] == "scene_freshness"]
+    if scope == GAZEBO_OBSERVED_SCOPE and type(stamp) is int and stamp > 0:
+        expected = None
     if expected is None:
         assert not findings
         assert report["status"] == "passed", report["findings"]
@@ -1478,7 +1500,9 @@ def test_pa_observed_bounds_measure_support_and_preserve_collision_coverage(
         verify_evidence_tree(tmp_path, pin(tmp_path, tmp_path / bound["record_ref"]))
 
 
-def _direct_input_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
+def _direct_input_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, destination_state: str = "current_state",
+) -> tuple[Any, ...]:
     transform = np.diag([1.0, -1.0, -1.0, 1.0])
     transform[2, 3] = 1.0
     runtime, producer, correspondence_ref, _ = _pa_geometry(
@@ -1494,8 +1518,9 @@ def _direct_input_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tu
     )
     calibration_pin = pin(tmp_path, calibration.record_path)
     producer.authorized[calibration_pin["ref"]] = calibration_pin["sha256"]
-    target = {"assembly_feature_association": [{"assembly_features": []}], "resolved_state_values": []}
-    for index, (state, name) in enumerate((("current_state", "medium gear"), ("desired_state", "selected destination"))):
+    target = {"assembly_feature_association": [{"state_names": ["desired_state"], "assembly_features": []}],
+              "resolved_state_values": []}
+    for index, (state, name) in enumerate((("current_state", "medium gear"), (destination_state, "selected destination"))):
         target["assembly_feature_association"][0]["assembly_features"].append({
             "name": name + " feature", "state_name": state, "state_value_name": name + " observed location",
             "owner": {"name": name, "evidence_refs": [correspondence["CAD"]["context_ref"], correspondence_ref]},
@@ -1518,15 +1543,19 @@ def _direct_input_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tu
     return runtime, producer, request, camera, calibration_pin
 
 
+@pytest.mark.parametrize("destination_state", ["current_state", "desired_state"])
 def test_direct_inputs_share_measurement_and_retain_answers_without_pa_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, destination_state: str,
 ) -> None:
-    """Resolve run_0016's seven need shapes plus its incompatible target reference."""
-    runtime, producer, request, _, _ = _direct_input_fixture(tmp_path, monkeypatch)
+    """Resolve checked pick, placement and scene inputs with either destination binding."""
+    runtime, producer, request, camera, _ = _direct_input_fixture(
+        tmp_path, monkeypatch, destination_state=destination_state,
+    )
     request["needs"] = _number_needs([*request["needs"],
         *[{"step_index": 1, "quantity": "/target_pose/" + axis, "reason": "Observed bounds reference pose needed."} for axis in ("x", "y", "z")],
     ])
     original = deepcopy(request["primitive_steps"])
+    original_target = deepcopy(request["target_feature"])
     events = []
 
     async def progress(event: Any) -> None:
@@ -1542,6 +1571,11 @@ def test_direct_inputs_share_measurement_and_retain_answers_without_pa_model(
     assert len(answers) == 10
     assert answers[0]["value_ref"]["record_ref"] == answers[1]["value_ref"]["record_ref"]
     assert answers[1]["value"] > 0
+    for axis, answer in zip(("x", "y", "z"), answers[2:5], strict=True):
+        assert answer["value_ref"]["field_path"] == f"/placement_surface_point/{axis}"
+        geometry = read_pin(tmp_path, answer["source_ref"])
+        assert geometry["candidate_reference"]["candidate_handle"] == camera["candidates"][1]["candidate_handle"]
+        assert answer["value"] == geometry["placement_surface_point"][axis]
     assert answers[5]["record_ref"] == result["validation_refs"]["part"]["ref"]
     assert [answer["value_ref"]["field_path"] for answer in answers[7:]] == ["/reference_pose/" + axis for axis in ("x", "y", "z")]
     scene = read_pin(tmp_path, result["validation_refs"]["scene"])
@@ -1549,6 +1583,7 @@ def test_direct_inputs_share_measurement_and_retain_answers_without_pa_model(
     assert len(scene["objects"]) == 3  # Both observed candidates and their finite support surface.
     assert scene["unresolved_candidates"] == [] and len(scene["declared_observations"]) == 1
     assert request["primitive_steps"] == original
+    assert request["target_feature"] == original_target
     assert not list(directory.glob("reply_*.json"))
     assert any("input_resolution_ref" in event for event in events)
     # Reuse exact approved measurements without consuming another operation.
@@ -1565,7 +1600,7 @@ def test_direct_inputs_share_measurement_and_retain_answers_without_pa_model(
     conflict["part_height_m"] += 0.01
     conflict["product_geometry"]["part_height_m"] += 0.01
     producer.save(conflict, [measured["ref"]])
-    selected, _ = resolve_primitive_inputs(request, producer, _issued_records(producer), {}, set())
+    selected, _ = resolve_primitive_inputs(request, producer, _issued_records(producer), {}, {})
     assert any(item.get("need_id") == "need_0002" and "conflict" in item.get("blocked", "") for item in selected)
 
 
@@ -1573,27 +1608,80 @@ def test_direct_inputs_share_measurement_and_retain_answers_without_pa_model(
 def test_direct_input_lookup_uses_accepted_handles_and_specific_prerequisites(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
 ) -> None:
-    from cais_spade_llm.spec2primitives.agents.pa.primitive_input_resolution import resolve_primitive_inputs
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_input_resolution import (
+        _feature_source, resolve_primitive_inputs,
+    )
 
     _, producer, request, _, calibration = _direct_input_fixture(tmp_path, monkeypatch)
+    moving, destination = request["target_feature"]["assembly_feature_association"][0]["assembly_features"]
+    moving["owner"]["type"], destination["owner"]["type"] = "Part", "Assembly"
     records = _issued_records(producer)
-    baseline = resolve_primitive_inputs(request, producer, records, {}, set())
+    baseline = resolve_primitive_inputs(request, producer, records, {}, {})
+    target = request["target_feature"]
+    sources = [_feature_source(target, records, "medium gear", destination=destination)
+               for destination in (False, True)]
     segmentation = next(record for record in records.values() if record["record_type"] == "RGBDSegmentationRecord")
     segmentation["cameras"].reverse()
-    assert resolve_primitive_inputs(request, producer, records, {}, set()) == baseline
+    target["assembly_feature_association"][0]["assembly_features"].reverse()
+    assert resolve_primitive_inputs(request, producer, records, {}, {}) == baseline
+    assert [_feature_source(target, records, "medium gear", destination=destination)
+            for destination in (False, True)] == sources
     if fault == "missing":
         request["target_feature"]["assembly_feature_association"] = []
     elif fault == "contradictory":
         request["target_feature"]["resolved_state_values"][0]["resolved_value"]["point_count"] += 1
     elif fault == "calibration":
         del records[calibration["ref"]]
-    answers, calls = resolve_primitive_inputs(request, producer, records, {}, set())
+    answers, calls = resolve_primitive_inputs(request, producer, records, {}, {})
     if fault:
         assert answers and all("blocked" in answer for answer in answers)
         assert all("grounding" in answer["blocked"].lower() or "accepted" in answer["blocked"].lower()
                    or "calibration" in answer["blocked"].lower() for answer in answers)
     else:
         assert answers == [] and len(calls) == 1
+
+
+@pytest.mark.parametrize("fault", [
+    "relationships", "current_relationship", "moving_endpoint", "part_binding",
+    "destination_binding", "destination_observation", "destination_candidate",
+])
+def test_direct_input_lookup_rejects_ambiguous_or_unbound_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Placement and scene resolution cannot bypass missing or ambiguous endpoints."""
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_input_resolution import resolve_primitive_inputs
+
+    _, producer, request, camera, _ = _direct_input_fixture(tmp_path, monkeypatch)
+    records = _issued_records(producer)
+    target = request["target_feature"]
+    association = target["assembly_feature_association"][0]
+    part, destination = association["assembly_features"]
+    if fault == "relationships":
+        target["assembly_feature_association"].append(deepcopy(association))
+    elif fault == "current_relationship":
+        association["state_names"] = ["current_state"]
+    elif fault == "moving_endpoint":
+        destination["owner"]["name"] = part["owner"]["name"]
+    elif fault == "part_binding":
+        part.update(state_name=None, state_value_name=None)
+    elif fault == "destination_binding":
+        destination.update(state_name=None, state_value_name=None)
+    elif fault == "destination_observation":
+        target["resolved_state_values"][1]["resolved_value"]["point_count"] += 1
+    elif fault == "destination_candidate":
+        segmentation_ref = target["resolved_state_values"][1]["value_ref"]["record_ref"]
+        observed = next(item for item in records[segmentation_ref]["cameras"]
+                        if item["observation_handle"] == camera["observation_handle"])
+        observed["candidates"].pop(1)
+    original = deepcopy(request)
+    answers, _ = resolve_primitive_inputs(request, producer, records, {}, {})
+    blocked = {answer["need_id"] for answer in answers if answer.get("blocked")}
+    required = {need["need_id"] for need in request["needs"]
+                if need["step_index"] == 6 or need["quantity"] == "scene"}
+    assert required.issubset(blocked)
+    if fault in {"relationships", "current_relationship", "moving_endpoint", "part_binding"}:
+        assert blocked == {need["need_id"] for need in request["needs"]}
+    assert request == original
 
 
 def test_measurement_batch_decodes_once_and_rejects_changed_sources(
@@ -1896,6 +1984,32 @@ def test_owned_capture_keeps_context_alive_until_validation_finishes(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("fault", [None, "changed", "missing"])
+def test_calculation_evidence_verifies_native_completion_sources(tmp_path: Path, fault: str | None) -> None:
+    """Follow a calculation's binding without treating PA citations as file paths."""
+    inputs, _, _, _ = _setup(tmp_path)
+    completion = read_pin(tmp_path, inputs.context_refs["pa_completion"])
+    assert any(source["ref"] == "requirement_0001" for source in completion["source_refs"])
+    assert not (tmp_path / "requirement_0001").exists()
+    request = append_record(tmp_path, tmp_path, "request.json", {"base_context_refs": inputs.context_refs})
+    binding = append_record(tmp_path, tmp_path, "binding.json", {"run_request_ref": request})
+    calculation = append_record(tmp_path, tmp_path, "calculation.json", {
+        "record_type": "PrimitiveCalculationRecord", "binding_ref": binding,
+    })
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    if fault:
+        path = tmp_path / completion["typed_context_refs"][0]["ref"]
+        if fault == "changed":
+            path.write_bytes(path.read_bytes() + b" ")
+        else:
+            path.unlink()
+        with pytest.raises((OSError, ValueError)):
+            verify_evidence_tree(tmp_path, calculation)
+    else:
+        assert verify_evidence_tree(tmp_path, calculation) == read_pin(tmp_path, calculation)
+        assert all(path.read_bytes() == data for path, data in before.items())
+
+
 def test_evidence_reuse_is_limited_to_one_synchronous_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Shared ancestor bytes are read once per check; a later changed source still fails."""
     from cais_spade_llm.spec2primitives.agents.ra.refinement_records import _verify_evidence_tree
@@ -1920,6 +2034,137 @@ def test_evidence_reuse_is_limited_to_one_synchronous_check(tmp_path: Path, monk
     mesh.write_bytes(b"changed geometry")
     with pytest.raises(ValueError, match="dependency changed"):
         verify_evidence_tree(tmp_path, parents[0])
+
+
+@pytest.mark.parametrize("pipeline", ["move_group", "ompl"])
+def test_measured_context_copies_selected_planning_pipeline(monkeypatch: pytest.MonkeyPatch, pipeline: str) -> None:
+    """Capture the selected pipeline's exact values through read-only parameter services."""
+    import sys
+    from cais_spade_llm.spec2primitives.adapters import robot_validation_context as module
+
+    parameters = {
+        "robot_description": "<robot name='fixture' />", "robot_description_semantic": "<robot name='fixture' />",
+        "default_planning_pipeline": pipeline, "planning_pipelines": [pipeline],
+        pipeline + ".planning_plugin": "ompl_interface/OMPLPlanner",
+        pipeline + ".request_adapters": "default_planner_request_adapters/FixStartStateBounds",
+        "robot_description_kinematics.dual_robots.kinematics_solver": None,
+        "use_sim_time": True, "unrelated": "excluded",
+    }
+    if pipeline == "move_group":
+        parameters.pop("planning_pipelines")  # run_0010 captured only default_planning_pipeline.
+    requests = []
+
+    class Client:
+        def wait_for_service(self, **kwargs: Any) -> bool:
+            return True
+
+        def call_async(self, request: Any) -> Any:
+            requests.append(request)
+            if hasattr(request, "prefixes"):
+                result = SimpleNamespace(result=SimpleNamespace(names=[name for name in parameters
+                    if any(name == prefix or name.startswith(prefix + ".") for prefix in request.prefixes)]))
+            else:
+                result = SimpleNamespace(values=[parameters[name] for name in request.names])
+            return SimpleNamespace(done=lambda: True, result=lambda: result)
+
+    stamp = SimpleNamespace(sec=1, nanosec=0)
+    joint = SimpleNamespace(header=SimpleNamespace(stamp=stamp), name=["joint1"], position=[0.0])
+    transform = SimpleNamespace(header=SimpleNamespace(stamp=stamp), transform=SimpleNamespace(
+        translation=SimpleNamespace(x=0.0, y=0.0, z=0.0), rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)))
+    node = SimpleNamespace(
+        create_subscription=lambda kind, topic, callback, depth: callback(joint),
+        create_client=lambda *args: Client(),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1_000_000_000)),
+        destroy_subscription=lambda *args: None, destroy_node=lambda: None,
+    )
+    executor = SimpleNamespace(add_node=lambda *args: None, spin_once=lambda **kwargs: None,
+                               spin_until_future_complete=lambda *args, **kwargs: None, shutdown=lambda: None)
+    for name, value in {
+        "rclpy": SimpleNamespace(init=lambda **kwargs: None, time=SimpleNamespace(Time=lambda: None)),
+        "rclpy.node": SimpleNamespace(Node=lambda *args, **kwargs: node),
+        "rclpy.context": SimpleNamespace(Context=lambda: SimpleNamespace(try_shutdown=lambda: None)),
+        "rclpy.executors": SimpleNamespace(SingleThreadedExecutor=lambda **kwargs: executor),
+        "rclpy.parameter": SimpleNamespace(parameter_value_to_python=lambda value: value,
+                                           Parameter=lambda *args, **kwargs: None),
+        "rcl_interfaces.srv": SimpleNamespace(GetParameters=SimpleNamespace(Request=SimpleNamespace),
+                                               ListParameters=SimpleNamespace(Request=SimpleNamespace)),
+        "sensor_msgs.msg": SimpleNamespace(JointState=object),
+        "tf2_ros": SimpleNamespace(Buffer=lambda: SimpleNamespace(lookup_transform=lambda *args: transform),
+                                    TransformListener=lambda *args: SimpleNamespace(unregister=lambda: None),
+                                    TransformException=RuntimeError),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, value)
+    monkeypatch.setattr(module, "calculation_policy", lambda configuration: {})
+    monkeypatch.setattr(module, "gripper_touch_links", lambda *args: [])
+    configuration = {
+        "move_group": {"frame_id": "world", "ee_link": "tool0", "tcp_link": "tcp", "group_name": "xarm6_xarm6",
+                       "position_tolerance_m": 0.001},
+        "gripper": {"joint": "joint1", "open": 0.0, "close": 1.0, "open_width_mm": 40.0},
+    }
+    profile = {**load_refinement_profile(), "resources": {"xarm6@localhost": {
+        "joint_states_topic": "/joint_states", "move_group_node": "/move_group",
+    }}}
+    record = module.MeasuredRobotContextRuntime()._capture("xarm6@localhost", "fixture", configuration, profile)
+    assert record["model_parameters"] == {name: value for name, value in parameters.items() if name != "unrelated"}
+    assert record["model_parameters_sha256"] == module.fingerprint(record["model_parameters"])
+    assert any(getattr(request, "prefixes", None) == [pipeline] for request in requests)
+
+
+@pytest.mark.parametrize("exit_code", [-6, None])
+def test_private_worker_preserves_parameter_types_and_reports_startup_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int | None,
+) -> None:
+    """Keep unset values out of worker YAML and retain logs when startup fails."""
+    import sys
+    import yaml
+    from cais_spade_llm.spec2primitives.adapters import isolated_moveit as module
+
+    disabled = {"move_group/MoveGroupExecuteTrajectoryAction", "move_group/MoveGroupMoveAction"}
+    (tmp_path / "default_capabilities_plugin_description.xml").write_text(
+        "<library>" + "".join(f'<class name="{name}" />' for name in module._ALLOWED_CAPABILITIES | disabled) + "</library>")
+    node = SimpleNamespace(destroy_node=lambda: None, create_client=lambda *args: SimpleNamespace(
+        wait_for_service=lambda **kwargs: False))
+    executor = SimpleNamespace(add_node=lambda *args: None, shutdown=lambda: None)
+    for name, value in {
+        "rclpy": SimpleNamespace(init=lambda **kwargs: None),
+        "rclpy.node": SimpleNamespace(Node=lambda *args, **kwargs: node),
+        "rclpy.context": SimpleNamespace(Context=lambda: SimpleNamespace(try_shutdown=lambda: None)),
+        "rclpy.executors": SimpleNamespace(SingleThreadedExecutor=lambda **kwargs: executor),
+        "ament_index_python.packages": SimpleNamespace(get_package_prefix=lambda *args: str(tmp_path),
+                                                        get_package_share_directory=lambda *args: str(tmp_path)),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, value)
+    captured = []
+    worker_log = "The private worker could not initialize its planning parameters."
+
+    def start(command: Any, **kwargs: Any) -> Any:
+        path = Path(command[command.index("--params-file") + 1])
+        captured.append(yaml.safe_load(path.read_text())["/**"]["ros__parameters"])
+        kwargs["stdout"].write(worker_log.encode())
+        return SimpleNamespace(poll=lambda: exit_code, wait=lambda **kwargs: None,
+                               terminate=lambda: None, kill=lambda: None)
+
+    monkeypatch.setattr(module.subprocess, "Popen", start)
+    monkeypatch.setattr(module.IsolatedMoveItSession, "_apply_scene",
+                        lambda self: self._call(object, "get_planning_scene", object()))
+    robot = {"model_parameters": {
+        "robot_description_kinematics.dual_robots.kinematics_solver": None,
+        "move_group.planning_plugin": "ompl_interface/OMPLPlanner", "use_sim_time": True,
+    }}
+    original = deepcopy(robot)
+    session = module.IsolatedMoveItSession(tmp_path, robot, {}, {
+        **load_refinement_profile(), "worker_startup_timeout_sec": 0,
+    })
+    message = "worker exited with code -6" if exit_code is not None else "service is unavailable"
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(session.__aenter__())
+    assert robot == original
+    assert all(value is not None for value in captured[0].values())
+    assert captured[0]["move_group.planning_plugin"] == robot["model_parameters"]["move_group.planning_plugin"]
+    assert captured[0]["use_sim_time"] is True and captured[0]["allow_trajectory_execution"] is False
+    assert disabled <= set(captured[0]["disable_capabilities"].split())
+    assert session.last_worker_log == worker_log
+    assert session._temporary is None and session._process is None
 
 
 def test_private_scene_allows_only_selected_gripper_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1963,6 +2208,231 @@ def test_private_scene_allows_only_selected_gripper_contact(tmp_path: Path, monk
                                   ("part", "arm", False), ("part", "base", False)]:
         assert matrix.entry_values[index[left]].enabled[index[right]] is expected
         assert matrix.entry_values[index[right]].enabled[index[left]] is expected
+
+
+def _initial_support_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
+    import sys
+    from cais_spade_llm.spec2primitives.adapters.isolated_moveit import IsolatedMoveItSession
+
+    monkeypatch.setitem(sys.modules, "moveit_msgs.msg", SimpleNamespace(
+        ContactInformation=SimpleNamespace(ROBOT_LINK=0, WORLD_OBJECT=1, ROBOT_ATTACHED=2),
+    ))
+    start = {"x": 0.4, "y": -0.3, "z": 1.25, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+    target = {**start, "z": 1.41}
+    part = {"object_id": "observed_ec004ec41988692e7beb", "size_m": [0.0417, 0.0417, 0.0195],
+            "pose": {**start, "z": 1.075}}
+    attached = {**deepcopy(part), "pose": {**start, "x": 0.0, "y": 0.0, "z": -0.175}}
+    scene = {"geometry_model": "observed_bounds", "objects": [part, {
+        "object_id": "surface_0", "mesh": {"ref": "surface.npz", "sha256": "a" * 64},
+        "pose": {**start, "x": 0.0, "y": 0.0, "z": 0.0},
+    }]}
+    robot = {"frame_id": "world", "ee_link": "xarm6_link_eef", "group_name": "xarm6_xarm6",
+             "position_tolerance_m": 0.005}
+    session = IsolatedMoveItSession(tmp_path, robot, scene, {
+        **load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE,
+    })
+    validity = SimpleNamespace(valid=False, constraint_result=[], contacts=[SimpleNamespace(
+        header=SimpleNamespace(frame_id="world"), depth=1.2609e-6,
+        normal=SimpleNamespace(x=0.0, y=0.0, z=1.0),
+        contact_body_1="surface_0", body_type_1=1,
+        contact_body_2=part["object_id"], body_type_2=2,
+    )])
+    return session, validity, start, target, attached
+
+
+@pytest.mark.parametrize("fault", [
+    None, "reversed_contact", "reordered_scene", "rotated_tool", "within_tolerance", "diagonal_too_far", "invalid_tolerance", "lateral", "downward", "rotation",
+    "later_pose", "different_shape", "ambiguous_part", "deep_contact", "invalid_depth",
+    "side_contact", "invalid_normal", "insufficient_lift", "robot_contact", "other_object",
+    "additional_collision", "no_contacts", "constraint", "frame", "rigid_scope", "assembly_scope",
+])
+def test_private_lift_recognizes_only_initial_observed_support_contact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    """Only an upward departure from the measured support may enter path planning."""
+    session, validity, start, target, attached = _initial_support_contact(tmp_path, monkeypatch)
+    contact = validity.contacts[0]
+    if fault == "reversed_contact":
+        contact.contact_body_1, contact.contact_body_2 = contact.contact_body_2, contact.contact_body_1
+        contact.body_type_1, contact.body_type_2 = contact.body_type_2, contact.body_type_1
+        contact.normal.z = -1.0
+    elif fault == "reordered_scene":
+        session.scene["objects"].reverse()
+    elif fault == "rotated_tool":
+        from cais_spade_llm.spec2primitives.adapters.robot_validation_context import pose_matrix, matrix_pose
+
+        start.update(qx=-0.00013915220925324104, qy=0.9999999554586486,
+                     qz=-0.00021248331114065338, qw=-0.0001567488623487154)
+        target = {**start, "z": target["z"]}
+        attached["pose"] = matrix_pose(
+            np.linalg.inv(pose_matrix(start)) @ pose_matrix(session.scene["objects"][0]["pose"])
+        )
+    elif fault == "lateral":
+        target["x"] += 0.1
+    elif fault == "within_tolerance":
+        target["x"] += session.robot["position_tolerance_m"] * .9
+    elif fault == "diagonal_too_far":
+        for key in ("x", "y"):
+            target[key] += session.robot["position_tolerance_m"] * .8
+    elif fault == "invalid_tolerance":
+        session.robot["position_tolerance_m"] = 0
+    elif fault == "downward":
+        target["z"] = start["z"] - 0.1
+    elif fault == "rotation":
+        target.update(qz=1.0, qw=0.0)
+    elif fault == "later_pose":
+        start["z"] += 0.01
+    elif fault == "different_shape":
+        attached["size_m"][2] += 0.01
+    elif fault == "ambiguous_part":
+        session.scene["objects"].append(deepcopy(session.scene["objects"][0]))
+    elif fault == "deep_contact":
+        contact.depth = session.robot["position_tolerance_m"] * 2
+    elif fault == "invalid_depth":
+        contact.depth = float("nan")
+    elif fault == "side_contact":
+        contact.normal.x, contact.normal.z = 1.0, 0.0
+    elif fault == "invalid_normal":
+        contact.normal.z = float("nan")
+    elif fault == "insufficient_lift":
+        target["z"] = start["z"] + contact.depth / 2
+    elif fault == "robot_contact":
+        contact.body_type_1 = 0
+    elif fault == "other_object":
+        session.scene["objects"][1].pop("mesh")
+        session.scene["objects"][1]["size_m"] = [0.1, 0.1, 0.1]
+    elif fault == "additional_collision":
+        obstacle = deepcopy(contact)
+        obstacle.contact_body_1, obstacle.body_type_1 = "xarm6_link3", 0
+        validity.contacts.append(obstacle)
+    elif fault == "no_contacts":
+        validity.contacts = []
+    elif fault == "constraint":
+        validity.constraint_result = [SimpleNamespace(result=False)]
+    elif fault == "frame":
+        contact.header.frame_id = "another_frame"
+    elif fault == "rigid_scope":
+        session.profile["validation_scope"] = GAZEBO_PICK_PLACE_SCOPE
+    elif fault == "assembly_scope":
+        session.profile["validation_scope"] = VALIDATION_SCOPE
+    original = deepcopy((session.scene, session.robot, start, target, attached))
+    assert session._leaves_initial_support_contact(validity, start, target, attached) is (
+        fault in {None, "reversed_contact", "reordered_scene", "rotated_tool", "within_tolerance"}
+    )
+    assert (session.scene, session.robot, start, target, attached) == original
+
+
+@pytest.mark.parametrize("fault", [None, "path_collision", "endpoint_collision", "prefix_collision"])
+def test_private_lift_keeps_cartesian_and_endpoint_collision_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    """A tolerated initial contact cannot bypass the path or endpoint checks."""
+    import sys
+
+    session, validity, start, target, attached = _initial_support_contact(tmp_path, monkeypatch)
+    # run_0018 recorded FK-to-authored XY differences and support-contact depth.
+    # The contact normal and service responses remain explicit offline fixtures.
+    target["x"] += .4004828951610835 - .400478132964567
+    target["y"] += -.2994966920283478 - -.2994990953508061
+    validity.contacts[0].depth = .000512691
+    if fault == "prefix_collision":
+        validity.contacts[0].contact_body_1 = "xarm6_link3"
+        validity.contacts[0].body_type_1 = 0
+
+    def pose(value: dict[str, float] | None = None) -> Any:
+        value = value or start
+        return SimpleNamespace(position=SimpleNamespace(**{key: value[key] for key in ("x", "y", "z")}),
+                               orientation=SimpleNamespace(**{key: value["q" + key] for key in ("x", "y", "z", "w")}))
+
+    service = SimpleNamespace(Request=lambda **kwargs: SimpleNamespace(header=SimpleNamespace(), **kwargs))
+    monkeypatch.setitem(sys.modules, "geometry_msgs.msg", SimpleNamespace(Pose=pose))
+    monkeypatch.setitem(sys.modules, "moveit_msgs.srv", SimpleNamespace(
+        GetStateValidity=service, GetPositionFK=service, GetCartesianPath=service,
+    ))
+    monkeypatch.setattr(session, "_state", lambda joints, attached: deepcopy(joints))
+    session.robot["model_parameters"] = {"robot_description": (
+        '<robot name="fixture"><joint name="xarm6_joint1" type="revolute">'
+        '<limit lower="-3" upper="3" /></joint></robot>'
+    )}
+    fk_responses = iter([pose(start), pose(target)])
+    validity_responses = iter([validity, SimpleNamespace(valid=fault != "endpoint_collision")])
+    calls = []
+
+    def call(service_type: Any, suffix: str, request: Any) -> Any:
+        calls.append((suffix, deepcopy(request)))
+        if suffix == "check_state_validity":
+            return next(validity_responses)
+        if suffix == "compute_fk":
+            return SimpleNamespace(error_code=SimpleNamespace(val=1),
+                                   pose_stamped=[SimpleNamespace(pose=next(fk_responses))])
+        assert suffix == "compute_cartesian_path" and request.avoid_collisions is True
+        point = SimpleNamespace(positions=[0.1], velocities=[0.0], accelerations=[0.0],
+                                time_from_start=SimpleNamespace(sec=1, nanosec=0))
+        return SimpleNamespace(error_code=SimpleNamespace(val=1), fraction=0.5 if fault == "path_collision" else 1.0,
+                               solution=SimpleNamespace(joint_trajectory=SimpleNamespace(
+                                   joint_names=["xarm6_joint1"], points=[point])))
+
+    monkeypatch.setattr(session, "_call", call)
+    joints = {"names": ["xarm6_joint1"], "positions": [0.0]}
+    original = deepcopy((joints, start, target, attached, session.scene))
+    result = session._check_segment(joints, start, target, attached)
+    assert result["status"] == ("passed" if fault is None else "failed")
+    assert (joints, start, target, attached, session.scene) == original
+    if fault == "prefix_collision":
+        assert [suffix for suffix, _ in calls] == ["check_state_validity"]
+        assert "xarm6_link3 / observed_ec004ec41988692e7beb" in result["message"]
+    else:
+        assert any(suffix == "compute_cartesian_path" for suffix, _ in calls)
+    if fault in {None, "endpoint_collision"}:
+        checked = [request.robot_state for suffix, request in calls if suffix == "check_state_validity"]
+        assert checked == [joints, {"names": ["xarm6_joint1"], "positions": [0.1]}]
+
+
+@pytest.mark.parametrize("suffix, outcome", [
+    ("get_planning_scene", "retry_success"), ("get_planning_scene", "timeout"),
+    ("get_planning_scene", "cancelled"), ("apply_planning_scene", "timeout"),
+    ("compute_cartesian_path", "timeout"),
+])
+def test_private_scene_read_retries_once_within_the_existing_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str, outcome: str,
+) -> None:
+    """A dropped read response permits one retry; scene mutations never replay."""
+    from cais_spade_llm.spec2primitives.adapters import isolated_moveit as module
+
+    session = module.IsolatedMoveItSession(tmp_path, {}, {}, {
+        **load_refinement_profile(), "planning_timeout_sec": 2.0,
+    })
+    clock = [0.0]
+    requests, removed, cancelled = [], [], []
+    response = object()
+
+    def call(request: Any) -> Any:
+        number = len(requests)
+        requests.append(request)
+        return SimpleNamespace(done=lambda: number == 1 and outcome == "retry_success",
+                               result=lambda: response, cancel=lambda: cancelled.append(number))
+
+    client = SimpleNamespace(wait_for_service=lambda **kwargs: True, call_async=call,
+                             remove_pending_request=removed.append)
+    session._clients[suffix] = client
+
+    def spin(*, timeout_sec: float) -> None:
+        clock[0] += timeout_sec
+        if outcome == "cancelled":
+            session._cancelled.set()
+
+    session._executor = SimpleNamespace(spin_once=spin)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    request = object()
+    if outcome == "retry_success":
+        assert session._call(object, suffix, request) is response
+    else:
+        with pytest.raises(RuntimeError, match="timed out: " + suffix):
+            session._call(object, suffix, request)
+    expected = 2 if suffix == "get_planning_scene" and outcome != "cancelled" else 1
+    assert requests == [request] * expected
+    assert len(removed) == len(cancelled) == (1 if outcome == "retry_success" else expected)
+    assert clock[0] <= 2.0
 
 
 def _pa_observations(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
@@ -2204,6 +2674,40 @@ def test_unsupported_primitive_stops_before_robot_capture_or_pa_investigation(
                    for event in view["refinement"]["events"])
 
 
+def test_undeclared_result_path_stops_before_measurements_and_preserves_submission(tmp_path: Path) -> None:
+    """A run_0017-style authoring error cannot consume PA or robot validation work."""
+    _setup(tmp_path)
+    pointer = "/declared_output/approach_pose/x"
+    steps = [
+        ("compute_pick_targets", {"part_name": "medium gear", "prefer_live_detection": False}),
+        ("move_cartesian", {"x": {"result_ref": {"step_index": 1, "field_path": pointer}}}),
+    ]
+    model = _ProgramRuntime([_program_action(steps)])
+    original = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    async def unexpected_validation(**kwargs: Any) -> Any:
+        pytest.fail("Invalid result references must stop before validation or measurements.")
+
+    result = asyncio.run(PrimitiveRefinementRuntime(
+        program_runtime=model, robot_runtime=object(), product_runtime=object(),
+        validator=unexpected_validation,
+    ).compose(tmp_path))
+    assert result["status"] == "invalid"
+    assert result["pa_batches"] == result["pa_operations"] == 0
+    assert result["candidate_refs"] == result["binding_refs"] == result["validation_refs"] == []
+    assert len(model.calls) == len(result["decision_refs"]) == 1
+    assert pointer in result["stop_reason"] and "compute_pick_targets" in result["stop_reason"]
+    decision = read_pin(tmp_path, result["decision_refs"][0])
+    assert decision["primitive_steps"] == [{"primitive_symbol": symbol, "params": params}
+                                            for symbol, params in steps]
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["status"] == "invalid" and view["attempt_count"] == 0
+    assert view["candidate"] == decision and "validation" not in view
+    assert not any(event["stage"] in {"robot_context", "evidence", "calculating", "validating"}
+                   for event in view["refinement"]["events"])
+    assert all(path.read_bytes() == data for path, data in original.items())
+
+
 @pytest.mark.parametrize("scope", [VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE])
 def test_historical_unsupported_program_is_readable_but_fails_before_geometry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str,
@@ -2310,7 +2814,9 @@ def _binding_fixture(
 
     def load(root: Path) -> Any:
         current = original_loader(root)
-        return replace(current, record_hashes={**current.record_hashes, **{ref["ref"]: ref["sha256"] for ref in refs.values()}})
+        return replace(current, composition_input={**current.composition_input,
+                       "target_feature": deepcopy(inputs.composition_input["target_feature"])},
+                       record_hashes={**current.record_hashes, **{ref["ref"]: ref["sha256"] for ref in refs.values()}})
 
     for module in (primitive_composition, refinement, program_execution):
         monkeypatch.setattr(module, "_load_inputs", load)
@@ -2333,6 +2839,39 @@ def _binding_fixture(
     monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", select)
     product = ProductPrimitiveContextRuntime(SimpleNamespace(), _MessageProduct())
     return inputs, robot, refs, product, load
+
+
+def test_worker_startup_failure_retains_log_without_requesting_ra_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable private worker reports RA context failure after one proposal."""
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
+    steps = _observed_program(refs, bound=False)
+    program = _MessageProgramRuntime([_program_action([(step["primitive_symbol"], step["params"]) for step in steps])])
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+
+    class Worker(_PlanningSession):
+        last_worker_log = "Planning pipeline could not initialize."
+
+        async def __aenter__(self) -> Any:
+            raise RuntimeError("Private MoveIt validation worker exited with code -6 before get_planning_scene.")
+
+    async def validator(**kwargs: Any) -> Any:
+        return await validate_program(**kwargs, session_factory=Worker)
+
+    runtime = PrimitiveRefinementRuntime(program_runtime=program, robot_runtime=Robot(), product_runtime=product,
+                                         validator=validator, profile=load_refinement_profile())
+    result = asyncio.run(runtime.compose(tmp_path))
+    assert result["status"] == "needs_context", result
+    assert len(program.calls) == len(result["candidate_refs"]) == 1
+    report = read_pin(tmp_path, result["validation_refs"][0])
+    finding = next(item for item in report["findings"] if item["check"] == "motion")
+    assert finding["authority"] == "RA" and "get_planning_scene" in finding["message"]
+    assert Worker.last_worker_log in finding["message"]
+    assert report["status"] == "unknown" and report["motion_executed"] is False
 
 
 @pytest.mark.parametrize("scope", [VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE])
@@ -2549,6 +3088,58 @@ def test_incomplete_or_incompatible_validation_never_passes(tmp_path: Path, faul
     assert report["status"] != "passed", report
 
 
+@pytest.mark.parametrize("quantity", [
+    "/x",
+    "x, y, and z for a collision-checked intermediate world-frame Cartesian waypoint between the placement approach_pose and target_pose",
+])
+def test_empty_waypoint_returns_to_ra_with_calculated_poses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quantity: str,
+) -> None:
+    """Replay run_0014's ownership failure without another PA batch or robot capture."""
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
+    steps = _observed_program(refs)
+    action = _program_action([(step["primitive_symbol"], step["params"]) for step in steps])
+    empty = deepcopy(action)
+    empty["primitive_steps"].insert(7, {"primitive_symbol": "move_cartesian", "params": "{}"})
+    empty["context_requests"] = [{"step_index": 8, "quantity": quantity, "authority": "PA",
+                                  "reason": "The previous placement segment failed."}]
+    program = _MessageProgramRuntime([action, empty, action])
+    captures, validations = [], []
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            captures.append(True)
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+
+    async def validator(**kwargs: Any) -> Any:
+        validations.append(True)
+        report = await validate_program(**kwargs, session_factory=_PlanningSession)
+        assert report["status"] == "passed", report
+        if len(validations) == 1:
+            report["status"] = "failed"
+            report["findings"].append({"step_index": 8, "check": "motion", "status": "failed",
+                                       "authority": "RA", "message": "Incomplete Cartesian segment."})
+            report["checked_steps"][7].update(status="failed", fraction=0.76)
+        return report
+
+    result = asyncio.run(PrimitiveRefinementRuntime(
+        program_runtime=program, robot_runtime=Robot(), product_runtime=product, validator=validator,
+    ).compose(tmp_path))
+    assert result["status"] == "validated_for_declared_scope", result
+    assert result["pa_batches"] == 1
+    assert len(captures) == 3 and len(validations) == 2
+    report = read_pin(tmp_path, result["validation_refs"][1])
+    assert {item["parameter_path"] for item in report["findings"]} == {"/x", "/y", "/z"}
+    assert all(item["authority"] == "RA" for item in report["findings"])
+    for candidate_ref in result["candidate_refs"][1:]:
+        candidate = read_pin(tmp_path, candidate_ref)
+        request = read_pin(tmp_path, {"ref": candidate["request_ref"], "sha256": candidate["request_sha256"]})
+        feedback = json.loads(request["prompt"].split("COMPOSITION_INPUT\n", 1)[1])["refinement_context"]
+        assert {item["step_index"] for item in feedback["calculations"]} == {1, 6}
+        assert all("result" in item and "record_ref" in item for item in feedback["calculations"])
+    assert read_pin(tmp_path, result["candidate_refs"][1])["primitive_steps"][7]["params"] == {}
+
+
 def test_refinement_deadline_and_unchanged_failures_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     inputs, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
     program = _MessageProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])] * 3)
@@ -2697,3 +3288,516 @@ def test_primitive_context_spade_delivery_checks_correlation_and_cleans_inboxes(
             pa.container.unregister(str(pa.jid))
     asyncio.run(scenario())
     assert deliveries and deliveries[0].get_metadata("type") == "PrimitiveContextRequest"
+
+
+def _fitting_setup(root: Path, *, bore_radius_m: float = .00549, part_name: str = "medium gear") -> tuple[Any, ...]:
+    from cais_spade_llm.spec2primitives.tools.assembly_geometry import annular_collision_segments
+
+    inputs, robot, refs, _ = _observed_setup(root)
+    target = deepcopy(inputs.composition_input["target_feature"])
+    target["assembly_feature_association"] = [{
+        "state_names": ["desired_state"], "assembly_features": [
+            {"owner": {"type": "Part", "name": part_name}},
+            {"owner": {"type": "Part", "name": "center gear shaft"}},
+        ],
+    }]
+    for name, radius in (("part", bore_radius_m / np.cos(np.pi / 64)), ("shaft", 0.0)):
+        np.savez(root / (name + "_ring.npz"), triangles_m=annular_collision_segments(
+            radius, 0.021 if name == "part" else 0.005, 0.02,
+        ).reshape(-1, 3, 3))
+    part = read_pin(root, refs["part"])
+    part.update(part_name=part_name, mesh=pin(root, root / "part_ring.npz"))
+    target_record = {**part, "part_name": "center gear shaft", "object_id": "observed_shaft",
+                     "reference_pose": _pose(x=0.2, z=0.05), "mesh": pin(root, root / "shaft_ring.npz")}
+    seat = {"record_type": "AssemblySurfaceEvidence", "status": "accepted", "frame_id": "world", "units": "m",
+            "mesh": pin(root, root / "mesh.npz"), "observation_timestamp_ns": 1_000_000_000}
+    for name, value in (("part", part), ("shaft", target_record), ("seat", seat)):
+        refs[name] = append_record(root, root / "fitting", name + ".json", value)
+    final = _pose(x=0.2, z=0.05005)
+    goal = {"record_type": "AssemblyGeometryEvidence", "status": "accepted", "frame_id": "world", "units": "m",
+            "reference_point": "observed_bounds_center", "part_name": part_name, "part_object_id": part["object_id"],
+            "assembly_association_sha256": part["assembly_association_sha256"],
+            "part_axis_local": [0., 0., 1.], "part_center_local_m": [0., 0., 0.], "part_height_m": .02,
+            "part_outer_radius_m": .021, "bore_radius_m": bore_radius_m, "shaft_radius_m": .00501,
+            "nominal_radial_clearance_m": bore_radius_m - .00501, "shaft_axis": [0., 0., 1.], "shaft_top_m": [.2, 0., .06],
+            "shaft_height_m": .02, "seating_point_m": [.2, 0., .04], "seating_normal": [0., 0., 1.],
+            "seating_resolution_m": .0001, "target_origin_pose": final,
+            "part_geometry_ref": refs["part"]["ref"], "target_geometry_ref": refs["shaft"]["ref"],
+            "seating_surface_ref": refs["seat"]["ref"], "source_refs": [refs[n] for n in ("part", "shaft", "seat")],
+            "product_geometry": {"placement_surface_point": {"x": .2, "y": 0., "z": .04},
+                                 "target_origin_pose": final, "insertion_axis": [0., 0., -1.],
+                                 "insertion_distance_m": .02, "part_height_m": .02},
+            "observation_timestamp_ns": 168_522_000_000}
+    refs["goal"] = append_record(root, root / "fitting", "goal.json", goal)
+    scene = read_pin(root, refs["scene"])
+    scene["objects"] = [{"object_id": r["object_id"], "mesh": r["mesh"], "pose": r["reference_pose"]}
+                        for r in (part, target_record)] + [{"object_id": "seat", "mesh": seat["mesh"], "pose": _pose(z=0)}]
+    refs["scene"] = append_record(root, root / "fitting", "scene.json", scene)
+    inputs = primitive_composition._with_scope(replace(
+        inputs, composition_input={**inputs.composition_input, "target_feature": target},
+        record_hashes={**inputs.record_hashes, **{ref["ref"]: ref["sha256"] for ref in refs.values()}},
+    ), GAZEBO_OBSERVED_SCOPE)
+    return inputs, robot, refs, {role: refs[role] for role in ("part", "goal", "scene")}
+
+
+@pytest.mark.parametrize("fault", [None, "above_seat", "offset", "missing_goal", "short_endpoint", "collision",
+                                  "no_clearance", "zero_clearance", "stale_robot", "invalid_goal"])
+def test_observed_fitting_requires_clearance_engagement_and_actual_seat(tmp_path: Path, fault: str | None) -> None:
+    inputs, robot, refs, roles = _fitting_setup(
+        tmp_path, bore_radius_m={"no_clearance": .004987318, "zero_clearance": .00501}.get(fault, .00549),
+    )
+    steps = _program(refs, insert=fault != "above_seat")
+    steps[0]["params"]["target_pose"] = _value(refs["part"], "/reference_pose")
+    if fault == "missing_goal":
+        roles.pop("goal")
+    if fault == "offset":
+        steps[7]["params"]["x"] = 0.203
+    if fault == "stale_robot":
+        robot["captured_at_ns"] -= 10_000_000_000
+    if fault == "invalid_goal":
+        goal = read_pin(tmp_path, roles["goal"])
+        goal["shaft_axis"] = [0., 0., 0.]
+        roles["goal"] = append_record(tmp_path, tmp_path / "fitting", "invalid_goal.json", goal)
+    original = deepcopy(steps)
+
+    class Planner(_PlanningSession):
+        async def check_segment(self, **request: Any) -> dict[str, Any]:
+            result = await super().check_segment(**request)
+            if request["attached"] and len(self.calls) == 5:
+                if fault == "short_endpoint":
+                    result["end_pose"] = {**request["target_pose"], "z": request["target_pose"]["z"] + .002}
+                if fault == "collision":
+                    result.update(status="failed", message="Fixture collision remains blocked.")
+            return result
+
+    report = asyncio.run(validate_program(inputs=inputs, steps=steps, robot=robot, evidence=roles,
+        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={}, session_factory=Planner))
+    assert (report["status"] == "passed") is (fault is None), report["findings"]
+    assert steps == original
+    if fault in {"no_clearance", "zero_clearance", "collision", "above_seat"}:
+        calculations = [read_pin(tmp_path, ref) for ref in report["calculation_refs"]]
+        assert [record["step_index"] for record in calculations] == [1, 6]
+        assert calculations[1]["robot_inputs"]["held_part_transform"] is not None
+        assert calculations[1]["result"]["pre_insert_pose"] != calculations[1]["result"]["insert_pose"]
+    if fault in {"no_clearance", "zero_clearance"}:
+        failures = [finding for finding in report["findings"] if finding["check"] == "mating_geometry"]
+        assert len(failures) == 1 and "through-bore radius" in failures[0]["message"]
+        assert failures[0]["remaining_radial_clearance_m"] <= 0
+        release = next(index for index, step in enumerate(steps, 1) if step["primitive_symbol"] == "release_part")
+        assert next(step for step in report["checked_steps"] if step["step_index"] == release)["status"] == "failed"
+    if fault == "stale_robot":
+        assert report["calculation_refs"] == []
+    if fault == "invalid_goal":
+        assert [read_pin(tmp_path, ref)["step_index"] for ref in report["calculation_refs"]] == [1]
+    if fault is None:
+        outcome = next(f for f in report["findings"] if f["check"] == "assembly_outcome")
+        assert outcome["seating_gap_m"] == pytest.approx(.00005)
+        assert outcome["axial_engagement_m"] > .009
+        assert outcome["remaining_radial_clearance_m"] > 0
+        calculation = read_pin(tmp_path, report["calculation_refs"][-1])
+        assert calculation["robot_inputs"]["held_part_transform"] is not None
+        assert calculation["result"]["pre_insert_pose"] != calculation["result"]["insert_pose"]
+
+
+def test_fitting_targets_use_the_full_held_part_transform() -> None:
+    from scipy.spatial.transform import Rotation
+    from cais_spade_llm.spec2primitives.adapters.robot_validation_context import matrix_pose, pose_matrix
+
+    robot = {"frame_id": "world", "ee_from_tcp": np.eye(4).tolist(), "policy": {"insertion_depth_m": .005}}
+    held = np.eye(4)
+    held[:3, :3] = Rotation.from_euler("xyz", [0.1, -.2, .3]).as_matrix()
+    held[:3, 3] = [.03, -.02, -.17]
+    final = _pose(x=.2, z=.05)
+    params = {"part_name": "medium gear", "pick_ctx": {}, "product_geometry": {
+        "target_origin_pose": final, "insertion_axis": [0, 0, -1], "insertion_distance_m": .02,
+        "part_height_m": .02, "placement_surface_point": {"x": .2, "y": 0, "z": .04},
+    }}
+    result = calculate_target("compute_place_targets", params, robot, _pose(),
+                              validation_scope=GAZEBO_OBSERVED_SCOPE, held_part_transform=held)
+    np.testing.assert_allclose(pose_matrix(result["insert_pose"]) @ held, pose_matrix(final), atol=1e-12)
+    assert result["pre_insert_pose"]["z"] - result["insert_pose"]["z"] == pytest.approx(.025)
+    assert result["target_pose"] == result["pre_insert_pose"]
+    with pytest.raises(CalculationUnavailable, match="part-to-EE"):
+        calculate_target("compute_place_targets", params, robot, _pose(), validation_scope=GAZEBO_OBSERVED_SCOPE)
+
+
+@pytest.mark.parametrize("fault", [None, "no_clearance", "zero_clearance", "missing_goal", "stale_robot"])
+def test_fitting_refinement_retains_grounded_calculations_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
+
+    setup = _fitting_setup(tmp_path, bore_radius_m={"no_clearance": .004987318, "zero_clearance": .00501}.get(fault, .00549))
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch, setup=setup)
+    select = primitive_input_resolution.resolve_primitive_inputs
+    if fault == "missing_goal":
+        def missing_goal(request: Any, producer: Any, records: Any, checked: Any, attempted: Any) -> Any:
+            entries, operations = select(request, producer, records, checked, attempted)
+            for entry in entries:
+                need = next(need for need in request["needs"] if need["need_id"] == entry["need_id"])
+                if need["quantity"] == "goal" or (need["step_index"] == 6 and need["quantity"] != "/product_geometry/part_height_m"):
+                    entry.clear()
+                    entry.update(need_id=need["need_id"], blocked="The destination seating surface is unavailable.")
+            return entries, operations
+        monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", missing_goal)
+    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    steps = _program(refs, bound=False)
+    steps[0]["params"]["prefer_live_detection"] = False
+    model = _MessageProgramRuntime([_program_action([(step["primitive_symbol"], step["params"]) for step in steps])])
+    captures = []
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            captures.append(True)
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns() - (10_000_000_000 if fault == "stale_robot" else 0)}
+    async def validator(**kwargs: Any) -> Any:
+        return await validate_program(**kwargs, session_factory=_PlanningSession)
+
+    runtime = PrimitiveRefinementRuntime(program_runtime=model, robot_runtime=Robot(), product_runtime=product, validator=validator)
+    result = asyncio.run(runtime.compose(tmp_path))
+    expected = "validated_for_declared_scope" if fault is None else "failed" if "clearance" in fault else "needs_context"
+    assert result["status"] == expected, result
+    assert len(model.calls) == result["pa_batches"] == 1 and result["pa_operations"] == 0
+    assert len(captures) == (2 if fault is None else 1)
+    report = read_pin(tmp_path, result["validation_refs"][-1])
+    expected_steps = [] if fault == "stale_robot" else [1] if fault == "missing_goal" else [1, 6]
+    assert [read_pin(tmp_path, ref)["step_index"] for ref in report["calculation_refs"]] == expected_steps
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["candidate"]["primitive_steps"] == steps
+    if expected_steps:
+        assert all(isinstance(view["resolved_primitive_steps"][1]["params"][axis], float) for axis in ("x", "y", "z"))
+    if 6 in expected_steps:
+        assert all(isinstance(view["resolved_primitive_steps"][7]["params"][axis], float) for axis in ("x", "y", "z"))
+    if fault in {"no_clearance", "zero_clearance"}:
+        assert "through-bore radius" in result["stop_reason"]
+        assert not any("Required input is unbound" in finding["message"] for finding in report["findings"])
+    assert all(path.read_bytes() == value for path, value in original.items())
+
+
+@pytest.mark.parametrize("fault", [None, "solid_shaft", "new_product", "blocked_bore", "noncircular", "no_clearance", "missing_seat", "tilted"])
+def test_observed_mating_geometry_appends_checked_shapes_without_rewriting_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    from scipy.spatial.transform import Rotation
+    from cais_spade_llm.spec2primitives.tools.assembly_geometry import annular_collision_segments
+
+    _, _, refs, _ = _fitting_setup(tmp_path)
+    bound = {}
+    for name, inner, outer in (("part", 0 if fault == "blocked_bore" else .0049 if fault == "no_clearance" else .0055, .021),
+                               ("shaft", 0 if fault == "solid_shaft" else .0025, .005)):
+        path = tmp_path / (name + "_CAD.npz")
+        triangles = annular_collision_segments(inner, outer, .02).reshape(-1, 3, 3)
+        if fault == "new_product":
+            triangles *= 1.5
+        if fault == "noncircular" and name == "part":
+            triangles[:, :, 0] *= 2
+        np.savez(path, triangles_m=triangles)
+        record = read_pin(tmp_path, refs[name])
+        if fault == "new_product":
+            record["part_name"] = "spacer" if name == "part" else "spacer shaft"
+        record["CAD_mesh"] = pin(tmp_path, path)
+        record["observation_timestamp_ns"] = 168_674_000_000 if name == "part" else 168_522_000_000
+        bound[name] = append_record(tmp_path, tmp_path / "CAD", name + ".json", record)
+    original = {ref["ref"]: (tmp_path / ref["ref"]).read_bytes() for ref in bound.values()}
+    angles = np.linspace(0, 2 * np.pi, 80, endpoint=False)
+
+    def points(record: Any) -> tuple[Any, Any]:
+        shaft = record["object_id"] == "observed_shaft"
+        radius = .005 if shaft else .021
+        xyz = np.array([[r * np.cos(a), r * np.sin(a), .01]
+                        for r in np.linspace(radius / 2, radius, 12) for a in angles])
+        if fault == "tilted" and shaft:
+            xyz = xyz @ Rotation.from_euler("y", 9.6, degrees=True).as_matrix().T
+        xyz += [.2 if shaft else 0, 0, .05]
+        seat = np.array([[.2 + r * np.cos(a), r * np.sin(a), .04]
+                         for r in np.linspace(.007, .02, 8) for a in angles])
+        scale = 1.5 if fault == "new_product" else 1
+        return xyz * scale, (xyz if fault == "missing_seat" else np.concatenate((xyz, seat))) * scale
+
+    producer = AssemblyGeometryProducer(tmp_path, tmp_path / "measured_fitting",
+                                        {r["ref"]: r["sha256"] for r in bound.values()})
+    monkeypatch.setattr(producer, "_candidate_points", points)
+    if fault in {"missing_seat", "tilted"}:
+        with pytest.raises(ValueError, match={"missing_seat": "seating surface",
+                                               "tilted": "tilted"}[fault]):
+            producer.observed_mating_geometry(bound["part"]["ref"], bound["shaft"]["ref"])
+    elif fault in {"blocked_bore", "noncircular"}:
+        goal = producer.observed_mating_geometry(bound["part"]["ref"], bound["shaft"]["ref"])["record"]
+        assert goal["status"] == ("failed" if fault == "blocked_bore" else "unsupported")
+        assert goal["product_geometry"] == {}
+        assert goal["part_geometry_ref"] == bound["part"]["ref"]
+        assert goal["source_refs"] == list(bound.values())
+        assert goal["observation_timestamp_ns"] == 168_522_000_000
+    else:
+        result = producer.observed_mating_geometry(bound["part"]["ref"], bound["shaft"]["ref"])
+        goal = result["record"]
+        from cais_spade_llm.spec2primitives.agents.ra.program_validation import observed_fitting_check
+        assert observed_fitting_check(goal["target_origin_pose"], goal)[0] is (fault != "no_clearance")
+        assert (goal["nominal_radial_clearance_m"] > 0) is (fault != "no_clearance")
+        assert goal["observation_timestamp_ns"] == 168_522_000_000
+        assert goal["seating_point_m"][2] == pytest.approx(.06 if fault == "new_product" else .04)
+        assert goal["shaft_top_m"][2] == pytest.approx(.09 if fault == "new_product" else .06)
+        if fault == "new_product":
+            assert goal["part_name"] == "spacer" and goal["part_height_m"] == pytest.approx(.03)
+            assert .00065 < goal["nominal_radial_clearance_m"] < .0008
+        assert goal["uncertainty"]["CAD_orientation"] == "not_established"
+        shaped = producer.read(goal["part_geometry_ref"])
+        assert shaped["reference_pose"] == read_pin(tmp_path, bound["part"])["reference_pose"]
+        assert shaped["observation_timestamp_ns"] == 168_674_000_000
+        assert shaped["source_refs"] == [bound["part"]]
+        assert "mesh" in shaped
+        producer.verify_outputs()
+    assert all((tmp_path / ref).read_bytes() == value for ref, value in original.items())
+
+
+def test_circular_profile_rejects_closed_or_ambiguous_openings() -> None:
+    from cais_spade_llm.spec2primitives.tools.assembly_geometry import annular_collision_segments, circular_profile
+
+    ring = annular_collision_segments(.0055, .021, .02).reshape(-1, 3, 3)
+    profile = circular_profile(ring)
+    assert 0.0054 < profile["inner_radius_m"] < .0055
+    with pytest.raises(ValueError, match="ambiguous"):
+        circular_profile(np.concatenate((ring, ring + [.06, 0, 0])))
+    cap = np.array([[[-.006, -.006, .01], [.006, -.006, .01], [0, .006, .01]]])
+    assert circular_profile(np.concatenate((ring, cap)))["inner_radius_m"] == 0
+    assert circular_profile(annular_collision_segments(0, .005, .02).reshape(-1, 3, 3))["inner_radius_m"] == 0
+    noncircular = ring.copy()
+    opening = np.linalg.norm(noncircular[:, :, :2], axis=-1) < .006
+    noncircular[:, :, 0][opening] *= 1.5
+    with pytest.raises(NotImplementedError, match="opening"):
+        circular_profile(noncircular)
+
+
+@pytest.mark.parametrize("destination_owner", ["Part", "Assembly"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_goal_requirement_does_not_select_insertion_inputs(tmp_path: Path, destination_owner: str, reverse: bool) -> None:
+    from cais_spade_llm.spec2primitives.agents.ra.validation_scope import required_validation_roles
+
+    inputs, _, _, _ = _fitting_setup(tmp_path)
+    target = deepcopy(inputs.composition_input["target_feature"])
+    features = target["assembly_feature_association"][0]["assembly_features"]
+    features[1]["owner"]["type"] = destination_owner
+    if reverse:
+        features.reverse()
+    assert required_validation_roles(GAZEBO_OBSERVED_SCOPE, target) == ("part", "goal", "scene")
+    inputs = primitive_composition._with_scope(replace(inputs, composition_input={
+        **inputs.composition_input, "target_feature": target}), GAZEBO_OBSERVED_SCOPE)
+    geometry = inputs.catalog["compute_place_targets"]["parameter_schemas"]["product_geometry"]
+    assert geometry["x-grounding-fields"] == ["placement_surface_point"]
+    for insertion in (False, True):
+        steps = (_program if insertion else _observed_program)({}, bound=False)
+        original = deepcopy(steps)
+        report = assess_program_dependencies(steps, inputs.catalog, inputs.composition_input["robot_state"],
+            read_evidence=lambda ref, pointer: _evidence_value(inputs, ref, pointer),
+            result_schema=lambda ref: _result_schema(steps, ref, inputs))
+        needs = {need["quantity"] for need in report["context_requests"] if need["step_index"] == 6}
+        assert ("/product_geometry/insertion_axis" in needs) is insertion
+        assert ("/product_geometry/target_origin_pose/qw" in needs) is insertion
+        assert "/product_geometry/placement_surface_point/z" in needs
+        assert steps == original
+
+
+def test_another_product_uses_its_checked_dimensions_and_assembly_destination(tmp_path: Path) -> None:
+    inputs, robot, refs, roles = _fitting_setup(tmp_path, bore_radius_m=.007, part_name="spacer")
+    target = deepcopy(inputs.composition_input["target_feature"])
+    features = target["assembly_feature_association"][0]["assembly_features"]
+    features[1]["owner"]["type"] = "Assembly"
+    features.reverse()
+    inputs = replace(inputs, composition_input={**inputs.composition_input, "target_feature": target})
+    steps = _program(refs)
+    for step in steps:
+        if "part_name" in step["params"]:
+            step["params"]["part_name"] = "spacer"
+    steps[0]["params"]["target_pose"] = _value(refs["part"], "/reference_pose")
+    original = deepcopy(steps)
+    report = asyncio.run(validate_program(inputs=inputs, steps=steps, robot=robot, evidence=roles,
+        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={}, session_factory=_PlanningSession))
+    assert report["status"] == "passed", report["findings"]
+    assert steps == original
+    assert [read_pin(tmp_path, ref)["step_index"] for ref in report["calculation_refs"]] == [1, 6]
+    outcome = next(f for f in report["findings"] if f["check"] == "assembly_outcome")
+    assert outcome["remaining_radial_clearance_m"] == pytest.approx(.007 - .00501)
+    assert outcome["seating_gap_m"] == pytest.approx(.00005)
+
+
+@pytest.mark.parametrize("status", ["unsupported", "failed"])
+def test_checked_shape_rejection_retains_pick_and_stops_measurement_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str,
+) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
+
+    inputs, robot, refs, roles = _fitting_setup(tmp_path)
+    reason = ("The approved CAD has no supported pair of coaxial circular end faces." if status == "unsupported"
+              else "CAD triangles close or obstruct the moving component's through opening.")
+    goal = {**read_pin(tmp_path, refs["goal"]), "status": status, "reason": reason, "product_geometry": {}}
+    refs["goal"] = roles["goal"] = append_record(tmp_path, tmp_path / "fitting", "rejected.json", goal)
+    _, _, _, product, _ = _binding_fixture(tmp_path, monkeypatch, setup=(inputs, robot, refs, roles))
+    select = primitive_input_resolution.resolve_primitive_inputs
+    requested = []
+    def measured(request: Any, producer: Any, records: Any, checked: Any, attempted: Any) -> Any:
+        requested.extend(request["needs"])
+        dependent = [need for need in request["needs"] if need.get("step_index") == 6]
+        independent = {**request, "needs": [need for need in request["needs"] if need not in dependent]}
+        answers, operations = select(independent, producer, records, checked, attempted)
+        answers.extend({"need_id": need["need_id"], "blocked": reason} for need in dependent if need["need_id"] not in checked)
+        return answers, operations
+    monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", measured)
+    steps = _observed_program({}, bound=False)
+    model = _MessageProgramRuntime([_program_action([(step["primitive_symbol"], step["params"]) for step in steps])])
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+    async def validator(**kwargs: Any) -> Any:
+        return await validate_program(**kwargs, session_factory=_PlanningSession)
+    result = asyncio.run(PrimitiveRefinementRuntime(program_runtime=model, robot_runtime=Robot(),
+                         product_runtime=product, validator=validator).compose(tmp_path))
+    assert result["status"] == status and result["stop_reason"] == reason, result
+    assert result["pa_batches"] == len(model.calls) == 1
+    assert not any("insertion" in need["quantity"] or "bore" in need["quantity"] for need in requested)
+    report = read_pin(tmp_path, result["validation_refs"][-1])
+    assert [read_pin(tmp_path, ref)["step_index"] for ref in report["calculation_refs"]] == [1]
+    assert not any(f.get("check") in {"assembly_outcome", "pick_place_outcome"} and f["status"] == "passed" for f in report["findings"])
+    assert read_primitive_composition_diagnostic(tmp_path)["candidate"]["primitive_steps"] == steps
+
+
+@pytest.mark.parametrize("specification", [
+    {"family": "vertical_gear_assembly"},
+    {"family": "vertical_gear_assembly", "requires_threading": True},
+    {"family": "vertical_gear_assembly", "requires_force_control": True},
+    {"family": "press fit"}, {"family": "snap fit"}, {"family": "USB insertion"},
+])
+def test_nominal_geometry_does_not_claim_unsupported_assembly_operations(tmp_path: Path, specification: dict[str, Any]) -> None:
+    inputs, robot, refs, roles = _fitting_setup(tmp_path)
+    roles["specification"] = append_record(tmp_path, tmp_path / "fitting", "specification.json", {
+        "record_type": "AssemblyValidationSpecification", "status": "accepted", **specification,
+    })
+    steps = _program(refs)
+    steps[0]["params"]["target_pose"] = _value(refs["part"], "/reference_pose")
+    report = asyncio.run(validate_program(inputs=inputs, steps=steps, robot=robot, evidence=roles,
+        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={}, session_factory=_PlanningSession))
+    supported = specification == {"family": "vertical_gear_assembly"}
+    assert (report["status"] == "passed") is supported
+    assert not any(f["check"] == "tolerances" for f in report["findings"])
+    assert "robustness to measurement errors" in report["unmodeled"]
+    if not supported:
+        assert any(f["check"] == "coverage" and "unsupported" in f["message"] for f in report["findings"])
+        assert not any(f["check"] in {"assembly_outcome", "pick_place_outcome"} and f["status"] == "passed" for f in report["findings"])
+
+
+def test_mating_measurement_failure_does_not_cancel_independent_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def select(request: Any, part: Any, scene: Any, checked: Any, attempted: Any) -> Any:
+        if not attempted:
+            return [], [{"tool_name": "observed_mating_geometry", "arguments": json.dumps({
+                "part_ref": part["ref"], "target_ref": part["ref"],
+            })}]
+        entries = [_pa_value("need_0001", part["ref"], "/part_height_m"),
+                   {"need_id": "need_0002", "record_ref": part["ref"]},
+                   {"need_id": "need_0004", "blocked": next(iter(attempted.values()))}]
+        if len(attempted) == 1:
+            return entries, [{"tool_name": "scene_geometry", "arguments": json.dumps({
+                "geometry_refs": [part["ref"]], "surface_refs": [], "segmentation_refs": [],
+            })}]
+        return [*entries, {"need_id": "need_0003", "record_ref": scene["ref"]}], []
+
+    runtime, request, directory, _, _, _ = _answer_fixture(tmp_path, monkeypatch, select)
+    request["needs"].append({"step_index": None, "quantity": "goal", "reason": "Mating geometry needed."})
+    calls = []
+    def unavailable(producer: Any, name: str, arguments: Any) -> Any:
+        calls.append(name)
+        if name == "observed_mating_geometry":
+            raise ValueError("The destination seating surface is unavailable.")
+        return {"status": "accepted"}
+    monkeypatch.setattr(runtime, "_geometry", unavailable)
+    outcome = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory, request=request,
+                                               max_operations=2, progress=None))
+    assert calls == ["observed_mating_geometry", "scene_geometry"]
+    assert outcome["operations_used"] == 2
+    assert len(outcome["unresolved"]) == 1 and "quantity goal" in outcome["unresolved"][0]
+    assert "seating surface is unavailable" in outcome["unresolved"][0]
+    checkpoint = read_pin(tmp_path, outcome["answers_ref"])
+    assert next(answer for answer in checkpoint["answers"] if answer["need_id"] == "need_0001")["value"] == .02
+
+
+@pytest.mark.parametrize("reason", ["The destination seating surface is unavailable.", "The measured shaft axis is ambiguous."])
+def test_missing_mating_measurements_leave_pick_inputs_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str,
+) -> None:
+    runtime, producer, request, _, _ = _direct_input_fixture(tmp_path, monkeypatch)
+    for feature in request["target_feature"]["assembly_feature_association"][0]["assembly_features"]:
+        feature["owner"]["type"] = "Part"
+    if "seating" in reason:
+        features = request["target_feature"]["assembly_feature_association"][0]["assembly_features"]
+        features[1]["owner"]["type"] = "Assembly"
+        features.reverse()
+    request["needs"] = _number_needs([*request["needs"],
+        {"step_index": 1, "quantity": "/target_pose", "reason": "Pick pose needed."},
+        {"step_index": 6, "quantity": "/product_geometry/part_height_m", "reason": "Part height needed."},
+        {"step_index": None, "quantity": "goal", "reason": "Mating geometry needed."},
+    ])
+    original = deepcopy(request)
+    geometry = runtime._geometry
+    def measure(producer: Any, name: str, arguments: Any) -> Any:
+        if name == "observed_mating_geometry":
+            raise ValueError(reason)
+        return geometry(producer, name, arguments)
+    monkeypatch.setattr(runtime, "_geometry", measure)
+    directory = tmp_path / "composition/refinement_runs/run_0001/pa_0001"
+    result = asyncio.run(runtime.investigate(interaction_root=tmp_path, directory=directory,
+                                            request=request, max_operations=6))
+    answers = {(answer["need"]["step_index"], answer["need"]["quantity"]): answer
+               for answer in read_pin(tmp_path, result["answers_ref"])["answers"]}
+    for quantity in ("/product_geometry/board_center/z", "/product_geometry/part_height_m", "/target_pose"):
+        assert "value" in answers[1, quantity]
+    assert answers[6, "/product_geometry/part_height_m"]["value"] == answers[1, "/product_geometry/part_height_m"]["value"]
+    assert "source_ref" in answers[None, "part"]
+    assert all(reason in finding for finding in result["unresolved"])
+    assert "quantity goal" in result["unresolved"][-1]
+    checkpoints = [json.loads(path.read_text()) for path in sorted(directory.glob("answers_auto_*.json"))]
+    assert any(any(answer.get("value") for answer in checkpoint["answers"]) for checkpoint in checkpoints[:-1])
+    assert request == original
+
+
+def test_missing_motion_controls_precede_missing_fitting_measurements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup = _fitting_setup(tmp_path)
+    _binding_fixture(tmp_path, monkeypatch, setup=setup)
+    action = _program_action([("move_cartesian", {})])
+    action["context_requests"] = [{"step_index": 1, "quantity": "x, y, and z", "authority": "PA", "reason": "Need a waypoint."}]
+    class Unused:
+        async def request_primitive_context(self, **kwargs: Any) -> Any:
+            raise AssertionError("A missing RA control must not consume a PA batch.")
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("A missing RA control needs no robot capture.")
+    result = asyncio.run(PrimitiveRefinementRuntime(program_runtime=_MessageProgramRuntime([action, action]),
+                        robot_runtime=Unused(), product_runtime=Unused()).compose(tmp_path))
+    assert result["status"] == "no_progress", result
+    assert result["pa_batches"] == result["pa_operations"] == 0
+    report = read_pin(tmp_path, result["validation_refs"][0])
+    assert {f["parameter_path"] for f in report["findings"]} == {"/x", "/y", "/z"}
+    assert all(f["authority"] == "RA" for f in report["findings"])
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_initial_support_contact_checks_the_exact_carried_mesh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: bool) -> None:
+    session, validity, start, target, attached = _initial_support_contact(tmp_path, monkeypatch)
+    mesh = {"ref": "part_collision.npz", "sha256": "a" * 64}
+    session.scene["objects"][0]["mesh"] = mesh
+    attached["mesh"] = {**mesh, "sha256": "b" * 64} if changed else mesh
+    # Equal old box dimensions cannot conceal a different active mesh.
+    assert session._leaves_initial_support_contact(validity, start, target, attached) is (not changed)
+
+
+def test_current_mating_blocker_precedes_generic_missing_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
+    _, _, _, product, _ = _binding_fixture(tmp_path, monkeypatch, setup=_fitting_setup(tmp_path))
+    def blocked(request: Any, producer: Any, records: Any, checked: Any, attempted: Any) -> Any:
+        return [{"need_id": need["need_id"], "blocked": "The through-bore radius does not clear the shaft envelope."}
+                for need in request["needs"]], []
+    monkeypatch.setattr(primitive_input_resolution, "resolve_primitive_inputs", blocked)
+    program = _MessageProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])])
+    result = asyncio.run(PrimitiveRefinementRuntime(program_runtime=program, robot_runtime=SimpleNamespace(),
+                                                    product_runtime=product).compose(tmp_path))
+    assert result["status"] == "needs_context"
+    report = read_pin(tmp_path, result["validation_refs"][-1])
+    assert "through-bore radius" in report["findings"][0]["message"]
+    assert any("Required goal evidence" in f["message"] for f in report["findings"])

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import permutations, product
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -332,6 +333,10 @@ def _register_candidate(
         or observed_points.shape[0] < _MINIMUM_DOWNSAMPLED_POINTS
     ):
         return []
+    from ..assembly_geometry import planar_features
+
+    plane = measured_planar_feature(candidate_points_m, min(0.0001, voxel_size_m / 10))
+    circular_planes = [feature for feature in planar_features(triangles_m) if feature["circles"]] if plane else []
     hypotheses = []
     for initialization, initial in enumerate(
         _principal_axis_initializations(model_points, observed_points),
@@ -342,6 +347,19 @@ def _register_candidate(
             observed_points,
             initial,
         )
+        if circular_planes:
+            normal, offset = np.asarray(plane["normal"]), plane["offset_m"]
+            # Constrain the circular face supported by visible points. Whole-object
+            # point registration must not tilt that face away from its observation.
+            compatible = [feature for feature in circular_planes
+                          if abs(float(normal @ (transformation[:3, :3] @ feature["normal"]))) > math.sqrt(0.5)]
+            if compatible:
+                face = min(compatible, key=lambda feature: abs(float(
+                    normal @ _transformed_point(transformation, feature["point_m"]) + offset)))
+                transformation = _refine_point_to_point_icp(
+                    model_points, observed_points, transformation,
+                    plane_constraint=(face, plane),
+                )
         if not _valid_transformation(transformation):
             continue
         fitness, rmse, inlier_count = _observed_fit(
@@ -368,6 +386,54 @@ def _register_candidate(
             )
         )
     return hypotheses
+
+
+def measured_planar_feature(points_m: np.ndarray, tolerance_m: float) -> dict[str, Any] | None:
+    """Measure a supported planar patch without assigning an object axis or task role.
+
+    Args:
+        points_m: Observed XYZ points in one declared frame, in metres.
+        tolerance_m: Maximum point-to-plane residual admitted for the patch.
+
+    Returns:
+        A fitted plane and its observed inliers, or None for insufficient support.
+    """
+    points = np.asarray(points_m, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all() or len(points) < 30:
+        return None
+    if not math.isfinite(tolerance_m) or tolerance_m <= 0:
+        raise ValueError("Planar measurement requires a positive residual limit.")
+    points = points[np.lexsort(points.T)]
+    rng = np.random.default_rng(0)
+    sample = points[rng.choice(len(points), min(len(points), 2048), replace=False)]
+    best = np.zeros(len(sample), dtype=bool)
+    for _ in range(256):
+        triplet = sample[rng.choice(len(sample), 3, replace=False)]
+        normal = np.cross(triplet[1] - triplet[0], triplet[2] - triplet[0])
+        length = np.linalg.norm(normal)
+        if length < 1e-12:
+            continue
+        normal /= length
+        selected = np.abs((sample - triplet[0]) @ normal) <= tolerance_m
+        if selected.sum() > best.sum():
+            best = selected
+    if best.sum() < max(30, len(sample) * 0.1):
+        return None
+    inliers = sample[best]
+    for _ in range(3):
+        center = inliers.mean(axis=0)
+        _, _, vectors = np.linalg.svd(inliers - center, full_matrices=False)
+        normal = vectors[-1]
+        inliers = points[np.abs((points - center) @ normal) <= tolerance_m]
+    if len(inliers) < 30:
+        return None
+    center = inliers.mean(axis=0)
+    if normal[np.argmax(np.abs(normal))] < 0:
+        normal = -normal
+    return {"normal": normal.tolist(), "offset_m": -float(normal @ center),
+            "point_m": center.tolist(), "inlier_points_m": inliers,
+            "rms_distance_m": float(np.sqrt(np.mean(((inliers - center) @ normal) ** 2))),
+            "inlier_count": len(inliers), "tolerance_m": tolerance_m}
 
 
 def _voxel_downsample(points_m: np.ndarray, voxel_size_m: float) -> np.ndarray:
@@ -420,10 +486,23 @@ def _refine_point_to_point_icp(
     model_points_m: np.ndarray,
     observed_points_m: np.ndarray,
     initial_transformation: np.ndarray,
+    *,
+    plane_constraint: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None,
 ) -> np.ndarray:
     from scipy.spatial import cKDTree
 
     transformation = initial_transformation.copy()
+    if plane_constraint:
+        face, observed = plane_constraint
+        normal = np.asarray(observed["normal"], dtype=float)
+        current = transformation[:3, :3] @ face["normal"]
+        if current @ normal < 0:
+            normal = -normal
+        observed_offset = observed["offset_m"] * (1 if np.dot(normal, observed["normal"]) > 0 else -1)
+        correction = Rotation.align_vectors([normal], [current])[0].as_matrix()
+        center = _transformed_point(transformation, face["point_m"])
+        transformation[:3, :3] = correction @ transformation[:3, :3]
+        transformation[:3, 3] = center - transformation[:3, :3] @ face["point_m"]
     keep_count = max(
         _MINIMUM_DOWNSAMPLED_POINTS,
         math.ceil(observed_points_m.shape[0] * _ICP_TRIM_FRACTION),
@@ -436,6 +515,14 @@ def _refine_point_to_point_icp(
             model_points_m[indices[retained]],
             observed_points_m[retained],
         )
+        if plane_constraint:
+            delta = Rotation.from_matrix(updated[:3, :3] @ transformation[:3, :3].T).as_quat()
+            angle = 2 * math.atan2(float(delta[:3] @ normal), float(delta[3]))
+            updated[:3, :3] = Rotation.from_rotvec(normal * angle).as_matrix() @ transformation[:3, :3]
+            updated[:3, 3] = (observed_points_m[retained].mean(axis=0)
+                             - updated[:3, :3] @ model_points_m[indices[retained]].mean(axis=0))
+            distance = normal @ _transformed_point(updated, face["point_m"]) + observed_offset
+            updated[:3, 3] -= normal * distance
         translation_change = float(np.linalg.norm(updated[:3, 3] - transformation[:3, 3]))
         relative = transformation[:3, :3].T @ updated[:3, :3]
         cosine = min(1.0, max(-1.0, (float(np.trace(relative)) - 1.0) * 0.5))

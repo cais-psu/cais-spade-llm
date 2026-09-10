@@ -27,6 +27,7 @@ from ...tools.observation_presentation import ObservationPresentation
 _GEOMETRY_ARGUMENTS = {
     "observed_geometry": {"segmentation_ref", "observation_handle", "calibration_ref"},
     "bind_observed_part": {"part_ref", "cad_ref", "feature_name"},
+    "observed_mating_geometry": {"part_ref", "target_ref"},
     "scene_geometry": {"geometry_refs", "surface_refs", "segmentation_refs"},
 }
 _INTERNAL_OBSERVATION_FIELDS = {
@@ -35,7 +36,7 @@ _INTERNAL_OBSERVATION_FIELDS = {
     "source_artifacts", "source_point_cloud", "label_mask_artifact",
 }
 _CAMERA_POSITION = re.compile(r"/cameras/[0-9]+(?:/|$)")
-_GEOMETRY_OPERATIONS = {"observed_geometry", "scene_geometry"}
+_GEOMETRY_OPERATIONS = {"observed_geometry", "observed_mating_geometry", "scene_geometry"}
 
 
 def _issued_records(producer: AssemblyGeometryProducer) -> dict[str, Any]:
@@ -206,11 +207,11 @@ def _checked_selection(
         ref, pointer = selection["record_ref"], selection["field_path"]
         if not isinstance(pointer, str) or (pointer and not pointer.startswith("/")):
             raise ValueError("A measured value requires a string field_path JSON pointer; use '' for its root.")
-        if role in required_validation_roles(scope):
+        if role in (*required_validation_roles(scope), "goal"):
             raise ValueError(f"The {role} validation need requires a whole record_ref without a pointer.")
     else:
         ref = entry["record_ref"]
-        if role not in required_validation_roles(scope):
+        if role not in (*required_validation_roles(scope), "goal"):
             raise ValueError("Whole record_ref is for a requested validation role; use value_ref for an input.")
     if not isinstance(ref, str):
         raise ValueError("record_ref must be an issued string reference.")
@@ -486,7 +487,7 @@ class ProductPrimitiveContextRuntime:
                 if name in _GEOMETRY_ARGUMENTS:
                     if set(arguments) != _GEOMETRY_ARGUMENTS[name]:
                         raise ValueError("Geometry tool argument fields are invalid.")
-                    if scope != GAZEBO_OBSERVED_SCOPE and name in {"observed_geometry", "bind_observed_part"}:
+                    if scope != GAZEBO_OBSERVED_SCOPE and name in {"observed_geometry", "bind_observed_part", "observed_mating_geometry"}:
                         raise ValueError("The requested tool is unavailable in this scope.")
                     geometry_operations += name in _GEOMETRY_OPERATIONS
                     def measure() -> dict[str, Any]:
@@ -571,7 +572,7 @@ class ProductPrimitiveContextRuntime:
 
         from .primitive_input_resolution import resolve_primitive_inputs
 
-        attempted: set[str] = set()
+        attempted: dict[str, str | None] = {}
         for resolution_number in range(1, max_operations + 2):
             records = await asyncio.to_thread(_verified_issued_records, producer)
             entries, requests = await asyncio.to_thread(
@@ -597,8 +598,13 @@ class ProductPrimitiveContextRuntime:
             if len(requests) > max_operations - operations:
                 await emit("Direct measurement batch exceeds the remaining operation budget; no item was started.")
                 break
-            attempted.update(fingerprint(item) for item in requests)
-            await run_batch(requests)
+            attempted.update((fingerprint(item), None) for item in requests)
+            outcomes = await run_batch(requests)
+            for outcome in outcomes:
+                if outcome["result"].get("status") == "unavailable":
+                    # The resolver associates this failure only with dependent
+                    # needs; independent checked measurements remain usable.
+                    attempted[fingerprint(outcome["request"])] = outcome["result"]["reason"]
 
         outcome = _answer_result(needs, checked, operations)
         outcome.update(answers_ref=answers_ref, model_responses=0)

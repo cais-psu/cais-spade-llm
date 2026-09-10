@@ -188,6 +188,7 @@ def _with_scope(inputs: _CompositionInputs, scope: str) -> _CompositionInputs:
     value = deepcopy(inputs.composition_input)
     value["primitive_catalog"] = _composition_catalog_view(
         tuple(value["primitive_catalog"]), validation_scope=scope,
+        target_feature=value["target_feature"],
     )
     return replace(inputs, composition_input=value, validation_scope=scope)
 
@@ -446,7 +447,8 @@ def _recorded_request_inputs(
     catalog = _validate_primitive_catalog(recorded.get("primitive_catalog"))
     # A saved request may retain simulator fields. It must still describe the same
     # pinned resource interface after projection, rather than adding capabilities.
-    if _encoded(_composition_catalog_view(tuple(catalog), validation_scope=scope)) != _encoded(
+    if _encoded(_composition_catalog_view(tuple(catalog), validation_scope=scope,
+                                         target_feature=inputs.composition_input["target_feature"])) != _encoded(
         inputs.composition_input["primitive_catalog"]
     ):
         raise PrimitiveCompositionError("The recorded composition catalog differs from its context.")
@@ -512,6 +514,14 @@ def _composition_prompt(inputs: _CompositionInputs, *, validation_scope: str | N
         value["refinement_context"] = {
             "previous_candidate": deepcopy(feedback["previous_candidate"]),
             "findings": list({json.dumps(item, sort_keys=True): item for item in findings}.values()),
+            "checked_steps": [deepcopy(item) for item in feedback.get("checked_steps", [])
+                              if item.get("status") != "passed"],
+            "calculations": [{
+                "record_ref": item["record_ref"], "step_index": item["step_index"],
+                "primitive_symbol": item["primitive_symbol"], "preceding_pose": item["preceding_pose"],
+                "result": {key: value for key, value in item["result"].items()
+                           if key in {"approach_pose", "target_pose", "pre_insert_pose", "insert_pose"}},
+            } for item in feedback.get("calculations", [])],
         }
     selectable = [symbol for symbol in inputs.catalog if symbol in supported_primitive_symbols(scope)]
     return (
@@ -523,11 +533,16 @@ def _composition_prompt(inputs: _CompositionInputs, *, validation_scope: str | N
         "The complete primitive_catalog is a composition contract. Conditions/effects are partial; "
         "grasp/release expose held_part, not proof of physical assembly. "
         "Each step has primitive_symbol and params, a JSON-encoded object. Names and control settings may be literals. "
-        "Omit unavailable measured inputs, including required inputs; never invent coordinates or placeholders. "
+        "Omit unavailable measured inputs, including required inputs; never invent measurements or placeholders. "
+        "Numeric move_cartesian coordinates and orientations may be RA-authored control proposals for collision validation. "
+        "RA must supply or revise those controls; PA cannot produce a collision-checked intermediate waypoint. "
         "PA deterministically supplies measurements for the exact required parameter paths using accepted task associations. "
         "The host binds checked answers without changing primitives, order, valid parameters or result dependencies. "
-        'Use {"result_ref":{"step_index":1,"field_path":"/declared_output"}} to select an earlier '
-        'one-based step output. Measurements already supplied by evidence must retain {"value_ref":'
+        "result_ref selects an earlier one-based step output. Its field_path is a JSON Pointer relative to "
+        "that primitive's result object: start with an exact field in its result_schemas, then follow nested properties. "
+        'For example, if step 1 declares target_pose.x, use {"result_ref":{"step_index":1,"field_path":"/target_pose/x"}}. '
+        'Use field_path="" for the whole result object. Schema labels are not result wrapper fields. '
+        'Measurements already supplied by evidence must retain {"value_ref":'
         '{"record_ref":"exact reference","field_path":"/field"}}; do not copy measured numbers into params. '
         "These references may occur inside objects/arrays. Signature-required arguments and x-grounding-fields "
         "are distinct. The observed bounds reference_pose is not a task candidate centroid. "
@@ -678,6 +693,7 @@ def _with_refinement(
     value = deepcopy(inputs.composition_input)
     hashes = dict(inputs.record_hashes)
     measurements = []
+    calculations = {}
     checked_evidence = {} if _checked_evidence is None else _checked_evidence
     for source in context["evidence_refs"]:
         record = _verify_evidence_tree(inputs.root, source, checked_evidence)
@@ -685,6 +701,10 @@ def _with_refinement(
             raise PrimitiveCompositionError("Refinement record is not product or robot evidence.")
         hashes[source["ref"]] = source["sha256"]
         value["grounded_context"]["typed_records"].append({"record_type": record.get("record_type"), "record_ref": source["ref"]})
+        if record.get("record_type") == "PrimitiveCalculationRecord":
+            calculations[record["step_index"]] = {"record_ref": source["ref"], **_without_model_name({
+                key: record[key] for key in ("step_index", "primitive_symbol", "preceding_pose", "result")
+            })}
         if record.get("record_type") in {"ObservedGeometryEvidence", "AssemblyGeometryEvidence", "AssemblySurfaceEvidence"}:
             delivered = _without_model_name(_composition_state_view(record))
             if len(json.dumps(delivered)) <= _READ_LIMIT:
@@ -697,7 +717,32 @@ def _with_refinement(
         "findings": deepcopy(context["findings"]),
         "validation_scope": read_validation_scope(run["profile"]),
         "resolved_measurements": measurements,
+        "calculations": list(calculations.values()),
     }
+    if context.get("validation_ref"):
+        report = verify_record(inputs.root, context["validation_ref"])
+        if (report.get("record_type") != "PrimitiveValidationReport"
+                or report.get("candidate_ref") != context["previous_candidate_ref"]
+                or report.get("binding_ref") != context.get("binding_ref")
+                or Path(context["validation_ref"]["ref"]).parent != Path(reference["ref"]).parent):
+            raise PrimitiveCompositionError("Revision validation differs from its preceding candidate and findings.")
+        # Older handoffs append PA explanations to the report's findings. Keep
+        # those pinned explanations while giving the current report precedence.
+        feedback["findings"] = deepcopy(report["findings"])
+        feedback["findings"].extend(deepcopy(item) for item in context["findings"]
+                                    if item not in report["findings"])
+        feedback["checked_steps"] = _without_model_name([
+            {key: item[key] for key in (
+                "step_index", "status", "resolved_params", "message", "fraction", "error_code",
+                "last_valid_pose", "contacts",
+            ) if key in item} for item in report["checked_steps"]
+        ])
+        for source in report["calculation_refs"]:
+            if hashes.get(source["ref"]) != source["sha256"]:
+                raise PrimitiveCompositionError("Revision calculation is absent from the pinned evidence handoff.")
+            calculation = _verify_evidence_tree(inputs.root, source, checked_evidence)
+            if calculation.get("record_type") != "PrimitiveCalculationRecord":
+                raise PrimitiveCompositionError("Revision calculation has an incompatible record type.")
     if context.get("binding_ref"):
         from .program_binding import read_program_binding
 
@@ -871,7 +916,11 @@ def _result_schema(steps: list[dict[str, Any]], ref: Any, inputs: _CompositionIn
         ):
             schema = current["items"]
         else:
-            raise PrimitiveCompositionError("result_ref selects an undeclared result field.")
+            raise PrimitiveCompositionError(
+                "result_ref selects an undeclared result field: "
+                f"step {index} ({steps[index - 1]['primitive_symbol']}), field_path={pointer!r}. "
+                f"Available top-level result fields: {', '.join(declaration)}."
+            )
     return schema
 
 

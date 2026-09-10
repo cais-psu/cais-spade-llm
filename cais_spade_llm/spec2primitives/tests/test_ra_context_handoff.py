@@ -1683,6 +1683,11 @@ def test_composition_preserves_ra_decisions_in_one_bounded_prompt(tmp_path: Path
     assert delivered["robot_state"] == inputs.composition_input["robot_state"]
     assert delivered["target_feature"]["product_requirement"] == "assemble medium gear"
     assert len(prompt) <= 32000 and prompt.count('"primitive_catalog":') == 1
+    example, _ = json.JSONDecoder().raw_decode(prompt[prompt.index('{"result_ref":'):])
+    assert primitive_composition._schema(primitive_composition._result_schema(
+        candidate.record["primitive_steps"][:1], example["result_ref"], inputs,
+    ))["type"] == "number"
+    assert "/declared_output" not in prompt
     assert not {"ontology_projection", "grounded_context"} & delivered.keys()
     assert all(word not in prompt for word in ("EXCHANGES", "observation_catalog", "CADSizeCorrespondenceRecord"))
     kinds = {variant["properties"]["kind"]["enum"][0] for variant in runtime.calls[0]["response_format"]["schema"]["properties"]["action"]["anyOf"]}
@@ -1845,7 +1850,10 @@ def test_parameterized_composition_rejects_without_repair(
     assert trace[0]["response"] == {"action": action}
 
 
-@pytest.mark.parametrize("pointer", ["/target_pose/missing", "/undeclared", "/target_pose/~2"])
+@pytest.mark.parametrize("pointer", [
+    "/target_pose/missing", "/undeclared", "/target_pose/~2",
+    "/declared_output/approach_pose/x", "/declared_output/target_pose/z", "/declared_output/tz",
+])
 def test_parameterized_composition_rejects_undeclared_result_paths(
     tmp_path: Path, pointer: str
 ) -> None:
@@ -1869,6 +1877,51 @@ def test_parameterized_composition_rejects_undeclared_result_paths(
     )
     candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
     assert candidate.record["status"] == "invalid"
+    assert candidate.record["primitive_steps"][1]["params"]["z"]["result_ref"]["field_path"] == pointer
+    assert len(runtime.calls) == len(candidate.record["exchange_refs"]) == 1
+    if "undeclared result field" in candidate.record["reason"]:
+        assert pointer in candidate.record["reason"]
+        assert "step 1 (compute_pick_targets)" in candidate.record["reason"]
+        assert "Available top-level result fields:" in candidate.record["reason"]
+        assert "target_pose" in candidate.record["reason"]
+
+
+def test_fitting_result_paths_select_declared_fields_without_wrappers(tmp_path: Path) -> None:
+    """Accept pick and insertion dependencies while their measured inputs await binding."""
+    _capture_geometry_context(tmp_path)
+
+    def pose(step_index: int, name: str, fields: tuple[str, ...] = ("x", "y", "z")) -> dict[str, Any]:
+        return {field: {"result_ref": {"step_index": step_index, "field_path": f"/{name}/{field}"}}
+                for field in fields}
+
+    pick_ctx = {name: {"result_ref": {"step_index": 1, "field_path": f"/{name}"}}
+                for name in ("part_name", "tz", "pick_tcp_z", "tcp_offset_z", "part_height")}
+    orientation = ("x", "y", "z", "qx", "qy", "qz", "qw")
+    steps = [
+        ("compute_pick_targets", {"part_name": "medium gear", "prefer_live_detection": False,
+                                  "target_pose_source": "observed_bounds_center"}),
+        ("move_cartesian", pose(1, "approach_pose")),
+        ("move_cartesian", pose(1, "target_pose")),
+        ("grasp_part", {"part_name": "medium gear"}),
+        ("move_cartesian", pose(1, "approach_pose")),
+        ("compute_place_targets", {"part_name": "medium gear", "pick_ctx": pick_ctx}),
+        ("move_cartesian", pose(6, "approach_pose", orientation)),
+        ("move_cartesian", pose(6, "pre_insert_pose", orientation)),
+        ("move_cartesian", pose(6, "insert_pose", orientation)),
+        ("release_part", {"part_name": "medium gear"}),
+        ("move_cartesian", pose(6, "pre_insert_pose", orientation)),
+    ]
+    runtime = _ProgramRuntime([_program_action(steps)])
+    candidate = asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
+    assert candidate.record["status"] == "proposed", candidate.record["reason"]
+    assert candidate.record["primitive_steps"] == [
+        {"primitive_symbol": symbol, "params": params} for symbol, params in steps
+    ]
+    view = read_primitive_composition_diagnostic(tmp_path)
+    assert view["status"] == "proposed"
+    assert any(issue["status"] == "deferred" for issue in view["binding_issues"])
+    assert any(issue["step_index"] == 1 and issue["status"] == "missing" for issue in view["binding_issues"])
+    assert len(runtime.calls) == 1
 
 
 @pytest.mark.parametrize("reference,pointer", [("evaluations/answer.json", ""), ("../answer.json", ""), (None, "/translated_location_m/01")])

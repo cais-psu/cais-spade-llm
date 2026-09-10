@@ -9,7 +9,8 @@ import logging
 import threading
 import time
 import uuid
-import time
+
+import numpy as np
 from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
@@ -32,8 +33,8 @@ from .primitive_composition import (
     _recorded_request_inputs,
     read_primitive_composition_diagnostic,
 )
-from .program_validation import resolve_selected_values, validate_program
-from .validation_scope import is_pick_place_scope, read_validation_scope, supported_primitive_symbols
+from .program_validation import observed_fitting_check, resolve_selected_values, validate_program
+from .validation_scope import GAZEBO_OBSERVED_SCOPE, is_pick_place_scope, read_validation_scope, supported_primitive_symbols
 from .refinement import _ACTIVE as ACTIVE_COMPOSITIONS
 from .refinement import _robot_changed
 from .refinement_records import (
@@ -53,7 +54,7 @@ from ...adapters.gazebo_execution import (
     prepare_trajectory,
 )
 from ...adapters.target_calculation import calculate_target
-from ...adapters.robot_validation_context import validation_capture
+from ...adapters.robot_validation_context import matrix_pose, pose_matrix, validation_capture
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +454,9 @@ class PrimitiveExecutionRuntime:
                     },
                 )
                 pose = deepcopy(fresh["ee_pose"])
+                part_pose = deepcopy(part.get("reference_pose", part.get("origin_pose")))
+                grasp_transform = None
+                measured_grasp_transform = None
                 joints = deepcopy(fresh["joint_state"])
                 gripper_joint = configuration["gripper"]["joint"]
                 if gripper_joint not in joints["names"]:
@@ -494,7 +498,8 @@ class PrimitiveExecutionRuntime:
                     )
                     check_stop()
                     if symbol in {"compute_pick_targets", "compute_place_targets"}:
-                        output = calculate_target(symbol, params, fresh, pose, validation_scope=program.report["scope"])
+                        output = calculate_target(symbol, params, fresh, pose, validation_scope=program.report["scope"],
+                                                  held_part_transform=grasp_transform)
                         calculation = verify_record(root, checked[index]["calculation_ref"])
                         if output != calculation["result"]:
                             raise ValueError(
@@ -511,6 +516,9 @@ class PrimitiveExecutionRuntime:
                                 if key in params
                             },
                         }
+                        pose = deepcopy(checked[index].get("end_pose", pose))
+                        if grasp_transform is not None:
+                            part_pose = matrix_pose(pose_matrix(pose) @ grasp_transform)
                         # Mimic joints follow the gripper controller. Retain its
                         # measured primary joint alongside the checked arm joints.
                         names = trajectories[index]["joint_names"]
@@ -533,6 +541,8 @@ class PrimitiveExecutionRuntime:
                         )
                         if held is not None:
                             raise ValueError("grasp_part requires held_part to be null.")
+                        if program.report["scope"] == GAZEBO_OBSERVED_SCOPE and "goal" in evidence:
+                            measured_grasp_transform = np.linalg.inv(pose_matrix(feedback["ee_pose"])) @ pose_matrix(part_pose)
                         custody_known = False
                         command_dispatched = True
                         position = params.get("position", configuration["gripper"]["close"])
@@ -546,10 +556,18 @@ class PrimitiveExecutionRuntime:
                             raise RuntimeError("Gazebo attachment was not acknowledged.")
                         output["gripper_feedback"] = grip
                         held = params["part_name"]
+                        grasp_transform = np.linalg.inv(pose_matrix(pose)) @ pose_matrix(part_pose)
                         custody_known = True
                     else:
                         if held is None or params.get("part_name", held) != held:
                             raise ValueError("release_part does not match acknowledged held_part.")
+                        if program.report["scope"] == GAZEBO_OBSERVED_SCOPE and "goal" in evidence:
+                            if measured_grasp_transform is None:
+                                raise ValueError("Fresh grasp feedback is required to assess the held gear before release.")
+                            measured_part_pose = matrix_pose(pose_matrix(feedback["ee_pose"]) @ measured_grasp_transform)
+                            seated, metrics = observed_fitting_check(measured_part_pose, evidence["goal"])
+                            if not seated:
+                                raise ValueError("Release does not establish the checked shaft fitting: " + str(metrics))
                         custody_known = False
                         command_dispatched = True
                         grip = await transport.gripper_command(configuration["gripper"]["open"])
@@ -561,7 +579,12 @@ class PrimitiveExecutionRuntime:
                         if output.get("success") is not True or output.get("attached") is not False:
                             raise RuntimeError("Gazebo detachment was not acknowledged.")
                         output["gripper_feedback"] = grip
+                        if measured_grasp_transform is not None:
+                            output["feedback"] = feedback
+                            output["fitting_metrics"] = metrics
                         held, custody_known = None, True
+                        grasp_transform = None
+                        measured_grasp_transform = None
                     results[index] = deepcopy(output)
                     await record(
                         f"step_{index:04d}_result.json",
@@ -578,6 +601,8 @@ class PrimitiveExecutionRuntime:
                 check_stop()
                 status, message = (
                     "completed",
+                    "All commands acknowledged. Nominal shaft fitting was checked in prediction; post-release seating remains unobserved."
+                    if program.report["scope"] == GAZEBO_OBSERVED_SCOPE and "goal" in evidence else
                     "Pick-and-place completed. All motion, gripper and attach/detach commands acknowledged."
                     if is_pick_place_scope(program.report["scope"]) else
                     "Execution completed. All commands acknowledged; assembly success has not been established.",
@@ -631,6 +656,10 @@ class PrimitiveExecutionRuntime:
 
     @staticmethod
     def _check_scene_age(evidence: Mapping[str, Any], now: int, profile: Mapping[str, Any]) -> None:
+        # Initial validation checks timestamp metadata and source integrity; this
+        # scope reuses the accepted geometry for the unchanged Gazebo scene.
+        if read_validation_scope(profile) == GAZEBO_OBSERVED_SCOPE:
+            return
         for value in evidence.values():
             stamp = value.get("observation_timestamp_ns")
             if stamp is not None and not 0 <= now - stamp <= profile["scene_max_age_sec"] * 1e9:

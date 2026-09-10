@@ -28,16 +28,22 @@ def read_validation_scope(record: Mapping[str, Any]) -> str:
     return scope
 
 
-def required_validation_roles(scope: str) -> tuple[str, ...]:
+def required_validation_roles(scope: str, target_feature: Mapping[str, Any] | None = None) -> tuple[str, ...]:
     """Return validation evidence roles separately from selected primitive inputs."""
     scope = read_validation_scope({"validation_scope": scope})
+    if scope == GAZEBO_OBSERVED_SCOPE and any(
+        "desired_state" in association.get("state_names", [])
+        and len(association.get("assembly_features", [])) == 2
+        for association in (target_feature or {}).get("assembly_feature_association", [])
+    ):
+        return ("part", "goal", "scene")
     if is_pick_place_scope(scope):
         return ("part", "scene")
     return ("part", "goal", "scene", "specification")
 
 
 def is_pick_place_scope(scope: str) -> bool:
-    """Identify scopes that check simulated custody rather than assembly seating."""
+    """Identify the two scopes using simulated pick-and-place custody checks."""
     return read_validation_scope({"validation_scope": scope}) in {
         GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE,
     }
@@ -60,8 +66,18 @@ def validation_scope_instruction(scope: str) -> str:
             "compute_pick_targets uses its center, measured part_height_m and board_center.z. "
             "compute_place_targets uses product_geometry.placement_surface_point (world XYZ "
             "on a PA-selected destination surface), the part height and the held reference offset. "
-            "No slot, shaft seating, CAD-origin pose or physical gripper-fit proof is required. "
-            "Only part and scene validation roles are required; goal and specification stay null. "
+            "An accepted desired assembly relationship additionally requires checked goal geometry, including an Assembly destination. "
+            "Endpoint owner types do not establish the mating shape. PA must qualify the accepted moving and destination bindings "
+            "against approved CAD and observed features. A through bore on the moving component, a solid or hollow circular shaft "
+            "and an actual seating surface support nominal straight circular insertion. Those checked features supply "
+            "target_origin_pose, insertion_axis, insertion_distance_m and part_height_m; CAD yaw remains unresolved. "
+            "pre_insert_pose is above shaft engagement; insert_pose establishes nominal seating within measured surface resolution. "
+            "A release above the seat or nonpositive measured clearance cannot satisfy that goal. "
+            "Threading, press fits, snap fits and other mating shapes are unsupported; report the specific coverage gap "
+            "instead of requesting shaft measurements or substituting pick-and-place success. "
+            "Missing manufacturing tolerances do not prevent nominal simulation checks. Robustness to measurement errors "
+            "and physical assembly success remain unproven. "
+            "Other observed pick-and-place requests require only part and scene. "
             "Motion, observed collision coverage, part proximity, custody and execution "
             "acknowledgments remain required. RA chooses all operations and bindings. "
         )

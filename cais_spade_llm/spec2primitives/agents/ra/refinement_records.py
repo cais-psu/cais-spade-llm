@@ -117,6 +117,13 @@ def _verify_evidence_tree(
             or value.get("record_type") == "GazeboInstanceBinding"
         ):
             raise ValueError("Execution records cannot supply composition evidence.")
+        if isinstance(value, dict) and value.get("record_type") == "PAContextGroundingCompletion":
+            from ..pa.grounding_contracts import _validated_two_decision_completion
+
+            # PA source_refs include logical citations, not just local artifact
+            # paths. Their existing validator checks those hashes and lineage.
+            _validated_two_decision_completion(root, value)
+            return value
         walk(value)
         return value
 

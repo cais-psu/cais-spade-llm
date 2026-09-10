@@ -2949,6 +2949,8 @@ def _format_validation_findings(
     )
     lines = [label + ", ".join(missing_roles) + "."] if missing_roles else []
     details += [f"PA: {message}" for message in unresolved[:2]] + secondary
+    # Repeated unbound coordinates must not crowd out their recorded cause.
+    details = list(dict.fromkeys(details))
     available = 3 - len(lines)
     lines.extend(details[:available])
     if len(unresolved) > 2 or len(details) > available:
@@ -3033,7 +3035,7 @@ def _apply_primitive_composition_diagnostic(
     pa_responses = (diagnostic.get("refinement") or {}).get("pa_responses", [])
     if isinstance(candidate, Mapping) and refinement and not isinstance(validation, Mapping):
         summary = "This proposal has no completed validation result."
-        if status in {"budget_exhausted", "cancelled", "interrupted", "failed", "stale"}:
+        if status in {"budget_exhausted", "cancelled", "interrupted", "failed", "stale", "invalid", "unsupported"}:
             summary += " The run ended before validation completed."
         else:
             summary += " Validation is pending."

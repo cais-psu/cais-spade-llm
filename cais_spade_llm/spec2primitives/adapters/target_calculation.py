@@ -45,8 +45,21 @@ def calculate_target(
     preceding_pose: Mapping[str, Any],
     *,
     validation_scope: str = VALIDATION_SCOPE,
+    held_part_transform: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Evaluate one authored helper; do not infer inputs, invoke perception or move."""
+    """Evaluate an authored helper without perception or motion.
+
+    Args:
+        primitive_symbol: The exact RA-selected helper.
+        params: Its explicitly resolved parameters.
+        robot_context: Measured tool transform and recorded controller policy.
+        preceding_pose: The checked preceding EE pose.
+        validation_scope: The program's declared validation scope.
+        held_part_transform: Transform from the held part reference into the EE frame.
+
+    Returns:
+        The existing helper outputs, including distinct fitting insertion poses.
+    """
     from cais_spade_llm.resources.robot.robot_primitives import ROBOT_EXTRACT_OUTPUT_MAP
 
     scope = read_validation_scope({"validation_scope": validation_scope})
@@ -86,6 +99,41 @@ def calculate_target(
                 "product_geometry must select actual geometry fields, not a raw record."
             )
         policy = robot_context["policy"]
+        if (primitive_symbol == "compute_place_targets" and scope == GAZEBO_OBSERVED_SCOPE
+                and "target_origin_pose" in geometry):
+            if held_part_transform is None:
+                raise CalculationUnavailable("Fitting requires the measured rigid part-to-EE transform at grasp.")
+            held = np.asarray(held_part_transform, dtype=float)
+            matrix_pose(held)
+            final_part = pose_matrix(geometry["target_origin_pose"])
+            insertion = np.asarray(geometry["insertion_axis"], dtype=float)
+            if (insertion.shape != (3,) or not np.isfinite(insertion).all()
+                    or not math.isclose(float(np.linalg.norm(insertion)), 1.0, abs_tol=1e-6)):
+                raise CalculationUnavailable("Fitting requires a measured unit insertion_axis.")
+            distance = _number(geometry["insertion_distance_m"], "insertion_distance_m", positive=True)
+            clearance = _number(policy["insertion_depth_m"], "insertion approach clearance", positive=True)
+            final_ee = final_part @ np.linalg.inv(held)
+            pre_insert = final_ee.copy()
+            pre_insert[:3, 3] -= insertion * (distance + clearance)
+            approach = pre_insert.copy()
+            approach[:3, 3] -= insertion * 0.05
+            final_tcp = final_ee @ tool
+            surface = {key: _number(geometry["placement_surface_point"][key], "placement_surface_point." + key)
+                       for key in ("x", "y", "z")}
+            result = {"part_name": params["part_name"], "part_height": _number(geometry["part_height_m"], "part_height_m", positive=True),
+                      "slot_x": surface["x"], "slot_y": surface["y"], "board_top_z": surface["z"],
+                      "place_z": float(final_ee[2, 3]), "place_tcp_z": float(final_tcp[2, 3]),
+                      "tcp_offset_z": float(final_tcp[2, 3] - final_ee[2, 3]),
+                      "grasp_tcp_to_part_origin_z": float(final_tcp[2, 3] - final_part[2, 3]),
+                      "place_part_origin_z": float(final_part[2, 3]),
+                      "target_pose": matrix_pose(pre_insert), "pre_insert_pose": matrix_pose(pre_insert),
+                      "insert_pose": matrix_pose(final_ee), "approach_pose": matrix_pose(approach),
+                      "target_origin_pose": dict(geometry["target_origin_pose"]),
+                      "insertion_axis_world": dict(zip(("x", "y", "z"), insertion.tolist()))}
+            output, error = ROBOT_EXTRACT_OUTPUT_MAP[primitive_symbol](dict(params), {"success": True, **result})
+            if error or output is None:
+                raise CalculationUnavailable(error or "The fitting helper returned no outputs.")
+            return _without_model_name(output)
         if primitive_symbol == "compute_pick_targets":
             result = _pick(params, geometry, policy, preceding_pose, float(offset[2]))
         elif scope == GAZEBO_OBSERVED_SCOPE:

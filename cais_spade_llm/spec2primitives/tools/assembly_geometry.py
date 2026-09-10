@@ -103,6 +103,145 @@ def planar_features(triangles: np.ndarray) -> list[dict[str, Any]]:
     return features
 
 
+def circular_profile(triangles: np.ndarray) -> dict[str, Any]:
+    """Measure one circular axis and its conservative CAD envelope.
+
+    Args:
+        triangles: Approved CAD triangles in metres and their original local frame.
+
+    Returns:
+        The circular axis, axial extent, and radii in CAD metres; zero inner radius
+        indicates a solid or obstructed envelope, not a through opening.
+    """
+    triangles = np.asarray(triangles)
+    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3) or not len(triangles) or not np.isfinite(triangles).all():
+        raise ValueError("CAD triangles must be finite three-dimensional measurements.")
+    features = planar_features(triangles)
+    pairs = []
+    for index, first in enumerate(features):
+        for second in features[index + 1:]:
+            normal = np.asarray(first["normal"])
+            if float(normal @ second["normal"]) > -1 + 1e-5:
+                continue
+            for a in first["circles"]:
+                for b in second["circles"]:
+                    delta = np.asarray(b["center_m"]) - a["center_m"]
+                    axial = float(delta @ normal)
+                    if (abs(axial) > 1e-5 and np.linalg.norm(delta - axial * normal) < 1e-5
+                            and abs(a["radius_m"] - b["radius_m"]) < 1e-5):
+                        pairs.append((abs(axial), (np.asarray(a["center_m"]) + b["center_m"]) / 2, normal, a["radius_m"]))
+    if not pairs:
+        raise NotImplementedError("The approved CAD has no supported pair of coaxial circular end faces.")
+    extent = max(item[0] for item in pairs)
+    selected = [item for item in pairs if math.isclose(item[0], extent, abs_tol=1e-5)]
+    _, center, axis, _ = selected[0]
+    if any(abs(float(axis @ item[2])) < 1 - 1e-5 or np.linalg.norm(center - item[1]) > 1e-5
+           for item in selected):
+        raise ValueError("CAD has ambiguous circular mounting axes.")
+    u = np.eye(3)[int(np.argmin(np.abs(axis)))]
+    u -= axis * float(u @ axis)
+    u /= np.linalg.norm(u)
+    v = np.cross(axis, u)
+    local = np.asarray(triangles) - center
+    axial = local @ axis
+    if float(np.ptp(axial)) > extent + 1e-5:
+        raise NotImplementedError("The circular end faces do not span the complete CAD part; this mating shape is unsupported.")
+    xy = np.stack((local @ u, local @ v), axis=-1)
+    first, second = xy, np.roll(xy, -1, axis=1)
+    edges = second - first
+    square = np.sum(edges ** 2, axis=-1)
+    amount = np.divide(-np.sum(first * edges, axis=-1), square,
+                       out=np.zeros_like(square), where=square > 0)
+    closest = first + np.clip(amount, 0, 1)[..., None] * edges
+    radii = np.linalg.norm(closest, axis=-1)
+    cross = first[..., 0] * second[..., 1] - first[..., 1] * second[..., 0]
+    inside = (np.all(cross > 1e-14, axis=1) | np.all(cross < -1e-14, axis=1))
+    inner = 0.0 if inside.any() else float(radii.min())
+    outer = float(np.linalg.norm(xy, axis=-1).max())
+    if inner > 0 and not any(item[3] < outer - 1e-5 for item in selected):
+        raise NotImplementedError("The CAD opening does not have supported coaxial circular boundaries at both end faces.")
+    return {"center_m": center.tolist(), "axis": axis.tolist(), "height_m": float(np.ptp(axial)),
+            "inner_radius_m": inner, "outer_radius_m": outer}
+
+
+def annular_collision_segments(inner_radius_m: float, outer_radius_m: float, height_m: float) -> np.ndarray:
+    """Build 64 closed convex sectors that preserve a conservative circular opening.
+
+    Args:
+        inner_radius_m: CAD opening radius, or zero for a filled shaft envelope.
+        outer_radius_m: Maximum CAD radius to enclose.
+        height_m: Measured axial extent.
+
+    Returns:
+        A sector-by-triangle array in metres, centered on the circular axis.
+    """
+    if not all(math.isfinite(value) for value in (inner_radius_m, outer_radius_m, height_m)) or not (
+        0 <= inner_radius_m < outer_radius_m and height_m > 0
+    ):
+        raise ValueError("Collision sectors require finite positive dimensions and an open radial interval.")
+    count = 64
+    outer = outer_radius_m / math.cos(math.pi / count)
+    faces = np.array([[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
+                      [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+                      [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]])
+    sectors = []
+    for index in range(count):
+        a, b = 2 * math.pi * index / count, 2 * math.pi * (index + 1) / count
+        corners = [(radius * math.cos(angle), radius * math.sin(angle))
+                   for radius, angle in ((inner_radius_m, a), (outer, a), (outer, b), (inner_radius_m, b))]
+        vertices = np.array([[x, y, z] for z in (-height_m / 2, height_m / 2) for x, y in corners])
+        triangles = vertices[faces]
+        area = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
+        sectors.append(triangles[area > 1e-16])
+    return np.asarray(sectors)
+
+
+def observed_circular_face(points: np.ndarray, profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Measure a circular face axis and center while leaving CAD yaw unresolved.
+
+    Args:
+        points: Calibrated observed candidate points in world metres.
+        profile: Circular dimensions checked against the approved CAD triangles.
+
+    Returns:
+        The observed face center, normal, and fit diagnostics.
+    """
+    from scipy.spatial import ConvexHull
+    from .rgb_d_cad_grounding.pose_estimation import measured_planar_feature
+
+    tolerance = min(0.0001, profile["outer_radius_m"] / 100)
+    plane = measured_planar_feature(points, tolerance)
+    if plane is None:
+        raise ValueError("The observed candidate does not establish a planar circular mounting face.")
+    axis = np.asarray(plane["normal"])
+    if axis[2] < 0:
+        axis = -axis
+    if axis[2] < 1 - 1e-5:
+        raise ValueError("The measured mounting axis is tilted; rigid vertical fitting remains unresolved.")
+    u = np.array([1.0, 0.0, 0.0])
+    u -= axis * float(u @ axis)
+    u /= np.linalg.norm(u)
+    v = np.cross(axis, u)
+    points = plane["inlier_points_m"]
+    center = points.mean(axis=0)
+    xy = np.column_stack(((points - center) @ u, (points - center) @ v))
+    hull = xy[ConvexHull(xy).vertices]
+    fit, _, rank, _ = np.linalg.lstsq(np.column_stack((2 * hull, np.ones(len(hull)))),
+                                     np.sum(hull ** 2, axis=1), rcond=None)
+    if rank != 3 or fit[2] + fit[:2] @ fit[:2] <= 0:
+        raise ValueError("The observed circular outline has an ambiguous center.")
+    radius = math.sqrt(float(fit[2] + fit[:2] @ fit[:2]))
+    residual = float(np.max(np.abs(np.linalg.norm(hull - fit[:2], axis=1) - radius)))
+    # Pixel centers undersample the silhouette. Preserve the measured residual;
+    # CAD supplies the envelope radius, never an invented observed orientation.
+    if residual > profile["outer_radius_m"] * 0.1 or not 0.7 < radius / profile["outer_radius_m"] < 1.1:
+        raise ValueError("The observed circular outline contradicts the selected CAD envelope.")
+    center += u * fit[0] + v * fit[1]
+    return {"center_m": center.tolist(), "axis": axis.tolist(), "radius_m": radius,
+            "outline_residual_m": residual, "plane_rms_distance_m": plane["rms_distance_m"],
+            "measurement_resolution_m": tolerance, "inlier_count": plane["inlier_count"]}
+
+
 class _ObservedGeometryBatch:
     """Share checked, immutable observation inputs for one measurement batch only."""
 
@@ -465,6 +604,197 @@ class AssemblyGeometryProducer:
         }, [part_ref, cad_ref])
         return self.bind_part(selected["record_ref"], feature_name)
 
+    def _candidate_points(self, record: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+        from .rgb_d_cad_grounding.frame_conversion import _load_calibration
+
+        pending = [source["ref"] for source in record["source_refs"]]
+        lineage = {}
+        while pending:
+            ref = pending.pop()
+            if ref in lineage:
+                continue
+            ancestor = self.read(ref)
+            lineage[ref] = ancestor
+            pending.extend(source["ref"] for source in ancestor.get("source_refs", []))
+        handle = record["candidate_reference"]["observation_handle"]
+        camera, stamp = self.observation(record["segmentation_ref"], handle)
+        calibrations = [ref for ref, value in lineage.items()
+                        if value.get("record_type") == "CameraToRobotCalibrationRecord"
+                        and value.get("source_frame") == camera["frame"] and value.get("target_frame") == "world"]
+        if len(calibrations) != 1:
+            raise ValueError("Mating geometry requires one original observation calibration.")
+        ref = calibrations[0]
+        if self._batch is None:
+            self._batch = _ObservedGeometryBatch.prepare(self.root, self.authorized, [{
+                "segmentation_ref": record["segmentation_ref"], "calibration_ref": ref,
+            }])
+            self._checked_records = dict(self._batch.records)
+        if record["segmentation_ref"] not in self._batch.candidates:
+            raise ValueError("Mating observations must belong to the same declared segmentation.")
+        candidates = [item for item in self._batch.candidates[record["segmentation_ref"]]
+                      if item["candidate_handle"] == record["candidate_reference"]["candidate_handle"]
+                      and item["observation_handle"] == handle]
+        if len(candidates) != 1 or candidates[0]["partial_visibility"]:
+            raise ValueError("The circular mounting candidate is missing, ambiguous or clipped.")
+        transform = _load_calibration(self.root, owned_path(self.root, ref), observation_timestamp_ns=stamp).target_from_camera
+        arrays = (candidates[0]["points_m"], self._batch.points[record["segmentation_ref"]][handle][0])
+        return tuple(points @ transform[:3, :3].T + transform[:3, 3] for points in arrays)
+
+    def observed_mating_geometry(self, part_ref: str, target_ref: str) -> dict[str, Any]:
+        """Measure a bore, shaft and seating surface for the accepted observed pair.
+
+        Args:
+            part_ref: ObservedGeometryEvidence bound to the accepted moving feature and CAD.
+            target_ref: ObservedGeometryEvidence bound to the accepted destination and CAD.
+
+        Returns:
+            Pinned measured goal geometry, including clearance, for fitting validation.
+        """
+        from scipy.spatial import ConvexHull
+        from scipy.spatial.transform import Rotation
+        from .rgb_d_cad_grounding.pose_estimation import measured_planar_feature
+        from ..agents.ra.refinement_records import pin
+
+        part, target = self.read(part_ref), self.read(target_ref)
+        _same_frame(part, target)
+        if (not part.get("assembly_association_sha256")
+                or part["assembly_association_sha256"] != target.get("assembly_association_sha256")):
+            raise ValueError("Mating geometry requires the same accepted assembly relationship at both endpoints.")
+        profiles = []
+        for record in (part, target):
+            if record.get("record_type") != "ObservedGeometryEvidence" or "CAD_mesh" not in record:
+                raise ValueError("Mating geometry requires observed instances with approved CAD bindings.")
+            try:
+                with np.load(owned_path(self.root, record["CAD_mesh"]["ref"]), allow_pickle=False) as mesh:
+                    profiles.append(circular_profile(mesh["triangles_m"]))
+            except NotImplementedError as exc:
+                return self.save({
+                    "record_type": "AssemblyGeometryEvidence", "status": "unsupported",
+                    "reason": str(exc), "frame_id": part["frame_id"], "units": "m",
+                    "reference_point": "observed_bounds_center", "part_name": part["part_name"],
+                    "part_object_id": part["object_id"],
+                    "assembly_association_sha256": part["assembly_association_sha256"],
+                    "part_geometry_ref": part_ref, "target_geometry_ref": target_ref, "product_geometry": {},
+                    "observation_timestamp_ns": min(part["observation_timestamp_ns"], target["observation_timestamp_ns"]),
+                }, [part_ref, target_ref])
+        if profiles[0]["inner_radius_m"] <= 0:
+            return self.save({
+                "record_type": "AssemblyGeometryEvidence", "status": "failed",
+                "reason": "CAD triangles close or obstruct the moving component's through opening.",
+                "frame_id": part["frame_id"], "units": "m", "reference_point": "observed_bounds_center",
+                "part_name": part["part_name"], "part_object_id": part["object_id"],
+                "assembly_association_sha256": part["assembly_association_sha256"],
+                "part_geometry_ref": part_ref, "target_geometry_ref": target_ref, "product_geometry": {},
+                "observation_timestamp_ns": min(part["observation_timestamp_ns"], target["observation_timestamp_ns"]),
+            }, [part_ref, target_ref])
+        shaped = []
+        for (ref, record, moving), profile in zip(((part_ref, part, True), (target_ref, target, False)), profiles):
+            points, all_points = self._candidate_points(record)
+            face = observed_circular_face(points, profile)
+            axis = np.asarray(face["axis"])
+            center = np.asarray(face["center_m"]) - axis * profile["height_m"] / 2
+            rotation = Rotation.align_vectors([axis], [[0.0, 0.0, 1.0]])[0].as_matrix()
+            sectors = annular_collision_segments(profile["inner_radius_m"],
+                                                 profile["outer_radius_m"], profile["height_m"])
+            triangles = sectors.reshape(-1, 3, 3) @ rotation.T + center
+            reference = pose_matrix(record["reference_pose"])
+            local = (triangles - reference[:3, 3]) @ reference[:3, :3]
+            path = self.directory / ("part_collision.npz" if moving else "target_collision.npz")
+            self.directory.mkdir(parents=True, exist_ok=True)
+            with path.open("xb") as stream:
+                np.savez_compressed(stream, triangles_m=local)
+            payload = {key: value for key, value in record.items()
+                       if key not in {"fingerprint", "source_refs", "created_at_ns"}}
+            payload.update(mesh=pin(self.root, path), circular_profile=profile, observed_circular_face=face,
+                           axis_local=(reference[:3, :3].T @ axis).tolist(),
+                           center_local_m=(reference[:3, :3].T @ (center - reference[:3, 3])).tolist(),
+                           uncertainty={**record.get("uncertainty", {}),
+                                        "collision_geometry": "CAD circular envelope with measured axis",
+                                        "CAD_orientation": "not_established"})
+            shaped.append(self.save(payload, [ref]))
+        moving, destination = (item["record"] for item in shaped)
+        radius = moving["circular_profile"]["inner_radius_m"] * math.cos(math.pi / 64)
+        shaft_radius = destination["circular_profile"]["outer_radius_m"] / math.cos(math.pi / 64)
+        face = destination["observed_circular_face"]
+        cap, axis = np.asarray(face["center_m"]), np.asarray(face["axis"])
+        radial = all_points - cap
+        heights = radial @ axis
+        distances = np.linalg.norm(radial - heights[:, None] * axis, axis=1)
+        ring = all_points[(distances > shaft_radius) & (distances < moving["circular_profile"]["outer_radius_m"])
+                          & (heights < -face["measurement_resolution_m"])
+                          & (heights > -destination["circular_profile"]["height_m"] * 2)]
+        surfaces = []
+        for _ in range(4):
+            plane = measured_planar_feature(ring, face["measurement_resolution_m"])
+            if plane is None:
+                break
+            normal = np.asarray(plane["normal"])
+            if normal @ axis < 0:
+                normal, plane["offset_m"] = -normal, -plane["offset_m"]
+            if float(normal @ axis) >= 1 - 1e-5:
+                points = plane["inlier_points_m"]
+                hull = ConvexHull(points[:, :2])
+                position = cap - axis * (float(normal @ cap) + plane["offset_m"]) / float(normal @ axis)
+                if np.all(hull.equations[:, :2] @ position[:2] + hull.equations[:, 2] <= 1e-9):
+                    surfaces.append((float(position @ axis), plane, normal, position, points[hull.vertices]))
+            residual = np.abs(ring @ np.asarray(plane["normal"]) + (
+                plane["offset_m"] if np.dot(normal, plane["normal"]) > 0 else -plane["offset_m"]))
+            ring = ring[residual > plane["tolerance_m"]]
+        if not surfaces:
+            raise ValueError("The destination needs a measured seating surface around the shaft; its top is not a seating height.")
+        _, plane, normal, position, boundary = max(surfaces, key=lambda item: item[0])
+        if float(axis @ (cap - position)) <= plane["tolerance_m"]:
+            raise ValueError("The measured seating surface does not establish shaft engagement.")
+        projected = boundary - (boundary @ normal + plane["offset_m"])[:, None] * normal
+        triangles = np.array([[projected[0], projected[index], projected[index + 1]]
+                              for index in range(1, len(projected) - 1)])
+        path = self.directory / "seating_surface.npz"
+        with path.open("xb") as stream:
+            np.savez_compressed(stream, triangles_m=triangles)
+        surface = self.save({
+            "record_type": "AssemblySurfaceEvidence", "status": "accepted", "frame_id": "world", "units": "m",
+            "normal": normal.tolist(), "offset_m": plane["offset_m"], "rms_distance_m": plane["rms_distance_m"],
+            "coverage": "observed_plane_patch", "mesh": pin(self.root, path),
+            "observation_timestamp_ns": target["observation_timestamp_ns"],
+        }, [target_ref])
+        # A measured interference is valid evidence, not a missing measurement.
+        # Preserve it for target calculation and the separate fitting check.
+        reference = pose_matrix(moving["reference_pose"])
+        current_axis = reference[:3, :3] @ moving["axis_local"]
+        rotation = Rotation.align_vectors([axis], [current_axis])[0].as_matrix() @ reference[:3, :3]
+        height = moving["circular_profile"]["height_m"]
+        resolution = max(plane["tolerance_m"], moving["observed_circular_face"]["measurement_resolution_m"])
+        # Release within the measured surface resolution, with a positive gap so
+        # the collision model never relies on penetrating the supporting surface.
+        center = position + axis * (height / 2 + resolution / 2)
+        final = np.eye(4)
+        final[:3, :3] = rotation
+        final[:3, 3] = center - rotation @ moving["center_local_m"]
+        origin = matrix_pose(final)
+        goal = {
+            "record_type": "AssemblyGeometryEvidence", "status": "accepted", "frame_id": "world", "units": "m",
+            "reference_point": "observed_bounds_center", "target_origin_pose": origin,
+            "part_name": moving["part_name"], "part_object_id": moving["object_id"],
+            "assembly_association_sha256": moving["assembly_association_sha256"],
+            "part_axis_local": moving["axis_local"], "part_center_local_m": moving["center_local_m"],
+            "part_outer_radius_m": moving["circular_profile"]["outer_radius_m"],
+            "part_height_m": height, "bore_radius_m": radius, "shaft_radius_m": shaft_radius,
+            "shaft_axis": axis.tolist(), "shaft_top_m": cap.tolist(),
+            "shaft_height_m": destination["circular_profile"]["height_m"],
+            "seating_point_m": position.tolist(), "seating_normal": normal.tolist(),
+            "seating_resolution_m": resolution, "nominal_radial_clearance_m": radius - shaft_radius,
+            "part_geometry_ref": shaped[0]["record_ref"], "target_geometry_ref": shaped[1]["record_ref"],
+            "seating_surface_ref": surface["record_ref"],
+            "insertion_axis": (-axis).tolist(),
+            "product_geometry": {"placement_surface_point": dict(zip(("x", "y", "z"), position.tolist())),
+                                 "target_origin_pose": origin, "insertion_axis": (-axis).tolist(),
+                                 "insertion_distance_m": float(axis @ (cap - position)), "part_height_m": height},
+            "observation_timestamp_ns": min(part["observation_timestamp_ns"], target["observation_timestamp_ns"]),
+            "uncertainty": {"CAD_orientation": "not_established", "yaw_specific_assembly": "unmodeled",
+                            "seating": "nominal contact within measured plane resolution"},
+        }
+        return self.save(goal, [item["record_ref"] for item in shaped] + [surface["record_ref"]])
+
     def bind_part(self, part_ref: str, feature_name: str) -> dict[str, Any]:
         """Associate measured geometry with an exact already-accepted assembly feature."""
         part = self.read(part_ref)
@@ -796,9 +1126,7 @@ class AssemblyGeometryProducer:
                 "Scene coverage needs observed object geometry, support surfaces and segmentation records."
             )
         _same_frame(*geometry, *surfaces)
-        observed = all(item.get("record_type") == "ObservedGeometryEvidence" for item in geometry)
-        if not observed and any(item.get("record_type") == "ObservedGeometryEvidence" for item in geometry):
-            raise ValueError("Select one consistent observed-box or registered-mesh scene representation.")
+        observed = any(item.get("record_type") == "ObservedGeometryEvidence" for item in geometry)
         declared_views = {(item["segmentation_ref"], item["candidate_reference"]["observation_handle"])
                           for item in geometry}
         if observed and {ref for ref, _ in declared_views} != set(segmentation_refs):
@@ -824,9 +1152,9 @@ class AssemblyGeometryProducer:
                             }
                         )
         objects = [
-            {"object_id": item["object_id"], **(
-                {"size_m": item["size_m"], "pose": item["reference_pose"]} if observed else
-                {"mesh": item["mesh"], "pose": item["origin_pose"]})}
+            {"object_id": item["object_id"],
+             **({"mesh": item["mesh"]} if "mesh" in item else {"size_m": item["size_m"]}),
+             "pose": item["reference_pose"] if item.get("record_type") == "ObservedGeometryEvidence" else item["origin_pose"]}
             for item in geometry
         ]
         if len({item["object_id"] for item in objects}) != len(objects):

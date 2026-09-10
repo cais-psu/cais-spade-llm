@@ -289,8 +289,12 @@ def test_gear_models_use_nist_stl_visuals_and_configured_collisions() -> None:
         )
         model = ET.parse(model_path).getroot().find("model")
         assert model is not None
-        assert _required_text(model, "link/collision/geometry/cylinder/radius") == radius
-        assert _required_text(model, "link/collision/geometry/cylinder/length") == length
+        if model_name != "gear_medium":
+            assert _required_text(model, "link/collision/geometry/cylinder/radius") == radius
+            assert _required_text(model, "link/collision/geometry/cylinder/length") == length
+        else:
+            assert len(model.findall("link/collision")) == 64
+            assert model.find("link/collision/geometry/cylinder") is None
         assert (
             _required_text(model, "link/visual/geometry/mesh/uri")
             == f"model://{model_name}/meshes/{filename}"
@@ -482,3 +486,36 @@ def test_mandatory_no_answer_leak_rule_is_in_every_scope_document() -> None:
             assert required_term in normalized_contents, (
                 f"{filename} is missing {required_term!r}"
             )
+
+
+def test_gear_medium_compound_collision_preserves_the_cad_opening_and_contact_settings() -> None:
+    import numpy as np
+    from scipy.spatial import ConvexHull
+
+    directory = REPOSITORY_ROOT / "ros2/cais_lab_robotics/models/gear_medium"
+    model = ET.parse(directory / "model.sdf").getroot().find("model")
+    assert model is not None
+    vertices = np.array([[float(v) for v in line.split()[1:]]
+                         for line in (directory / "meshes/Gear_Medium_collision_segment.stl").read_text().splitlines()
+                         if line.strip().startswith("vertex ")])
+    triangles = vertices.reshape(-1, 3, 3)
+    unique = np.unique(vertices, axis=0)
+    assert len(unique) == 8
+    assert ConvexHull(unique).volume > 0
+    assert np.isclose(np.ptp(vertices[:, 2]), .02, atol=1e-8)
+    inner = np.linalg.norm(vertices[:, :2], axis=1).min()
+    assert .00498 < inner < .005  # The through wall, not the 5.3 mm entry chamfer.
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    assert np.all(np.sum(normals * (triangles.mean(axis=1) - unique.mean(axis=0)), axis=1) > 0)
+    for index, collision in enumerate(model.findall("link/collision")):
+        pose = [float(v) for v in _required_text(collision, "pose").split()]
+        assert np.allclose(pose[:5], 0)
+        assert math.isclose(pose[5], 2 * math.pi * index / 64, abs_tol=1e-14)
+        assert _required_text(collision, "geometry/mesh/uri") == "model://gear_medium/meshes/Gear_Medium_collision_segment.stl"
+        assert _required_text(collision, "surface/friction/ode/mu") == "0.5"
+        assert _required_text(collision, "surface/contact/ode/kp") == "20000.0"
+        assert _required_text(collision, "surface/contact/ode/kd") == "8.0"
+        assert _required_text(collision, "surface/contact/ode/max_vel") == "0.05"
+        assert _required_text(collision, "surface/contact/ode/min_depth") == "0.0005"
+    assert _required_text(model, "link/inertial/mass") == "0.10"
+    assert _required_text(model, "link/visual/pose") == "-0.21316049955 0.18188829805 0.0697159157 3.141592653589793 0 0"

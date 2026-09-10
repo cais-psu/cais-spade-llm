@@ -8,7 +8,7 @@ from typing import Any
 
 from ..ra.composition_context import _resolve_json_pointer
 from ..ra.refinement_records import fingerprint
-from ..ra.validation_scope import GAZEBO_OBSERVED_SCOPE
+from ..ra.validation_scope import GAZEBO_OBSERVED_SCOPE, required_validation_roles
 
 
 class _GroundingPrerequisite(ValueError):
@@ -19,14 +19,22 @@ def _feature_source(
     target: Mapping[str, Any], records: Mapping[str, Any], part_name: str, *, destination: bool,
 ) -> dict[str, Any]:
     associations = [association for association in target.get("assembly_feature_association", [])
-                    if any(feature.get("owner", {}).get("name") == part_name
+                    if "desired_state" in association.get("state_names", [])
+                    and any(feature.get("owner", {}).get("name") == part_name
                            and feature.get("state_name") == "current_state"
                            for feature in association.get("assembly_features", []))]
     if len(associations) != 1:
         raise _GroundingPrerequisite(f"Grounding must establish one accepted assembly relationship for {part_name!r}.")
-    features = [feature for feature in associations[0]["assembly_features"]
-                if (feature.get("state_name") == "desired_state" if destination else
-                    feature.get("state_name") == "current_state" and feature.get("owner", {}).get("name") == part_name)]
+    features = associations[0]["assembly_features"]
+    part_features = [feature for feature in features
+                     if feature.get("state_name") == "current_state"
+                     and feature.get("owner", {}).get("name") == part_name]
+    if len(part_features) != 1:
+        raise _GroundingPrerequisite(f"Grounding must establish one accepted part feature for {part_name!r}.")
+    # Desired membership describes the relationship; either endpoint may bind a
+    # current observation. Select its counterpart without changing that binding.
+    features = ([feature for feature in features if feature is not part_features[0]]
+                if destination else part_features)
     role = "destination" if destination else "part"
     if len(features) != 1:
         raise _GroundingPrerequisite(f"Grounding must establish one accepted {role} feature for {part_name!r}.")
@@ -107,6 +115,7 @@ def _one_value(records: list[tuple[str, Any]], pointer: str) -> str | None:
 
 def _scene_inputs(
     target: Mapping[str, Any], producer: Any, records: Mapping[str, Any], names: set[str],
+    goal: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Cover every candidate in the accepted part and destination observations."""
     if not names:
@@ -156,19 +165,93 @@ def _scene_inputs(
         surface_refs.append(min(ref for ref, _ in patches))
     if operations:
         return None, list(operations.values())
+    if goal and goal.get("status") == "accepted":
+        replacements = {records[goal[field]]["object_id"]: goal[field]
+                        for field in ("part_geometry_ref", "target_geometry_ref")}
+        geometry_refs = [replacements.get(records[ref]["object_id"], ref) for ref in geometry_refs]
+        surface_refs.append(goal["seating_surface_ref"])
     arguments = {"geometry_refs": sorted(set(geometry_refs)), "surface_refs": sorted(set(surface_refs)),
                  "segmentation_refs": sorted({ref for ref, _ in views})}
     return {"tool_name": "scene_geometry", "arguments": json.dumps(arguments, sort_keys=True)}, []
 
 
+def _observed_goal(
+    target: Mapping[str, Any], producer: Any, records: Mapping[str, Any], names: set[str],
+    attempted: Mapping[str, str | None],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    if len(names) != 1:
+        raise _GroundingPrerequisite("Mating geometry requires one exact moving part in the accepted relationship.")
+    name = next(iter(names))
+    sources = [_feature_source(target, records, name, destination=destination) for destination in (False, True)]
+    bound_refs, operations = [], {}
+    for source in sources:
+        candidates = _observed_records(records, source)
+        selected = _one_value(candidates, "/product_geometry")
+        if selected is None:
+            operation = _measurement_request(producer.root, producer, records, source)
+        else:
+            bound = [(ref, value) for ref, value in candidates
+                     if value.get("accepted_feature_name") == source["feature"]["name"] and "CAD_mesh" in value]
+            if bound:
+                bound_refs.append(_one_value(bound, "/product_geometry"))
+                continue
+            owner_refs = source["feature"]["owner"]["evidence_refs"]
+            cad_refs = {record["CAD"]["record"]["ref"] for ref, record in records.items()
+                        if ref in owner_refs and record.get("record_type") == "CADSizeCorrespondenceRecord"
+                        and record.get("CAD", {}).get("context_ref") in owner_refs}
+            if len(cad_refs) != 1 or not cad_refs.issubset(records):
+                raise _GroundingPrerequisite("The mating feature needs one issued CAD identity association.")
+            operation = {"tool_name": "bind_observed_part", "arguments": json.dumps({
+                "part_ref": selected, "cad_ref": next(iter(cad_refs)), "feature_name": source["feature"]["name"],
+            })}
+        key = fingerprint(operation)
+        if key in attempted:
+            raise _GroundingPrerequisite(
+                attempted[key] or "Required mating geometry remains unavailable; inspect the recorded measurement operation."
+            )
+        operations[key] = operation
+    if operations:
+        return None, list(operations.values())
+    association = records[bound_refs[0]]["assembly_association_sha256"]
+    goals = [(ref, record) for ref, record in records.items()
+             if record.get("record_type") == "AssemblyGeometryEvidence" and record.get("status") in {"accepted", "unsupported", "failed"}
+             and record.get("part_name") == name and record.get("assembly_association_sha256") == association
+             and "part_geometry_ref" in record and "target_geometry_ref" in record
+             and all(records.get(record[field], {}).get("candidate_reference") == records[bound]["candidate_reference"]
+                     for field, bound in zip(("part_geometry_ref", "target_geometry_ref"), bound_refs))]
+    selected = _one_value(goals, "/product_geometry")
+    if selected:
+        return selected, []
+    operation = {"tool_name": "observed_mating_geometry", "arguments": json.dumps({
+        "part_ref": bound_refs[0], "target_ref": bound_refs[1],
+    })}
+    key = fingerprint(operation)
+    if key in attempted:
+        raise _GroundingPrerequisite(
+            attempted[key] or
+            "The accepted mating features could not be established; inspect observed_mating_geometry findings."
+        )
+    return None, [operation]
+
+
 def resolve_primitive_inputs(
     request: Mapping[str, Any], producer: Any, records: Mapping[str, Any],
-    checked: Mapping[str, Any], attempted: set[str],
+    checked: Mapping[str, Any], attempted: Mapping[str, str | None],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return checked-source selections and uniquely determined measurement requests.
 
     The caller validates and persists answers and executes requests through the same
     bounded tool runner as PA. No primitive or parameter is added or changed here.
+
+    Args:
+        request: Declared input needs, authored steps and accepted task associations.
+        producer: Scoped source reader and measurement authority.
+        records: Verified records issued to this investigation.
+        checked: Earlier checked selections, indexed by need_id.
+        attempted: Measurement fingerprints with their failure reason, when unavailable.
+
+    Returns:
+        Independent answer selections and deduplicated measurement requests.
     """
     if request.get("validation_scope") != GAZEBO_OBSERVED_SCOPE or not request.get("primitive_steps"):
         return [], []
@@ -177,20 +260,64 @@ def resolve_primitive_inputs(
     names = {step.get("params", {}).get("part_name") for step in steps
              if step.get("primitive_symbol") in {"compute_pick_targets", "grasp_part"}
              and isinstance(step.get("params", {}).get("part_name"), str)}
+    goal_ref, goal, goal_failure = None, None, None
+    fitting = "goal" in required_validation_roles(GAZEBO_OBSERVED_SCOPE, target) and (
+        "goal" in request.get("validation_refs", {})
+        or any(need.get("step_index") is None and need["quantity"] == "goal" for need in request["needs"])
+    )
+    if fitting:
+        try:
+            goal_ref, measurements = _observed_goal(target, producer, records, names, attempted)
+            operations.update((fingerprint(operation), operation) for operation in measurements)
+            goal = records[goal_ref] if goal_ref is not None else None
+        except _GroundingPrerequisite as exc:
+            goal_failure = str(exc)
     for need in request["needs"]:
-        if need["need_id"] in checked:
-            continue
         index, quantity = need.get("step_index"), need["quantity"]
+        step = steps[index - 1] if index is not None and 0 < index <= len(steps) else {}
+        symbol = step.get("primitive_symbol")
+        previous = checked.get(need["need_id"], {})
+        if goal and index is None and quantity in {"part", "goal"}:
+            ref = goal["part_geometry_ref"] if quantity == "part" else goal_ref
+            if previous.get("record_ref") != ref:
+                answers.append({"need_id": need["need_id"], "record_ref": ref})
+            continue
+        if goal and symbol == "compute_place_targets" and quantity.startswith("/product_geometry"):
+            if goal.get("status") != "accepted" and quantity != "/product_geometry/part_height_m":
+                if not previous:
+                    answers.append({"need_id": need["need_id"], "blocked": goal["reason"]})
+                continue
+            try:
+                value = _resolve_json_pointer(goal, quantity)
+            except (KeyError, ValueError):
+                value = None
+            if value is not None:
+                selection = {"record_ref": goal_ref, "field_path": quantity}
+                # The completed mating record supplies placement's axial height;
+                # pick measurements retain their original observed-height source.
+                if previous.get("value_ref") != selection:
+                    answers.append({"need_id": need["need_id"], "value_ref": selection})
+                continue
+        if previous:
+            continue
+        if fitting and not goal and (
+            (index is None and quantity in {"goal", "scene"})
+            or (symbol == "compute_place_targets" and quantity.startswith("/product_geometry")
+                and quantity != "/product_geometry/part_height_m")
+        ):
+            if goal_failure:
+                answers.append({"need_id": need["need_id"], "blocked": goal_failure})
+            continue
         if index is None and quantity == "scene":
             selected = request.get("validation_refs", {}).get("scene", {}).get("ref")
             scene = records.get(selected, {})
-            if (scene.get("record_type") == "AssemblySceneEvidence" and scene.get("status") == "accepted"
+            if (not goal and scene.get("record_type") == "AssemblySceneEvidence" and scene.get("status") == "accepted"
                     and scene.get("geometry_model") == "observed_bounds" and scene.get("declared_observations")
                     and scene.get("coverage") == "all_observed_candidates" and not scene.get("unresolved_candidates")):
                 answers.append({"need_id": need["need_id"], "record_ref": selected})
                 continue
             try:
-                operation, measurements = _scene_inputs(target, producer, records, names)
+                operation, measurements = _scene_inputs(target, producer, records, names, goal)
                 if operation:
                     arguments = json.loads(operation["arguments"])
                     matching = [ref for ref, record in records.items()
@@ -209,14 +336,14 @@ def resolve_primitive_inputs(
                     key = fingerprint(operation)
                     if key not in attempted:
                         operations[key] = operation
+                    elif attempted[key]:
+                        raise _GroundingPrerequisite(attempted[key])
             except _GroundingPrerequisite as exc:
                 answers.append({"need_id": need["need_id"], "blocked": str(exc)})
             continue
         role = index is None and quantity == "part"
         if index is None and not role:
             continue
-        step = steps[index - 1] if index is not None and 0 < index <= len(steps) else {}
-        symbol = step.get("primitive_symbol")
         pointer, destination = None, False
         if symbol == "compute_pick_targets":
             if quantity in {"/product_geometry", "/product_geometry/board_center/z", "/product_geometry/part_height_m"}:
@@ -260,6 +387,8 @@ def resolve_primitive_inputs(
             key = fingerprint(operation)
             if key not in attempted:
                 operations[key] = operation
+            elif attempted[key]:
+                raise _GroundingPrerequisite(attempted[key])
         except _GroundingPrerequisite as exc:
             answers.append({"need_id": need["need_id"], "blocked": str(exc)})
     return answers, list(operations.values())

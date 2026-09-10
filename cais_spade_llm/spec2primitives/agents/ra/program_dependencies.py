@@ -43,6 +43,31 @@ def assess_program_dependencies(
     issues = assess_parameter_bindings(
         steps, catalog, robot_state, read_evidence=read_evidence, result_schema=result_schema
     )
+    # Conditional insertion outputs need their measured inputs only when RA
+    # selects them. Owner types neither select outputs nor qualify mating shapes.
+    insertion_steps = {
+        ref["step_index"]
+        for step in steps for _, kind, ref in selected_references(step["params"])
+        if kind == "result_ref" and ref["field_path"].split("/")[1:2] in (["pre_insert_pose"], ["insert_pose"])
+    }
+    for index in sorted(insertion_steps):
+        step = steps[index - 1]
+        if step["primitive_symbol"] != "compute_place_targets":
+            continue
+        entry = deepcopy(catalog[step["primitive_symbol"]])
+        geometry = entry["parameter_schemas"].get("product_geometry", {})
+        if "placement_surface_point" not in geometry.get("properties", {}):
+            continue
+        geometry["x-grounding-fields"] = list(dict.fromkeys([
+            *geometry.get("x-grounding-fields", []), "target_origin_pose",
+            "insertion_axis", "insertion_distance_m", "part_height_m",
+        ]))
+        conditional = assess_parameter_bindings(
+            [step], {step["primitive_symbol"]: entry}, robot_state,
+            read_evidence=read_evidence, result_schema=result_schema,
+        )
+        issues = [item for item in issues if item["step_index"] != index]
+        issues.extend({**item, "step_index": index} for item in conditional)
     # A numeric intermediate control target is an RA proposal for motion checks;
     # it is not a claim that a product measurement was observed at that location.
     issues = [

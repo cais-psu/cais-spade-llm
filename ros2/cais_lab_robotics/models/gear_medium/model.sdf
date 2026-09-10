@@ -9,8 +9,515 @@
           <iyy>1.4356194535e-05</iyy><iyz>0</iyz><izz>2.2045722402e-05</izz>
         </inertia>
       </inertial>
+      <!-- 64 convex sectors from Gear_Medium.STL in metres. The 5.3 mm entry
+           chamfer is not the through bore; the narrowest CAD opening is retained. -->
       <collision name="collision">
-        <geometry><cylinder><radius>0.02099796295</radius><length>0.02</length></cylinder></geometry>
+        <pose>0 0 0 0 0 0</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_01">
+        <pose>0 0 0 0 0 0.09817477042468103</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_02">
+        <pose>0 0 0 0 0 0.1963495408493621</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_03">
+        <pose>0 0 0 0 0 0.2945243112740431</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_04">
+        <pose>0 0 0 0 0 0.3926990816987241</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_05">
+        <pose>0 0 0 0 0 0.4908738521234052</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_06">
+        <pose>0 0 0 0 0 0.5890486225480862</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_07">
+        <pose>0 0 0 0 0 0.6872233929727672</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_08">
+        <pose>0 0 0 0 0 0.7853981633974483</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_09">
+        <pose>0 0 0 0 0 0.8835729338221293</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_10">
+        <pose>0 0 0 0 0 0.9817477042468103</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_11">
+        <pose>0 0 0 0 0 1.079922474671491</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_12">
+        <pose>0 0 0 0 0 1.178097245096172</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_13">
+        <pose>0 0 0 0 0 1.276272015520854</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_14">
+        <pose>0 0 0 0 0 1.374446785945534</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_15">
+        <pose>0 0 0 0 0 1.472621556370215</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_16">
+        <pose>0 0 0 0 0 1.570796326794897</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_17">
+        <pose>0 0 0 0 0 1.668971097219578</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_18">
+        <pose>0 0 0 0 0 1.767145867644259</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_19">
+        <pose>0 0 0 0 0 1.86532063806894</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_20">
+        <pose>0 0 0 0 0 1.963495408493621</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_21">
+        <pose>0 0 0 0 0 2.061670178918302</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_22">
+        <pose>0 0 0 0 0 2.159844949342983</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_23">
+        <pose>0 0 0 0 0 2.258019719767664</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_24">
+        <pose>0 0 0 0 0 2.356194490192345</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_25">
+        <pose>0 0 0 0 0 2.454369260617026</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_26">
+        <pose>0 0 0 0 0 2.552544031041707</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_27">
+        <pose>0 0 0 0 0 2.650718801466388</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_28">
+        <pose>0 0 0 0 0 2.748893571891069</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_29">
+        <pose>0 0 0 0 0 2.84706834231575</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_30">
+        <pose>0 0 0 0 0 2.945243112740431</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_31">
+        <pose>0 0 0 0 0 3.043417883165112</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_32">
+        <pose>0 0 0 0 0 3.141592653589793</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_33">
+        <pose>0 0 0 0 0 3.239767424014474</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_34">
+        <pose>0 0 0 0 0 3.337942194439155</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_35">
+        <pose>0 0 0 0 0 3.436116964863836</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_36">
+        <pose>0 0 0 0 0 3.534291735288517</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_37">
+        <pose>0 0 0 0 0 3.632466505713198</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_38">
+        <pose>0 0 0 0 0 3.730641276137879</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_39">
+        <pose>0 0 0 0 0 3.82881604656256</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_40">
+        <pose>0 0 0 0 0 3.926990816987241</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_41">
+        <pose>0 0 0 0 0 4.025165587411922</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_42">
+        <pose>0 0 0 0 0 4.123340357836604</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_43">
+        <pose>0 0 0 0 0 4.221515128261284</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_44">
+        <pose>0 0 0 0 0 4.319689898685965</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_45">
+        <pose>0 0 0 0 0 4.417864669110647</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_46">
+        <pose>0 0 0 0 0 4.516039439535327</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_47">
+        <pose>0 0 0 0 0 4.614214209960009</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_48">
+        <pose>0 0 0 0 0 4.71238898038469</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_49">
+        <pose>0 0 0 0 0 4.81056375080937</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_50">
+        <pose>0 0 0 0 0 4.908738521234052</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_51">
+        <pose>0 0 0 0 0 5.006913291658733</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_52">
+        <pose>0 0 0 0 0 5.105088062083414</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_53">
+        <pose>0 0 0 0 0 5.203262832508095</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_54">
+        <pose>0 0 0 0 0 5.301437602932776</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_55">
+        <pose>0 0 0 0 0 5.399612373357457</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_56">
+        <pose>0 0 0 0 0 5.497787143782138</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_57">
+        <pose>0 0 0 0 0 5.595961914206819</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_58">
+        <pose>0 0 0 0 0 5.6941366846315</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_59">
+        <pose>0 0 0 0 0 5.792311455056181</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_60">
+        <pose>0 0 0 0 0 5.890486225480862</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_61">
+        <pose>0 0 0 0 0 5.988660995905543</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_62">
+        <pose>0 0 0 0 0 6.086835766330224</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
+        <surface>
+          <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
+          <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>
+        </surface>
+      </collision>
+      <collision name="collision_63">
+        <pose>0 0 0 0 0 6.185010536754906</pose>
+        <geometry><mesh><uri>model://gear_medium/meshes/Gear_Medium_collision_segment.stl</uri><scale>1 1 1</scale></mesh></geometry>
         <surface>
           <friction><ode><mu>0.5</mu><mu2>0.5</mu2></ode></friction>
           <contact><ode><kp>20000.0</kp><kd>8.0</kd><max_vel>0.05</max_vel><min_depth>0.0005</min_depth></ode></contact>

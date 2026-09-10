@@ -271,6 +271,24 @@ class MeasuredRobotContextRuntime:
                 name: parameter_value_to_python(value)
                 for name, value in zip(names, values, strict=True)
             }
+            # The active pipeline need not use the ompl parameter namespace.
+            # Copy its declared settings from the same selected MoveIt node.
+            pipelines = model_parameters.get("planning_pipelines", []) or []
+            if not isinstance(pipelines, list) or any(not isinstance(name, str) for name in pipelines):
+                raise ValueError("The selected robot's planning_pipelines parameter is invalid.")
+            pipelines = list(pipelines)
+            default = model_parameters.get("default_planning_pipeline")
+            if isinstance(default, str) and default and default not in pipelines:
+                pipelines.append(default)
+            if pipelines:
+                names = call(listing, ListParameters.Request(prefixes=pipelines, depth=0)).result.names
+                names = [name for name in names if name not in model_parameters]
+                if names:
+                    values = call(getter, GetParameters.Request(names=names)).values
+                    model_parameters.update({
+                        name: parameter_value_to_python(value)
+                        for name, value in zip(names, values, strict=True)
+                    })
             if not all(
                 isinstance(model_parameters.get(name), str) and model_parameters[name]
                 for name in ("robot_description", "robot_description_semantic")

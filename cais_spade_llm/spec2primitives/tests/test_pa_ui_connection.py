@@ -2263,6 +2263,34 @@ def test_saved_deadline_is_separate_from_next_run_option_and_progress_is_lightwe
         container.delete()
 
 
+@pytest.mark.parametrize("status", ["invalid", "unsupported", "cancelled", "proposal", "composing"])
+def test_rejected_proposal_does_not_display_validation_as_pending(status: str) -> None:
+    """Keep the invalid reference visible while distinguishing stopped and active runs."""
+    candidate = {"status": "invalid" if status == "invalid" else "proposed", "primitive_steps": [
+        {"primitive_symbol": "compute_pick_targets", "params": {"part_name": "medium gear"}},
+        {"primitive_symbol": "move_cartesian", "params": {
+            "x": {"result_ref": {"step_index": 1, "field_path": "/declared_output/approach_pose/x"}},
+        }},
+    ]}
+    message = "result_ref selects an undeclared result field."
+    view = {"status": status, "message": message, "candidate": candidate, "attempt_count": 0,
+            "refinement": {"events": [{"stage": "composing", "message": "RA proposal received."}]}}
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        spec2primitives_ui._apply_primitive_composition_diagnostic(elements, view, authoring_available=True)
+        summary = elements["candidate_bindings"].text
+        assert "This proposal has no completed validation result." in summary
+        ended = status in {"invalid", "unsupported", "cancelled"}
+        assert ("The run ended before validation completed." in summary) is ended
+        assert ("Validation is pending." in summary) is not ended
+        assert elements["candidate_message"].text == message
+        assert "/declared_output/approach_pose/x" in elements["candidate_steps"].content
+        assert json.loads(elements["candidate_trace"].content)["candidate"] == candidate
+    finally:
+        container.delete()
+
+
 def test_primitive_binding_summary_is_short_and_full_report_remains_expandable() -> None:
     issues = [
         {
@@ -2427,6 +2455,38 @@ def test_revised_proposal_does_not_inherit_previous_validation_findings(
         container.delete()
 
 
+def test_repeated_unbound_findings_leave_destination_blocker_visible() -> None:
+    """Repeated placement coordinates leave room for run_0008's recorded cause."""
+    from copy import deepcopy
+
+    blocker = "Grounding must establish one accepted destination feature for 'medium gear'."
+    unresolved = [
+        f"step_index 6, quantity /product_geometry/placement_surface_point/{axis}: blocked: {blocker}"
+        for axis in ("x", "y", "z")
+    ]
+    validation = {
+        "status": "unknown",
+        "findings": [
+            *[{"step_index": 6, "check": f"/product_geometry/placement_surface_point/{axis}",
+               "status": "unknown", "authority": "PA", "message": "Required input is unbound."}
+              for axis in ("x", "y", "z")],
+            {"step_index": None, "check": "scene", "status": "unknown", "authority": "PA",
+             "message": "Required scene evidence is missing."},
+            *[{"step_index": None, "status": "unknown", "authority": "PA", "message": message}
+              for message in unresolved],
+        ],
+    }
+    original = deepcopy(validation)
+    text = spec2primitives_ui._format_validation_findings(validation, {"unresolved": unresolved})
+    assert text.splitlines() == [
+        "Step 6: Required input is unbound.",
+        "Required scene evidence is missing.",
+        unresolved[0],
+        "Open the program records for all findings.",
+    ]
+    assert validation == original
+
+
 def test_current_validation_blockers_precede_older_pa_explanations() -> None:
     """A newer calculation failure must not be hidden by earlier missing-height feedback."""
     current = "The selected target calculation cannot resolve the supplied tool transform."
@@ -2448,6 +2508,43 @@ def test_current_validation_blockers_precede_older_pa_explanations() -> None:
     assert "Open the program records for all findings." in text
     assert "Selected result from step 1" not in text
     assert len(validation["findings"]) == 4
+
+
+def test_fitting_failure_remains_visible_once_with_calculated_coordinates() -> None:
+    from copy import deepcopy
+
+    failure = ("The checked through-bore radius (0.004987318 m) does not clear the shaft envelope "
+               "(0.005006046 m). Entry chamfers do not establish the through-bore clearance.")
+    validation = {"status": "failed", "scope": spec2primitives_ui.GAZEBO_OBSERVED_SCOPE, "findings": [
+        *[{"step_index": None, "check": "mating_geometry", "status": "failed", "authority": "PA", "message": failure}] * 2,
+        {"step_index": 9, "check": "motion", "status": "failed", "message": "Insertion collides with the shaft."},
+        {"step_index": None, "check": "assembly_outcome", "status": "unknown", "message": "The complete predicted shaft fitting could not be established."},
+    ]}
+    previous = {"unresolved": ["Earlier investigation did not derive part height."]}
+    original = deepcopy(validation)
+    text = spec2primitives_ui._format_validation_findings(validation, previous)
+    assert text.count(failure) == 1
+    assert text.index(failure) < text.index("Insertion collides") < text.index("Earlier investigation")
+    assert "Open the program records for all findings." in text
+    assert validation == original
+    steps = [{"primitive_symbol": "move_cartesian", "params": {"x": .4004289837365861, "y": -.29956979509443044, "z": 1.4}}]
+    rendered = spec2primitives_ui._format_primitive_program(steps, [], pending_results=True)
+    assert "x=0.4004289837365861" in rendered and "<unbound>" not in rendered and "<pending:" not in rendered
+
+
+def test_unsupported_geometry_is_visible_once_before_older_measurement_requests() -> None:
+    from copy import deepcopy
+
+    failure = "The approved CAD has no supported pair of coaxial circular end faces."
+    validation = {"status": "unknown", "scope": spec2primitives_ui.GAZEBO_OBSERVED_SCOPE, "findings": [
+        *[{"step_index": None, "check": "coverage", "status": "unknown", "message": failure}] * 2,
+        {"step_index": 6, "check": "bindings", "status": "unknown", "message": "Checked supported goal geometry is required for assembly targets."},
+        {"step_index": None, "check": "assembly_outcome", "status": "unknown", "message": "The complete predicted assembly could not be established."},
+    ]}
+    original = deepcopy(validation)
+    text = spec2primitives_ui._format_validation_findings(validation, {"unresolved": ["Earlier request for shaft measurements."]})
+    assert text.count(failure) == 1 and text.index(failure) < text.index("Earlier request")
+    assert validation == original and len(validation["findings"]) == 4
 
 
 @pytest.mark.parametrize("robot_change", [False, True])

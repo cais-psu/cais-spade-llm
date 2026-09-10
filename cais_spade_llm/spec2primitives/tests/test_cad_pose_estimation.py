@@ -440,3 +440,32 @@ def _asymmetric_tetrahedron() -> np.ndarray:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("tilt", [0.0, 9.6])
+def test_measured_circular_plane_constrains_tilt_without_inventing_upright_pose(tilt: float) -> None:
+    from cais_spade_llm.spec2primitives.tools.assembly_geometry import observed_circular_face
+
+    angles = np.linspace(0, 2 * np.pi, 80, endpoint=False)
+    radii = np.linspace(.002, .005, 12)
+    points = np.array([[r * np.cos(a), r * np.sin(a), .01] for r in radii for a in angles])
+    rotation = Rotation.from_euler("y", tilt, degrees=True).as_matrix()
+    observed = points @ rotation.T + [.1, -.2, 1.0]
+    plane = pose_module.measured_planar_feature(observed, .00005)
+    reordered = pose_module.measured_planar_feature(observed[::-1], .00005)
+    np.testing.assert_allclose(plane["normal"], rotation[:, 2], atol=1e-10)
+    np.testing.assert_array_equal(plane["normal"], reordered["normal"])
+    initial = np.eye(4)
+    initial[:3, :3] = Rotation.from_euler("y", 9.6 - tilt, degrees=True).as_matrix()
+    initial[:3, 3] = [.1, -.2, 1.0]
+    result = pose_module._refine_point_to_point_icp(points, observed, initial, plane_constraint=(
+        {"normal": [0, 0, 1], "point_m": [0, 0, .01]}, plane,
+    ))
+    np.testing.assert_allclose(result[:3, 2], rotation[:, 2], atol=1e-10)
+    profile = {"outer_radius_m": .005}
+    if tilt:
+        with pytest.raises(ValueError, match="tilted"):
+            observed_circular_face(observed, profile)
+    else:
+        face = observed_circular_face(observed, profile)
+        np.testing.assert_allclose(face["center_m"], [.1, -.2, 1.01], atol=1e-10)

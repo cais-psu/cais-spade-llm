@@ -19,6 +19,8 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from ..agents.ra.refinement_records import owned_path
+from ..agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, read_validation_scope
+from .robot_validation_context import pose_matrix
 
 _ALLOWED_CAPABILITIES = frozenset(
     {
@@ -99,7 +101,9 @@ class IsolatedMoveItSession:
         }
         if not _ALLOWED_CAPABILITIES <= capabilities:
             raise RuntimeError("Installed MoveIt lacks the required validation-only capabilities.")
-        parameters = dict(self.robot["model_parameters"])
+        # An unset ROS parameter is None in the snapshot. YAML null would be
+        # read by ROS as the string "null", changing declared parameter types.
+        parameters = {name: value for name, value in self.robot["model_parameters"].items() if value is not None}
         parameters.update(
             {
                 "allow_trajectory_execution": False,
@@ -165,15 +169,33 @@ class IsolatedMoveItSession:
         timeout_field = "worker_startup_timeout_sec" if self._starting else "service_timeout_sec"
         deadline = time.monotonic() + float(self.profile[timeout_field])
         while not client.wait_for_service(timeout_sec=0.1):
+            if self._process is not None and (code := self._process.poll()) is not None:
+                raise RuntimeError(
+                    f"Private MoveIt validation worker exited with code {code} before {suffix}."
+                )
             if self._cancelled.is_set() or time.monotonic() >= deadline:
                 raise RuntimeError(
                     "Private MoveIt validation service is unavailable or cancelled: " + suffix
                 )
         future = client.call_async(request)
-        deadline = time.monotonic() + float(self.profile["planning_timeout_sec"])
+        timeout = float(self.profile["planning_timeout_sec"])
+        deadline = time.monotonic() + timeout
+        retry_at = deadline - timeout / 2 if suffix == "get_planning_scene" else deadline
         while not future.done() and not self._cancelled.is_set() and time.monotonic() < deadline:
-            self._executor.spin_once(timeout_sec=0.1)
-        if not future.done() or future.result() is None:
+            self._executor.spin_once(timeout_sec=min(0.1, max(0.0, deadline - time.monotonic())))
+            if (
+                not future.done()
+                and not self._cancelled.is_set()
+                and retry_at <= time.monotonic() < deadline
+            ):
+                # DDS can lose a startup response after service discovery. Retry
+                # only this read, once, inside the original response deadline.
+                client.remove_pending_request(future)
+                future.cancel()
+                future = client.call_async(request)
+                retry_at = deadline
+        if self._cancelled.is_set() or not future.done() or future.result() is None:
+            client.remove_pending_request(future)
             future.cancel()
             raise RuntimeError("Private MoveIt validation timed out: " + suffix)
         return future.result()
@@ -333,10 +355,19 @@ class IsolatedMoveItSession:
                 "message": "The prefix joint state violates recorded robot joint limits.",
             }
         validity = GetStateValidity.Request(robot_state=state, group_name=self.robot["group_name"])
-        if not self._call(GetStateValidity, "check_state_validity", validity).valid:
+        prefix = self._call(GetStateValidity, "check_state_validity", validity)
+        leaving_support = not prefix.valid and self._leaves_initial_support_contact(
+            prefix, start_pose, target_pose, attached
+        )
+        if not prefix.valid and not leaving_support:
+            contacts = "; ".join(
+                f"{contact.contact_body_1} / {contact.contact_body_2} (depth {contact.depth:.6g} m)"
+                for contact in prefix.contacts
+            )
             return {
                 "status": "failed",
-                "message": "The proposed prefix state violates collision or state validity constraints.",
+                "message": "The proposed prefix state violates collision or state validity constraints."
+                + (" Contacts: " + contacts if contacts else ""),
             }
         fk = GetPositionFK.Request(fk_link_names=[self.robot["ee_link"]], robot_state=state)
         fk.header.frame_id = self.robot["frame_id"]
@@ -396,6 +427,13 @@ class IsolatedMoveItSession:
         positions.update(zip(trajectory.joint_names, trajectory.points[-1].positions, strict=True))
         end = {"names": list(positions), "positions": list(positions.values())}
         fk.robot_state = self._state(end, attached)
+        if leaving_support:
+            validity.robot_state = fk.robot_state
+            if not self._call(GetStateValidity, "check_state_validity", validity).valid:
+                return {
+                    "status": "failed",
+                    "message": "The lift endpoint still violates collision or state validity constraints.",
+                }
         endpoint = self._call(GetPositionFK, "compute_fk", fk)
         if (
             endpoint.error_code.val != 1
@@ -406,11 +444,18 @@ class IsolatedMoveItSession:
                 "status": "unknown",
                 "message": "The returned trajectory does not establish the authored endpoint pose.",
             }
+        endpoint_pose = endpoint.pose_stamped[0].pose
         return {
             "status": "passed",
-            "message": "Complete direct Cartesian segment checked in the isolated scene.",
+            "message": "Complete direct Cartesian segment checked in the isolated scene."
+            + (" The initial observed support contact was separated by the lift." if leaving_support else ""),
             "fraction": response.fraction,
             "end_joint_state": end,
+            "end_pose": {
+                "x": endpoint_pose.position.x, "y": endpoint_pose.position.y, "z": endpoint_pose.position.z,
+                "qx": endpoint_pose.orientation.x, "qy": endpoint_pose.orientation.y,
+                "qz": endpoint_pose.orientation.z, "qw": endpoint_pose.orientation.w,
+            },
             "trajectory": {
                 "joint_names": list(trajectory.joint_names),
                 "positions": [list(point.positions) for point in trajectory.points],
@@ -422,6 +467,80 @@ class IsolatedMoveItSession:
                 ],
             },
         }
+
+    def _leaves_initial_support_contact(
+        self,
+        validity: Any,
+        start_pose: Mapping[str, Any],
+        target_pose: Mapping[str, Any],
+        attached: Mapping[str, Any] | None,
+    ) -> bool:
+        from moveit_msgs.msg import ContactInformation
+
+        if (
+            read_validation_scope(self.profile) != GAZEBO_OBSERVED_SCOPE
+            or self.scene.get("geometry_model") != "observed_bounds"
+            or attached is None
+            or not validity.contacts
+            or any(not constraint.result for constraint in validity.constraint_result)
+        ):
+            return False
+        original = [
+            item for item in self.scene["objects"] if item["object_id"] == attached["object_id"]
+        ]
+        shape = "mesh" if "mesh" in attached else "size_m"
+        if (
+            len(original) != 1
+            or shape not in attached
+            or attached[shape] != original[0].get(shape)
+        ):
+            return False
+        start, target = pose_matrix(start_pose), pose_matrix(target_pose)
+        tolerance = float(self.robot["position_tolerance_m"])
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            return False
+        # Attaching observed geometry makes its pre-existing support contact count
+        # as robot collision. Recognize only that original pose and an upward
+        # translation; never exempt the support from Cartesian collision checks.
+        if (
+            not np.allclose(
+                start @ pose_matrix(attached["pose"]), pose_matrix(original[0]["pose"]),
+                rtol=0, atol=1e-9,
+            )
+            or not np.allclose(start[:3, :3], target[:3, :3], rtol=0, atol=1e-9)
+            or float(np.linalg.norm(target[:2, 3] - start[:2, 3])) > tolerance
+            or target[2, 3] <= start[2, 3]
+        ):
+            return False
+        for contact in validity.contacts:
+            if contact.header.frame_id != self.robot["frame_id"]:
+                return False
+            normal = np.asarray([contact.normal.x, contact.normal.y, contact.normal.z], dtype=float)
+            if (contact.contact_body_1, contact.body_type_1) == (
+                attached["object_id"], ContactInformation.ROBOT_ATTACHED,
+            ):
+                other, body_type = contact.contact_body_2, contact.body_type_2
+                normal = -normal
+            elif (contact.contact_body_2, contact.body_type_2) == (
+                attached["object_id"], ContactInformation.ROBOT_ATTACHED,
+            ):
+                other, body_type = contact.contact_body_1, contact.body_type_1
+            else:
+                return False
+            supports = [item for item in self.scene["objects"] if item["object_id"] == other]
+            if (
+                body_type != ContactInformation.WORLD_OBJECT
+                or len(supports) != 1
+                or "mesh" not in supports[0]
+                or not math.isfinite(contact.depth)
+                or not 0 <= contact.depth <= tolerance
+                or not np.isfinite(normal).all()
+                or not math.isclose(float(np.linalg.norm(normal)), 1.0, abs_tol=1e-6)
+                or normal[2] <= 0
+                or float(np.dot(target[:3, 3] - start[:3, 3], normal)) <= contact.depth
+            ):
+                return False
+        return True
 
     def _pose_matches(self, actual: Any, expected: Mapping[str, float]) -> bool:
         position, rotation = actual.position, actual.orientation

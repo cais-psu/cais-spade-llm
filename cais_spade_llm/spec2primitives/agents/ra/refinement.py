@@ -28,7 +28,7 @@ from .program_dependencies import assess_program_dependencies
 from .program_binding import apply_primitive_bindings
 from .program_validation import validate_program
 from ...adapters.robot_validation_context import validation_capture
-from .validation_scope import is_pick_place_scope, read_validation_scope, required_validation_roles
+from .validation_scope import GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, is_pick_place_scope, read_validation_scope, required_validation_roles
 from .refinement_records import (
     append_record,
     fingerprint,
@@ -177,7 +177,7 @@ def _robot_change_message(differences: list[dict[str, Any]]) -> str:
 def _experiment_specification(
     root: Path, directory: Path, profile: Mapping[str, Any]
 ) -> tuple[dict[str, str] | None, Path | None, str | None]:
-    if is_pick_place_scope(read_validation_scope(profile)):
+    if read_validation_scope(profile) == GAZEBO_PICK_PLACE_SCOPE:
         return None, None, None
     configured = profile.get("validation_specification_path")
     if configured is None:
@@ -416,13 +416,23 @@ class PrimitiveRefinementRuntime:
                             result_schema=lambda ref: _result_schema(steps, ref, extended),
                         )
                         needs = [need for need in dependencies["context_requests"] if need["authority"] == "PA"]
-                        for role in required_validation_roles(scope):
+                        goal = (verify_evidence_tree(root, validation_refs["goal"])
+                                if scope == GAZEBO_OBSERVED_SCOPE and "goal" in validation_refs else {})
+                        if goal.get("status") in {"unsupported", "failed"}:
+                            needs = [need for need in needs if not (
+                                need.get("primitive_symbol") == "compute_place_targets"
+                                and need["quantity"].startswith("/product_geometry")
+                                and need["quantity"] != "/product_geometry/part_height_m"
+                            )]
+                        for role in required_validation_roles(scope, inputs.composition_input["target_feature"]):
                             evidence = (verify_evidence_tree(root, validation_refs[role])
                                         if role in validation_refs else {})
                             reason = None
                             if not evidence:
                                 reason = f"Required {role} evidence is missing."
-                            elif evidence.get("status") != "accepted":
+                            elif (evidence.get("status") != "accepted"
+                                  and not (scope == GAZEBO_OBSERVED_SCOPE and role == "goal"
+                                           and evidence.get("status") in {"unsupported", "failed"})):
                                 reason = f"Required {role} evidence is {evidence.get('status', 'unavailable')}."
                             elif role == "scene" and (evidence.get("coverage") != "all_observed_candidates"
                                                        or evidence.get("unresolved_candidates")):
@@ -436,8 +446,17 @@ class PrimitiveRefinementRuntime:
                         dependencies, product_needs = await asyncio.to_thread(input_needs)
                         unique = {(need["step_index"], need.get("parameter_path", need["quantity"])): need
                                   for need in product_needs}
+                        control_steps = {need["step_index"] for need in dependencies["context_requests"]
+                                         if need["authority"] == "RA"
+                                         and need["primitive_symbol"] == "move_cartesian"}
+                        if control_steps:
+                            # Resolve the malformed control proposal before spending
+                            # a PA batch on independent missing measurements.
+                            break
                         for need in explicit_needs:
-                            if need["authority"] == "PA":
+                            # A prose request cannot transfer ownership of missing
+                            # motion controls to a product measurement producer.
+                            if need["authority"] == "PA" and need["step_index"] not in control_steps:
                                 unique.setdefault((need["step_index"], need["quantity"]), need)
                         product_needs = list(unique.values())
                         if (not product_needs or self.product_runtime is None
@@ -515,7 +534,7 @@ class PrimitiveRefinementRuntime:
                             await asyncio.to_thread(verify_evidence_tree, root, reference)
                             source_pins[reference["ref"]] = deepcopy(reference)
                         roles = outcome.get("validation_refs", {})
-                        if set(roles) - set(required_validation_roles(scope)):
+                        if set(roles) - set(required_validation_roles(scope, inputs.composition_input["target_feature"])):
                             raise ValueError("PA returned a validation role outside this scope.")
                         validation_refs.update(deepcopy(roles))
                         explicit_needs = []
@@ -524,13 +543,27 @@ class PrimitiveRefinementRuntime:
                             break
                     await save_binding()
                     dependencies, unresolved_inputs = await asyncio.to_thread(input_needs)
-                    if unresolved_inputs or pa_findings:
+                    ra_needs = [need for need in dependencies["context_requests"] if need["authority"] == "RA"]
+                    input_findings = pa_findings + [
+                        {"step_index": need["step_index"], "check": need["quantity"],
+                         "status": "unknown", "authority": "PA", "message": need["reason"]}
+                        for need in unresolved_inputs
+                    ]
+                    # Later missing measurements must not hide an independently
+                    # grounded helper. The validator still requires fresh robot
+                    # feedback and checks every preceding state before calculating.
+                    grounded_calculation = scope == GAZEBO_OBSERVED_SCOPE and any(
+                        step["primitive_symbol"] in {"compute_pick_targets", "compute_place_targets"}
+                        and not any(need.get("step_index") is not None and need["step_index"] <= index
+                                    for need in dependencies["context_requests"])
+                        for index, step in enumerate(steps, 1)
+                    )
+                    checked_goal_rejection = (scope == GAZEBO_OBSERVED_SCOPE and "goal" in validation_refs
+                                              and verify_evidence_tree(root, validation_refs["goal"]).get("status") in {"unsupported", "failed"})
+                    if input_findings and not ra_needs and not grounded_calculation and not checked_goal_rejection:
                         from .program_validation import _report
 
-                        findings = [{"step_index": need["step_index"], "check": need["quantity"],
-                                     "status": "unknown", "authority": "PA", "message": need["reason"]}
-                                    for need in unresolved_inputs] + pa_findings
-                        report = _report(steps, findings, [], [], None, scope=scope)
+                        report = _report(steps, input_findings, [], [], None, scope=scope)
                         report.update(candidate_ref=candidate_ref, binding_ref=binding_ref,
                                       robot_context_ref=None, evidence_refs=deepcopy(validation_refs))
                         report_ref = await asyncio.to_thread(append_record, root, directory,
@@ -540,75 +573,89 @@ class PrimitiveRefinementRuntime:
                                    validation_ref=report_ref, validation=report)
                         status, stop_reason = "needs_context", "Required measurements remain unresolved; inspect the recorded input findings."
                         break
-                    await emit(
-                        "robot_context", "Capturing measured robot state and EE/TCP context."
-                    )
-                    # Persist and render progress before capture so UI work cannot
-                    # consume the snapshot's two-second validation-entry allowance.
-                    await emit(
-                        "validating",
-                        "Preparing program checks and capturing fresh robot context without motion.",
-                    )
-                    async with AsyncExitStack() as capture_stack:
-                        robot_failure = None
-                        validation_entry_ns = None
-                        try:
-                            captured = dict(
-                                await capture_stack.enter_async_context(validation_capture(
-                                    self.robot_runtime, inputs.assignment, profile=profile,
-                                ))
-                            )
-                            validation_entry_ns = time.time_ns()
-                            captured_ref = await asyncio.to_thread(
-                                append_record,
-                                root,
-                                directory,
-                                f"robot_context_{len(decisions):04d}.json",
-                                captured,
-                            )
-                            differences = _robot_changed(robot, captured, profile) if robot else []
-                            if differences:
-                                status, stop_reason = (
-                                    "stale",
-                                    _robot_change_message(differences),
-                                )
-                                # Keep the rejected capture as diagnostics, without replacing
-                                # the context against which the previous candidate was checked.
-                                await emit(
-                                    "robot_context",
-                                    stop_reason,
-                                    previous_robot_context_ref=robot_ref,
-                                    robot_context_ref=captured_ref,
-                                    differences=differences,
-                                )
-                                break
-                            robot = captured
-                            robot_ref = captured_ref
-                            source_pins[robot_ref["ref"]] = robot_ref
-                        except (
-                            ImportError,
-                            OSError,
-                            RuntimeError,
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                        ) as exc:
-                            robot = None
-                            robot_ref = None
-                            robot_failure = str(exc)
-                        report = await self.validator(
-                            inputs=extended,
-                            steps=steps,
-                            robot=robot,
-                            evidence=validation_refs,
-                            directory=directory / f"validation_{len(decisions):04d}",
-                            profile=profile,
-                            cache=cache,
-                            _validation_started_at_ns=validation_entry_ns,
-                            progress=validation_progress,
+                    robot_failure = None
+                    if ra_needs:
+                        from .program_validation import _report
+
+                        report = _report(steps, [{
+                            "step_index": need["step_index"], "parameter_path": need["parameter_path"],
+                            "check": "bindings", "status": "failed", "authority": "RA",
+                            "message": need["reason"] + " RA must author this control input.",
+                        } for need in ra_needs], [], [], None, scope=scope, binding_ref=binding_ref)
+                    else:
+                        await emit(
+                            "robot_context", "Capturing measured robot state and EE/TCP context."
                         )
+                        # Persist and render progress before capture so UI work cannot
+                        # consume the snapshot's two-second validation-entry allowance.
+                        await emit(
+                            "validating",
+                            "Preparing program checks and capturing fresh robot context without motion.",
+                        )
+                        async with AsyncExitStack() as capture_stack:
+                            robot_failure = None
+                            validation_entry_ns = None
+                            try:
+                                captured = dict(
+                                    await capture_stack.enter_async_context(validation_capture(
+                                        self.robot_runtime, inputs.assignment, profile=profile,
+                                    ))
+                                )
+                                validation_entry_ns = time.time_ns()
+                                captured_ref = await asyncio.to_thread(
+                                    append_record,
+                                    root,
+                                    directory,
+                                    f"robot_context_{len(decisions):04d}.json",
+                                    captured,
+                                )
+                                differences = _robot_changed(robot, captured, profile) if robot else []
+                                if differences:
+                                    status, stop_reason = (
+                                        "stale",
+                                        _robot_change_message(differences),
+                                    )
+                                    # Keep the rejected capture as diagnostics, without replacing
+                                    # the context against which the previous candidate was checked.
+                                    await emit(
+                                        "robot_context",
+                                        stop_reason,
+                                        previous_robot_context_ref=robot_ref,
+                                        robot_context_ref=captured_ref,
+                                        differences=differences,
+                                    )
+                                    break
+                                robot = captured
+                                robot_ref = captured_ref
+                                source_pins[robot_ref["ref"]] = robot_ref
+                            except (
+                                ImportError,
+                                OSError,
+                                RuntimeError,
+                                KeyError,
+                                TypeError,
+                                ValueError,
+                            ) as exc:
+                                robot = None
+                                robot_ref = None
+                                robot_failure = str(exc)
+                            report = await self.validator(
+                                inputs=extended,
+                                steps=steps,
+                                robot=robot,
+                                evidence=validation_refs,
+                                directory=directory / f"validation_{len(decisions):04d}",
+                                profile=profile,
+                                cache=cache,
+                                _validation_started_at_ns=validation_entry_ns,
+                                progress=validation_progress,
+                            )
                     if report.get("scope") != scope:
                         raise ValueError("The validation report scope differs from its refinement run.")
+                    if input_findings and not ra_needs:
+                        report["findings"] = input_findings + report["findings"]
+                        if report["status"] == "passed":
+                            report["status"] = "unknown"
                     await asyncio.to_thread(_assert_inputs_unchanged, extended)
                     if robot_failure:
                         report["robot_context_failure"] = robot_failure
@@ -652,8 +699,11 @@ class PrimitiveRefinementRuntime:
                                     verify_evidence_tree, root, reference
                                 )
                                 stamp = accepted.get("observation_timestamp_ns")
+                                # Recheck source integrity even when the scope allows
+                                # reuse of geometry from an unchanged Gazebo scene.
                                 if (
-                                    stamp is not None
+                                    scope != GAZEBO_OBSERVED_SCOPE
+                                    and stamp is not None
                                     and not 0
                                     <= final_robot["measured_at_ros_ns"] - stamp
                                     <= profile["scene_max_age_sec"] * 1e9
@@ -702,19 +752,42 @@ class PrimitiveRefinementRuntime:
                     if report["status"] == "passed":
                         status, stop_reason = (
                             "validated_for_declared_scope",
+                            "Nominal circular insertion validated against measured mating geometry. Robustness to measurement errors and physical assembly success remain unproven. No motion was executed."
+                            if scope == GAZEBO_OBSERVED_SCOPE and "goal" in validation_refs else
                             "Validated for Gazebo pick-and-place. No motion was executed."
                             if is_pick_place_scope(scope) else
                             "Program validated against the pinned rigid vertical geometry and direct-motion model; no motion was executed.",
                         )
+                        break
+                    coverage_failure = next((finding for finding in report["findings"]
+                                             if finding.get("check") == "coverage" and finding.get("status") != "passed"), None)
+                    if scope == GAZEBO_OBSERVED_SCOPE and coverage_failure is not None:
+                        status, stop_reason = "unsupported", coverage_failure["message"]
+                        break
+                    fitting_failure = next((finding for finding in report["findings"]
+                                            if finding.get("check") == "mating_geometry"
+                                            and finding.get("status") == "failed"
+                                            and (finding.get("remaining_radial_clearance_m", float("inf")) <= 0
+                                                 or finding.get("authority") != "PA")), None)
+                    if scope == GAZEBO_OBSERVED_SCOPE and fitting_failure is not None:
+                        # Checked interference cannot be repaired by asking PA for
+                        # the same measurements or RA for another waypoint.
+                        status, stop_reason = "failed", fitting_failure["message"]
                         break
                     state_key = fingerprint({"steps": steps, "findings": report["findings"]})
                     if state_key in seen:
                         status, stop_reason = "no_progress", "RA repeated an unchanged program and validation findings."
                         break
                     seen.add(state_key)
-                    if any(finding.get("authority") == "PA" or finding.get("check") in {
-                        "robot_context", "robot_freshness", "freshness", "final_freshness",
-                    } for finding in report["findings"]):
+                    # Worker startup requires available robot context before
+                    # another authored program can undergo motion validation.
+                    if any(
+                        finding.get("authority") == "PA"
+                        or finding.get("check") in {"robot_context", "robot_freshness", "freshness", "final_freshness"}
+                        or (finding.get("check") == "motion" and finding.get("authority") == "RA"
+                            and finding.get("status") == "unknown" and finding.get("step_index") is None)
+                        for finding in report["findings"]
+                    ):
                         status, stop_reason = "needs_context", "Measured robot or product context remains unresolved; inspect the recorded findings."
                         break
                     context = {

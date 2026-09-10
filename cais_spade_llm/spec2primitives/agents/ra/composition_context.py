@@ -57,6 +57,7 @@ def _composition_state_view(value: object) -> Any:
 
 def _composition_catalog_view(
     entries: tuple[Mapping[str, object], ...], *, validation_scope: str = VALIDATION_SCOPE,
+    target_feature: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Project composition contracts while retaining full runtime snapshots."""
     scope = read_validation_scope({"validation_scope": validation_scope})
@@ -162,6 +163,19 @@ def _composition_catalog_view(
                         "description": "Measured part height; otherwise retain pick_ctx.part_height.",
                     },
                 }
+                geometry["properties"].update({
+                    "target_origin_pose": {"type": "object", "x-grounding-fields": ["x", "y", "z", "qx", "qy", "qz", "qw"],
+                                           "properties": {key: {"type": "number", "x-frame-source": "world"}
+                                                          for key in ("x", "y", "z", "qx", "qy", "qz", "qw")}},
+                    "insertion_axis": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                    "insertion_distance_m": {"type": "number", "exclusiveMinimum": 0},
+                })
+                geometry["description"] = (
+                    "PA-selected placement_surface_point in world metres. For checked circular insertion, "
+                    "select target_origin_pose, insertion_axis, insertion_distance_m and part_height_m from the same goal. "
+                    "These inputs are required when RA selects pre_insert_pose or insert_pose outputs; an assembly "
+                    "relationship alone does not establish their applicability."
+                )
     return result
 
 
