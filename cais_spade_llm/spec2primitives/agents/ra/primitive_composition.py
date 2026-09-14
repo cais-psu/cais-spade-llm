@@ -42,7 +42,9 @@ from .context_handoff import (
 _DIRECTORY = Path("composition/primitive_program_candidates")
 _MAX_STEPS = 32
 _READ_LIMIT = 12000
-_PROMPT_LIMIT = 32000
+# A revision carries the full catalog, bound program and checked feedback.
+# run_0021 needs 36,409 characters even after the existing semantic projection.
+_PROMPT_LIMIT = 64000
 
 
 class PrimitiveCompositionError(ValueError):

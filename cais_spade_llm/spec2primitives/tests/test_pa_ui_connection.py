@@ -1861,6 +1861,8 @@ def test_gazebo_execution_button_requires_validated_program_and_idle_simulation(
         assert elements["run_program_button"].text == "Run in Gazebo"
         assert (not elements["run_program_button"]._props.get("disable", False)) is enabled
         assert not elements["stop_execution_button"].visible
+        if composition_status == "validated_for_declared_scope":
+            assert "Saved program validated" in elements["execution_message"].text
     finally:
         container.delete()
 
@@ -1910,6 +1912,146 @@ def test_gazebo_execution_progress_stop_and_reconnect_preserve_composition() -> 
             composition_status="validated_for_declared_scope",
         )
         assert not elements["run_program_button"]._props.get("disable", False)
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("status", ["unknown", "interrupted", "reset_required", "reset_completed"])
+def test_interrupted_gazebo_history_allows_run_without_a_reset_button(status):
+    """Let execution own a clean restart instead of exposing a manual reset action."""
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        assert "reset_execution_button" not in elements
+        for _ in range(2):
+            spec2primitives_ui._apply_primitive_execution_diagnostic(
+                elements, {"status": status, "message": "Reset verification evidence."},
+                available=True, gazebo_running=False, composition_status="validated_for_declared_scope",
+                busy=False,
+            )
+            assert not elements["run_program_button"]._props.get("disable", False)
+            assert "Run in Gazebo will start a clean shared scene" in elements["execution_message"].text
+            assert "Reset verification evidence." in elements["execution_message"].text
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+@pytest.mark.parametrize("previous_status", ["idle", "blocked"])
+def test_gazebo_execution_preparation_survives_polling_and_allows_safe_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: bool, previous_status: str,
+) -> None:
+    """Show preparation before records exist and retry only an undispatched run."""
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
+    from cais_spade_llm.spec2primitives.agents.ra import RAContextHandoffError
+    from cais_spade_llm.spec2primitives.tests.test_ra_context_handoff import _prepare_composition
+
+    root = tmp_path / "interaction_execution"
+    _prepare_composition(root)
+    candidate_ref = "composition/primitive_program_candidates/attempt_0001/candidate.json"
+    binding_ref = "composition/refinement_runs/run_0001/binding_0001.json"
+    composition = {
+        "status": "validated_for_declared_scope",
+        "latest_candidate_ref": candidate_ref,
+        "binding_ref": {"ref": binding_ref, "sha256": "b" * 64},
+    }
+    diagnostic = {
+        "status": previous_status,
+        "message": "Validate a program before running it in Gazebo.",
+        "candidate_ref": {"ref": candidate_ref, "sha256": "a" * 64},
+        "result": {"command_dispatched": False},
+    }
+    buttons, elements, timers = {}, {}, []
+    original_on_click = spec2primitives_ui.ui.button.on_click
+    original_render = spec2primitives_ui._render_phase_5_diagnostics
+
+    def on_click(button: Any, callback: Callable) -> Any:
+        buttons[button.text] = callback
+        return original_on_click(button, callback)
+
+    def render() -> dict[str, Any]:
+        elements.update(original_render())
+        return elements
+
+    def timer(interval: float, callback: Callable, **kwargs: Any) -> None:
+        if not kwargs.get("once", False):
+            timers.append(callback)
+
+    monkeypatch.setattr(spec2primitives_ui.ui.button, "on_click", on_click)
+    monkeypatch.setattr(spec2primitives_ui.ui, "timer", timer)
+    monkeypatch.setattr(spec2primitives_ui, "_render_phase_5_diagnostics", render)
+    monkeypatch.setattr(spec2primitives_ui, "read_primitive_composition_diagnostic", lambda path: composition)
+    monkeypatch.setattr(spec2primitives_ui, "read_primitive_execution_diagnostic", lambda path: dict(diagnostic))
+    monkeypatch.setattr(
+        spec2primitives_ui, "read_dual_gazebo_status",
+        lambda runtime: SimpleNamespace(state="running", blocked_reason=None),
+    )
+    with spec2primitives_ui.ui.column() as container:
+        pass
+
+    async def scenario() -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls, commands = [], []
+        blocker = "Spec2Primitives Dual Gazebo did not become ready within 90 seconds: Waiting for core services: /compute_cartesian_path"
+
+        class Executor:
+            async def run(self, path: Path, **kwargs: Any) -> dict[str, Any]:
+                assert path == root
+                calls.append((kwargs["candidate_ref"], kwargs["binding_ref"]))
+                entered.set()
+                await release.wait()
+                if timeout and len(calls) == 1:
+                    raise RAContextHandoffError(blocker)
+                commands.append("move_cartesian")
+                diagnostic.update(status="completed", message="Commands completed.",
+                                  result={"command_dispatched": True})
+                await kwargs["progress"](dict(diagnostic))
+                return diagnostic
+
+        runtime = Spec2PrimitivesUIRuntime(
+            dual_gazebo=object(), product_agent=object(), contexts_root=tmp_path,
+            primitive_execution_runtime=Executor(),
+        )
+        with container:
+            spec2primitives_ui._render_pa_interaction(runtime)
+
+        async def click_run() -> None:
+            with container:
+                await buttons["Run in Gazebo"]()
+
+        task = asyncio.create_task(click_run())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=3)
+            assert elements["execution_status"].text == "preparing"
+            assert "waiting for Gazebo readiness" in elements["execution_message"].text
+            await timers[0]()
+            assert elements["execution_status"].text == "preparing"
+            assert "waiting for Gazebo readiness" in elements["execution_message"].text
+            assert elements["run_program_button"]._props["disable"]
+            await click_run()
+            assert calls == [(candidate_ref, binding_ref)]
+            assert commands == []
+            release.set()
+            await asyncio.wait_for(task, timeout=3)
+            if timeout:
+                await timers[0]()
+                assert elements["execution_status"].text == "blocked"
+                assert elements["execution_message"].text == blocker
+                assert not elements["stop_execution_button"].visible
+                assert not elements["run_program_button"]._props.get("disable", False)
+                assert commands == []
+                await click_run()
+            assert commands == ["move_cartesian"]
+            assert elements["execution_status"].text == "completed"
+            assert elements["run_program_button"]._props["disable"]
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    try:
+        asyncio.run(scenario())
     finally:
         container.delete()
 
@@ -2516,6 +2658,8 @@ def test_fitting_failure_remains_visible_once_with_calculated_coordinates() -> N
     failure = ("The checked through-bore radius (0.004987318 m) does not clear the shaft envelope "
                "(0.005006046 m). Entry chamfers do not establish the through-bore clearance.")
     validation = {"status": "failed", "scope": spec2primitives_ui.GAZEBO_OBSERVED_SCOPE, "findings": [
+        *[{"step_index": index, "status": "unknown", "authority": "PA", "pa_response_ref": {"ref": "pa_0001/response.json"},
+           "message": "not_investigated: no checked answer was selected."} for index in (1, 6, 2)],
         *[{"step_index": None, "check": "mating_geometry", "status": "failed", "authority": "PA", "message": failure}] * 2,
         {"step_index": 9, "check": "motion", "status": "failed", "message": "Insertion collides with the shaft."},
         {"step_index": None, "check": "assembly_outcome", "status": "unknown", "message": "The complete predicted shaft fitting could not be established."},
@@ -2530,6 +2674,10 @@ def test_fitting_failure_remains_visible_once_with_calculated_coordinates() -> N
     steps = [{"primitive_symbol": "move_cartesian", "params": {"x": .4004289837365861, "y": -.29956979509443044, "z": 1.4}}]
     rendered = spec2primitives_ui._format_primitive_program(steps, [], pending_results=True)
     assert "x=0.4004289837365861" in rendered and "<unbound>" not in rendered and "<pending:" not in rendered
+    missing = {"scope": spec2primitives_ui.GAZEBO_LINK_ATTACHER_SCOPE, "status": "unknown", "findings": [
+        {"check": "goal", "status": "unknown", "authority": "PA", "message": "PA has not supplied the required goal evidence."},
+    ]}
+    assert spec2primitives_ui._format_validation_findings(missing, None) == "Simulation validation incomplete: goal."
 
 
 def test_unsupported_geometry_is_visible_once_before_older_measurement_requests() -> None:

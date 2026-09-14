@@ -19,7 +19,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from .robot_validation_context import matrix_pose, pose_matrix
-from ..agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, VALIDATION_SCOPE
+from ..agents.ra.validation_scope import is_observed_scope, VALIDATION_SCOPE
 
 
 def load_execution_profile() -> dict[str, Any]:
@@ -43,6 +43,11 @@ def load_execution_profile() -> dict[str, Any]:
             raise ValueError(f"Invalid Gazebo execution setting: {key}.")
     if Path(profile["world_file"]).name != profile["world_file"]:
         raise ValueError("Gazebo execution requires a package-local world file.")
+    placement = profile.get("placement_attachment", {})
+    if set(placement) != {"model_name", "link"} or not all(
+        isinstance(value, str) and value.strip() for value in placement.values()
+    ):
+        raise ValueError("Gazebo placement requires a configured board model and link.")
     return profile
 
 
@@ -144,7 +149,7 @@ def match_instance(
     validation_scope: str = VALIDATION_SCOPE,
 ) -> dict[str, Any]:
     """Require one live instance matching the accepted CAD and scoped observed geometry."""
-    observed_bounds = validation_scope == GAZEBO_OBSERVED_SCOPE
+    observed_bounds = is_observed_scope(validation_scope)
     reference = "observed_bounds_center" if observed_bounds else "CAD_origin"
     if part.get("frame_id") != "world" or part.get("reference_point") != reference:
         raise ValueError(f"Instance binding requires the accepted world-frame {reference} reference.")
@@ -283,6 +288,28 @@ def prepare_trajectory(
     return value
 
 
+class GripperCommandError(RuntimeError):
+    """Retain command evidence, including a late terminal acknowledgment at teardown."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any]) -> None:
+        """Attach the session-owned diagnostic consumed after transport cleanup."""
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+    @property
+    def outcome_known(self) -> bool:
+        """Return whether rejection or a controller terminal result was confirmed."""
+        return self.diagnostics.get("termination_confirmed") is True
+
+
+def gripper_action_name(topic: str) -> str:
+    """Resolve the standard action on the explicitly configured trajectory controller."""
+    suffix = "/joint_trajectory"
+    if not isinstance(topic, str) or not topic.endswith(suffix) or not topic[:-len(suffix)]:
+        raise ValueError("Gripper topic must identify a controller's /joint_trajectory endpoint.")
+    return topic[:-len(suffix)] + "/follow_joint_trajectory"
+
+
 class GazeboExecutionSession:
     """Own ROS clients for one simulation run; no shared agent is made executable."""
 
@@ -296,6 +323,8 @@ class GazeboExecutionSession:
             stop,
         )
         self.node = self.context = self.executor = self.goal = self.pending_goal = None
+        self.goal_result = self.cancel_request = None
+        self.gripper_diagnostics: dict[str, Any] | None = None
         self.joints: Any = None
         self._clients: dict[str, Any] = {}
 
@@ -320,7 +349,13 @@ class GazeboExecutionSession:
 
     async def __aexit__(self, *args: Any) -> None:
         """Release this session's ROS context after any outstanding command ends."""
-        await self.work(self._close)
+        try:
+            await self.work(self._close)
+        except (TimeoutError, RuntimeError) as exc:
+            if len(args) > 1 and isinstance(args[1], GripperCommandError):
+                args[1].diagnostics["cleanup_error"] = str(exc)
+            else:
+                raise
 
     def _start(self) -> None:
         import rclpy
@@ -331,8 +366,8 @@ class GazeboExecutionSession:
         from rclpy.parameter import Parameter
         from rclpy.action import ActionClient
         from moveit_msgs.action import ExecuteTrajectory
+        from control_msgs.action import FollowJointTrajectory
         from sensor_msgs.msg import JointState
-        from trajectory_msgs.msg import JointTrajectory
         from linkattacher_msgs.srv import AttachLink, DetachLink
 
         if self.stop.is_set():
@@ -351,8 +386,9 @@ class GazeboExecutionSession:
         self.node.create_subscription(
             JointState, self.profile["joint_states_topic"], self._joint, 50
         )
-        self.gripper = self.node.create_publisher(
-            JointTrajectory, self.configuration["gripper"]["topic"], 10
+        self.gripper = ActionClient(
+            self.node, FollowJointTrajectory,
+            gripper_action_name(self.configuration["gripper"]["topic"]),
         )
         services = self.configuration["services"]
         self.arm = ActionClient(self.node, ExecuteTrajectory, services["execute_trajectory"])
@@ -363,6 +399,9 @@ class GazeboExecutionSession:
                 raise RuntimeError("Gazebo attachment services are unavailable.")
         if not self.arm.wait_for_server(timeout_sec=self.profile["service_timeout_sec"]):
             raise RuntimeError("Gazebo trajectory execution is unavailable.")
+        if not self.gripper.wait_for_server(timeout_sec=self.profile["service_timeout_sec"]):
+            raise RuntimeError("Gazebo gripper action is unavailable: " +
+                               gripper_action_name(self.configuration["gripper"]["topic"]))
 
     def _joint(self, value: Any) -> None:
         self.joints = value
@@ -393,6 +432,7 @@ class GazeboExecutionSession:
         return await self.work(self._entity_states, names)
 
     def _entity_states(self, names: list[str]) -> dict[str, Any]:
+        """Read instance poses after synchronizing their stamps with the local ROS clock."""
         from gazebo_msgs.srv import GetEntityState, GetModelList
 
         listed = self._service(
@@ -409,12 +449,36 @@ class GazeboExecutionSession:
             )
             pose = response.state.pose
             stamp = response.header.stamp.sec * 1000000000 + response.header.stamp.nanosec
-            if (
-                not 0
-                <= self.node.get_clock().now().nanoseconds - stamp
-                <= self.profile["state_max_age_sec"] * 1e9
-            ):
-                raise RuntimeError("Gazebo instance feedback is stale.")
+            if stamp <= 0:
+                raise RuntimeError(f"Gazebo instance feedback has no valid timestamp for {name!r}.")
+            # Gazebo stamps service replies at world time, which may be ahead of
+            # this node's latest /clock update. Wait for that update without
+            # repeating the request or relaxing the feedback age limit.
+            now = self.node.get_clock().now().nanoseconds
+            deadline = time.monotonic() + self.profile["service_timeout_sec"]
+            while now < stamp and not self.stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                previous = now
+                self.executor.spin_once(timeout_sec=min(0.05, remaining))
+                now = self.node.get_clock().now().nanoseconds
+                if now < previous:
+                    raise RuntimeError("Gazebo simulation clock moved backwards while checking instance feedback.")
+            if self.stop.is_set():
+                raise RuntimeError("Execution stopped while waiting for Gazebo instance feedback.")
+            if now < stamp:
+                raise RuntimeError(
+                    f"Gazebo simulation clock did not catch up to feedback for {name!r} "
+                    f"within {self.profile['service_timeout_sec']:g} s "
+                    f"(clock={now / 1e9:.6f} s, feedback={stamp / 1e9:.6f} s)."
+                )
+            age = (now - stamp) / 1e9
+            if age > self.profile["state_max_age_sec"]:
+                raise RuntimeError(
+                    f"Gazebo instance feedback is stale for {name!r} "
+                    f"(age={age:.6f} s, limit={self.profile['state_max_age_sec']:g} s)."
+                )
             result[name] = {"pose": self._pose(pose), "stamp_ns": stamp}
         return result
 
@@ -512,12 +576,14 @@ class GazeboExecutionSession:
             goal.trajectory.joint_trajectory.points.append(point)
         if self.stop.is_set():
             raise RuntimeError("Execution stopped before trajectory dispatch.")
+        self.gripper_diagnostics = None
+        self.cancel_request = self.goal_result = None
         self.pending_goal = self.arm.send_goal_async(goal)
         self.goal = self._await(self.pending_goal, self.profile["service_timeout_sec"])
         self.pending_goal = None
         if self.goal is None or not self.goal.accepted:
             raise RuntimeError("Gazebo rejected the trajectory goal.")
-        future = self.goal.get_result_async()
+        future = self.goal_result = self.goal.get_result_async()
         deadline = (
             time.monotonic()
             + trajectory["time_from_start_ns"][-1] / 1e9
@@ -526,7 +592,7 @@ class GazeboExecutionSession:
         cancel_sent = False
         while not future.done():
             if (self.stop.is_set() or time.monotonic() >= deadline) and not cancel_sent:
-                self._await(self.goal.cancel_goal_async(), self.profile["stop_timeout_sec"])
+                self._request_cancel()
                 cancel_sent = True
                 deadline = time.monotonic() + self.profile["stop_timeout_sec"]
             if cancel_sent and time.monotonic() >= deadline:
@@ -547,51 +613,180 @@ class GazeboExecutionSession:
         return await self.work(self._gripper_command, position)
 
     def _gripper_command(self, position: float) -> dict[str, Any]:
-        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
         if self.stop.is_set():
             raise RuntimeError("Execution stopped before gripper dispatch.")
         config = self.configuration["gripper"]
         duration = float(config["move_time_sec"])
+        padding = float(config.get("feedback_timeout_pad_sec", 0.5))
+        settle = float(config.get("settle_sec", 0.0))
+        tolerance = float(config.get("position_tolerance", 0.01))
         endpoints = (float(config["open"]), float(config["close"]))
         if (
             type(position) not in (int, float)
-            or not all(math.isfinite(value) for value in (*endpoints, position, duration))
-            or duration <= 0
+            or not all(math.isfinite(value) for value in (*endpoints, position, duration, padding, settle, tolerance))
+            or duration <= 0 or padding < 0 or settle < 0 or tolerance <= 0
             or not min(endpoints) <= position <= max(endpoints)
         ):
             raise ValueError("Invalid configured gripper command.")
-        deadline = time.monotonic() + self.profile["service_timeout_sec"]
-        while self.gripper.get_subscription_count() == 0 and time.monotonic() < deadline:
-            self.executor.spin_once(timeout_sec=0.05)
-        if self.gripper.get_subscription_count() == 0:
-            raise RuntimeError("Gazebo gripper controller is unavailable.")
+        from control_msgs.action import FollowJointTrajectory
+        from control_msgs.msg import JointTolerance
+        from trajectory_msgs.msg import JointTrajectoryPoint
+
+        goal = FollowJointTrajectory.Goal()
         point = JointTrajectoryPoint(positions=[float(position)])
         point.time_from_start.sec, point.time_from_start.nanosec = divmod(
             int(duration * 1e9), 1000000000
         )
-        sent = self.node.get_clock().now().nanoseconds
-        self.gripper.publish(JointTrajectory(joint_names=[config["joint"]], points=[point]))
-        deadline = time.monotonic() + duration + float(config["feedback_timeout_pad_sec"])
-        while time.monotonic() < deadline:
-            self.executor.spin_once(timeout_sec=0.05)
-            if self.joints is None or config["joint"] not in self.joints.name:
-                continue
-            stamp = self.joints.header.stamp.sec * 1000000000 + self.joints.header.stamp.nanosec
-            actual = self.joints.position[self.joints.name.index(config["joint"])]
-            if (
-                stamp >= sent
-                and math.isfinite(actual)
-                and abs(actual - position) <= float(config["position_tolerance"])
-            ):
-                return {"success": True, "position": actual, "stamp_ns": stamp}
-        raise TimeoutError("Gripper feedback did not acknowledge the commanded position.")
+        goal.trajectory.joint_names, goal.trajectory.points = [config["joint"]], [point]
+        goal.goal_tolerance = [JointTolerance(name=config["joint"], position=tolerance)]
+        goal.goal_time_tolerance.sec, goal.goal_time_tolerance.nanosec = divmod(int(padding * 1e9), 1000000000)
+        sent = previous_clock = self.node.get_clock().now().nanoseconds
+        started = time.monotonic()
+        report = self.gripper_diagnostics = {
+            "joint": config["joint"], "target": position, "accepted": None,
+            "termination_confirmed": False, "terminal_status": None, "error_code": None,
+            "cancel_requested": False, "cancel_acknowledged": False,
+            "position": None, "stamp_ns": None, "sent_ros_ns": sent,
+            "elapsed_simulation_sec": 0.0, "elapsed_wall_sec": 0.0, "success": False,
+        }
+        if self.joints is not None and config["joint"] in self.joints.name:
+            index = self.joints.name.index(config["joint"])
+            if index < len(self.joints.position) and math.isfinite(self.joints.position[index]):
+                report["position"] = float(self.joints.position[index])
+                report["stamp_ns"] = self.joints.header.stamp.sec * 10**9 + self.joints.header.stamp.nanosec
+        self.cancel_request = self.goal_result = None
+        stable_since = None
+        last_feedback_stamp = 0
+        feedback_reason = "No fresh gripper joint feedback."
+        try:
+            if sent <= 0:
+                report["termination_confirmed"] = True
+                raise RuntimeError("Gazebo clock is unavailable before gripper dispatch.")
+            self.pending_goal = self.gripper.send_goal_async(goal)
+            self.goal = self._await(self.pending_goal, self.profile["service_timeout_sec"])
+            self.pending_goal = None
+            report["accepted"] = bool(self.goal is not None and self.goal.accepted)
+            if not report["accepted"]:
+                report["termination_confirmed"] = True
+                self.goal = None
+                raise RuntimeError("Gazebo rejected the gripper goal.")
+            self.goal_result = self.goal.get_result_async()
+            deadline = time.monotonic() + duration + padding + self.profile["trajectory_timeout_pad_sec"]
+            while True:
+                self.executor.spin_once(timeout_sec=0.02)
+                now = self.node.get_clock().now().nanoseconds
+                report["elapsed_wall_sec"] = time.monotonic() - started
+                report["elapsed_simulation_sec"] = (now - sent) / 1e9
+                if now < previous_clock:
+                    raise RuntimeError("Gazebo clock moved backwards during gripper execution.")
+                previous_clock = now
+                if self.goal_result.done():
+                    response = self._gripper_terminal()
+                    if response.status != 4 or response.result.error_code != 0:
+                        raise RuntimeError(
+                            f"Gripper controller terminated with status {response.status}, "
+                            f"error {response.result.error_code}: {response.result.error_string}"
+                        )
+                if self.stop.is_set():
+                    raise RuntimeError("Gripper execution stopped; no subsequent primitive was dispatched.")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Gripper completion timed out. " + feedback_reason)
+                if self.joints is None or config["joint"] not in self.joints.name:
+                    stable_since = None
+                    continue
+                if self.joints.name.count(config["joint"]) != 1:
+                    raise RuntimeError("Gripper joint feedback is ambiguous.")
+                index = self.joints.name.index(config["joint"])
+                if index >= len(self.joints.position):
+                    raise RuntimeError("Gripper joint feedback has no measured position.")
+                actual = float(self.joints.position[index])
+                stamp = self.joints.header.stamp.sec * 1000000000 + self.joints.header.stamp.nanosec
+                if stamp < last_feedback_stamp:
+                    raise RuntimeError("Gripper feedback timestamp moved backwards.")
+                last_feedback_stamp = stamp
+                report.update(position=actual if math.isfinite(actual) else None, stamp_ns=stamp)
+                if not math.isfinite(actual):
+                    raise RuntimeError("Gripper joint feedback is non-finite.")
+                fresh = stamp >= sent and stamp > 0 and 0 <= now - stamp <= self.profile["state_max_age_sec"] * 1e9
+                if not fresh or abs(actual - position) > tolerance:
+                    stable_since = None
+                    feedback_reason = ("Gripper joint feedback is stale or its clock has not synchronized."
+                                       if not fresh else f"Target {position:g}; measured {actual:g}.")
+                    continue
+                # Advance settling only with measured simulation timestamps, never
+                # by repeatedly accepting one cached sample while Gazebo is paused.
+                stable_since = stamp if stable_since is None else stable_since
+                if report["termination_confirmed"] and (stamp - stable_since) / 1e9 >= settle:
+                    report["success"] = True
+                    return deepcopy(report)
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            report["message"] = str(exc)
+            try:
+                self._finish_outstanding_goal()
+            except (OSError, RuntimeError, ValueError, TypeError) as cleanup:
+                report["cleanup_error"] = str(cleanup)
+            report["elapsed_wall_sec"] = time.monotonic() - started
+            report["elapsed_simulation_sec"] = (self.node.get_clock().now().nanoseconds - sent) / 1e9
+            raise GripperCommandError(str(exc), report) from exc
 
-    async def attachment(self, binding: Mapping[str, Any], attach: bool) -> dict[str, Any]:
-        """Issue exactly one attach/detach request and require its acknowledgment."""
-        return await self.work(self._attachment, binding, attach)
+    def _gripper_terminal(self) -> Any:
+        response = self.goal_result.result()
+        if response is None or response.status not in {4, 5, 6}:
+            raise RuntimeError("Gripper controller returned no valid terminal result.")
+        self.gripper_diagnostics.update(
+            termination_confirmed=True, terminal_status=response.status,
+            error_code=response.result.error_code, error_string=response.result.error_string,
+        )
+        self.goal = None
+        return response
 
-    def _attachment(self, binding: Mapping[str, Any], attach: bool) -> dict[str, Any]:
+    def _request_cancel(self) -> None:
+        if self.cancel_request is None:
+            self.cancel_request = self.goal.cancel_goal_async()
+            if self.gripper_diagnostics is not None:
+                self.gripper_diagnostics["cancel_requested"] = True
+        response = self._await(self.cancel_request, self.profile["stop_timeout_sec"])
+        if self.gripper_diagnostics is not None:
+            self.gripper_diagnostics["cancel_acknowledged"] = bool(response.goals_canceling)
+
+    def _finish_outstanding_goal(self) -> None:
+        if self.pending_goal is not None:
+            self.goal = self._await(self.pending_goal, self.profile["stop_timeout_sec"])
+            self.pending_goal = None
+            if self.gripper_diagnostics is not None:
+                self.gripper_diagnostics["accepted"] = bool(self.goal is not None and self.goal.accepted)
+                if not self.gripper_diagnostics["accepted"]:
+                    self.gripper_diagnostics["termination_confirmed"] = True
+        if self.goal is None or not self.goal.accepted:
+            return
+        if self.goal_result is None:
+            self.goal_result = self.goal.get_result_async()
+        if not self.goal_result.done():
+            self._request_cancel()
+            self._await(self.goal_result, self.profile["stop_timeout_sec"])
+        if self.gripper_diagnostics is not None:
+            self._gripper_terminal()
+        else:
+            self.goal = None
+
+    async def attachment(
+        self, binding: Mapping[str, Any], attach: bool, *, parent: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Attach/detach the bound part to the gripper or an explicit execution fixture.
+
+        Args:
+            binding: Instance selected only after the program has been validated.
+            attach: Whether to attach or detach that instance.
+            parent: Configured placement fixture; None selects the robot gripper.
+
+        Returns:
+            The acknowledged command, including the placement parent when supplied.
+        """
+        return await self.work(self._attachment, binding, attach, parent)
+
+    def _attachment(
+        self, binding: Mapping[str, Any], attach: bool, parent: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         from linkattacher_msgs.srv import AttachLink, DetachLink
 
         if self.stop.is_set():
@@ -599,8 +794,8 @@ class GazeboExecutionSession:
         config = self.configuration["attach"]
         request = (AttachLink if attach else DetachLink).Request()
         request.model1_name, request.link1_name = (
-            config["robot_model_name"],
-            config["primary_attach_link"],
+            (parent["model_name"], parent["link"]) if parent is not None else
+            (config["robot_model_name"], config["primary_attach_link"])
         )
         request.model2_name, request.link2_name = binding["model_name"], binding["link"]
         response = self._await(
@@ -609,20 +804,15 @@ class GazeboExecutionSession:
         )
         if response is None or response.success is not True:
             raise RuntimeError("Gazebo attachment command failed.")
-        return {"success": True, "attached": attach, "message": response.message}
+        return {"success": True, "attached": attach, "message": response.message,
+                **({"parent": dict(parent)} if parent is not None else {})}
 
     def _close(self) -> None:
         try:
             # A late goal acknowledgment still belongs to this run. Obtain its
             # handle before teardown so cancellation is not silently abandoned.
-            if self.pending_goal is not None:
-                self.stop.set()
-                self.goal = self._await(self.pending_goal, self.profile["stop_timeout_sec"])
-                self.pending_goal = None
-            if self.goal is not None and self.goal.accepted:
-                self.stop.set()
-                self._await(self.goal.cancel_goal_async(), self.profile["stop_timeout_sec"])
-                self._await(self.goal.get_result_async(), self.profile["stop_timeout_sec"])
+            if self.pending_goal is not None or (self.goal is not None and self.goal.accepted):
+                self._finish_outstanding_goal()
         finally:
             self.goal = None
             if self.executor is not None:

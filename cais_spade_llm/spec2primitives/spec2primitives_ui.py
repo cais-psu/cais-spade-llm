@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from nicegui import ui
-from .agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE
+from .agents.ra.validation_scope import GAZEBO_LINK_ATTACHER_SCOPE, GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE
 from nicegui.elements.badge import Badge
 from nicegui.elements.button import Button
 from nicegui.elements.label import Label
@@ -337,7 +337,7 @@ def _render_dual_gazebo(runtime: DualGazeboRuntime) -> None:
             action_state["status"] = status
             _apply_dual_gazebo_status(
                 status,
-                busy=bool(action_state["busy"]),
+                busy=bool(action_state["busy"] or execution_busy()),
                 status_badge=status_badge,
                 status_message=status_message,
                 start_button=start_button,
@@ -364,7 +364,7 @@ def _render_dual_gazebo(runtime: DualGazeboRuntime) -> None:
                 action_state["refreshing"] = False
 
         async def _start() -> None:
-            if action_state["busy"]:
+            if action_state["busy"] or execution_busy():
                 return
             action_state["busy"] = True
             _apply_status(action_state["status"])
@@ -381,7 +381,7 @@ def _render_dual_gazebo(runtime: DualGazeboRuntime) -> None:
                 await _refresh_status()
 
         async def _stop() -> None:
-            if action_state["busy"]:
+            if action_state["busy"] or execution_busy():
                 return
             action_state["busy"] = True
             _apply_status(action_state["status"])
@@ -2725,14 +2725,20 @@ def _apply_primitive_execution_diagnostic(
 ) -> None:
     """Display execution separately and expose only the saved-program action."""
     status = str(diagnostic.get("status", "idle"))
-    active = status in {"preparing", "running", "capturing", "stopping"}
+    active = status in {"preparing", "running", "capturing", "stopping", "resetting"}
     elements["execution_status"].set_text("not run" if status == "idle" else status)
     elements["execution_status"].props(
         f"color={'green' if status == 'completed' else 'red' if status in {'failed', 'blocked', 'unknown', 'interrupted'} else 'grey'} outline"
     )
-    elements["execution_message"].set_text(
-        str(diagnostic.get("message", "Validate a program before running it in Gazebo."))
-    )
+    message = str(diagnostic.get("message", "Validate a program before running it in Gazebo."))
+    if status == "idle" and composition_status == "validated_for_declared_scope":
+        message = "Saved program validated. Run in Gazebo checks current readiness before executing."
+    elif status in {"unknown", "interrupted", "reset_required", "reset_completed"} and not gazebo_running:
+        message = (
+            "Gazebo is stopped. Run in Gazebo will start a clean shared scene and complete "
+            "readiness checks before dispatching the validated program.\n\nRecorded detail: " + message
+        )
+    elements["execution_message"].set_text(message)
     already_attempted = (
         bool(elements.get("execution_candidate_ref"))
         and (diagnostic.get("candidate_ref") or {}).get("ref")
@@ -2742,7 +2748,6 @@ def _apply_primitive_execution_diagnostic(
     _set_enabled(
         elements["run_program_button"],
         available
-        and gazebo_running
         and composition_status == "validated_for_declared_scope"
         and not busy
         and not active
@@ -2917,6 +2922,7 @@ def _format_validation_findings(
     missing_roles = []
     details = []
     secondary = []
+    prior_requests = []
     for item in findings:
         role = item.get("check")
         if (
@@ -2930,7 +2936,9 @@ def _format_validation_findings(
             missing_roles.append(role)
         else:
             prefix = f"Step {item['step_index']}: " if item.get("step_index") else ""
-            if item["status"] == "warning" or (
+            if item.get("pa_response_ref"):
+                prior_requests.append(prefix + item["message"])
+            elif item["status"] == "warning" or (
                 role == "bindings" and item["message"].startswith("Selected result from step ")
             ) or role in {"assembly_outcome", "pick_place_outcome"}:
                 secondary.append(prefix + item["message"])
@@ -2943,12 +2951,14 @@ def _format_validation_findings(
         else []
     )
     label = (
+        "Simulation validation incomplete: "
+        if (validation or {}).get("scope") == GAZEBO_LINK_ATTACHER_SCOPE else
         "Pick-and-place validation incomplete: "
         if (validation or {}).get("scope") in {GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE} else
         "Assembly validation incomplete: "
     )
     lines = [label + ", ".join(missing_roles) + "."] if missing_roles else []
-    details += [f"PA: {message}" for message in unresolved[:2]] + secondary
+    details += [f"PA: {message}" for message in unresolved[:2]] + prior_requests + secondary
     # Repeated unbound coordinates must not crowd out their recorded cause.
     details = list(dict.fromkeys(details))
     available = 3 - len(lines)
@@ -3848,21 +3858,27 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             if action_state["execution_error"] and not running:
                 diagnostic = {
                     **diagnostic,
-                    "status": "blocked",
+                    "status": "reset_required" if diagnostic.get("reset_required") else "blocked",
                     "message": action_state["execution_error"],
                 }
-            _apply_primitive_execution_diagnostic(
-                phase_5_elements,
-                diagnostic,
-                available=runtime.primitive_execution_runtime is not None,
-                gazebo_running=gazebo is not None
-                and gazebo.state == "running"
-                and not gazebo.blocked_reason,
-                composition_status=phase_5_elements["candidate_status_badge"].text,
-                busy=bool(busy),
-            )
+            # The owning callback includes preparation before records exist.
+            # Polling can still contain idle state or an earlier execution attempt.
+            if not action_state["primitive_executing"]:
+                _apply_primitive_execution_diagnostic(
+                    phase_5_elements,
+                    diagnostic,
+                    available=runtime.primitive_execution_runtime is not None,
+                    gazebo_running=gazebo is not None
+                    and gazebo.state == "running"
+                    and not gazebo.blocked_reason,
+                    composition_status=phase_5_elements["candidate_status_badge"].text,
+                    busy=bool(busy),
+                )
             if running:
                 for name in ("start_button", "create_candidate_button"):
+                    _set_enabled(phase_5_elements[name], False)
+            if diagnostic.get("interaction_invalidated"):
+                for name in ("start_button", "refresh_button", "create_candidate_button", "diagnostic_deadline"):
                     _set_enabled(phase_5_elements[name], False)
             _update_start_enabled()
 
@@ -3888,6 +3904,10 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
                 )
 
             try:
+                await progress({
+                    "status": "preparing",
+                    "message": "Checking the saved program and waiting for Gazebo readiness.",
+                })
                 candidate_ref = phase_5_elements["execution_candidate_ref"]
                 if not isinstance(candidate_ref, str):
                     raise ValueError("Display a saved validated program before Run in Gazebo.")
@@ -3896,8 +3916,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 action_state["execution_error"] = str(exc)
                 if not interaction_card.is_deleted:
-                    phase_5_elements["execution_status"].set_text("blocked")
-                    phase_5_elements["execution_message"].set_text(str(exc))
+                    await progress({"status": "blocked", "message": str(exc)})
                     ui.notify(f"Gazebo execution unavailable: {exc}", type="negative")
             finally:
                 await _finish_phase_5_action("primitive_executing", root)

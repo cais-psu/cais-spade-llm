@@ -15,7 +15,7 @@ from typing import Any
 from ..ra.composition_context import _composition_state_view, _without_model_name
 from ..ra.refinement_records import _verify_evidence_tree, append_record, fingerprint, owned_path, pin, read_pin, verify_evidence_tree, verify_record
 from ..ra.validation_scope import (
-    GAZEBO_OBSERVED_SCOPE,
+    is_observed_scope,
     read_validation_scope,
     required_validation_roles,
 )
@@ -229,7 +229,7 @@ def _checked_selection(
         answer.update(value_ref={"record_ref": ref, "field_path": pointer}, value=selected["value"])
     else:
         expected = {
-            "part": "ObservedGeometryEvidence" if scope == GAZEBO_OBSERVED_SCOPE else "AssemblyGeometryEvidence",
+            "part": "ObservedGeometryEvidence" if is_observed_scope(scope) else "AssemblyGeometryEvidence",
             "goal": "AssemblyGeometryEvidence", "scene": "AssemblySceneEvidence",
             "specification": "AssemblyValidationSpecification",
         }[role]
@@ -487,7 +487,7 @@ class ProductPrimitiveContextRuntime:
                 if name in _GEOMETRY_ARGUMENTS:
                     if set(arguments) != _GEOMETRY_ARGUMENTS[name]:
                         raise ValueError("Geometry tool argument fields are invalid.")
-                    if scope != GAZEBO_OBSERVED_SCOPE and name in {"observed_geometry", "bind_observed_part", "observed_mating_geometry"}:
+                    if not is_observed_scope(scope) and name in {"observed_geometry", "bind_observed_part", "observed_mating_geometry"}:
                         raise ValueError("The requested tool is unavailable in this scope.")
                     geometry_operations += name in _GEOMETRY_OPERATIONS
                     def measure() -> dict[str, Any]:

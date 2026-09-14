@@ -3,9 +3,12 @@ from __future__ import annotations
 """Bound evidence acquisition, audited calculation, validation and RA revision."""
 
 import asyncio
+import fcntl
 import hashlib
 import json
+import re
 import time
+import xml.etree.ElementTree as ET
 from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
@@ -28,7 +31,10 @@ from .program_dependencies import assess_program_dependencies
 from .program_binding import apply_primitive_bindings
 from .program_validation import validate_program
 from ...adapters.robot_validation_context import validation_capture
-from .validation_scope import GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, is_pick_place_scope, read_validation_scope, required_validation_roles
+from .validation_scope import (
+    GAZEBO_LINK_ATTACHER_SCOPE, GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE,
+    is_observed_scope, is_pick_place_scope, read_validation_scope, required_validation_roles,
+)
 from .refinement_records import (
     append_record,
     fingerprint,
@@ -87,10 +93,48 @@ def load_refinement_profile() -> dict[str, Any]:
     return profile
 
 
+def _same_simulation_model(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """Compare captured models while allowing regenerated Gazebo controller filenames."""
+    parameters = []
+    descriptions = []
+    for context in (previous, current):
+        model = context.get("model_parameters")
+        if (
+            not isinstance(model, Mapping)
+            or model.get("use_sim_time") is not True
+            or fingerprint(model) != context.get("model_parameters_sha256")
+            or not isinstance(model.get("robot_description"), str)
+        ):
+            return False
+        try:
+            description = ET.fromstring(model["robot_description"])
+        except ET.ParseError:
+            return False
+        if description.tag != "robot":
+            return False
+        parameters.append(dict(model))
+        descriptions.append(description)
+
+    selector = "gazebo/plugin[@filename='libgazebo_ros2_control.so']/parameters"
+    first_files, second_files = (description.findall(selector) for description in descriptions)
+    if len(first_files) != len(second_files):
+        return False
+    generated_path = re.compile(r"/tmp/launch_params_[A-Za-z0-9_]+")
+    for first, second in zip(first_files, second_files, strict=True):
+        if generated_path.fullmatch(first.text or "") and generated_path.fullmatch(second.text or ""):
+            # This Gazebo plugin locator changes on every launch; it is not a
+            # MoveIt model change. Keep raw records/hashes and every other model
+            # parameter intact; execution still checks configuration and feedback.
+            first.text = second.text
+    for model, description in zip(parameters, descriptions, strict=True):
+        model["robot_description"] = ET.tostring(description, encoding="unicode")
+    return parameters[0] == parameters[1]
+
+
 def _robot_changed(
     previous: Mapping[str, Any], current: Mapping[str, Any], profile: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Describe differences under the existing robot-context comparison policy."""
+    """Report robot changes, excluding regenerated simulation controller filenames."""
     differences = []
     for key in (
         "configuration_sha256",
@@ -101,6 +145,8 @@ def _robot_changed(
         "held_part",
     ):
         if previous.get(key) != current.get(key):
+            if key == "model_parameters_sha256" and _same_simulation_model(previous, current):
+                continue
             differences.append(
                 {"field": key, "previous": previous.get(key), "current": current.get(key)}
             )
@@ -249,6 +295,13 @@ class PrimitiveRefinementRuntime:
         ):
             raise ValueError("The composition deadline must be finite and between 0 and 3600 seconds.")
         root = root.resolve()
+        from .execution_state import execution_busy, assert_interaction_current
+
+        if execution_busy():
+            raise ValueError("Gazebo execution or reset is active; composition is unavailable.")
+        await asyncio.to_thread(assert_interaction_current, root)
+        if execution_busy():
+            raise ValueError("Gazebo execution or reset is active; composition is unavailable.")
         task = _ACTIVE.get(root)
         if task is None or task.done():
             profile = deepcopy(self.profile)
@@ -262,6 +315,21 @@ class PrimitiveRefinementRuntime:
         return await asyncio.shield(task)
 
     async def _run(
+        self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None,
+        profile: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        # A second application must not replace the shared scene during validation.
+        with (root.parent / ".gazebo_execution.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValueError("Another application owns Gazebo execution or composition.") from exc
+            from .execution_state import assert_interaction_current
+
+            await asyncio.to_thread(assert_interaction_current, root)
+            return await self._run_locked(root, progress=progress, profile=profile)
+
+    async def _run_locked(
         self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None,
         profile: Mapping[str, Any],
     ) -> dict[str, Any]:
@@ -417,7 +485,7 @@ class PrimitiveRefinementRuntime:
                         )
                         needs = [need for need in dependencies["context_requests"] if need["authority"] == "PA"]
                         goal = (verify_evidence_tree(root, validation_refs["goal"])
-                                if scope == GAZEBO_OBSERVED_SCOPE and "goal" in validation_refs else {})
+                                if is_observed_scope(scope) and "goal" in validation_refs else {})
                         if goal.get("status") in {"unsupported", "failed"}:
                             needs = [need for need in needs if not (
                                 need.get("primitive_symbol") == "compute_place_targets"
@@ -431,7 +499,7 @@ class PrimitiveRefinementRuntime:
                             if not evidence:
                                 reason = f"Required {role} evidence is missing."
                             elif (evidence.get("status") != "accepted"
-                                  and not (scope == GAZEBO_OBSERVED_SCOPE and role == "goal"
+                                  and not (is_observed_scope(scope) and role == "goal"
                                            and evidence.get("status") in {"unsupported", "failed"})):
                                 reason = f"Required {role} evidence is {evidence.get('status', 'unavailable')}."
                             elif role == "scene" and (evidence.get("coverage") != "all_observed_candidates"
@@ -454,6 +522,11 @@ class PrimitiveRefinementRuntime:
                             # a PA batch on independent missing measurements.
                             break
                         for need in explicit_needs:
+                            if scope == GAZEBO_LINK_ATTACHER_SCOPE:
+                                # This scope derives every measurement path and
+                                # validation role from the program. Prose hints
+                                # remain in the RA submission, not PA obligations.
+                                continue
                             # A prose request cannot transfer ownership of missing
                             # motion controls to a product measurement producer.
                             if need["authority"] == "PA" and need["step_index"] not in control_steps:
@@ -552,13 +625,13 @@ class PrimitiveRefinementRuntime:
                     # Later missing measurements must not hide an independently
                     # grounded helper. The validator still requires fresh robot
                     # feedback and checks every preceding state before calculating.
-                    grounded_calculation = scope == GAZEBO_OBSERVED_SCOPE and any(
+                    grounded_calculation = is_observed_scope(scope) and any(
                         step["primitive_symbol"] in {"compute_pick_targets", "compute_place_targets"}
                         and not any(need.get("step_index") is not None and need["step_index"] <= index
                                     for need in dependencies["context_requests"])
                         for index, step in enumerate(steps, 1)
                     )
-                    checked_goal_rejection = (scope == GAZEBO_OBSERVED_SCOPE and "goal" in validation_refs
+                    checked_goal_rejection = (is_observed_scope(scope) and "goal" in validation_refs
                                               and verify_evidence_tree(root, validation_refs["goal"]).get("status") in {"unsupported", "failed"})
                     if input_findings and not ra_needs and not grounded_calculation and not checked_goal_rejection:
                         from .program_validation import _report
@@ -702,7 +775,7 @@ class PrimitiveRefinementRuntime:
                                 # Recheck source integrity even when the scope allows
                                 # reuse of geometry from an unchanged Gazebo scene.
                                 if (
-                                    scope != GAZEBO_OBSERVED_SCOPE
+                                    not is_observed_scope(scope)
                                     and stamp is not None
                                     and not 0
                                     <= final_robot["measured_at_ros_ns"] - stamp
@@ -752,8 +825,10 @@ class PrimitiveRefinementRuntime:
                     if report["status"] == "passed":
                         status, stop_reason = (
                             "validated_for_declared_scope",
+                            "Primitive composition validated for Gazebo attach/detach placement. No motion was executed."
+                            if scope == GAZEBO_LINK_ATTACHER_SCOPE else
                             "Nominal circular insertion validated against measured mating geometry. Robustness to measurement errors and physical assembly success remain unproven. No motion was executed."
-                            if scope == GAZEBO_OBSERVED_SCOPE and "goal" in validation_refs else
+                            if is_observed_scope(scope) and "goal" in validation_refs else
                             "Validated for Gazebo pick-and-place. No motion was executed."
                             if is_pick_place_scope(scope) else
                             "Program validated against the pinned rigid vertical geometry and direct-motion model; no motion was executed.",
@@ -761,7 +836,7 @@ class PrimitiveRefinementRuntime:
                         break
                     coverage_failure = next((finding for finding in report["findings"]
                                              if finding.get("check") == "coverage" and finding.get("status") != "passed"), None)
-                    if scope == GAZEBO_OBSERVED_SCOPE and coverage_failure is not None:
+                    if is_observed_scope(scope) and coverage_failure is not None:
                         status, stop_reason = "unsupported", coverage_failure["message"]
                         break
                     fitting_failure = next((finding for finding in report["findings"]

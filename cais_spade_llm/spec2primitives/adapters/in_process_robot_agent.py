@@ -27,6 +27,7 @@ class InProcessRobotAgentHost(Protocol):
     """Expose the narrow application runtime needed by the RA adapter."""
 
     resource_agents: Sequence[object]
+    _spec2primitives_robot_agent: object | None
     system_running: bool
     execution_mode: str
     robot_env: str
@@ -243,7 +244,13 @@ class InProcessRobotAgentCompositionRuntime:
         if _execution_custody is None and execution_busy():
             raise RAContextHandoffError("Composition validation is unavailable during Gazebo execution.")
 
-        selected = await self._selected_or_started_agent(assignment)
+        # Execution starts its selected RA once, before fresh validation. Later
+        # captures must not replace a stopped agent while a program owns it.
+        selected = (
+            self._require_execution_agent(assignment)
+            if _execution_custody is not None
+            else await self._selected_or_started_agent(assignment)
+        )
         self._require_alive(selected, assignment.selected_resource_jid)
         self._require_execution_mode(selected, assignment)
         if assignment.selected_execution_mode != "simulation":
@@ -282,9 +289,55 @@ class InProcessRobotAgentCompositionRuntime:
                 raise RAContextHandoffError("Robot tool/configuration changed during measurement.")
 
     async def execution_configuration(
-        self, assignment: SelectedRAAssignmentEnvelope
+        self, assignment: SelectedRAAssignmentEnvelope, *, start_if_needed: bool = False,
     ) -> Mapping[str, Any]:
-        """Require exclusive simulation readiness and read the exact selected RA."""
+        """Wait for simulation readiness and read the unchanged selected RA.
+
+        Args:
+            assignment: The saved authority for the selected simulation resource.
+            start_if_needed: Permit context-only startup during initial Run preparation.
+                Leave false for all subsequent execution checks.
+
+        Returns:
+            The selected RobotAgent's configuration and primitive catalog.
+
+        Raises:
+            RAContextHandoffError: Readiness expires or runtime authority changes.
+        """
+        selected = self._require_execution_agent(assignment, allow_stopped=start_if_needed)
+        needs_start = start_if_needed and not self._is_alive(selected)
+        await self._wait_for_simulation_readiness()
+        if needs_start:
+            # Recheck the same owner and all interlocks after discovery before
+            # requesting any lifecycle change through the existing host boundary.
+            if self._require_execution_agent(assignment, allow_stopped=True) is not selected:
+                raise RAContextHandoffError(
+                    "The selected RobotAgent changed while waiting for Gazebo readiness."
+                )
+            selected = await self._start_selected_resource(
+                assignment.selected_resource_jid, assignment.selected_execution_mode,
+            )
+
+        async def read() -> dict[str, Any]:
+            # Readiness may take several probes. Its success cannot authorize a
+            # different environment, hardware state or RobotAgent after the wait.
+            if self._require_execution_agent(assignment) is not selected:
+                raise RAContextHandoffError(
+                    "The selected RobotAgent changed while waiting for Gazebo readiness."
+                )
+            return {
+                "configuration": deepcopy(selected.controller_config),
+                "primitive_catalog": _phase_5_1_primitive_catalog(
+                    selected.recovery_synthesis_primitive_catalog()
+                ),
+            }
+
+        return await self._host._run_on_agent_runtime(read())
+
+    def _require_execution_agent(
+        self, assignment: SelectedRAAssignmentEnvelope, *, allow_stopped: bool = False,
+    ) -> Any:
+        """Check simulation authority, allowing an absent/stopped RA only before startup."""
         if assignment.selected_execution_mode != "simulation":
             raise RAContextHandoffError("Gazebo execution requires simulation mode.")
         if self._host.ros2_proc_status(DUAL_GAZEBO_NAME) != "running":
@@ -302,29 +355,30 @@ class InProcessRobotAgentCompositionRuntime:
                 raise RAContextHandoffError(
                     "Hardware stack is active or its stopped state is unavailable."
                 )
-        ready, reason = await asyncio.to_thread(self._host.simulation_start_ready, force=True)
-        if not ready:
-            raise RAContextHandoffError(str(reason or "Gazebo is not ready for execution."))
         selected = self._selected_agent_or_none(assignment.selected_resource_jid)
+        # The standalone context-only RA is owned separately from the shared
+        # Agent System's resource list. Read that owner without starting an agent.
+        standalone = getattr(self._host, "_spec2primitives_robot_agent", None)
+        if str(getattr(standalone, "jid", "")) == assignment.selected_resource_jid:
+            if selected is not None and selected is not standalone:
+                raise RAContextHandoffError(
+                    f"Selected RobotAgent {assignment.selected_resource_jid} is not unique."
+                )
+            selected = standalone
         if selected is None:
+            if allow_stopped:
+                return None
             raise RAContextHandoffError("The selected RobotAgent is not running.")
         assignment.assert_addressed_to(str(getattr(selected, "jid", "")))
-        self._require_alive(selected, assignment.selected_resource_jid)
+        if not allow_stopped:
+            self._require_alive(selected, assignment.selected_resource_jid)
         self._require_execution_mode(selected, assignment)
         if getattr(selected, "context_only", False) is not True:
             raise RAContextHandoffError(
                 "Gazebo execution requires the isolated context-only RobotAgent."
             )
 
-        async def read() -> dict[str, Any]:
-            return {
-                "configuration": deepcopy(selected.controller_config),
-                "primitive_catalog": _phase_5_1_primitive_catalog(
-                    selected.recovery_synthesis_primitive_catalog()
-                ),
-            }
-
-        return await self._host._run_on_agent_runtime(read())
+        return selected
 
     async def capture_execution_context(
         self,
@@ -427,6 +481,10 @@ class InProcessRobotAgentCompositionRuntime:
         self._host.execution_mode = execution_mode
         self._host.robot_env = "gazebo"
         await self._wait_for_simulation_readiness()
+        return await self._start_selected_resource(resource_jid, execution_mode)
+
+    async def _start_selected_resource(self, resource_jid: str, execution_mode: str) -> object:
+        """Start or reuse the exact RA through the host's context-only lifecycle."""
         try:
             selected_agent = await self._host.start_spec2primitives_robot_agent(
                 resource_jid,
@@ -456,7 +514,9 @@ class InProcessRobotAgentCompositionRuntime:
             try:
                 # Phase 5 is an operator action, so use the authoritative bounded
                 # probe instead of the UI timer cache, which may still be pending.
-                readiness = self._host.simulation_start_ready(force=True)
+                readiness = await asyncio.to_thread(
+                    self._host.simulation_start_ready, force=True
+                )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 raise RAContextHandoffError(
                     "Spec2Primitives Dual Gazebo readiness is unavailable."

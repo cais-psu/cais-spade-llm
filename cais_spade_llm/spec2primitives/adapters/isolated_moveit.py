@@ -19,7 +19,7 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from ..agents.ra.refinement_records import owned_path
-from ..agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, read_validation_scope
+from ..agents.ra.validation_scope import is_observed_scope, read_validation_scope
 from .robot_validation_context import pose_matrix
 
 _ALLOWED_CAPABILITIES = frozenset(
@@ -273,44 +273,25 @@ class IsolatedMoveItSession:
         return item
 
     def _apply_scene(
-        self, *, remove: str | None = None, add: Mapping[str, Any] | None = None
+        self, *, joints: Mapping[str, Any] | None = None,
+        attached: Mapping[str, Any] | None = None, add: Mapping[str, Any] | None = None,
     ) -> None:
-        from moveit_msgs.msg import CollisionObject, PlanningScene
+        from moveit_msgs.msg import PlanningScene
         from moveit_msgs.srv import ApplyPlanningScene
 
         scene = PlanningScene()
         # Retain the model's SRDF self-collision matrix in this new private scene.
         scene.is_diff = True
-        scene.robot_state.is_diff = True
-        if remove is None and add is None:
+        if joints is None:
             scene.robot_state = self._state(self.robot["joint_state"])
             scene.world.collision_objects = [
                 self._object(item, self.robot["frame_id"]) for item in self.scene["objects"]
             ]
-            if self.scene.get("allowed_contacts"):
-                from moveit_msgs.msg import AllowedCollisionEntry, PlanningSceneComponents
-                from moveit_msgs.srv import GetPlanningScene
-
-                request = GetPlanningScene.Request(
-                    components=PlanningSceneComponents(components=PlanningSceneComponents.ALLOWED_COLLISION_MATRIX),
-                )
-                matrix = self._call(GetPlanningScene, "get_planning_scene", request).scene.allowed_collision_matrix
-                for contact in self.scene["allowed_contacts"]:
-                    for name in [contact["object_id"], *contact["links"]]:
-                        if name not in matrix.entry_names:
-                            matrix.entry_names.append(name)
-                            for row in matrix.entry_values:
-                                row.enabled.append(False)
-                            matrix.entry_values.append(AllowedCollisionEntry(enabled=[False] * len(matrix.entry_names)))
-                    item_index = matrix.entry_names.index(contact["object_id"])
-                    for link in contact["links"]:
-                        link_index = matrix.entry_names.index(link)
-                        matrix.entry_values[item_index].enabled[link_index] = True
-                        matrix.entry_values[link_index].enabled[item_index] = True
-                scene.allowed_collision_matrix = matrix
-        if remove is not None:
-            item = CollisionObject(id=remove, operation=CollisionObject.REMOVE)
-            scene.world.collision_objects.append(item)
+        else:
+            # The scene monitor must own the same attachment as plan requests.
+            # Removing only the world object lets later scene-diff propagation
+            # erase its contact allowances because the scene has no held body.
+            scene.robot_state = self._state(joints, attached)
         if add is not None:
             scene.world.collision_objects.append(self._object(add, self.robot["frame_id"]))
         response = self._call(
@@ -318,12 +299,44 @@ class IsolatedMoveItSession:
         )
         if not response.success:
             raise RuntimeError("Private collision scene was not accepted.")
+        if self.scene.get("allowed_contacts"):
+            from moveit_msgs.msg import AllowedCollisionEntry, PlanningSceneComponents
+            from moveit_msgs.srv import GetPlanningScene
+
+            # Apply only the declared contact pairs after custody is established,
+            # retaining the model's SRDF exclusions and all other collision pairs.
+            request = GetPlanningScene.Request(
+                components=PlanningSceneComponents(components=PlanningSceneComponents.ALLOWED_COLLISION_MATRIX),
+            )
+            matrix = self._call(GetPlanningScene, "get_planning_scene", request).scene.allowed_collision_matrix
+            for contact in self.scene["allowed_contacts"]:
+                for name in [contact["object_id"], *contact["links"]]:
+                    if name not in matrix.entry_names:
+                        matrix.entry_names.append(name)
+                        for row in matrix.entry_values:
+                            row.enabled.append(False)
+                        matrix.entry_values.append(AllowedCollisionEntry(enabled=[False] * len(matrix.entry_names)))
+                item_index = matrix.entry_names.index(contact["object_id"])
+                for link in contact["links"]:
+                    link_index = matrix.entry_names.index(link)
+                    matrix.entry_values[item_index].enabled[link_index] = True
+                    matrix.entry_values[link_index].enabled[item_index] = True
+            contacts_scene = PlanningScene()
+            contacts_scene.is_diff = True
+            contacts_scene.robot_state.is_diff = True
+            contacts_scene.allowed_collision_matrix = matrix
+            response = self._call(
+                ApplyPlanningScene, "apply_planning_scene", ApplyPlanningScene.Request(scene=contacts_scene)
+            )
+            if not response.success:
+                raise RuntimeError("Private collision contact allowances were not accepted.")
 
     async def change_custody(
-        self, *, remove: str | None = None, add: Mapping[str, Any] | None = None
+        self, *, joints: Mapping[str, Any], attached: Mapping[str, Any] | None,
+        add: Mapping[str, Any] | None = None,
     ) -> None:
-        """Change only hypothetical object placement in the worker's private scene."""
-        await self._work(self._apply_scene, remove=remove, add=add)
+        """Set hypothetical held-body state and released geometry in the private scene."""
+        await self._work(self._apply_scene, joints=joints, attached=attached, add=add)
 
     async def check_segment(
         self,
@@ -478,7 +491,7 @@ class IsolatedMoveItSession:
         from moveit_msgs.msg import ContactInformation
 
         if (
-            read_validation_scope(self.profile) != GAZEBO_OBSERVED_SCOPE
+            not is_observed_scope(read_validation_scope(self.profile))
             or self.scene.get("geometry_model") != "observed_bounds"
             or attached is None
             or not validity.contacts

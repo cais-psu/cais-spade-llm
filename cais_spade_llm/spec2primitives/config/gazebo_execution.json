@@ -1,6 +1,7 @@
 {
-  "package": "xarm_gazebo",
+  "package": "cais_lab_robotics",
   "world_file": "table_spec2primitives.world",
+  "placement_attachment": {"model_name": "Gear_Plate", "link": "Gear_Plate"},
   "instance_position_tolerance_m": 0.01,
   "instance_orientation_tolerance_rad": 0.1,
   "service_timeout_sec": 10,

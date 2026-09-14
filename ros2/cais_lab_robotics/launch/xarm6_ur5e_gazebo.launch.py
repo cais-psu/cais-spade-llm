@@ -266,6 +266,44 @@ def _tune_xarm_gripper_joint_dynamics(root, prefix):
         limit.set('velocity', XARM_GRIPPER_VELOCITY)
 
 
+def _configure_spec2primitives_gripper_followers(
+    root: ET.Element, prefix: str, *, world_file: str, passive: bool,
+) -> None:
+    """Select direct finger following for the active ICRA attachment simulation."""
+    if world_file != 'table_spec2primitives.world' or passive:
+        return
+    expected = {
+        f'{prefix}{name}' for name in (
+            'left_finger_joint', 'left_inner_knuckle_joint',
+            'right_outer_knuckle_joint', 'right_finger_joint',
+            'right_inner_knuckle_joint',
+        )
+    }
+    plugins = [
+        plugin for plugin in root.findall('./gazebo/plugin')
+        if plugin.get('filename') == 'libgazebo_mimic_joint_plugin.so'
+        and plugin.findtext('joint') == f'{prefix}drive_joint'
+    ]
+    if len(plugins) != len(expected) or {
+        plugin.findtext('mimicJoint') for plugin in plugins
+    } != expected:
+        raise RuntimeError('Expected exactly five xArm gripper follower plugins for Spec2Primitives.')
+    for plugin in plugins:
+        if len(plugin.findall('hasPID')) != 1:
+            raise RuntimeError('The Spec2Primitives xArm gripper follower configuration is ambiguous.')
+    # This scope uses acknowledged attachment for custody. Direct following keeps
+    # the vendor's finger linkage aligned without claiming frictional grasping.
+    for plugin in plugins:
+        plugin.remove(plugin.find('hasPID'))
+
+
+def _xarm_gripper_initial_position(*, world_file: str, passive: bool) -> float:
+    """Return the xArm drive-joint startup position for this simulation mode."""
+    if world_file == 'table_spec2primitives.world' and not passive:
+        return 0.0
+    return 0.85
+
+
 def _tune_xarm_grasp_fix_plugin(root):
     """Avoid repulsive impulses after grasp attach on xArm gripper."""
     for gazebo_elem in root.findall('gazebo'):
@@ -539,12 +577,18 @@ def launch_setup(context, *args, **kwargs):
         f'{xarm_prefix}joint4': 0.000322,
         f'{xarm_prefix}joint5': 1.440603,
         f'{xarm_prefix}joint6': -1.572544,
-        f'{xarm_prefix}drive_joint': 0.85,  # gripper fully open at startup
+        f'{xarm_prefix}drive_joint': _xarm_gripper_initial_position(
+            world_file=gazebo_world_path.name,
+            passive=passive,
+        ),
     }
     _set_ros2_control_initial_positions(xarm_root, xarm_initial_positions)
     _tune_xarm_gripper_joint_dynamics(xarm_root, xarm_prefix)
     _tune_xarm_gripper_contact_properties(xarm_root, xarm_prefix)
     _strip_grasp_fix_plugins(xarm_root)
+    _configure_spec2primitives_gripper_followers(
+        xarm_root, xarm_prefix, world_file=gazebo_world_path.name, passive=passive,
+    )
 
     # Strip world link, world_joint, and the gazebo_ros2_control plugin
     # (combined URDF provides its own world link and single plugin)

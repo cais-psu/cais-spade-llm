@@ -17,7 +17,7 @@ from cais_spade_llm.resources.robot.target_calculations import (
 )
 
 from ..agents.ra.composition_context import _without_model_name
-from ..agents.ra.validation_scope import GAZEBO_OBSERVED_SCOPE, VALIDATION_SCOPE, read_validation_scope
+from ..agents.ra.validation_scope import is_observed_scope, VALIDATION_SCOPE, read_validation_scope
 from .robot_validation_context import matrix_pose, pose_matrix
 
 
@@ -99,7 +99,7 @@ def calculate_target(
                 "product_geometry must select actual geometry fields, not a raw record."
             )
         policy = robot_context["policy"]
-        if (primitive_symbol == "compute_place_targets" and scope == GAZEBO_OBSERVED_SCOPE
+        if (primitive_symbol == "compute_place_targets" and is_observed_scope(scope)
                 and "target_origin_pose" in geometry):
             if held_part_transform is None:
                 raise CalculationUnavailable("Fitting requires the measured rigid part-to-EE transform at grasp.")
@@ -136,7 +136,7 @@ def calculate_target(
             return _without_model_name(output)
         if primitive_symbol == "compute_pick_targets":
             result = _pick(params, geometry, policy, preceding_pose, float(offset[2]))
-        elif scope == GAZEBO_OBSERVED_SCOPE:
+        elif is_observed_scope(scope):
             result = _place_observed(params, geometry, policy, float(offset[2]), orientation)
         else:
             result = _place(params, geometry, policy, float(offset[2]), orientation)

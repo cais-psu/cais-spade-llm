@@ -19,7 +19,7 @@ from .context_handoff import (
     SelectedRAAssignmentEnvelope,
     SelectedRAContextSnapshot,
 )
-from .validation_scope import GAZEBO_OBSERVED_SCOPE, VALIDATION_SCOPE, read_validation_scope
+from .validation_scope import is_observed_scope, VALIDATION_SCOPE, read_validation_scope
 
 _PPR_DEFINES = "http://PAonto.com#defines"
 _PPR_FEATURE = "http://PAonto.com#feature"
@@ -133,7 +133,7 @@ def _composition_catalog_view(
                     name: value for name, value in entry[field].items() if name == "held_part"
                 }
         if (
-            scope == GAZEBO_OBSERVED_SCOPE
+            is_observed_scope(scope)
             and symbol in {"compute_pick_targets", "compute_place_targets"}
             and isinstance(entry.get("parameter_schemas", {}).get("product_geometry"), dict)
         ):

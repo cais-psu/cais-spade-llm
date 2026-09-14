@@ -30,7 +30,8 @@ from .primitive_composition import _result_schema
 from .refinement_records import append_record, fingerprint, verify_evidence_tree, verify_record
 
 from .validation_scope import (
-    GAZEBO_OBSERVED_SCOPE,
+    GAZEBO_LINK_ATTACHER_SCOPE,
+    is_observed_scope,
     is_pick_place_scope,
     read_validation_scope,
     required_validation_roles,
@@ -166,7 +167,7 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
             if name == "target_pose" and source.get("record_type") == "RobotFrameLocationRecord":
                 raise BindingUnavailable(
                     "/target_pose must select the measured observed bounds reference_pose used for the part."
-                    if inputs.validation_scope == GAZEBO_OBSERVED_SCOPE else
+                    if is_observed_scope(inputs.validation_scope) else
                     "/target_pose selects an observed candidate center, but the CAD-origin "
                     "reference and grasp offset required by this validation scope remain unresolved."
                 )
@@ -176,7 +177,7 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
                     "AssemblyGeometryEvidence",
                     "AssemblySurfaceEvidence",
                     "AssemblyGoalEvidence",
-                } | ({"ObservedGeometryEvidence"} if inputs.validation_scope == GAZEBO_OBSERVED_SCOPE else set())
+                } | ({"ObservedGeometryEvidence"} if is_observed_scope(inputs.validation_scope) else set())
                 or (source.get("status") != "accepted" and not height_estimate)
                 or source.get("frame_id") != "world"
                 or source.get("units") != "m"
@@ -186,7 +187,7 @@ def _geometry_sources(step: Mapping[str, Any], inputs: _CompositionInputs) -> li
                 )
             if name == "target_pose" and source.get("reference_point") not in {
                 "CAD_origin", "selected_CAD_feature",
-            } | ({"observed_bounds_center"} if inputs.validation_scope == GAZEBO_OBSERVED_SCOPE else set()):
+            } | ({"observed_bounds_center"} if is_observed_scope(inputs.validation_scope) else set()):
                 raise BindingUnavailable(
                     "The selected observed location does not establish the helper's grasp reference point."
                 )
@@ -327,6 +328,39 @@ def observed_fitting_check(
             and gap - rim_height >= 0 and gap + rim_height <= resolution), metrics
 
 
+def simulated_placement_check(
+    part_pose: Mapping[str, Any], goal: Mapping[str, Any],
+    robot: Mapping[str, Any], profile: Mapping[str, Any],
+) -> tuple[bool, dict[str, float]]:
+    """Check the authored placement for link attachment using robot pose tolerances.
+
+    Args:
+        part_pose: Carried part reference pose predicted from the checked motion.
+        goal: PA-qualified destination pose and part axis for the accepted pair.
+        robot: Measured robot context including its position tolerance.
+        profile: Recorded motion-validation orientation tolerance.
+
+    Returns:
+        Whether the placement reaches the intended reference and insertion axis,
+        with pose errors and the applied simulation tolerances.
+    """
+    actual, target = pose_matrix(part_pose), pose_matrix(goal["target_origin_pose"])
+    axis = np.asarray(goal["part_axis_local"], dtype=float)
+    if (axis.shape != (3,) or not np.isfinite(axis).all()
+            or not math.isclose(float(np.linalg.norm(axis)), 1.0, abs_tol=1e-6)):
+        raise ValueError("Simulated placement requires a measured unit part axis.")
+    position_tolerance = float(robot["position_tolerance_m"])
+    axis_tolerance = float(profile["fk_orientation_tolerance_rad"])
+    if not all(math.isfinite(value) and value > 0 for value in (position_tolerance, axis_tolerance)):
+        raise ValueError("Simulated placement requires positive robot pose tolerances.")
+    position_error = float(np.linalg.norm(actual[:3, 3] - target[:3, 3]))
+    cosine = float((actual[:3, :3] @ axis) @ (target[:3, :3] @ axis))
+    axis_error = math.acos(float(np.clip(cosine, -1, 1)))
+    metrics = {"position_error_m": position_error, "axis_error_rad": axis_error,
+               "position_tolerance_m": position_tolerance, "axis_tolerance_rad": axis_tolerance}
+    return position_error <= position_tolerance and axis_error <= axis_tolerance, metrics
+
+
 async def validate_program(
     *,
     inputs: _CompositionInputs,
@@ -398,7 +432,7 @@ async def validate_program(
     findings: list[dict[str, Any]] = []
     records = {}
     expected_types = {
-        "part": "ObservedGeometryEvidence" if scope == GAZEBO_OBSERVED_SCOPE else "AssemblyGeometryEvidence",
+        "part": "ObservedGeometryEvidence" if is_observed_scope(scope) else "AssemblyGeometryEvidence",
         "goal": "AssemblyGeometryEvidence",
         "scene": "AssemblySceneEvidence",
         "specification": "AssemblyValidationSpecification",
@@ -410,8 +444,9 @@ async def validate_program(
         "specification": "acceptance criteria must come from approved documents or an explicit experiment specification",
     }
     required_roles = required_validation_roles(scope, inputs.composition_input["target_feature"])
-    fitting = scope == GAZEBO_OBSERVED_SCOPE and "goal" in required_roles
-    roles = (*required_roles, *(["specification"] if scope == GAZEBO_OBSERVED_SCOPE and evidence.get("specification") else []))
+    fitting = is_observed_scope(scope) and "goal" in required_roles
+    link_attachment = scope == GAZEBO_LINK_ATTACHER_SCOPE
+    roles = (*required_roles, *(["specification"] if is_observed_scope(scope) and evidence.get("specification") else []))
     for role in roles:
         kind = expected_types[role]
         reference = evidence.get(role)
@@ -530,7 +565,7 @@ async def validate_program(
             observation_failure = None
             if type(stamp) is not int or stamp <= 0:
                 observation_failure = f"The {role} evidence has no valid observation timestamp."
-            elif scope == GAZEBO_OBSERVED_SCOPE:
+            elif is_observed_scope(scope):
                 # Accepted geometry remains usable for the unchanged Gazebo scene
                 # across clock resets and elapsed time; retain its sensor timestamp.
                 continue
@@ -564,7 +599,7 @@ async def validate_program(
             spec.get("family") != "vertical_gear_assembly"
             or spec.get("requires_threading")
             or spec.get("requires_force_control")
-            or (scope == GAZEBO_OBSERVED_SCOPE and spec.get("yaw_required"))
+            or (is_observed_scope(scope) and spec.get("yaw_required"))
         ):
             findings.append(
                 _finding(
@@ -574,12 +609,12 @@ async def validate_program(
                     "The selected assembly specification requires unsupported behavior: "
                     + str({key: spec[key] for key in ("family", "requires_threading", "requires_force_control", "yaw_required") if key in spec})
                     + ". Nominal straight circular insertion does not validate threading, press fits, snap fits or yaw-specific mating."
-                    if scope == GAZEBO_OBSERVED_SCOPE else
+                    if is_observed_scope(scope) else
                     "The required assembly operation lies outside rigid vertical gear validation.",
                 )
             )
             records.pop("specification")
-        elif scope != GAZEBO_OBSERVED_SCOPE:
+        elif not is_observed_scope(scope):
             required = ["position_tolerance_m", "axis_tolerance_rad"] + (
                 ["orientation_tolerance_rad"] if spec.get("yaw_required") else []
             )
@@ -663,7 +698,7 @@ async def validate_program(
             len(instances) != 1
             or any(instances[0].get(key) != value for key, value in _part_shape(part_record).items())
             or instances[0].get("pose") != part_record.get(
-                "reference_pose" if scope == GAZEBO_OBSERVED_SCOPE else "origin_pose")
+                "reference_pose" if is_observed_scope(scope) else "origin_pose")
         ):
             findings.append(
                 _finding(
@@ -674,6 +709,7 @@ async def validate_program(
                 )
             )
             records.pop("scene")
+    placement_contacts = []
     if fitting and "goal" in records:
         goal = records["goal"]
         try:
@@ -687,7 +723,16 @@ async def validate_program(
                         or targets[0].get("pose") != target["reference_pose"]
                         or not any(item.get("mesh") == surface["mesh"] for item in records["scene"]["objects"])):
                     raise ValueError("The collision scene must retain the checked shaft and finite seating surface.")
-            seated, metrics = observed_fitting_check(goal["target_origin_pose"], goal)
+            if link_attachment:
+                seated, metrics = simulated_placement_check(goal["target_origin_pose"], goal, robot, profile)
+                # Link attachment models intended mating contact. Exempt only
+                # this accepted part/target/seat pair, retaining other collisions.
+                placement_contacts = [target["object_id"], *[
+                    item["object_id"] for item in records.get("scene", {}).get("objects", [])
+                    if item.get("mesh") == surface["mesh"]
+                ]]
+            else:
+                seated, metrics = observed_fitting_check(goal["target_origin_pose"], goal)
         except (KeyError, TypeError, ValueError) as exc:
             findings.append(_finding(None, "mating_geometry", "failed", str(exc), authority="PA"))
             records.pop("goal")
@@ -715,7 +760,7 @@ async def validate_program(
     calculations, checked_steps = [], []
     pose, joints = deepcopy(robot["ee_pose"]), deepcopy(robot["joint_state"])
     part = records.get("part")
-    part_pose = deepcopy(part.get("reference_pose" if scope == GAZEBO_OBSERVED_SCOPE else "origin_pose")) if part else None
+    part_pose = deepcopy(part.get("reference_pose" if is_observed_scope(scope) else "origin_pose")) if part else None
     held = deepcopy(
         robot.get("held_part", inputs.composition_input["robot_state"].get("held_part"))
     )
@@ -730,8 +775,9 @@ async def validate_program(
                 worker = session_factory(root, robot, {
                     **records["scene"],
                     **({"allowed_contacts": [{"object_id": part["object_id"],
-                                               "links": robot.get("touch_links", [robot["ee_link"]])}]}
-                       if scope == GAZEBO_OBSERVED_SCOPE and part else {}),
+                                               "links": [*robot.get("touch_links", [robot["ee_link"]]),
+                                                         *placement_contacts]}]}
+                       if is_observed_scope(scope) and part else {}),
                 }, profile)
                 session = await stack.enter_async_context(worker)
             except (ImportError, OSError, RuntimeError, ValueError) as exc:
@@ -765,7 +811,7 @@ async def validate_program(
                     "touch_links": robot.get("touch_links", [robot["ee_link"]]),
                 }
                 if session:
-                    await session.change_custody(remove=part["object_id"])
+                    await session.change_custody(joints=joints, attached=attached)
         for index, step in enumerate(steps, start=1):
             symbol = step["primitive_symbol"]
             if not prefix_valid:
@@ -857,7 +903,7 @@ async def validate_program(
                             raise BindingUnavailable("Checked supported goal geometry is required for assembly targets.")
                         if params.get("product_geometry") != records["goal"]["product_geometry"]:
                             raise BindingUnavailable("Placement product_geometry must select the checked mating goal, including the actual seating surface.")
-                    if scope == GAZEBO_OBSERVED_SCOPE and symbol == "compute_pick_targets" and part is not None:
+                    if is_observed_scope(scope) and symbol == "compute_pick_targets" and part is not None:
                         selected = params.get("target_pose")
                         if selected is None:
                             detected = params.get("detected_parts", [])
@@ -1010,14 +1056,14 @@ async def validate_program(
                         "touch_links": robot.get("touch_links", [robot["ee_link"]]),
                     }
                     if session:
-                        await session.change_custody(remove=part["object_id"])
+                        await session.change_custody(joints=joints, attached=attached)
                     checked_steps.append(
                         {
                             "step_index": index,
                             "status": "passed",
                             "message": (
                                 "Part identity and proximity checked for simulated link attachment."
-                                if scope == GAZEBO_OBSERVED_SCOPE else
+                                if is_observed_scope(scope) else
                                 "Geometric grasp compatibility checked under the rigid-grasp assumption."
                             ),
                         }
@@ -1036,9 +1082,14 @@ async def validate_program(
                     if fitting:
                         if "goal" not in records:
                             raise BindingUnavailable("Checked supported goal geometry is required before assembly release.")
-                        seated, metrics = observed_fitting_check(part_pose, records["goal"])
+                        seated, metrics = (
+                            simulated_placement_check(part_pose, records["goal"], robot, profile)
+                            if link_attachment else observed_fitting_check(part_pose, records["goal"])
+                        )
                         if not seated:
-                            raise ValueError("The proposed release does not establish bore clearance, axial engagement and seating: " + str(metrics))
+                            message = ("The proposed release misses the simulated placement target: " if link_attachment else
+                                       "The proposed release does not establish bore clearance, axial engagement and seating: ")
+                            raise ValueError(message + str(metrics))
                     elif not is_pick_place_scope(scope):
                         if not {"goal", "specification"} <= records.keys():
                             raise BindingUnavailable(
@@ -1055,6 +1106,7 @@ async def validate_program(
                     held, grasp_transform, attached = None, None, None
                     if session:
                         await session.change_custody(
+                            joints=joints, attached=None,
                             add={
                                 "object_id": part["object_id"],
                                 **_part_shape(part),
@@ -1099,10 +1151,15 @@ async def validate_program(
     if fitting:
         complete = (prefix_valid and {"part", "goal", "scene"} <= records.keys()
                     and not any(finding["check"] == "coverage" and finding["status"] != "passed" for finding in findings))
-        seated, metrics = observed_fitting_check(part_pose, records["goal"]) if complete else (False, {})
+        seated, metrics = (
+            simulated_placement_check(part_pose, records["goal"], robot, profile)
+            if link_attachment else observed_fitting_check(part_pose, records["goal"])
+        ) if complete else (False, {})
         findings.append(_finding(
             None, "assembly_outcome", "passed" if seated and held is None else "failed" if complete else "unknown",
-            "Predicted nominal bore clearance, axial engagement and seating checked; robustness to measurement errors and physical assembly success remain unproven."
+            ("Simulated placement and custody checked; execution must acknowledge detachment and board attachment."
+             if link_attachment else
+             "Predicted nominal bore clearance, axial engagement and seating checked; robustness to measurement errors and physical assembly success remain unproven.")
             if complete else "The complete predicted assembly could not be established.", held_part=held, **metrics,
         ))
     elif is_pick_place_scope(scope):
@@ -1175,8 +1232,9 @@ def _report(
         "calculation_refs": calculations,
         "predicted_final_state": final_state,
         "unmodeled": [
+            *(["physical mating clearance"] if scope == GAZEBO_LINK_ATTACHER_SCOPE else []),
             *(["precise seating", "assembly tolerances"] if is_pick_place_scope(scope) else []),
-            *(["robustness to measurement errors"] if scope == GAZEBO_OBSERVED_SCOPE else []),
+            *(["robustness to measurement errors"] if is_observed_scope(scope) else []),
             "force closure",
             "contact dynamics",
             "physical assembly success",

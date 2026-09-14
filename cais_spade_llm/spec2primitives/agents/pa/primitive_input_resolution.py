@@ -8,7 +8,8 @@ from typing import Any
 
 from ..ra.composition_context import _resolve_json_pointer
 from ..ra.refinement_records import fingerprint
-from ..ra.validation_scope import GAZEBO_OBSERVED_SCOPE, required_validation_roles
+from ..ra.validation_scope import is_observed_scope, required_validation_roles
+from ...tools.assembly_geometry import _feature_cad_associations
 
 
 class _GroundingPrerequisite(ValueError):
@@ -54,7 +55,7 @@ def _feature_source(
     camera, candidate = matches[0]
     if candidate != state["resolved_value"]:
         raise _GroundingPrerequisite(f"The issued {role} observation contradicts its accepted candidate association.")
-    return {"feature": feature, "segmentation_ref": ref, "candidate_handle": handle,
+    return {"feature": feature, "state": state, "segmentation_ref": ref, "candidate_handle": handle,
             "observation_handle": camera["observation_handle"], "camera": camera}
 
 
@@ -195,11 +196,8 @@ def _observed_goal(
             if bound:
                 bound_refs.append(_one_value(bound, "/product_geometry"))
                 continue
-            owner_refs = source["feature"]["owner"]["evidence_refs"]
-            cad_refs = {record["CAD"]["record"]["ref"] for ref, record in records.items()
-                        if ref in owner_refs and record.get("record_type") == "CADSizeCorrespondenceRecord"
-                        and record.get("CAD", {}).get("context_ref") in owner_refs}
-            if len(cad_refs) != 1 or not cad_refs.issubset(records):
+            cad_refs = set(_feature_cad_associations(source["feature"], source["state"], records).values())
+            if len(cad_refs) != 1:
                 raise _GroundingPrerequisite("The mating feature needs one issued CAD identity association.")
             operation = {"tool_name": "bind_observed_part", "arguments": json.dumps({
                 "part_ref": selected, "cad_ref": next(iter(cad_refs)), "feature_name": source["feature"]["name"],
@@ -253,7 +251,7 @@ def resolve_primitive_inputs(
     Returns:
         Independent answer selections and deduplicated measurement requests.
     """
-    if request.get("validation_scope") != GAZEBO_OBSERVED_SCOPE or not request.get("primitive_steps"):
+    if not is_observed_scope(request.get("validation_scope")) or not request.get("primitive_steps"):
         return [], []
     steps, target = request["primitive_steps"], request["target_feature"]
     answers, operations = [], {}
@@ -261,7 +259,7 @@ def resolve_primitive_inputs(
              if step.get("primitive_symbol") in {"compute_pick_targets", "grasp_part"}
              and isinstance(step.get("params", {}).get("part_name"), str)}
     goal_ref, goal, goal_failure = None, None, None
-    fitting = "goal" in required_validation_roles(GAZEBO_OBSERVED_SCOPE, target) and (
+    fitting = "goal" in required_validation_roles(request["validation_scope"], target) and (
         "goal" in request.get("validation_refs", {})
         or any(need.get("step_index") is None and need["quantity"] == "goal" for need in request["needs"])
     )
@@ -372,11 +370,8 @@ def resolve_primitive_inputs(
                 if bound:
                     answers.append({"need_id": need["need_id"], "record_ref": _one_value(bound, "/product_geometry")})
                     continue
-                owner_refs = source["feature"]["owner"]["evidence_refs"]
-                cad_refs = {record["CAD"]["record"]["ref"] for ref, record in records.items()
-                            if ref in owner_refs and record.get("record_type") == "CADSizeCorrespondenceRecord"
-                            and record.get("CAD", {}).get("context_ref") in owner_refs}
-                if len(cad_refs) != 1 or not cad_refs.issubset(records):
+                cad_refs = set(_feature_cad_associations(source["feature"], source["state"], records).values())
+                if len(cad_refs) != 1:
                     raise _GroundingPrerequisite("The accepted part feature needs one issued CAD identity association.")
                 operation = {"tool_name": "bind_observed_part", "arguments": json.dumps({
                     "part_ref": selected, "cad_ref": next(iter(cad_refs)), "feature_name": source["feature"]["name"],

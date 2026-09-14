@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import json
+import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,13 +17,70 @@ from cais_spade_llm.spec2primitives.adapters.dual_gazebo import (
     read_dual_gazebo_status,
     start_dual_gazebo,
     stop_dual_gazebo,
+    GazeboResetProbe,
 )
+
+
+@pytest.mark.parametrize('world,passive', [
+    ('table_spec2primitives.world', False),
+    ('table_spec2primitives.world', True), ('table.world', False),
+])
+def test_icra_gripper_followers_preserve_other_simulation_modes(world, passive):
+    """Change only follower control, preserving every other robot model element."""
+    launch = Path(__file__).resolve().parents[3] / 'ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py'
+    module = ast.parse(launch.read_text())
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                    and node.name == '_configure_spec2primitives_gripper_followers')
+    scope = {'ET': ET}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(launch), 'exec'), scope)
+    configure = scope[function.name]
+    root = ET.fromstring('<robot><joint name="arm"/><gazebo><plugin filename="other"/></gazebo></robot>')
+    names = ['left_finger_joint', 'left_inner_knuckle_joint', 'right_outer_knuckle_joint',
+             'right_finger_joint', 'right_inner_knuckle_joint']
+    for name in names:
+        plugin = ET.SubElement(ET.SubElement(root, 'gazebo'), 'plugin',
+                               filename='libgazebo_mimic_joint_plugin.so')
+        for key, value in {'joint': 'xarm6_drive_joint', 'mimicJoint': 'xarm6_' + name,
+                           'multiplier': '1', 'offset': '0', 'maxEffort': '10', 'hasPID': ''}.items():
+            ET.SubElement(plugin, key).text = value
+    before = ET.tostring(root)
+    configure(root, 'xarm6_', world_file=world, passive=passive)
+    if world != 'table_spec2primitives.world' or passive:
+        assert ET.tostring(root) == before
+        return
+    assert root.findall('.//hasPID') == []
+    for plugin in root.findall('./gazebo/plugin')[1:]:
+        ET.SubElement(plugin, 'hasPID').text = ''
+    assert ET.tostring(root) == before
+    root.findall('./gazebo/plugin')[-1].find('mimicJoint').text = 'xarm6_left_finger_joint'
+    with pytest.raises(RuntimeError, match='exactly five'):
+        configure(root, 'xarm6_', world_file=world, passive=passive)
+
+
+@pytest.mark.parametrize(('world', 'passive', 'expected'), [
+    ('table_spec2primitives.world', False, 0.0),
+    ('table_spec2primitives.world', True, 0.85),
+    ('table.world', False, 0.85),
+])
+def test_icra_xarm_gripper_starts_open_without_changing_other_modes(
+    world, passive, expected,
+):
+    """Start the active ICRA xArm gripper at its configured open target."""
+    launch = Path(__file__).resolve().parents[3] / 'ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py'
+    module = ast.parse(launch.read_text())
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                    and node.name == '_xarm_gripper_initial_position')
+    scope = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(launch), 'exec'), scope)
+
+    assert scope[function.name](world_file=world, passive=passive) == expected
 
 
 class FakeRuntime:
     """In-memory runtime implementing only the Spec2Primitives adapter protocol."""
 
     def __init__(self) -> None:
+        self.execution_mode, self.robot_env, self.system_running = "simulation", "gazebo", False
         self.statuses = {DUAL_GAZEBO_NAME: "stopped"}
         self.hardware_statuses = {
             "xarm6": {"overall": "stopped"},
@@ -46,6 +106,74 @@ class FakeRuntime:
 
     def ros2_stop(self, name: str) -> None:
         self.stop_calls.append(name)
+
+
+@pytest.mark.parametrize("fault", [None, "old_clock", "paused", "reset_clock", "stale", "missing", "nonfinite", "old_feedback"])
+def test_reset_probe_requires_new_clock_and_fresh_both_robot_feedback(monkeypatch, fault):
+    """A stopped/restarted process name alone never proves a new simulation baseline."""
+    from cais_spade_llm.spec2primitives.adapters import dual_gazebo
+
+    profile = {"joint_states_topics": ["/joint_states"], "readiness_timeout_sec": 2.0, "state_max_age_sec": 0.2}
+    probe = GazeboResetProbe(profile, threading.Event())
+    probe.context = SimpleNamespace(get_domain_id=lambda: 7)
+    probe.description = '<robot><ros2_control><joint name="arm_a"/><joint name="arm_b"/></ros2_control></robot>'
+    wall = 0.0
+    old = {"publishers": {"/clock": ["old_clock"], "/joint_states": ["old_joints"]}, "services": []}
+    publishers = {"/clock": ["old_clock" if fault == "old_clock" else "new_clock"], "/joint_states": ["new_joints"]}
+
+    def spin(*, timeout_sec):
+        nonlocal wall
+        wall += timeout_sec
+        clock = 1.0 if fault == "paused" else (0.5 if fault == "reset_clock" and wall > 0.15 else 1.0 + wall)
+        probe.clock_ns, probe.clock_gid = int(clock * 1e9), publishers["/clock"][0]
+        stamp = int((0.5 if fault == "stale" else clock) * 1e9)
+        probe.joints["/joint_states"] = (SimpleNamespace(
+            name=["arm_a"] if fault == "missing" else ["arm_a", "arm_b"],
+            position=[0.1] if fault == "missing" else [float("nan") if fault == "nonfinite" else 0.1, 0.2],
+            header=SimpleNamespace(stamp=SimpleNamespace(sec=stamp // 10**9, nanosec=stamp % 10**9)),
+        ), "old_joints" if fault == "old_feedback" else "new_joints", wall)
+
+    monkeypatch.setattr(dual_gazebo, "time", SimpleNamespace(monotonic=lambda: wall))
+    probe.executor = SimpleNamespace(spin_once=spin)
+    monkeypatch.setattr(probe, "_endpoints", lambda: {"publishers": publishers, "services": []})
+    if fault:
+        with pytest.raises((RuntimeError, TimeoutError)):
+            probe.wait_ready(old, ["arm_a", "arm_b"])
+    else:
+        baseline = probe.wait_ready(old, ["arm_a", "arm_b"])
+        assert baseline["clock_publisher_gid"] == "new_clock"
+        assert set(baseline["joint_feedback"]) == {"arm_a", "arm_b"}
+        assert baseline["clock_ns"] > baseline["first_clock_ns"]
+
+
+@pytest.mark.parametrize("fault", [None, "process", "endpoints", "interlock"])
+def test_reset_probe_requires_stopped_process_and_absent_endpoints(monkeypatch, fault):
+    from cais_spade_llm.spec2primitives.adapters import dual_gazebo
+
+    runtime = FakeRuntime()
+    if fault == "process":
+        runtime.statuses[DUAL_GAZEBO_NAME] = "running"
+    wall = 0.0
+    probe = GazeboResetProbe({"stop_timeout_sec": 2}, threading.Event())
+    monkeypatch.setattr(probe, "_subscribe", lambda: None)
+
+    def spin(*, timeout_sec):
+        nonlocal wall
+        wall += timeout_sec
+        if fault == "interlock" and wall > 0.2:
+            runtime.hardware_statuses["ur5e"]["overall"] = "starting"
+
+    monkeypatch.setattr(dual_gazebo, "time", SimpleNamespace(monotonic=lambda: wall))
+    probe.executor = SimpleNamespace(spin_once=spin)
+    monkeypatch.setattr(probe, "_endpoints", lambda: {
+        "publishers": {"/clock": ["old"] if fault == "endpoints" else []}, "services": [],
+    })
+    if fault:
+        with pytest.raises((RuntimeError, TimeoutError)):
+            probe.wait_stopped(runtime)
+    else:
+        assert probe.wait_stopped(runtime)["process_status"] == "stopped"
+        assert wall >= 1.0
 
 
 def test_reads_stopped_and_running_status() -> None:

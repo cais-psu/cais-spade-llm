@@ -218,6 +218,7 @@ def create_spec2primitives_ui_runtime(
         ),
         primitive_execution_runtime=PrimitiveExecutionRuntime(
             robot_runtime=robot_agent_runtime,
+            dual_gazebo=dual_gazebo,
             capture_runtime=LiveGazeboObservationCaptureRuntime(),
         ),
     )

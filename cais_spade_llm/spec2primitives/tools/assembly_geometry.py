@@ -18,6 +18,43 @@ from ..agents.ra.refinement_records import _verify_evidence_tree, append_record,
 from .rgb_d_cad_grounding.size_correspondence import _load_cad_input
 
 
+def _feature_cad_associations(
+    feature: Mapping[str, Any], state: Mapping[str, Any], records: Mapping[str, Any],
+) -> dict[str, str]:
+    """Map an accepted endpoint's cited correspondence records to issued CAD records."""
+    owner_refs = set(feature["owner"]["evidence_refs"])
+    evidence_refs = owner_refs | set(feature.get("evidence_refs", [])) | set(state.get("evidence_refs", []))
+    segmentation_ref = state.get("value_ref", {}).get("record_ref")
+    candidate_handle = state.get("resolved_value", {}).get("candidate_handle")
+    observed = [(camera, candidate) for camera in records.get(segmentation_ref, {}).get("cameras", [])
+                for candidate in camera.get("candidates", []) if candidate.get("candidate_handle") == candidate_handle]
+    associations = {}
+    for ref in sorted(evidence_refs):
+        record = records.get(ref, {})
+        if record.get("record_type") != "CADSizeCorrespondenceRecord" or record.get("measurement") != "accepted":
+            continue
+        cad = record.get("CAD", {})
+        cad_ref = cad.get("record", {}).get("ref")
+        mesh = records.get(cad_ref, {})
+        if (mesh.get("record_type") != "CADMeshRecord"
+                or mesh.get("source", {}).get("context_ref") != cad.get("context_ref")):
+            continue
+        # The owner may already name its CAD. A feature/state citation instead
+        # must support that exact observed endpoint, not another candidate or view.
+        if cad.get("context_ref") not in owner_refs:
+            if (record.get("segmentation", {}).get("record", {}).get("ref") != segmentation_ref
+                    or len(observed) != 1 or observed[0][1] != state.get("resolved_value")):
+                continue
+            measurements = [item for item in record.get("candidate_measurements", [])
+                            if item.get("candidate_handle") == candidate_handle
+                            and item.get("observation_handle") == observed[0][0]["observation_handle"]]
+            if (len(measurements) != 1 or measurements[0].get("measurement_status") != "measured"
+                    or measurements[0].get("within_size_tolerance") is not True):
+                continue
+        associations[ref] = cad_ref
+    return associations
+
+
 def planar_features(triangles: np.ndarray) -> list[dict[str, Any]]:
     """Find planar face groups and circular boundary candidates in CAD-local metres."""
     edges = triangles[:, 1:] - triangles[:, :1]
@@ -796,7 +833,15 @@ class AssemblyGeometryProducer:
         return self.save(goal, [item["record_ref"] for item in shaped] + [surface["record_ref"]])
 
     def bind_part(self, part_ref: str, feature_name: str) -> dict[str, Any]:
-        """Associate measured geometry with an exact already-accepted assembly feature."""
+        """Associate measured geometry with an exact already-accepted assembly feature.
+
+        Args:
+            part_ref: Issued geometry for the accepted observed candidate and CAD.
+            feature_name: Exact feature name in the accepted assembly relationship.
+
+        Returns:
+            Bound geometry with the checked identity evidence retained as source pins.
+        """
         part = self.read(part_ref)
         matches = [
             (association, feature)
@@ -824,10 +869,27 @@ class AssemblyGeometryProducer:
             raise ValueError(
                 "The measured candidate differs from the accepted physical instance; return to the PA authority gate."
             )
+        sources = [part_ref]
         if part["cad_context_ref"] not in feature["owner"]["evidence_refs"]:
-            raise ValueError(
-                "The selected CAD geometry is not bound to the accepted feature owner."
-            )
+            refs = (set(feature["owner"]["evidence_refs"]) | set(feature.get("evidence_refs", []))
+                    | set(state.get("evidence_refs", [])))
+            refs.add(state["value_ref"]["record_ref"])
+            records = {ref: self.read(ref) for ref in sorted(refs) if ref in self.authorized}
+            cad_refs = {record["CAD"]["record"]["ref"] for record in records.values()
+                        if record.get("record_type") == "CADSizeCorrespondenceRecord"}
+            records.update({ref: self.read(ref) for ref in sorted(cad_refs) if ref in self.authorized})
+            associations = _feature_cad_associations(feature, state, records)
+            selected = set(associations.values())
+            cad = records[next(iter(selected))] if len(selected) == 1 else {}
+            mesh = cad.get("artifacts", {}).get("mesh", {})
+            if (cad.get("source", {}).get("context_ref") != part["cad_context_ref"]
+                    or {key: mesh.get(key) for key in ("ref", "sha256")} != part.get("CAD_mesh")):
+                raise ValueError(
+                    "The selected CAD geometry needs one cited correspondence for the accepted feature observation."
+                )
+            # Pin the accepted feature's identity evidence so it cannot disappear
+            # when a later investigation reuses this bound geometry.
+            sources.extend([*sorted(selected), *sorted(associations)])
         payload = {
             key: value
             for key, value in part.items()
@@ -838,7 +900,7 @@ class AssemblyGeometryProducer:
             accepted_feature_name=feature_name,
             assembly_association_sha256=fingerprint(association),
         )
-        return self.save(payload, [part_ref])
+        return self.save(payload, sources)
 
     def observation(
         self, segmentation_ref: str, observation_handle: str

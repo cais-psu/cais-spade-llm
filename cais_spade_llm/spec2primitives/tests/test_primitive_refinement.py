@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from cais_spade_llm.spec2primitives.agents.ra import primitive_composition
 from cais_spade_llm.spec2primitives.agents.ra.validation_scope import (
-    GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE, read_validation_scope,
+    GAZEBO_LINK_ATTACHER_SCOPE, GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE, is_observed_scope, read_validation_scope,
 )
 
 from cais_spade_llm.spec2primitives.agents.pa.primitive_context import (
@@ -58,6 +58,7 @@ from cais_spade_llm.spec2primitives.agents.ra.refinement import (
 )
 from cais_spade_llm.spec2primitives.agents.ra.refinement_records import (
     append_record,
+    fingerprint,
     pin,
     read_pin,
     verify_evidence_tree,
@@ -431,7 +432,7 @@ def test_observed_scope_validates_boxes_without_cad_orientation_or_jaw_fit(tmp_p
     robot.update(measured_at_ros_ns=102_400_000_000, tf_stamps_ns=[102_400_000_000] * 2)
     robot["joint_state"]["stamp_ns"] = 102_400_000_000
     steps = _observed_program(refs)
-    profile = load_refinement_profile()
+    profile = {**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE}
     if fault == "missing_input":
         del steps[5]["params"]["product_geometry"]
     elif fault == "scene":
@@ -485,6 +486,58 @@ def test_observed_scope_validates_boxes_without_cad_orientation_or_jaw_fit(tmp_p
             calculation["primitive_symbol"], calculation["resolved_params"], robot,
             calculation["preceding_pose"], validation_scope=GAZEBO_OBSERVED_SCOPE,
         ) == calculation["result"]
+
+
+@pytest.mark.parametrize("fault", [
+    None, "joint_limit", "mesh_path", "plugin", "fixed_controller_path", "planner",
+    "not_simulation", "malformed_description", "invalid_model_hash", "missing_model_parameters",
+])
+def test_robot_comparison_allows_only_generated_gazebo_controller_filenames(fault: str | None) -> None:
+    """A launch filename is incidental; changed robot models and corrupt captures still block."""
+    previous = _robot(SimpleNamespace(
+        assignment=SimpleNamespace(selected_resource_jid="xarm6@localhost", fingerprint="a"),
+    ))
+    previous["model_parameters"] = {
+        "use_sim_time": True,
+        "robot_description": (
+            '<robot name="fixture"><joint name="joint1" type="revolute">'
+            '<limit lower="-3" upper="3" velocity="1" effort="1"/></joint>'
+            '<link name="finger"><visual><geometry><mesh filename="/assets/finger.stl"/>'
+            '</geometry></visual></link><gazebo><plugin name="gazebo_ros2_control" '
+            'filename="libgazebo_ros2_control.so"><parameters>/tmp/launch_params_before'
+            '</parameters></plugin></gazebo></robot>'
+        ),
+        "robot_description_planning.joint_limits.joint1.max_velocity": 1.0,
+    }
+    current = deepcopy(previous)
+    model = current["model_parameters"]
+    model["robot_description"] = model["robot_description"].replace(
+        "/tmp/launch_params_before", "/tmp/launch_params_after",
+    )
+    replacements = {
+        "joint_limit": ('upper="3"', 'upper="2"'),
+        "mesh_path": ("/assets/finger.stl", "/assets/changed.stl"),
+        "plugin": ("libgazebo_ros2_control.so", "different_control.so"),
+        "fixed_controller_path": ("/tmp/launch_params_after", "/etc/controllers.yaml"),
+        "malformed_description": ("</robot>", ""),
+    }
+    if fault in replacements:
+        model["robot_description"] = model["robot_description"].replace(*replacements[fault])
+    elif fault == "planner":
+        model["robot_description_planning.joint_limits.joint1.max_velocity"] = 2.0
+    elif fault == "not_simulation":
+        previous["model_parameters"]["use_sim_time"] = model["use_sim_time"] = False
+    for context in (previous, current):
+        context["model_parameters_sha256"] = fingerprint(context["model_parameters"])
+    if fault == "invalid_model_hash":
+        current["model_parameters_sha256"] = "c" * 64
+    elif fault == "missing_model_parameters":
+        current.pop("model_parameters")
+    original = deepcopy((previous, current))
+    assert previous["model_parameters_sha256"] != current["model_parameters_sha256"]
+    differences = _robot_changed(previous, current, _legacy_profile())
+    assert [item["field"] for item in differences] == ([] if fault is None else ["model_parameters_sha256"])
+    assert (previous, current) == original
 
 
 def test_robot_comparison_retains_thresholds_and_reports_all_differences() -> None:
@@ -1115,7 +1168,7 @@ def test_pick_place_scope_keeps_input_geometry_and_custody_checks(tmp_path: Path
 @pytest.mark.parametrize("scope", [None, "unknown", [], 1])
 def test_unknown_validation_scope_is_rejected(scope: Any) -> None:
     assert read_validation_scope({}) == VALIDATION_SCOPE
-    assert load_refinement_profile()["validation_scope"] == GAZEBO_OBSERVED_SCOPE
+    assert load_refinement_profile()["validation_scope"] == GAZEBO_LINK_ATTACHER_SCOPE
     with pytest.raises(ValueError, match="Unknown validation scope"):
         read_validation_scope({"validation_scope": scope})
 
@@ -1502,11 +1555,12 @@ def test_pa_observed_bounds_measure_support_and_preserve_collision_coverage(
 
 def _direct_input_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, destination_state: str = "current_state",
+    diameters_m: tuple[float, ...] = (0.042, 0.03),
 ) -> tuple[Any, ...]:
     transform = np.diag([1.0, -1.0, -1.0, 1.0])
     transform[2, 3] = 1.0
     runtime, producer, correspondence_ref, _ = _pa_geometry(
-        tmp_path, monkeypatch, world_transform=transform, diameters_m=(0.042, 0.03),
+        tmp_path, monkeypatch, world_transform=transform, diameters_m=diameters_m,
     )
     correspondence = producer.read(correspondence_ref)
     segmentation_pin = correspondence["segmentation"]["record"]
@@ -1541,6 +1595,120 @@ def _direct_input_fixture(
         ]), "evidence_refs": [{"ref": ref, "sha256": sha} for ref, sha in producer.authorized.items()]}
     producer.target_feature = target
     return runtime, producer, request, camera, calibration_pin
+
+
+@pytest.mark.parametrize("citation_location", ["feature", "state"])
+@pytest.mark.parametrize("destination_state", ["current_state", "desired_state"])
+@pytest.mark.parametrize("scope", [GAZEBO_OBSERVED_SCOPE, GAZEBO_LINK_ATTACHER_SCOPE])
+def test_mating_uses_cad_citations_on_the_exact_feature_or_bound_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, citation_location: str, destination_state: str, scope: str,
+) -> None:
+    """Reach mating measurements when an Assembly owner's CAD citation is on its feature."""
+    runtime, producer, request, _, _ = _direct_input_fixture(
+        tmp_path, monkeypatch, destination_state=destination_state, diameters_m=(0.042, 0.042),
+    )
+    request["validation_scope"] = scope
+    target = request["target_feature"]
+    destination = target["assembly_feature_association"][0]["assembly_features"][1]
+    correspondence_ref = destination["owner"]["evidence_refs"][1]
+    destination["owner"].update(type="Assembly", evidence_refs=["requirement_0001"])
+    citation = destination if citation_location == "feature" else target["resolved_state_values"][1]
+    citation["evidence_refs"] = [correspondence_ref]
+    request["needs"] = _number_needs([*request["needs"],
+        {"step_index": None, "quantity": "goal", "reason": "Mating geometry needed."},
+    ])
+    original = deepcopy(request)
+    geometry, calls, bound_refs = runtime._geometry, [], []
+    reason = "The destination seating surface is unavailable."
+
+    def measure(producer: Any, name: str, arguments: Any) -> Any:
+        calls.append(name)
+        if name == "observed_mating_geometry":
+            bound_refs.extend((arguments["part_ref"], arguments["target_ref"]))
+            raise ValueError(reason)
+        return geometry(producer, name, arguments)
+
+    monkeypatch.setattr(runtime, "_geometry", measure)
+    result = asyncio.run(runtime.investigate(
+        interaction_root=tmp_path, directory=tmp_path / "composition/refinement_runs/run_0001/pa_0002",
+        request=request, max_operations=6,
+    ))
+    assert calls == ["observed_geometry", "bind_observed_part", "bind_observed_part", "observed_mating_geometry"]
+    assert all(reason in finding for finding in result["unresolved"])
+    assert "part" in result["validation_refs"]
+    bound_pin = pin(tmp_path, tmp_path / bound_refs[1])
+    bound = verify_evidence_tree(tmp_path, bound_pin)
+    correspondence = producer.read(correspondence_ref)
+    assert bound["cad_context_ref"] == correspondence["CAD"]["context_ref"]
+    assert bound["accepted_feature_name"] == destination["name"]
+    assert correspondence_ref in {source["ref"] for source in bound["source_refs"]}
+    assert request == original
+    path = tmp_path / correspondence_ref
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="changed"):
+        verify_evidence_tree(tmp_path, bound_pin)
+
+
+@pytest.mark.parametrize("fault", [
+    "uncited", "unissued", "missing_cad", "candidate", "observation", "segmentation",
+    "size", "partial_visibility", "duplicate_measurement", "ambiguous_cad",
+])
+def test_feature_cad_citations_cannot_select_unrelated_or_ambiguous_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Keep placement blocked when citations do not support one exact observed endpoint."""
+    from cais_spade_llm.spec2primitives.agents.pa.primitive_input_resolution import resolve_primitive_inputs
+
+    _, producer, request, camera, calibration = _direct_input_fixture(
+        tmp_path, monkeypatch, diameters_m=(0.042, 0.042),
+    )
+    target = request["target_feature"]
+    destination = target["assembly_feature_association"][0]["assembly_features"][1]
+    correspondence_ref = destination["owner"]["evidence_refs"][1]
+    destination["owner"].update(type="Assembly", evidence_refs=["requirement_0001"])
+    destination["evidence_refs"] = [correspondence_ref]
+    request["needs"] = _number_needs([*request["needs"],
+        {"step_index": None, "quantity": "goal", "reason": "Mating geometry needed."},
+    ])
+    correspondence = producer.read(correspondence_ref)
+    producer.observed_geometry(correspondence["segmentation"]["record"]["ref"],
+                               camera["observation_handle"], calibration["ref"])
+    records = _issued_records(producer)
+    correspondence = records[correspondence_ref]
+    measurement = next(item for item in correspondence["candidate_measurements"]
+                       if item["candidate_handle"] == camera["candidates"][1]["candidate_handle"])
+    if fault == "uncited":
+        destination["evidence_refs"] = []
+    elif fault == "unissued":
+        del records[correspondence_ref]
+    elif fault == "missing_cad":
+        del records[correspondence["CAD"]["record"]["ref"]]
+    elif fault == "candidate":
+        measurement["candidate_handle"] = camera["candidates"][0]["candidate_handle"]
+    elif fault == "observation":
+        measurement["observation_handle"] = "another_view"
+    elif fault == "segmentation":
+        correspondence["segmentation"]["record"]["ref"] = "another_segmentation.json"
+    elif fault == "size":
+        measurement["within_size_tolerance"] = False
+    elif fault == "partial_visibility":
+        measurement["measurement_status"] = "partial_visibility"
+    elif fault == "duplicate_measurement":
+        correspondence["candidate_measurements"].append(deepcopy(measurement))
+    elif fault == "ambiguous_cad":
+        alternative = deepcopy(correspondence)
+        cad_ref = "another_cad_record.json"
+        records[cad_ref] = deepcopy(records[correspondence["CAD"]["record"]["ref"]])
+        alternative["CAD"]["record"]["ref"] = cad_ref
+        records["another_correspondence.json"] = alternative
+        destination["evidence_refs"].append("another_correspondence.json")
+    answers, operations = resolve_primitive_inputs(request, producer, records, {}, {})
+    goal = next(need for need in request["needs"] if need["quantity"] == "goal")
+    assert any(answer["need_id"] == goal["need_id"] and "CAD identity" in answer.get("blocked", "")
+               for answer in answers)
+    assert not any(operation["tool_name"] == "bind_observed_part"
+                   and json.loads(operation["arguments"])["feature_name"] == destination["name"]
+                   for operation in operations)
 
 
 @pytest.mark.parametrize("destination_state", ["current_state", "desired_state"])
@@ -2167,20 +2335,42 @@ def test_private_worker_preserves_parameter_types_and_reports_startup_exit(
     assert session._temporary is None and session._process is None
 
 
-def test_private_scene_allows_only_selected_gripper_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep SRDF exclusions and collision checks for the arm and other objects."""
+@pytest.mark.parametrize("placement_contacts", [[], ["destination", "seat"]])
+@pytest.mark.parametrize("reject_contacts", [False, True])
+def test_private_scene_allows_only_selected_gripper_contact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement_contacts: list[str],
+    reject_contacts: bool,
+) -> None:
+    """Preserve declared contacts across custody without exempting other pairs."""
     import sys
     from cais_spade_llm.spec2primitives.adapters.isolated_moveit import IsolatedMoveItSession
 
-    matrix = SimpleNamespace(entry_names=["arm", "base"], entry_values=[
-        SimpleNamespace(enabled=[False, True]), SimpleNamespace(enabled=[True, False]),
+    matrix = SimpleNamespace(entry_names=["arm", "base", "neighbor"], entry_values=[
+        SimpleNamespace(enabled=[False, True, False]), SimpleNamespace(enabled=[True, False, False]),
+        SimpleNamespace(enabled=[False, False, False]),
     ])
-    scene = SimpleNamespace(is_diff=False, robot_state=SimpleNamespace(is_diff=False),
-                            world=SimpleNamespace(collision_objects=[]))
+    objects = set()
+    removed_objects = set()
+    reject_update = False
+
+    class CollisionObject(SimpleNamespace):
+        REMOVE = -1
+
+    def robot_state() -> Any:
+        return SimpleNamespace(is_diff=False, joint_state=SimpleNamespace(name=[], position=[]),
+                               attached_collision_objects=[])
+
+    def planning_scene() -> Any:
+        return SimpleNamespace(is_diff=False, robot_state=robot_state(),
+                               world=SimpleNamespace(collision_objects=[]),
+                               allowed_collision_matrix=SimpleNamespace(entry_names=[], entry_values=[]))
+
+    current_state = robot_state()
     components = type("Components", (), {"ALLOWED_COLLISION_MATRIX": 128, "__init__": lambda self, **kw: self.__dict__.update(kw)})
     monkeypatch.setitem(sys.modules, "moveit_msgs.msg", SimpleNamespace(
-        CollisionObject=SimpleNamespace, PlanningScene=lambda: scene,
+        CollisionObject=CollisionObject, PlanningScene=planning_scene,
         PlanningSceneComponents=components, AllowedCollisionEntry=SimpleNamespace,
+        RobotState=robot_state, AttachedCollisionObject=SimpleNamespace,
     ))
     service = SimpleNamespace(Request=SimpleNamespace)
     monkeypatch.setitem(sys.modules, "moveit_msgs.srv", SimpleNamespace(
@@ -2190,24 +2380,103 @@ def test_private_scene_allows_only_selected_gripper_contact(tmp_path: Path, monk
 
     def client(service: Any, name: str) -> Any:
         def call(request: Any) -> Any:
+            nonlocal matrix, current_state
             calls.append(name.rsplit("/", 1)[-1])
-            response = (SimpleNamespace(scene=SimpleNamespace(allowed_collision_matrix=matrix))
-                        if name.endswith("get_planning_scene") else SimpleNamespace(success=True))
+            if name.endswith("get_planning_scene"):
+                # Scene-diff propagation removes allowances for deleted objects
+                # unless the scene itself retains them as attached bodies.
+                held = {item.object.id for item in current_state.attached_collision_objects}
+                for object_id in removed_objects - held:
+                    if object_id in matrix.entry_names:
+                        index = matrix.entry_names.index(object_id)
+                        matrix.entry_names.pop(index)
+                        matrix.entry_values.pop(index)
+                        for row in matrix.entry_values:
+                            row.enabled.pop(index)
+                response = SimpleNamespace(scene=SimpleNamespace(allowed_collision_matrix=deepcopy(matrix)))
+            else:
+                update_state = request.scene.robot_state
+                if update_state.joint_state.name or update_state.attached_collision_objects:
+                    assert not update_state.is_diff
+                    current_state = deepcopy(update_state)
+                    for item in current_state.attached_collision_objects:
+                        objects.discard(item.object.id)
+                        removed_objects.add(item.object.id)
+                for item in request.scene.world.collision_objects:
+                    if item.operation == CollisionObject.REMOVE:
+                        objects.discard(item.id)
+                        removed_objects.add(item.id)
+                    else:
+                        objects.add(item.id)
+                        removed_objects.discard(item.id)
+                update = request.scene.allowed_collision_matrix
+                success = not (update.entry_names and reject_update)
+                if update.entry_names and success:
+                    assert not request.scene.world.collision_objects
+                    assert request.scene.is_diff and request.scene.robot_state.is_diff
+                    matrix = deepcopy(update)
+                response = SimpleNamespace(success=success)
             return SimpleNamespace(done=lambda: True, result=lambda: response)
         return SimpleNamespace(wait_for_service=lambda **kw: True, call_async=call)
 
-    session = IsolatedMoveItSession(tmp_path, {"joint_state": {}, "frame_id": "world"}, {
-        "objects": [], "allowed_contacts": [{"object_id": "part", "links": ["finger"]}],
+    session = IsolatedMoveItSession(tmp_path, {
+        "joint_state": {"names": ["joint1"], "positions": [0.2]}, "frame_id": "world", "ee_link": "tool",
+    }, {
+        "objects": [{"object_id": "part"}, {"object_id": "neighbor"}],
+        "allowed_contacts": [{"object_id": "part", "links": ["finger", *placement_contacts]}],
     }, load_refinement_profile())
     session._node = SimpleNamespace(create_client=client)
-    monkeypatch.setattr(session, "_state", lambda *args: SimpleNamespace(is_diff=False))
+    monkeypatch.setattr(session, "_object", lambda item, frame: CollisionObject(
+        id=item["object_id"], operation=1, pose=deepcopy(item.get("pose")), frame_id=frame,
+    ))
     session._apply_scene()
-    assert calls == ["get_planning_scene", "apply_planning_scene"]
-    index = {name: i for i, name in enumerate(matrix.entry_names)}
-    for left, right, expected in [("arm", "base", True), ("part", "finger", True),
-                                  ("part", "arm", False), ("part", "base", False)]:
-        assert matrix.entry_values[index[left]].enabled[index[right]] is expected
-        assert matrix.entry_values[index[right]].enabled[index[left]] is expected
+
+    def check_contacts() -> None:
+        session._call(service, "get_planning_scene", SimpleNamespace())
+        index = {name: i for i, name in enumerate(matrix.entry_names)}
+        for left, right, expected in [("arm", "base", True), ("part", "finger", True),
+                                      ("part", "arm", False), ("part", "base", False),
+                                      ("part", "neighbor", False)]:
+            assert matrix.entry_values[index[left]].enabled[index[right]] is expected
+            assert matrix.entry_values[index[right]].enabled[index[left]] is expected
+        for name in placement_contacts:
+            assert matrix.entry_values[index["part"]].enabled[index[name]] is True
+            assert matrix.entry_values[index[name]].enabled[index["part"]] is True
+            assert matrix.entry_values[index["arm"]].enabled[index[name]] is False
+            assert matrix.entry_values[index["finger"]].enabled[index[name]] is False
+
+    check_contacts()
+    assert objects == {"part", "neighbor"}
+    attachment = {"object_id": "part", "pose": _pose(z=0.01), "touch_links": ["finger"]}
+    mutations = [
+        {"joints": {"names": ["joint1"], "positions": [0.4]}, "attached": attachment},
+        {"joints": {"names": ["joint1"], "positions": [0.6]}, "attached": None,
+         "add": {"object_id": "part", "pose": _pose(x=0.2)}},
+        {"joints": {"names": ["joint1"], "positions": [0.6]}, "attached": attachment},
+    ]
+    original = deepcopy(mutations)
+    for mutation in mutations:
+        reject_update = reject_contacts
+        if reject_contacts:
+            with pytest.raises(RuntimeError, match="contact allowances were not accepted"):
+                asyncio.run(session.change_custody(**mutation))
+            break
+        asyncio.run(session.change_custody(**mutation))
+        check_contacts()
+        assert current_state.joint_state.name == mutation["joints"]["names"]
+        assert current_state.joint_state.position == mutation["joints"]["positions"]
+        if mutation["attached"] is not None:
+            assert objects == {"neighbor"}
+            held, = current_state.attached_collision_objects
+            assert held.object.id == "part" and held.link_name == "tool"
+            assert held.touch_links == ["finger"] and held.object.pose == attachment["pose"]
+            assert held.object.frame_id == "tool"
+        else:
+            assert objects == {"part", "neighbor"}
+            assert current_state.attached_collision_objects == []
+    cycle = ["apply_planning_scene", "get_planning_scene", "apply_planning_scene", "get_planning_scene"]
+    assert calls == (cycle + cycle[:3] if reject_contacts else cycle * 4)
+    assert mutations == original
 
 
 def _initial_support_contact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
@@ -2809,7 +3078,7 @@ def _binding_fixture(
     from cais_spade_llm.spec2primitives.agents.ra import refinement, program_execution
     from cais_spade_llm.spec2primitives.agents.pa import primitive_input_resolution
 
-    inputs, robot, refs, roles = setup or (_observed_setup if scope == GAZEBO_OBSERVED_SCOPE else _setup)(tmp_path)
+    inputs, robot, refs, roles = setup or (_observed_setup if is_observed_scope(scope) else _setup)(tmp_path)
     original_loader = _load_inputs
 
     def load(root: Path) -> Any:
@@ -2831,7 +3100,7 @@ def _binding_fixture(
             else:
                 pointer = need["quantity"]
                 source = refs["pick"] if need["step_index"] == 1 else refs["goal"]
-                if scope == GAZEBO_OBSERVED_SCOPE and pointer.startswith("/target_pose"):
+                if is_observed_scope(scope) and pointer.startswith("/target_pose"):
                     source, pointer = refs["part"], pointer.replace("/target_pose", "/reference_pose", 1)
                 answers.append(_pa_value(need["need_id"], source["ref"], pointer))
         return answers, []
@@ -3140,6 +3409,50 @@ def test_empty_waypoint_returns_to_ra_with_calculated_poses(
     assert read_pin(tmp_path, result["candidate_refs"][1])["primitive_steps"][7]["params"] == {}
 
 
+def test_large_bound_program_reaches_ra_revision_with_complete_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A motion failure must reach RA even when its complete revision exceeds 32,000 characters."""
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
+    steps = _observed_program(refs, bound=False)
+    # Repetition is permitted by the 32-step contract and increases the bound
+    # program size; prompt construction must retain every authored decision.
+    steps[-2:-2] = [deepcopy(steps[-3]) for _ in range(32 - len(steps))]
+    action = _program_action([(step["primitive_symbol"], step["params"]) for step in steps])
+    reason = "Fixture stops after reading complete revision feedback."
+    model = _MessageProgramRuntime([action, {"kind": "unsupported", "reason": reason}])
+    failure = "A complete collision-checked Cartesian segment was not found; this does not prove global infeasibility."
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+
+    async def validator(**kwargs: Any) -> Any:
+        report = await validate_program(**kwargs, session_factory=_PlanningSession)
+        assert report["status"] == "passed", report
+        report["status"] = "failed"
+        report["findings"].append({"step_index": 9, "check": "motion", "status": "failed", "message": failure})
+        report["checked_steps"][8].update(status="failed", fraction=1 / 12, error_code=1, message=failure)
+        return report
+
+    result = asyncio.run(PrimitiveRefinementRuntime(
+        program_runtime=model, robot_runtime=Robot(), product_runtime=product, validator=validator,
+    ).compose(tmp_path))
+    assert result["status"] == "unsupported" and result["stop_reason"] == reason, result
+    assert len(model.calls) == 2 and result["pa_batches"] == 1
+    first, revision = [json.loads(call["prompt"].split("COMPOSITION_INPUT\n", 1)[1]) for call in model.calls]
+    assert len(model.calls[0]["prompt"]) <= 32000 < len(model.calls[1]["prompt"]) <= 64000
+    assert revision["primitive_catalog"] == first["primitive_catalog"]
+    feedback = revision["refinement_context"]
+    binding = read_pin(tmp_path, result["binding_refs"][-1])
+    assert feedback["previous_candidate"] == binding["primitive_steps"]
+    assert len(feedback["previous_candidate"]) == 32
+    assert any(finding["message"] == failure for finding in feedback["findings"])
+    assert feedback["checked_steps"][0]["fraction"] == pytest.approx(1 / 12)
+    assert {item["step_index"] for item in feedback["calculations"]} == {1, 6}
+    assert result["motion_executed"] is False
+
+
 def test_refinement_deadline_and_unchanged_failures_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     inputs, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch)
     program = _MessageProgramRuntime([_program_action([("grasp_part", {"part_name": "medium gear"})])] * 3)
@@ -3371,7 +3684,7 @@ def test_observed_fitting_requires_clearance_engagement_and_actual_seat(tmp_path
             return result
 
     report = asyncio.run(validate_program(inputs=inputs, steps=steps, robot=robot, evidence=roles,
-        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={}, session_factory=Planner))
+        directory=tmp_path / "validation", profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE}, cache={}, session_factory=Planner))
     assert (report["status"] == "passed") is (fault is None), report["findings"]
     assert steps == original
     if fault in {"no_clearance", "zero_clearance", "collision", "above_seat"}:
@@ -3397,6 +3710,105 @@ def test_observed_fitting_requires_clearance_engagement_and_actual_seat(tmp_path
         calculation = read_pin(tmp_path, report["calculation_refs"][-1])
         assert calculation["robot_inputs"]["held_part_transform"] is not None
         assert calculation["result"]["pre_insert_pose"] != calculation["result"]["insert_pose"]
+
+
+@pytest.mark.parametrize("fault", [None, "within_pose_tolerance", "above_target", "wrong_axis", "collision", "missing_goal", "held_part"])
+def test_link_attachment_checks_primitives_without_requiring_clearance(tmp_path: Path, fault: str | None) -> None:
+    """The reported interference permits intended contact, never a wrong primitive outcome."""
+    inputs, robot, refs, roles = _fitting_setup(tmp_path, bore_radius_m=.004987318)
+    inputs = primitive_composition._with_scope(inputs, GAZEBO_LINK_ATTACHER_SCOPE)
+    steps = _program(refs, insert=fault != "above_target")
+    steps[0]["params"]["target_pose"] = _value(refs["part"], "/reference_pose")
+    if fault == "wrong_axis":
+        steps[7]["params"].update(qx=float(np.sin(.1)), qy=0., qz=0., qw=float(np.cos(.1)))
+    if fault == "missing_goal":
+        roles.pop("goal")
+    if fault == "held_part":
+        steps = steps[:8]
+    original = deepcopy(steps)
+    scenes = []
+    planners = []
+
+    class Planner(_PlanningSession):
+        def __init__(self, root: Path, robot: Any, scene: Any, profile: Any) -> None:
+            super().__init__()
+            scenes.append(deepcopy(scene))
+            planners.append(self)
+
+        async def check_segment(self, **request: Any) -> dict[str, Any]:
+            result = await super().check_segment(**request)
+            if request["attached"] and len(self.calls) == 5:
+                if fault == "collision":
+                    result.update(status="failed", message="Collision with an unrelated observed object.")
+                elif fault == "within_pose_tolerance":
+                    result["end_pose"] = {**request["target_pose"], "z": request["target_pose"]["z"] + .0005}
+            return result
+
+    report = asyncio.run(validate_program(
+        inputs=inputs, steps=steps, robot=robot, evidence=roles, directory=tmp_path / "validation",
+        profile=load_refinement_profile(), cache={}, session_factory=Planner,
+    ))
+    assert (report["status"] == "passed") is (fault in {None, "within_pose_tolerance"}), report["findings"]
+    assert report["scope"] == GAZEBO_LINK_ATTACHER_SCOPE and report["motion_executed"] is False
+    assert "physical mating clearance" in report["unmodeled"]
+    assert steps == original
+    assert scenes[0]["objects"] == read_pin(tmp_path, refs["scene"])["objects"]
+    contacts = scenes[0]["allowed_contacts"]
+    assert contacts == [{"object_id": read_pin(tmp_path, refs["part"])["object_id"], "links": [
+        "configured_finger", *([] if fault == "missing_goal" else ["observed_shaft", "seat"]),
+    ]}]
+    if report["status"] == "passed":
+        outcome = next(f for f in report["findings"] if f["check"] == "assembly_outcome")
+        assert outcome["position_error_m"] <= robot["position_tolerance_m"]
+        assert "remaining_radial_clearance_m" not in outcome
+        assert report["predicted_final_state"]["held_part"] is None
+        planner, = planners
+        grasp, release = planner.custody
+        assert grasp == {"joints": planner.calls[2]["joints"], "attached": planner.calls[2]["attached"]}
+        assert release["joints"] == planner.calls[-1]["joints"]
+        assert release["attached"] is None
+        assert release["add"]["pose"] == report["predicted_final_state"]["part_pose"]
+
+
+def test_link_attachment_composition_derives_needs_and_retains_ra_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run_0019's free-text requests cannot block resolved inputs in the simulation scope."""
+    from cais_spade_llm.spec2primitives.agents.ra.program_execution import load_validated_program
+
+    setup = _fitting_setup(tmp_path, bore_radius_m=.004987318)
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch, GAZEBO_LINK_ATTACHER_SCOPE, setup)
+    steps = _program(refs, bound=False)
+    action = _program_action([(step["primitive_symbol"], step["params"]) for step in steps])
+    action["context_requests"] = [
+        {"step_index": index, "quantity": quantity, "authority": "PA", "reason": "Check this requirement."}
+        for index, quantity in ((1, "PA-qualified medium gear ObservedGeometryEvidence binding"),
+                                (6, "PA-qualified checked assembly geometry"),
+                                (2, "Collision, proximity, custody, frame-readiness, and execution validation"))
+    ]
+    model = _MessageProgramRuntime([action])
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> Any:
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+
+    async def validator(**kwargs: Any) -> Any:
+        return await validate_program(**kwargs, session_factory=_PlanningSession)
+
+    result = asyncio.run(PrimitiveRefinementRuntime(
+        program_runtime=model, robot_runtime=Robot(), product_runtime=product, validator=validator,
+    ).compose(tmp_path))
+    assert result["status"] == "validated_for_declared_scope", result
+    assert len(model.calls) == result["pa_batches"] == 1
+    program = load_validated_program(tmp_path)
+    assert program.report["scope"] == GAZEBO_LINK_ATTACHER_SCOPE
+    assert set(program.report["evidence_refs"]) == {"part", "goal", "scene"}
+    assert read_primitive_composition_diagnostic(tmp_path)["candidate"]["primitive_steps"] == steps
+    assert not any(f.get("pa_response_ref") for f in program.report["findings"])
+    prompt = model.calls[0]["prompt"]
+    assert "micrometre seating are not acceptance criteria" in prompt
+    assert '"assembly_board_v1"' not in prompt and '"model_name":' not in prompt
+    assert "placement_attachment" not in prompt
 
 
 def test_fitting_targets_use_the_full_held_part_transform() -> None:
@@ -3452,7 +3864,8 @@ def test_fitting_refinement_retains_grounded_calculations_after_failure(
     async def validator(**kwargs: Any) -> Any:
         return await validate_program(**kwargs, session_factory=_PlanningSession)
 
-    runtime = PrimitiveRefinementRuntime(program_runtime=model, robot_runtime=Robot(), product_runtime=product, validator=validator)
+    runtime = PrimitiveRefinementRuntime(program_runtime=model, robot_runtime=Robot(), product_runtime=product, validator=validator,
+                                         profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE})
     result = asyncio.run(runtime.compose(tmp_path))
     expected = "validated_for_declared_scope" if fault is None else "failed" if "clearance" in fault else "needs_context"
     assert result["status"] == expected, result
@@ -3610,7 +4023,7 @@ def test_another_product_uses_its_checked_dimensions_and_assembly_destination(tm
     steps[0]["params"]["target_pose"] = _value(refs["part"], "/reference_pose")
     original = deepcopy(steps)
     report = asyncio.run(validate_program(inputs=inputs, steps=steps, robot=robot, evidence=roles,
-        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={}, session_factory=_PlanningSession))
+        directory=tmp_path / "validation", profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE}, cache={}, session_factory=_PlanningSession))
     assert report["status"] == "passed", report["findings"]
     assert steps == original
     assert [read_pin(tmp_path, ref)["step_index"] for ref in report["calculation_refs"]] == [1, 6]
@@ -3673,7 +4086,7 @@ def test_nominal_geometry_does_not_claim_unsupported_assembly_operations(tmp_pat
     steps = _program(refs)
     steps[0]["params"]["target_pose"] = _value(refs["part"], "/reference_pose")
     report = asyncio.run(validate_program(inputs=inputs, steps=steps, robot=robot, evidence=roles,
-        directory=tmp_path / "validation", profile=load_refinement_profile(), cache={}, session_factory=_PlanningSession))
+        directory=tmp_path / "validation", profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE}, cache={}, session_factory=_PlanningSession))
     supported = specification == {"family": "vertical_gear_assembly"}
     assert (report["status"] == "passed") is supported
     assert not any(f["check"] == "tolerances" for f in report["findings"])

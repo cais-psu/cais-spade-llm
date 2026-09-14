@@ -8,6 +8,7 @@ from typing import Any
 VALIDATION_SCOPE = "rigid_vertical_gear_assembly_direct_cartesian"
 GAZEBO_PICK_PLACE_SCOPE = "gazebo_pick_place_direct_cartesian"
 GAZEBO_OBSERVED_SCOPE = "gazebo_pick_place_observed_geometry_direct_cartesian"
+GAZEBO_LINK_ATTACHER_SCOPE = "gazebo_link_attacher_direct_cartesian"
 
 _SUPPORTED = frozenset({
     "compute_pick_targets",
@@ -23,7 +24,9 @@ def read_validation_scope(record: Mapping[str, Any]) -> str:
     # Older saved profiles and authoring requests predate this field. A changed
     # application default must never reinterpret their validation authority.
     scope = record.get("validation_scope", VALIDATION_SCOPE)
-    if not isinstance(scope, str) or scope not in {VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE}:
+    if not isinstance(scope, str) or scope not in {
+        VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE, GAZEBO_LINK_ATTACHER_SCOPE,
+    }:
         raise ValueError(f"Unknown validation scope: {scope!r}.")
     return scope
 
@@ -31,7 +34,7 @@ def read_validation_scope(record: Mapping[str, Any]) -> str:
 def required_validation_roles(scope: str, target_feature: Mapping[str, Any] | None = None) -> tuple[str, ...]:
     """Return validation evidence roles separately from selected primitive inputs."""
     scope = read_validation_scope({"validation_scope": scope})
-    if scope == GAZEBO_OBSERVED_SCOPE and any(
+    if is_observed_scope(scope) and any(
         "desired_state" in association.get("state_names", [])
         and len(association.get("assembly_features", [])) == 2
         for association in (target_feature or {}).get("assembly_feature_association", [])
@@ -43,9 +46,16 @@ def required_validation_roles(scope: str, target_feature: Mapping[str, Any] | No
 
 
 def is_pick_place_scope(scope: str) -> bool:
-    """Identify the two scopes using simulated pick-and-place custody checks."""
+    """Identify scopes using simulated pick-and-place custody checks."""
     return read_validation_scope({"validation_scope": scope}) in {
-        GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE,
+        GAZEBO_PICK_PLACE_SCOPE, GAZEBO_OBSERVED_SCOPE, GAZEBO_LINK_ATTACHER_SCOPE,
+    }
+
+
+def is_observed_scope(scope: str) -> bool:
+    """Identify scopes grounded in observed bounds and measured destination geometry."""
+    return read_validation_scope({"validation_scope": scope}) in {
+        GAZEBO_OBSERVED_SCOPE, GAZEBO_LINK_ATTACHER_SCOPE,
     }
 
 
@@ -58,6 +68,25 @@ def supported_primitive_symbols(scope: str) -> frozenset[str]:
 def validation_scope_instruction(scope: str) -> str:
     """Describe the recorded acceptance criteria without prescribing a program."""
     scope = read_validation_scope({"validation_scope": scope})
+    if scope == GAZEBO_LINK_ATTACHER_SCOPE:
+        return (
+            f"Validation scope: {scope}. Evaluate primitive composition using Gazebo link attachment. "
+            "Use PA-qualified observed part bounds, support surfaces and the accepted destination relationship. "
+            "compute_pick_targets uses observed_bounds_center, measured part_height_m and board_center.z. "
+            "compute_place_targets uses the measured placement_surface_point and held part-to-tool transform. "
+            "An accepted desired assembly relationship requires checked goal geometry: target_origin_pose, "
+            "insertion_axis, insertion_distance_m and part_height_m from the same accepted pair. "
+            "Reach that final part reference before release; pre_insert_pose alone is not placement. "
+            "Check position and insertion-axis alignment against robot motion tolerances. "
+            "Intended contact between the selected part and its checked destination/seat is allowed. "
+            "Bore clearance, press-fit mechanics and micrometre seating are not acceptance criteria. "
+            "Other collisions, complete Cartesian motion, correct part identity, grasp proximity and custody remain checked. "
+            "Execution acknowledges gripper attachment, detachment and attachment to the configured assembly board at release. "
+            "No placement snap repairs an incorrect program. This validates simulated primitive composition, not physical assembly. "
+            "Missing input paths and required evidence roles are derived automatically; return context_requests=[] "
+            "instead of prose requests repeating these checks. Motion and execution checks belong to RA, not PA. "
+            "RA chooses every primitive, its order and bindings. "
+        )
     if scope == GAZEBO_OBSERVED_SCOPE:
         return (
             f"Validation scope: {scope}. Use approved observed bounds and support surfaces "
