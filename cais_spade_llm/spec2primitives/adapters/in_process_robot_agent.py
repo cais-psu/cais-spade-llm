@@ -4,13 +4,14 @@ from __future__ import annotations
 
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any, Protocol
 from pathlib import Path
 
-from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME
+from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DUAL_GAZEBO_NAME, read_dual_gazebo_started_at_ns
 from cais_spade_llm.spec2primitives.adapters.moveit_plan_only import (
     MoveItPlanOnlyRuntime,
 )
@@ -82,7 +83,8 @@ class InProcessRobotAgentCompositionRuntime:
         if execution_busy():
             raise RAContextHandoffError("Robot context capture is unavailable during Gazebo execution.")
         acknowledged = await asyncio.to_thread(
-            execution_custody, self._contexts_root, assignment.selected_resource_jid
+            execution_custody, self._contexts_root, assignment.selected_resource_jid,
+            _started_at_ns=read_dual_gazebo_started_at_ns(self._host),
         )
         selected_agent = await self._selected_or_started_agent(assignment)
         assignment.assert_addressed_to(str(getattr(selected_agent, "jid", "")))
@@ -274,7 +276,8 @@ class InProcessRobotAgentCompositionRuntime:
         acknowledged = _execution_custody
         if acknowledged is None:
             acknowledged = await asyncio.to_thread(
-                execution_custody, self._contexts_root, assignment.selected_resource_jid
+                execution_custody, self._contexts_root, assignment.selected_resource_jid,
+                _started_at_ns=read_dual_gazebo_started_at_ns(self._host),
             )
         if acknowledged is not None:
             held_part = acknowledged["held_part"]
@@ -291,53 +294,41 @@ class InProcessRobotAgentCompositionRuntime:
     async def execution_configuration(
         self, assignment: SelectedRAAssignmentEnvelope, *, start_if_needed: bool = False,
     ) -> Mapping[str, Any]:
-        """Wait for simulation readiness and read the unchanged selected RA.
+        """Read simulation command configuration without starting agents or probing ROS.
 
         Args:
-            assignment: The saved authority for the selected simulation resource.
-            start_if_needed: Permit context-only startup during initial Run preparation.
-                Leave false for all subsequent execution checks.
+            assignment: The saved selected simulation resource.
+            start_if_needed: Retained for existing callers; execution no longer starts an RA.
 
         Returns:
-            The selected RobotAgent's configuration and primitive catalog.
-
-        Raises:
-            RAContextHandoffError: Readiness expires or runtime authority changes.
+            The configured controller and, when present, the selected RA catalog.
         """
-        selected = self._require_execution_agent(assignment, allow_stopped=start_if_needed)
-        needs_start = start_if_needed and not self._is_alive(selected)
-        await self._wait_for_simulation_readiness()
-        if needs_start:
-            # Recheck the same owner and all interlocks after discovery before
-            # requesting any lifecycle change through the existing host boundary.
-            if self._require_execution_agent(assignment, allow_stopped=True) is not selected:
-                raise RAContextHandoffError(
-                    "The selected RobotAgent changed while waiting for Gazebo readiness."
-                )
-            selected = await self._start_selected_resource(
-                assignment.selected_resource_jid, assignment.selected_execution_mode,
-            )
-
-        async def read() -> dict[str, Any]:
-            # Readiness may take several probes. Its success cannot authorize a
-            # different environment, hardware state or RobotAgent after the wait.
-            if self._require_execution_agent(assignment) is not selected:
-                raise RAContextHandoffError(
-                    "The selected RobotAgent changed while waiting for Gazebo readiness."
-                )
+        selected = await asyncio.to_thread(self._require_execution_agent, assignment, allow_stopped=True)
+        if selected is not None:
             return {
                 "configuration": deepcopy(selected.controller_config),
-                "primitive_catalog": _phase_5_1_primitive_catalog(
-                    selected.recovery_synthesis_primitive_catalog()
-                ),
+                "primitive_catalog": _phase_5_1_primitive_catalog(selected.recovery_synthesis_primitive_catalog()),
             }
+        # Restored programs need controller endpoints, not a SPADE agent or a
+        # second robot controller. Read the same exact resource's Gazebo manifest.
+        def read() -> dict[str, Any]:
+            directory = Path(__file__).resolve().parents[2] / "initialization/resources"
+            matches = [
+                resource["gazebo"]["controller"]
+                for path in sorted(directory.glob("robot_*.json"))
+                for resource in json.loads(path.read_text()).values()
+                if resource.get("jid") == assignment.selected_resource_jid
+            ]
+            if len(matches) != 1:
+                raise RAContextHandoffError("The selected resource has no unique Gazebo controller configuration.")
+            return {"configuration": matches[0], "primitive_catalog": []}
 
-        return await self._host._run_on_agent_runtime(read())
+        return await asyncio.to_thread(read)
 
     def _require_execution_agent(
         self, assignment: SelectedRAAssignmentEnvelope, *, allow_stopped: bool = False,
     ) -> Any:
-        """Check simulation authority, allowing an absent/stopped RA only before startup."""
+        """Check simulation ownership; configuration reads may use an absent or stopped RA."""
         if assignment.selected_execution_mode != "simulation":
             raise RAContextHandoffError("Gazebo execution requires simulation mode.")
         if self._host.ros2_proc_status(DUAL_GAZEBO_NAME) != "running":

@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from collections import deque
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
@@ -281,10 +282,18 @@ def prepare_trajectory(
             if q.min() < lower or q.max() > upper:
                 raise ValueError(f"Trajectory position exceeds limits for {name}.")
         dt = np.diff(times) / 1e9
-        if max(np.max(np.abs(dq)), np.max(np.abs(np.diff(q) / dt))) > velocity + 1e-6:
-            raise ValueError(f"Trajectory velocity exceeds limits for {name}.")
-        if max(np.max(np.abs(ddq)), np.max(np.abs(np.diff(dq) / dt))) > acceleration + 1e-6:
-            raise ValueError(f"Trajectory acceleration exceeds limits for {name}.")
+        peak_velocity = max(np.max(np.abs(dq)), np.max(np.abs(np.diff(q) / dt)))
+        if peak_velocity > velocity + 1e-6:
+            raise ValueError(
+                f"Trajectory velocity exceeds limits for {name}. "
+                f"Maximum={peak_velocity:.9g}, limit={velocity:.9g}."
+            )
+        peak_acceleration = max(np.max(np.abs(ddq)), np.max(np.abs(np.diff(dq) / dt)))
+        if peak_acceleration > acceleration + 1e-6:
+            raise ValueError(
+                f"Trajectory acceleration exceeds limits for {name}. "
+                f"Maximum={peak_acceleration:.9g}, limit={acceleration:.9g}."
+            )
     return value
 
 
@@ -327,6 +336,12 @@ class GazeboExecutionSession:
         self.gripper_diagnostics: dict[str, Any] | None = None
         self.joints: Any = None
         self._clients: dict[str, Any] = {}
+        self._feedback_condition = threading.Condition()
+        self._joint_samples: deque[Any] = deque(maxlen=4096)
+        self._joint_samples_dropped = 0
+        self._spin_stop = threading.Event()
+        self._spin_thread: threading.Thread | None = None
+        self._spin_error: RuntimeError | None = None
 
     async def work(self, function: Any, *args: Any) -> Any:
         """Await worker completion even if the owning UI disconnects or cancels."""
@@ -359,7 +374,6 @@ class GazeboExecutionSession:
 
     def _start(self) -> None:
         import rclpy
-        import tf2_ros
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.node import Node
@@ -381,8 +395,6 @@ class GazeboExecutionSession:
         )
         self.executor = SingleThreadedExecutor(context=self.context)
         self.executor.add_node(self.node)
-        self.buffer = tf2_ros.Buffer()
-        self.listener = tf2_ros.TransformListener(self.buffer, self.node)
         self.node.create_subscription(
             JointState, self.profile["joint_states_topic"], self._joint, 50
         )
@@ -394,6 +406,8 @@ class GazeboExecutionSession:
         self.arm = ActionClient(self.node, ExecuteTrajectory, services["execute_trajectory"])
         self.attach = self.node.create_client(AttachLink, services["attach"])
         self.detach = self.node.create_client(DetachLink, services["detach"])
+        self._spin_thread = threading.Thread(target=self._spin, name=self.node.get_name(), daemon=True)
+        self._spin_thread.start()
         for client in (self.attach, self.detach):
             if not client.wait_for_service(timeout_sec=self.profile["service_timeout_sec"]):
                 raise RuntimeError("Gazebo attachment services are unavailable.")
@@ -404,12 +418,49 @@ class GazeboExecutionSession:
                                gripper_action_name(self.configuration["gripper"]["topic"]))
 
     def _joint(self, value: Any) -> None:
-        self.joints = value
+        with self._feedback_condition:
+            self.joints = value
+            if len(self._joint_samples) == self._joint_samples.maxlen:
+                self._joint_samples_dropped += 1
+            self._joint_samples.append(value)
+            self._feedback_condition.notify_all()
+
+    def _spin(self) -> None:
+        from rclpy.executors import ExternalShutdownException, ShutdownException
+
+        previous_clock = 0
+        try:
+            while not self._spin_stop.is_set():
+                self.executor.spin_once(timeout_sec=0.05)
+                now = self.node.get_clock().now().nanoseconds
+                if now < previous_clock:
+                    self._spin_error = RuntimeError("Gazebo clock moved backwards during execution.")
+                previous_clock = now
+                with self._feedback_condition:
+                    self._feedback_condition.notify_all()
+        except (ExternalShutdownException, ShutdownException, RuntimeError) as exc:
+            if not self._spin_stop.is_set():
+                self._spin_error = RuntimeError(f"Gazebo feedback executor stopped: {exc}")
+        finally:
+            with self._feedback_condition:
+                self._feedback_condition.notify_all()
+
+    def _wait_for_update(self, *, timeout_sec: float) -> None:
+        # Only the session thread spins this executor. Command waits must not
+        # compete with it or stop /clock and joint delivery between primitives.
+        with self._feedback_condition:
+            self._feedback_condition.wait(timeout=timeout_sec)
+        if self._spin_error is not None:
+            raise self._spin_error
+
+    @staticmethod
+    def _joint_stamp(value: Any) -> int:
+        return value.header.stamp.sec * 1_000_000_000 + value.header.stamp.nanosec
 
     def _await(self, future: Any, timeout: float) -> Any:
         deadline = time.monotonic() + timeout
         while not future.done() and time.monotonic() < deadline:
-            self.executor.spin_once(timeout_sec=0.05)
+            self._wait_for_update(timeout_sec=0.05)
         if not future.done():
             # A service timeout is an unknown outcome, not a negative response.
             raise TimeoutError("Gazebo command acknowledgment timed out.")
@@ -461,7 +512,7 @@ class GazeboExecutionSession:
                 if remaining <= 0:
                     break
                 previous = now
-                self.executor.spin_once(timeout_sec=min(0.05, remaining))
+                self._wait_for_update(timeout_sec=min(0.05, remaining))
                 now = self.node.get_clock().now().nanoseconds
                 if now < previous:
                     raise RuntimeError("Gazebo simulation clock moved backwards while checking instance feedback.")
@@ -494,68 +545,6 @@ class GazeboExecutionSession:
             "qw": pose.orientation.w,
         }
 
-    async def feedback(
-        self,
-        robot: Mapping[str, Any],
-        expected_joints: Mapping[str, Any],
-        expected_pose: Mapping[str, Any],
-        tolerance: float,
-    ) -> dict[str, Any]:
-        """Require fresh joint and tool feedback at the expected motion prefix."""
-        return await self.work(self._feedback, robot, expected_joints, expected_pose, tolerance)
-
-    def _feedback(
-        self,
-        robot: Mapping[str, Any],
-        expected: Mapping[str, Any],
-        pose: Mapping[str, Any],
-        tolerance: float,
-    ) -> dict[str, Any]:
-        from rclpy.time import Time
-        from tf2_ros import TransformException
-
-        deadline = time.monotonic() + self.profile["service_timeout_sec"]
-        while time.monotonic() < deadline:
-            self.executor.spin_once(timeout_sec=0.05)
-            if self.joints is None:
-                continue
-            stamp = self.joints.header.stamp.sec * 1000000000 + self.joints.header.stamp.nanosec
-            now = self.node.get_clock().now().nanoseconds
-            if not 0 <= now - stamp <= self.profile["state_max_age_sec"] * 1e9:
-                continue
-            actual = dict(zip(self.joints.name, self.joints.position, strict=True))
-            if any(
-                name not in actual
-                or not math.isfinite(actual[name])
-                or abs(actual[name] - value)
-                > (
-                    self.configuration["gripper"]["position_tolerance"]
-                    if name == self.configuration["gripper"]["joint"]
-                    else tolerance
-                )
-                for name, value in zip(expected["names"], expected["positions"], strict=True)
-            ):
-                continue
-            try:
-                transform = self.buffer.lookup_transform(
-                    robot["frame_id"], robot["ee_link"], Time()
-                )
-            except TransformException:
-                continue
-            tf_stamp = transform.header.stamp.sec * 1000000000 + transform.header.stamp.nanosec
-            if not 0 <= now - tf_stamp <= self.profile["state_max_age_sec"] * 1e9:
-                continue
-            t, q = transform.transform.translation, transform.transform.rotation
-            measured = {"x": t.x, "y": t.y, "z": t.z, "qx": q.x, "qy": q.y, "qz": q.z, "qw": q.w}
-            difference = np.linalg.inv(pose_matrix(pose)) @ pose_matrix(measured)
-            if (
-                np.linalg.norm(difference[:3, 3]) <= robot["position_tolerance_m"]
-                and Rotation.from_matrix(difference[:3, :3]).magnitude()
-                <= self.profile["fk_orientation_tolerance_rad"]
-            ):
-                return {"joint_positions": actual, "ee_pose": measured, "measured_at_ros_ns": now}
-        raise RuntimeError("Fresh robot feedback does not match the validated program prefix.")
-
     async def move(self, trajectory: Mapping[str, Any]) -> dict[str, Any]:
         """Execute precisely the checked timed trajectory and retain cancellation."""
         return await self.work(self._move, trajectory)
@@ -576,6 +565,9 @@ class GazeboExecutionSession:
             goal.trajectory.joint_trajectory.points.append(point)
         if self.stop.is_set():
             raise RuntimeError("Execution stopped before trajectory dispatch.")
+        sent = previous_clock = self.node.get_clock().now().nanoseconds
+        if sent <= 0:
+            raise RuntimeError("Gazebo clock is unavailable before trajectory dispatch.")
         self.gripper_diagnostics = None
         self.cancel_request = self.goal_result = None
         self.pending_goal = self.arm.send_goal_async(goal)
@@ -584,27 +576,48 @@ class GazeboExecutionSession:
         if self.goal is None or not self.goal.accepted:
             raise RuntimeError("Gazebo rejected the trajectory goal.")
         future = self.goal_result = self.goal.get_result_async()
-        deadline = (
-            time.monotonic()
-            + trajectory["time_from_start_ns"][-1] / 1e9
-            + self.profile["trajectory_timeout_pad_sec"]
+        # Controller durations follow /clock even when physics runs slowly.
+        # A stopped clock and cancellation still need bounded wall-time waits.
+        deadline_ns = sent + trajectory["time_from_start_ns"][-1] + int(
+            self.profile["trajectory_timeout_pad_sec"] * 1e9
         )
-        cancel_sent = False
+        last_clock_advance = time.monotonic()
+        cancel_reason = None
+        cancel_deadline = None
         while not future.done():
-            if (self.stop.is_set() or time.monotonic() >= deadline) and not cancel_sent:
-                self._request_cancel()
-                cancel_sent = True
-                deadline = time.monotonic() + self.profile["stop_timeout_sec"]
-            if cancel_sent and time.monotonic() >= deadline:
+            now = self.node.get_clock().now().nanoseconds
+            wall = time.monotonic()
+            if now < previous_clock:
+                raise RuntimeError("Gazebo clock moved backwards during trajectory execution.")
+            if now > previous_clock:
+                last_clock_advance = wall
+            previous_clock = now
+            if cancel_reason is None:
+                if self.stop.is_set():
+                    cancel_reason = "Execution stopped."
+                elif now >= deadline_ns:
+                    cancel_reason = "Trajectory completion timed out in Gazebo simulation time."
+                elif wall - last_clock_advance >= self.profile["service_timeout_sec"]:
+                    cancel_reason = "Gazebo clock stopped advancing during trajectory execution."
+                if cancel_reason is not None:
+                    self._request_cancel()
+                    cancel_deadline = time.monotonic() + self.profile["stop_timeout_sec"]
+            if cancel_deadline is not None and not future.done() and time.monotonic() >= cancel_deadline:
                 raise TimeoutError(
-                    "Trajectory cancellation has no terminal acknowledgment; motion state is unknown."
+                    f"{cancel_reason} Trajectory cancellation has no terminal acknowledgment; "
+                    "motion state is unknown."
                 )
-            self.executor.spin_once(timeout_sec=0.05)
+            if not future.done():
+                self._wait_for_update(timeout_sec=0.05)
         response = future.result()
         self.goal = None
-        if cancel_sent or response.status != 4 or response.result.error_code.val != 1:
+        # A timeout cancellation can race with an already successful controller
+        # result. The terminal acknowledgment establishes the motion outcome.
+        if self.stop.is_set() or response.status != 4 or response.result.error_code.val != 1:
             raise RuntimeError(
-                "Trajectory stopped or failed; no subsequent primitive was dispatched."
+                "Trajectory stopped or failed; "
+                f"controller status {response.status}, MoveIt error_code {response.result.error_code.val}. "
+                f"{cancel_reason or ''} No subsequent primitive was dispatched."
             )
         return {"success": True, "error_code": response.result.error_code.val}
 
@@ -648,7 +661,11 @@ class GazeboExecutionSession:
             "cancel_requested": False, "cancel_acknowledged": False,
             "position": None, "stamp_ns": None, "sent_ros_ns": sent,
             "elapsed_simulation_sec": 0.0, "elapsed_wall_sec": 0.0, "success": False,
+            "clock_ros_ns": sent, "feedback_age_sec": None,
         }
+        with self._feedback_condition:
+            self._joint_samples.clear()
+            dropped = self._joint_samples_dropped
         if self.joints is not None and config["joint"] in self.joints.name:
             index = self.joints.name.index(config["joint"])
             if index < len(self.joints.position) and math.isfinite(self.joints.position[index]):
@@ -671,14 +688,19 @@ class GazeboExecutionSession:
                 self.goal = None
                 raise RuntimeError("Gazebo rejected the gripper goal.")
             self.goal_result = self.goal.get_result_async()
-            deadline = time.monotonic() + duration + padding + self.profile["trajectory_timeout_pad_sec"]
+            deadline_ns = sent + int((duration + padding + self.profile["trajectory_timeout_pad_sec"]) * 1e9)
+            last_clock_advance = time.monotonic()
             while True:
-                self.executor.spin_once(timeout_sec=0.02)
+                self._wait_for_update(timeout_sec=0.02)
                 now = self.node.get_clock().now().nanoseconds
-                report["elapsed_wall_sec"] = time.monotonic() - started
+                wall = time.monotonic()
+                report["clock_ros_ns"] = now
+                report["elapsed_wall_sec"] = wall - started
                 report["elapsed_simulation_sec"] = (now - sent) / 1e9
                 if now < previous_clock:
                     raise RuntimeError("Gazebo clock moved backwards during gripper execution.")
+                if now > previous_clock:
+                    last_clock_advance = wall
                 previous_clock = now
                 if self.goal_result.done():
                     response = self._gripper_terminal()
@@ -689,22 +711,47 @@ class GazeboExecutionSession:
                         )
                 if self.stop.is_set():
                     raise RuntimeError("Gripper execution stopped; no subsequent primitive was dispatched.")
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Gripper completion timed out. " + feedback_reason)
-                if self.joints is None or config["joint"] not in self.joints.name:
-                    stable_since = None
+                if now >= deadline_ns:
+                    raise TimeoutError("Gripper completion timed out in Gazebo simulation time. " + feedback_reason)
+                if wall - last_clock_advance >= self.profile["service_timeout_sec"]:
+                    raise TimeoutError("Gazebo clock stopped advancing during gripper execution. " + feedback_reason)
+                with self._feedback_condition:
+                    if self._joint_samples_dropped != dropped:
+                        stable_since = None
+                        dropped = self._joint_samples_dropped
+                    pending = self._joint_samples[0] if self._joint_samples else None
+                    if pending is not None and self._joint_stamp(pending) <= now:
+                        sample = self._joint_samples.popleft()
+                    else:
+                        sample = None
+                if sample is None:
+                    if pending is not None:
+                        report["stamp_ns"] = self._joint_stamp(pending)
+                        report["feedback_age_sec"] = (now - report["stamp_ns"]) / 1e9
+                        feedback_reason = "Waiting for Gazebo clock to reach gripper joint feedback."
+                    if last_feedback_stamp and (now - last_feedback_stamp) / 1e9 > self.profile["state_max_age_sec"]:
+                        stable_since = None
+                        feedback_reason = "Gripper joint feedback is stale."
                     continue
-                if self.joints.name.count(config["joint"]) != 1:
+                if config["joint"] not in sample.name:
+                    stable_since = None
+                    feedback_reason = "No measured gripper joint in feedback."
+                    continue
+                if sample.name.count(config["joint"]) != 1:
                     raise RuntimeError("Gripper joint feedback is ambiguous.")
-                index = self.joints.name.index(config["joint"])
-                if index >= len(self.joints.position):
+                index = sample.name.index(config["joint"])
+                if index >= len(sample.position):
                     raise RuntimeError("Gripper joint feedback has no measured position.")
-                actual = float(self.joints.position[index])
-                stamp = self.joints.header.stamp.sec * 1000000000 + self.joints.header.stamp.nanosec
+                actual = float(sample.position[index])
+                stamp = self._joint_stamp(sample)
                 if stamp < last_feedback_stamp:
                     raise RuntimeError("Gripper feedback timestamp moved backwards.")
+                if (stamp - last_feedback_stamp) / 1e9 > self.profile["state_max_age_sec"]:
+                    stable_since = None
+                distinct = stamp > last_feedback_stamp
                 last_feedback_stamp = stamp
-                report.update(position=actual if math.isfinite(actual) else None, stamp_ns=stamp)
+                report.update(position=actual if math.isfinite(actual) else None, stamp_ns=stamp,
+                              feedback_age_sec=(now - stamp) / 1e9)
                 if not math.isfinite(actual):
                     raise RuntimeError("Gripper joint feedback is non-finite.")
                 fresh = stamp >= sent and stamp > 0 and 0 <= now - stamp <= self.profile["state_max_age_sec"] * 1e9
@@ -713,10 +760,13 @@ class GazeboExecutionSession:
                     feedback_reason = ("Gripper joint feedback is stale or its clock has not synchronized."
                                        if not fresh else f"Target {position:g}; measured {actual:g}.")
                     continue
+                if not distinct:
+                    continue
                 # Advance settling only with measured simulation timestamps, never
                 # by repeatedly accepting one cached sample while Gazebo is paused.
                 stable_since = stamp if stable_since is None else stable_since
-                if report["termination_confirmed"] and (stamp - stable_since) / 1e9 >= settle:
+                if (report["termination_confirmed"] and stamp > stable_since
+                        and (stamp - stable_since) / 1e9 >= settle):
                     report["success"] = True
                     return deepcopy(report)
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
@@ -726,7 +776,10 @@ class GazeboExecutionSession:
             except (OSError, RuntimeError, ValueError, TypeError) as cleanup:
                 report["cleanup_error"] = str(cleanup)
             report["elapsed_wall_sec"] = time.monotonic() - started
-            report["elapsed_simulation_sec"] = (self.node.get_clock().now().nanoseconds - sent) / 1e9
+            report["clock_ros_ns"] = self.node.get_clock().now().nanoseconds
+            report["elapsed_simulation_sec"] = (report["clock_ros_ns"] - sent) / 1e9
+            if report["stamp_ns"] is not None:
+                report["feedback_age_sec"] = (report["clock_ros_ns"] - report["stamp_ns"]) / 1e9
             raise GripperCommandError(str(exc), report) from exc
 
     def _gripper_terminal(self) -> Any:
@@ -815,8 +868,14 @@ class GazeboExecutionSession:
                 self._finish_outstanding_goal()
         finally:
             self.goal = None
+            self._spin_stop.set()
             if self.executor is not None:
-                self.executor.shutdown()
+                if self.executor.shutdown(timeout_sec=self.profile["stop_timeout_sec"]) is False:
+                    raise RuntimeError("Gazebo feedback executor shutdown timed out.")
+            if self._spin_thread is not None:
+                self._spin_thread.join(timeout=self.profile["stop_timeout_sec"])
+                if self._spin_thread.is_alive():
+                    raise RuntimeError("Gazebo feedback executor did not stop; transport cleanup is incomplete.")
             if self.node is not None:
                 self.node.destroy_node()
             if self.context is not None:

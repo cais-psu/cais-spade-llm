@@ -114,9 +114,14 @@ def _robot(inputs: Any) -> dict[str, Any]:
         "tf_stamps_ns": [1000000000, 1000000000],
         "configuration_sha256": "a" * 64,
         "model_parameters_sha256": "b" * 64,
-        "model_parameters": {"robot_description": "private robot model"},
+        "model_parameters": {
+            "robot_description": '<robot name="fixture"><joint name="joint1" type="revolute"><limit lower="-3" upper="3" velocity="1" effort="1"/></joint></robot>',
+            "robot_description_planning.joint_limits.joint1.has_acceleration_limits": True,
+            "robot_description_planning.joint_limits.joint1.max_acceleration": 1.0,
+        },
         "position_tolerance_m": 0.001,
         "policy": {
+            "trajectory_time_scale": 1.0,
             "approach_height_m": 0.1,
             "pick_tcp_z_bias_min_m": 0.003,
             "pick_tcp_z_bias_max_m": 0.02,
@@ -307,6 +312,13 @@ class _PlanningSession:
             "status": "passed",
             "message": "Controlled fixture segment accepted.",
             "end_joint_state": request["joints"],
+            "trajectory": {
+                "joint_names": ["joint1"],
+                "positions": [[request["joints"]["positions"][request["joints"]["names"].index("joint1")]]] * 2,
+                "velocities": [[0.0], [0.0]],
+                "accelerations": [[0.0], [0.0]],
+                "time_from_start_ns": [0, 1000000000],
+            },
         }
 
     async def change_custody(self, **values: Any) -> None:
@@ -1171,6 +1183,22 @@ def test_unknown_validation_scope_is_rejected(scope: Any) -> None:
     assert load_refinement_profile()["validation_scope"] == GAZEBO_LINK_ATTACHER_SCOPE
     with pytest.raises(ValueError, match="Unknown validation scope"):
         read_validation_scope({"validation_scope": scope})
+
+
+@pytest.mark.parametrize("value", [None, False, 0, -1, 3601, float("inf"), float("nan"), "30"])
+def test_refinement_profile_rejects_invalid_startup_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: Any,
+) -> None:
+    """Require a finite positive startup budget before opening a ROS context."""
+    from cais_spade_llm.spec2primitives.agents.ra import refinement
+
+    profile = load_refinement_profile()
+    profile["worker_startup_timeout_sec"] = value
+    path = tmp_path / "phase5_validation.json"
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(refinement, "_PROFILE", path)
+    with pytest.raises(ValueError, match="worker_startup_timeout_sec"):
+        load_refinement_profile()
 
 
 def test_target_calculation_rejects_defaults_tokens_and_tool_mismatch(tmp_path: Path) -> None:
@@ -2205,48 +2233,170 @@ def test_evidence_reuse_is_limited_to_one_synchronous_check(tmp_path: Path, monk
 
 
 @pytest.mark.parametrize("pipeline", ["move_group", "ompl"])
-def test_measured_context_copies_selected_planning_pipeline(monkeypatch: pytest.MonkeyPatch, pipeline: str) -> None:
-    """Capture the selected pipeline's exact values through read-only parameter services."""
+@pytest.mark.parametrize("feedback,expected", [
+    ("ready", None),
+    ("clock_lag", None),
+    ("delayed_joint", None),
+    ("slow_parameters", None),
+    ("model_timeout", "Robot model parameter read timed out"),
+    ("retry_list", None),
+    ("retry_get", None),
+    ("retry_pipeline_list", None),
+    ("retry_pipeline_get", None),
+    ("delayed_reply", None),
+    ("getter_timeout", "Robot model parameter read timed out: /move_group/get_parameters"),
+    ("empty_response", "Robot model parameter read timed out: /move_group/list_parameters"),
+    ("discovery_timeout", "Robot model parameter service is unavailable: /move_group/list_parameters"),
+    ("capture_deadline", "Robot model parameter read timed out: /move_group/list_parameters"),
+    ("nearly_expired", "Robot model parameter read timed out: /move_group/list_parameters"),
+    ("retry_stale_joint", "Feedback timestamps"),
+    ("future_only", "No joint state at or before ROS time"),
+    ("missing_joint", "No JointState messages received on /joint_states"),
+    ("zero_clock", "The simulation clock has not supplied a positive time"),
+    ("zero_joint", "Feedback timestamps"),
+    ("stale_joint", "Feedback timestamps"),
+    ("zero_tf", "Feedback timestamps"),
+    ("stale_tf", "Feedback timestamps"),
+    ("future_tf", "Feedback timestamps"),
+    ("skew", "Feedback timestamp skew"),
+    ("missing_tf", "fixture TF lookup unavailable"),
+])
+def test_measured_context_copies_selected_planning_pipeline(
+    monkeypatch: pytest.MonkeyPatch, pipeline: str, feedback: str, expected: str | None,
+) -> None:
+    """Capture fresh buffered feedback and exact selected-pipeline parameter values."""
     import sys
+    from unittest.mock import Mock
+
     from cais_spade_llm.spec2primitives.adapters import robot_validation_context as module
 
     parameters = {
         "robot_description": "<robot name='fixture' />", "robot_description_semantic": "<robot name='fixture' />",
-        "default_planning_pipeline": pipeline, "planning_pipelines": [pipeline],
+        "default_planning_pipeline": pipeline,
         pipeline + ".planning_plugin": "ompl_interface/OMPLPlanner",
         pipeline + ".request_adapters": "default_planner_request_adapters/FixStartStateBounds",
         "robot_description_kinematics.dual_robots.kinematics_solver": None,
         "use_sim_time": True, "unrelated": "excluded",
     }
-    if pipeline == "move_group":
-        parameters.pop("planning_pipelines")  # run_0010 captured only default_planning_pipeline.
+    # run_0010 captured only default_planning_pipeline for move_group.
+    parameters.update({"ompl": {"planning_pipelines": [pipeline]}}.get(pipeline, {}))
     requests = []
+    elapsed = [0.0]
+    limits = []
+    discovery_limits = []
+    receive_joint = []
+    published = []
+    pending = []
+    removed = []
+    cancelled = []
+    request_stages = []
+    request_futures = []
+    response_waits = []
 
     class Client:
+        def __init__(self, srv_name: str) -> None:
+            self.srv_name = srv_name
+
         def wait_for_service(self, **kwargs: Any) -> bool:
-            return True
+            discovery_limits.append(kwargs["timeout_sec"])
+            if feedback in {"discovery_timeout", "capture_deadline", "nearly_expired"}:
+                elapsed[0] += kwargs["timeout_sec"] - (1.0 if feedback == "nearly_expired" else 0.0)
+            return feedback != "discovery_timeout"
+
+        def remove_pending_request(self, future: Any) -> None:
+            removed.append(future)
+            pending.remove(future)
 
         def call_async(self, request: Any) -> Any:
+            nonlocal now_ns
+            if pending:
+                assert len(pending) == 1 and requests[-1] is request
             requests.append(request)
+            if feedback == "slow_parameters" and len(requests) == 1:
+                elapsed[0] += 3.0
+                now_ns = 4_000_000_000
+                fresh_stamp = SimpleNamespace(sec=4, nanosec=0)
+                transform.header = SimpleNamespace(stamp=fresh_stamp)
+                receive_joint[0](SimpleNamespace(header=SimpleNamespace(stamp=fresh_stamp),
+                                                 name=["joint1"], position=[0.25]))
             if hasattr(request, "prefixes"):
+                stage = "pipeline_list" if request.prefixes == [pipeline] else "list"
                 result = SimpleNamespace(result=SimpleNamespace(names=[name for name in parameters
                     if any(name == prefix or name.startswith(prefix + ".") for prefix in request.prefixes)]))
             else:
+                stage = "get" if "robot_description" in request.names else "pipeline_get"
                 result = SimpleNamespace(values=[parameters[name] for name in request.names])
-            return SimpleNamespace(done=lambda: True, result=lambda: result)
+            unanswered = (
+                feedback in {"model_timeout", "nearly_expired"}
+                or feedback == "getter_timeout" and stage == "get"
+                or (feedback == "retry_" + stage or feedback == "retry_stale_joint" and stage == "list")
+                and stage not in request_stages
+            )
+            request_stages.append(stage)
+            if feedback == "empty_response":
+                result = None
+            ready_at = None if unanswered else elapsed[0]
+            if feedback == "delayed_reply" and stage == "get":
+                ready_at = elapsed[0] + 6.0
+            future = SimpleNamespace(result=lambda: result, ready_at=ready_at,
+                                     cancel=lambda: cancelled.append(future))
+            future.done = lambda: future.ready_at is not None and elapsed[0] >= future.ready_at
+            pending.append(future)
+            request_futures.append(future)
+            return future
 
-    stamp = SimpleNamespace(sec=1, nanosec=0)
+    now_ns, joint_stamp_ns, tf_stamp_ns = {
+        "zero_clock": (0, 1_000_000_000, 1_000_000_000),
+        "zero_joint": (1_000_000_000, 0, 1_000_000_000),
+        "stale_joint": (4_000_000_000, 1_000_000_000, 4_000_000_000),
+        "retry_stale_joint": (4_000_000_000, 1_000_000_000, 4_000_000_000),
+        "zero_tf": (1_000_000_000, 1_000_000_000, 0),
+        "stale_tf": (4_000_000_000, 4_000_000_000, 1_000_000_000),
+        "future_tf": (1_000_000_000, 1_000_000_000, 1_100_000_000),
+        "skew": (1_000_000_000, 1_000_000_000, 900_000_000),
+    }.get(feedback, (1_000_000_000, 1_000_000_000, 1_000_000_000))
+    stamp = SimpleNamespace(sec=joint_stamp_ns // 10**9, nanosec=joint_stamp_ns % 10**9)
     joint = SimpleNamespace(header=SimpleNamespace(stamp=stamp), name=["joint1"], position=[0.0])
-    transform = SimpleNamespace(header=SimpleNamespace(stamp=stamp), transform=SimpleNamespace(
+    transform = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(
+        sec=tf_stamp_ns // 10**9, nanosec=tf_stamp_ns % 10**9)), transform=SimpleNamespace(
         translation=SimpleNamespace(x=0.0, y=0.0, z=0.0), rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0)))
+    future_joint = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=100_000_000)),
+                                   name=["joint1"], position=[0.5])
+    messages = {"missing_joint": [], "future_only": [future_joint], "delayed_joint": [],
+                "clock_lag": [joint, future_joint]}.get(feedback, [joint])
+
+    def subscribe(kind: Any, topic: str, callback: Any, depth: int) -> None:
+        receive_joint.append(callback)
+        for message in messages:
+            callback(message)
+
+    lookup = Mock(return_value=transform,
+                  side_effect={"missing_tf": RuntimeError("fixture TF lookup unavailable")}.get(feedback))
+
+    class Executor:
+        def add_node(self, node: Any) -> None:
+            pass
+
+        def spin_once(self, **kwargs: Any) -> None:
+            if pending:
+                elapsed[0] += kwargs["timeout_sec"]
+                response_waits.append(kwargs["timeout_sec"])
+                limits.append(kwargs["timeout_sec"])
+                return
+            elapsed[0] += 1.0
+            if feedback == "delayed_joint" and elapsed[0] == 12.0:
+                receive_joint[0](joint)
+
+        def shutdown(self) -> None:
+            pass
+
     node = SimpleNamespace(
-        create_subscription=lambda kind, topic, callback, depth: callback(joint),
-        create_client=lambda *args: Client(),
-        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1_000_000_000)),
+        create_subscription=subscribe,
+        create_client=lambda kind, name: Client(name),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=now_ns)),
         destroy_subscription=lambda *args: None, destroy_node=lambda: None,
     )
-    executor = SimpleNamespace(add_node=lambda *args: None, spin_once=lambda **kwargs: None,
-                               spin_until_future_complete=lambda *args, **kwargs: None, shutdown=lambda: None)
+    executor = Executor()
     for name, value in {
         "rclpy": SimpleNamespace(init=lambda **kwargs: None, time=SimpleNamespace(Time=lambda: None)),
         "rclpy.node": SimpleNamespace(Node=lambda *args, **kwargs: node),
@@ -2257,13 +2407,14 @@ def test_measured_context_copies_selected_planning_pipeline(monkeypatch: pytest.
         "rcl_interfaces.srv": SimpleNamespace(GetParameters=SimpleNamespace(Request=SimpleNamespace),
                                                ListParameters=SimpleNamespace(Request=SimpleNamespace)),
         "sensor_msgs.msg": SimpleNamespace(JointState=object),
-        "tf2_ros": SimpleNamespace(Buffer=lambda: SimpleNamespace(lookup_transform=lambda *args: transform),
+        "tf2_ros": SimpleNamespace(Buffer=lambda: SimpleNamespace(lookup_transform=lookup),
                                     TransformListener=lambda *args: SimpleNamespace(unregister=lambda: None),
                                     TransformException=RuntimeError),
     }.items():
         monkeypatch.setitem(sys.modules, name, value)
     monkeypatch.setattr(module, "calculation_policy", lambda configuration: {})
     monkeypatch.setattr(module, "gripper_touch_links", lambda *args: [])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: elapsed[0], time_ns=time.time_ns))
     configuration = {
         "move_group": {"frame_id": "world", "ee_link": "tool0", "tcp_link": "tcp", "group_name": "xarm6_xarm6",
                        "position_tolerance_m": 0.001},
@@ -2272,7 +2423,58 @@ def test_measured_context_copies_selected_planning_pipeline(monkeypatch: pytest.
     profile = {**load_refinement_profile(), "resources": {"xarm6@localhost": {
         "joint_states_topic": "/joint_states", "move_group_node": "/move_group",
     }}}
+    profile["max_capture_skew_sec"] = {"skew": 0.01}.get(feedback, profile["max_capture_skew_sec"])
+    retry_stage = {
+        "retry_list": "list", "retry_get": "get", "retry_pipeline_list": "pipeline_list",
+        "retry_pipeline_get": "pipeline_get", "retry_stale_joint": "list",
+        "delayed_reply": "get",
+        "model_timeout": "list", "getter_timeout": "get", "empty_response": "list", "nearly_expired": "list",
+    }.get(feedback)
+
+    def check_requests() -> None:
+        assert not pending
+        assert removed == request_futures
+        assert all(future in removed for future in cancelled)
+        assert all(limit <= profile["service_timeout_sec"] for limit in limits)
+        assert max(discovery_limits) <= profile["worker_startup_timeout_sec"]
+        assert sum(response_waits) <= profile["service_timeout_sec"]
+        if retry_stage in request_stages:
+            indices = [index for index, stage in enumerate(request_stages) if stage == retry_stage]
+            assert len(indices) == 2
+            assert requests[indices[0]] is requests[indices[1]]
+            expected_cancelled = 0 if feedback == "empty_response" else 2 if feedback in {
+                "model_timeout", "getter_timeout", "nearly_expired",
+            } else 1
+            assert len(cancelled) == expected_cancelled
+            if feedback == "delayed_reply":
+                assert cancelled == [request_futures[indices[1]]]
+                assert 6.0 <= sum(response_waits) < 10.0
+        else:
+            assert not cancelled
+
+    if expected is not None:
+        with pytest.raises(RuntimeError, match=expected) as error:
+            module.MeasuredRobotContextRuntime()._capture(
+                "xarm6@localhost", "fixture", configuration, profile, published.append)
+        assert not published
+        if feedback in {"capture_deadline", "discovery_timeout"}:
+            assert not requests
+        else:
+            assert requests
+        if feedback == "capture_deadline":
+            assert "0 attempts within 0 seconds" in str(error.value)
+        if feedback in {"model_timeout", "getter_timeout", "nearly_expired", "empty_response"}:
+            assert "2 attempts" in str(error.value)
+        if feedback == "getter_timeout":
+            assert f"{len(requests[-1].names)} parameters" in str(error.value)
+        assert elapsed[0] <= profile["worker_startup_timeout_sec"]
+        check_requests()
+        return
     record = module.MeasuredRobotContextRuntime()._capture("xarm6@localhost", "fixture", configuration, profile)
+    expected_stamp, expected_position = {"slow_parameters": (4_000_000_000, 0.25)}.get(feedback, (1_000_000_000, 0.0))
+    assert record["joint_state"] == {"names": ["joint1"], "positions": [expected_position], "stamp_ns": expected_stamp}
+    assert record["tf_stamps_ns"] == [expected_stamp, expected_stamp]
+    check_requests()
     assert record["model_parameters"] == {name: value for name, value in parameters.items() if name != "unrelated"}
     assert record["model_parameters_sha256"] == module.fingerprint(record["model_parameters"])
     assert any(getattr(request, "prefixes", None) == [pipeline] for request in requests)

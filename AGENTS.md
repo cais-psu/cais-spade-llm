@@ -21,8 +21,11 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   `cais_spade_llm/spec2primitives/` and read its `AGENTS.md` before doing any work.
 - Keep searches scoped to `cais_spade_llm/spec2primitives/`; do not run repository-wide
   searches for a Spec2Primitives task unless the user explicitly expands the scope.
-- Do not inspect or modify `cais_spade_llm/ui/bridge.py` for Spec2Primitives work unless
-  the user explicitly requests work on that file.
+- Inspect `cais_spade_llm/ui/bridge.py` whenever needed; read-only inspection does
+  not require user confirmation.
+- Never modify `cais_spade_llm/ui/bridge.py` directly. Keep it read-only because
+  it is already large. Put implementation changes in Spec2Primitives adapters
+  or other approved modules instead of adding code to the bridge.
 - Treat ProductAgent, ResourceAgent, CCA, and RobotAgent as shared, read-only
   runtime authorities. Connect to them only through adapters owned by
   `cais_spade_llm/spec2primitives/` after the user authorizes that integration work.

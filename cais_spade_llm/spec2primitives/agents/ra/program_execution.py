@@ -10,8 +10,6 @@ import threading
 import time
 import uuid
 
-import numpy as np
-from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -24,26 +22,26 @@ from .execution_state import (
     assert_interaction_current,
     execution_busy,
     execution_custody,
-    interrupted_reset_cleared_scene,
     read_primitive_execution_diagnostic,
     reset_history,
     verified_reset,
 )
 from .primitive_composition import (
-    _assert_inputs_unchanged,
+    _action,
+    _attempt_paths,
     _evidence_value,
     _load_inputs,
+    _parse_steps,
     _read_record,
     _recorded_request_inputs,
-    read_primitive_composition_diagnostic,
+    _validate_steps,
 )
-from .program_validation import observed_fitting_check, simulated_placement_check, resolve_selected_values, validate_program
+from .program_validation import resolve_selected_values, validate_program
 from .validation_scope import (
     GAZEBO_LINK_ATTACHER_SCOPE, is_observed_scope, is_pick_place_scope,
     read_validation_scope, supported_primitive_symbols,
 )
 from .refinement import _ACTIVE as ACTIVE_COMPOSITIONS
-from .refinement import _robot_changed
 from .refinement_records import (
     append_record,
     fingerprint,
@@ -59,14 +57,11 @@ from ...adapters.gazebo_execution import (
     fixture_instances,
     load_execution_profile,
     match_instance,
-    prepare_trajectory,
 )
 from ...adapters.dual_gazebo import (
-    GazeboResetProbe, assert_reset_interlocks, read_dual_gazebo_status,
+    GazeboResetProbe, assert_reset_interlocks, read_dual_gazebo_started_at_ns, read_dual_gazebo_status,
     start_dual_gazebo, stop_dual_gazebo,
 )
-from ...adapters.target_calculation import calculate_target
-from ...adapters.robot_validation_context import matrix_pose, pose_matrix, validation_capture
 
 logger = logging.getLogger(__name__)
 
@@ -89,44 +84,88 @@ class ValidatedProgram:
 def load_validated_program(root: Path) -> ValidatedProgram:
     """Reject drafts, stale authority, or mismatched candidate/report lineage."""
     inputs = _load_inputs(root)
-    view = read_primitive_composition_diagnostic(root)
-    if view["status"] != "validated_for_declared_scope":
+    base_inputs = inputs
+    runs = sorted((root / "composition/refinement_runs").glob("run_*"))
+    if not runs or not (runs[-1] / "result.json").is_file():
         raise ValueError(
             "Run in Gazebo requires the current program to be validated_for_declared_scope."
         )
-    result = view["refinement"]["result"]
+    directory = runs[-1]
+    result_ref = pin(root, directory / "result.json")
+    result = verify_record(root, result_ref)
+    if result.get("status") != "validated_for_declared_scope":
+        raise ValueError("Run in Gazebo requires the current program to be validated_for_declared_scope.")
     request_ref = result["request_ref"]
     request = verify_record(root, request_ref)
     scope = read_validation_scope(request["profile"])
-    result_ref = pin(root, owned_path(root, request_ref["ref"]).parent / "result.json")
     if (
-        verify_record(root, result_ref) != result
+        request_ref != pin(root, directory / "request.json")
+        or request.get("record_type") != "PrimitiveRefinementRequest"
         or request["base_context_refs"] != inputs.context_refs
     ):
         raise ValueError("The validated run has changed authority.")
+    # Execution verifies the selected run's actual dependencies. Rendering every
+    # historical candidate is UI work and grows with unrelated failed attempts.
+    for key in ("candidate_refs", "decision_refs", "validation_refs", "binding_refs", "event_refs"):
+        for reference in result.get(key, []):
+            read_pin(root, reference)
+    events = [verify_record(root, reference) for reference in result["event_refs"]]
+    recorded_events = {reference["ref"] for reference in result["event_refs"]}
+    for path in directory.glob("event_*.json"):
+        if path.relative_to(root).as_posix() not in recorded_events:
+            terminal = verify_record(root, pin(root, path))
+            if (path.name != f"event_{len(events) + 1:04d}.json"
+                    or terminal.get("stage") != "finished"
+                    or terminal.get("status") != result["status"]):
+                raise ValueError("The validated run's events changed after completion.")
     candidate_ref, validation_ref = result["candidate_refs"][-1], result["validation_refs"][-1]
-    candidate = _read_record(owned_path(root, candidate_ref["ref"]))
-    if read_pin(root, candidate_ref) != candidate or candidate != view["candidate"]:
-        raise ValueError("The displayed candidate differs from the validated program.")
+    attempts = _attempt_paths(root)
+    if not attempts or candidate_ref["ref"] != (attempts[-1] / "candidate.json").relative_to(root).as_posix():
+        raise ValueError("A newer composition attempt supersedes the validated program.")
+    candidate = read_pin(root, candidate_ref)
+    candidate_path = owned_path(root, candidate_ref["ref"])
+    if _read_record(candidate_path) != candidate or candidate.get("status") != "proposed":
+        raise ValueError("The validated candidate is not an unchanged RA proposal.")
+    if candidate["request_ref"] != (attempts[-1] / "request.json").relative_to(root).as_posix():
+        raise ValueError("The candidate references another attempt's request.")
     saved_request = _read_record(owned_path(root, candidate["request_ref"]))
     read_pin(root, {"ref": candidate["request_ref"], "sha256": candidate["request_sha256"]})
     if read_validation_scope(saved_request) != scope:
         raise ValueError("The authored program and refinement run have different validation scopes.")
     inputs = _recorded_request_inputs(inputs, saved_request)
+    if saved_request["context_refs"] != inputs.context_refs:
+        raise ValueError("The candidate request has different context authority.")
     if inputs.includes_execution_identifiers:
         raise ValueError(
             "Compose a new program with the current composition interface before execution."
         )
     report = verify_record(root, validation_ref)
-    if report != view.get("validation"):
-        raise ValueError("The selected validation report differs from the displayed report.")
+    proposals = [event for event in events if event["stage"] == "proposal"]
+    validations = [event for event in events if event["stage"] == "validation_result"]
+    if (not proposals or proposals[-1]["candidate_ref"] != candidate_ref
+            or not validations or validations[-1]["validation_ref"] != validation_ref):
+        raise ValueError("The selected program differs from the latest proposal or validation.")
+    exchanges = []
+    for index, reference in enumerate(candidate["exchange_refs"], 1):
+        expected = attempts[-1] / f"exchange_{index:04d}.json"
+        if reference["ref"] != expected.relative_to(root).as_posix():
+            raise ValueError("The candidate references another attempt's RA exchange.")
+        exchanges.append(_read_record(owned_path(root, reference["ref"])))
+        read_pin(root, reference)
+    if not exchanges:
+        raise ValueError("The candidate has no recorded RA submission.")
+    submitted = _action(exchanges[-1]["response"])
+    if submitted["kind"] != "propose" or _parse_steps(submitted["primitive_steps"]) != candidate["primitive_steps"]:
+        raise ValueError("Candidate differs from the RA submission.")
+    _validate_steps(candidate["primitive_steps"], inputs)
     binding_ref = result.get("binding_refs", [None])[-1] if result.get("binding_refs") else None
-    if report.get("binding_ref") != binding_ref or view.get("binding_ref") != binding_ref:
+    bindings = [event["binding_ref"] for event in events if event["stage"] == "binding"]
+    if report.get("binding_ref") != binding_ref or (bindings[-1] if bindings else None) != binding_ref:
         raise ValueError("The displayed binding differs from the validated program.")
     if binding_ref is not None:
         from .program_binding import read_program_binding
 
-        binding, inputs = read_program_binding(_load_inputs(root), binding_ref)
+        binding, inputs = read_program_binding(base_inputs, binding_ref)
         if binding["candidate_ref"] != candidate_ref:
             raise ValueError("The validated binding belongs to another RA proposal.")
         steps = deepcopy(binding["primitive_steps"])
@@ -176,7 +215,7 @@ class PrimitiveExecutionRuntime:
         dual_gazebo: Any = None,
         reset_probe_factory: Any = GazeboResetProbe,
     ) -> None:
-        """Inject owned robot authority, transport, and final RGB-D capture."""
+        """Inject simulation configuration and command transport for the saved program."""
         self.robot_runtime, self.capture_runtime = robot_runtime, capture_runtime
         self.profile = dict(profile) if profile is not None else load_execution_profile()
         self.session_factory, self.validator, self.share = session_factory, validator, share
@@ -239,43 +278,6 @@ class PrimitiveExecutionRuntime:
         """Read persisted progress without contacting a robot."""
         return read_primitive_execution_diagnostic(root)
 
-    async def _start_gazebo_if_stopped(
-        self, contexts_root: Path, progress: Any,
-    ) -> bool:
-        """Start a clean shared scene when execution finds Gazebo stopped."""
-        if self.dual_gazebo is None:
-            return False
-        status = await asyncio.to_thread(read_dual_gazebo_status, self.dual_gazebo)
-        if status.blocked_reason:
-            raise RuntimeError(status.blocked_reason)
-        if status.state == "running":
-            clean = await asyncio.to_thread(
-                interrupted_reset_cleared_scene, contexts_root
-            )
-            if clean:
-                await progress({
-                    "status": "preparing",
-                    "message": (
-                        "Using the Gazebo scene started after the recorded old scene stopped. "
-                        "Checking execution readiness."
-                    ),
-                })
-            return clean
-        if status.state != "stopped":
-            raise RuntimeError(
-                f"Dual Robots (xArm6 + UR5e) cannot start while status is {status.state}."
-            )
-        await progress({
-            "status": "preparing",
-            "message": "Gazebo is stopped. Starting a clean shared scene before execution.",
-        })
-        error = await asyncio.to_thread(start_dual_gazebo, self.dual_gazebo)
-        if error:
-            refreshed = await asyncio.to_thread(read_dual_gazebo_status, self.dual_gazebo)
-            if refreshed.state != "running" or refreshed.blocked_reason:
-                raise RuntimeError(error)
-        return True
-
     async def reset_simulation(
         self, root: Path, *, progress: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
@@ -309,9 +311,16 @@ class PrimitiveExecutionRuntime:
             required_joints = set()
             for historical in history:
                 for reference in historical["records"]:
-                    if Path(reference["ref"]).name == "robot_ready.json":
-                        robot = await asyncio.to_thread(verify_record, root.parent / historical["interaction"], reference)
-                        required_joints.update(robot["joint_state"]["names"])
+                    name = Path(reference["ref"]).name
+                    owner = root.parent / historical["interaction"]
+                    if name == "prepared.json":
+                        prepared = await asyncio.to_thread(verify_record, owner, reference)
+                        robot = await asyncio.to_thread(verify_record, owner, prepared["robot_context_ref"])
+                    elif name in {"robot_initial.json", "robot_ready.json"}:
+                        robot = await asyncio.to_thread(verify_record, owner, reference)
+                    else:
+                        continue
+                    required_joints.update(robot["joint_state"]["names"])
             if not required_joints:
                 raise ValueError("No verified historical robot feedback is available to verify both robots after reset.")
             profile = load_refinement_profile()
@@ -408,7 +417,10 @@ class PrimitiveExecutionRuntime:
     async def _run_locked(
         self, root: Path, stop: threading.Event, progress: Any, candidate_ref: str | None, binding_ref: str | None
     ) -> dict[str, Any]:
+        started_at_ns, started = time.time_ns(), time.monotonic()
+        preparation_timings: dict[str, float] = {}
         program = await asyncio.to_thread(load_validated_program, root)
+        preparation_timings["load_program_sec"] = time.monotonic() - started
         if binding_ref is not None and (program.binding_ref or {}).get("ref") != binding_ref:
             raise ValueError("The displayed parameter binding changed. Refresh before Run in Gazebo.")
         if candidate_ref is not None and candidate_ref != program.candidate_ref["ref"]:
@@ -418,29 +430,25 @@ class PrimitiveExecutionRuntime:
         assignment = program.inputs.assignment
         if assignment.selected_execution_mode != "simulation":
             raise ValueError("Run in Gazebo supports simulation only.")
-        fresh_simulation = await self._start_gazebo_if_stopped(root.parent, progress)
-        await asyncio.to_thread(
-            assert_execution_available, root.parent, fresh_simulation=fresh_simulation
+        gazebo_started_at_ns = 0
+        if self.dual_gazebo is not None:
+            gazebo = await asyncio.to_thread(read_dual_gazebo_status, self.dual_gazebo)
+            if gazebo.blocked_reason:
+                raise RuntimeError(gazebo.blocked_reason)
+            if gazebo.state != "running":
+                raise RuntimeError(
+                    "Start Dual Gazebo Environment with its top Start control before Run in Gazebo."
+                )
+            gazebo_started_at_ns = read_dual_gazebo_started_at_ns(self.dual_gazebo)
+        await asyncio.to_thread(assert_execution_available, root.parent, _started_at_ns=gazebo_started_at_ns)
+        await asyncio.to_thread(assert_interaction_current, root, _started_at_ns=gazebo_started_at_ns)
+        custody = await asyncio.to_thread(
+            execution_custody, root.parent, assignment.selected_resource_jid,
+            _started_at_ns=gazebo_started_at_ns,
         )
-        if not fresh_simulation:
-            await asyncio.to_thread(assert_interaction_current, root)
-        custody = (
-            {"held_part": None, "gripper_state": None}
-            if fresh_simulation
-            else await asyncio.to_thread(
-                execution_custody, root.parent, assignment.selected_resource_jid
-            )
-        )
-        previous_view = await asyncio.to_thread(read_primitive_execution_diagnostic, root, include_active=False)
-        if not fresh_simulation and previous_view.get("candidate_ref") == program.candidate_ref and (
-            previous_view.get("result") or {}
-        ).get("command_dispatched", True):
-            raise ValueError(
-                "This program already has an execution attempt. Capture current context and compose a fresh program; saved commands are never replayed."
-            )
-        # A restored saved program may have no live context-only RA. Startup is
-        # permitted here, after replay checks, never by per-step authority checks.
-        authority = await self.robot_runtime.execution_configuration(assignment, start_if_needed=True)
+        stage_started = time.monotonic()
+        authority = await self.robot_runtime.execution_configuration(assignment)
+        preparation_timings["configuration_sec"] = time.monotonic() - stage_started
         configuration = authority["configuration"]
         transport_profile = {
             **self.profile,
@@ -450,11 +458,6 @@ class PrimitiveExecutionRuntime:
             "state_max_age_sec": program.profile["state_max_age_sec"],
             "fk_orientation_tolerance_rad": program.profile["fk_orientation_tolerance_rad"],
         }
-        recorded_catalog = read_pin(root, program.inputs.context_refs["primitive_catalog"])[
-            "primitive_catalog"
-        ]
-        if authority["primitive_catalog"] != recorded_catalog:
-            raise ValueError("The live selected RobotAgent catalog changed after composition.")
         directory = root / "execution" / ("run_" + str(time.time_ns()) + "_" + uuid.uuid4().hex[:8])
         refs = []
         previous_event = None
@@ -485,7 +488,8 @@ class PrimitiveExecutionRuntime:
                 "profile": transport_profile,
                 "validation_scope": program.report["scope"],
                 "configuration_sha256": fingerprint(configuration),
-                "fresh_simulation": fresh_simulation,
+                "fresh_simulation": False,
+                "started_at_ns": started_at_ns,
                 "created_at_ns": time.time_ns(),
             },
         )
@@ -504,6 +508,7 @@ class PrimitiveExecutionRuntime:
                 "message": message,
                 "previous_event_ref": previous_event,
                 "created_at_ns": time.time_ns(),
+                "elapsed_sec": time.monotonic() - started,
                 **details,
             }
             previous_event = await asyncio.to_thread(
@@ -521,103 +526,14 @@ class PrimitiveExecutionRuntime:
             if stop.is_set():
                 raise RuntimeError("Stop execution was requested.")
 
-        async def check_authority() -> None:
-            check_stop()
-            await asyncio.to_thread(_assert_inputs_unchanged, program.inputs)
-            await asyncio.to_thread(read_pin, root, program.candidate_ref)
-            if program.binding_ref is not None:
-                await asyncio.to_thread(read_pin, root, program.binding_ref)
-            await asyncio.to_thread(verify_record, root, program.validation_ref)
-            for reference in program.report["evidence_refs"].values():
-                await asyncio.to_thread(verify_evidence_tree, root, reference)
-            current = await self.robot_runtime.execution_configuration(assignment)
-            if current != authority:
-                raise ValueError(
-                    "The selected robot configuration or catalog changed during execution."
-                )
-
         status, message = "blocked", "Execution preparation did not complete."
         try:
-            await emit(
-                "preparing", "Checking the saved program, current robot state and Gazebo binding."
-            )
+            await emit("preparing", "Loading the saved primitive parameters and trajectories.")
             check_stop()
-            async with AsyncExitStack() as capture_stack:
-                fresh = dict(
-                    await capture_stack.enter_async_context(validation_capture(
-                        self.robot_runtime, assignment, profile=program.profile, custody={"held_part": held},
-                    ))
-                )
-                validation_entry_ns = time.time_ns()
-                fresh_ref = await record("robot_initial.json", fresh)
-                if fingerprint(configuration) != fresh["configuration_sha256"]:
-                    raise ValueError("Live RobotAgent configuration differs from the measured robot context.")
-                changes = _robot_changed(program.robot, fresh, program.profile)
-                # Saved primitives prescribe targets, not the old joint start
-                # state. Fresh validation below must check the complete current
-                # state and generate every trajectory before any dispatch.
-                incompatible = [
-                    change for change in changes
-                    if not change["field"].startswith("joint_state.positions[")
-                ]
-                if incompatible:
-                    raise ValueError(
-                        "Robot state or configuration changed after validation: "
-                        + ", ".join(change["field"] for change in incompatible)
-                        + ". Capture current context and compose again."
-                    )
-                if changes:
-                    await emit(
-                        "preparing",
-                        "Revalidating the unchanged saved program from current joint positions: "
-                        + ", ".join(change["field"] for change in changes) + ".",
-                    )
-                fresh_report = await self.validator(
-                    inputs=program.inputs,
-                    steps=program.steps,
-                    robot=fresh,
-                    evidence=program.report["evidence_refs"],
-                    directory=directory / "validation",
-                    profile=program.profile,
-                    cache={},
-                    _validation_started_at_ns=validation_entry_ns,
-                )
-            validation_ref = await record("validation.json", fresh_report)
-            if fresh_report["status"] != "passed" or fresh_report[
-                "candidate_fingerprint"
-            ] != fingerprint(program.steps) or fresh_report.get("scope") != program.report["scope"] or (
-                fresh_report.get("binding_ref") != program.binding_ref
-            ):
-                raise ValueError("Fresh validation did not pass for the unchanged program.")
-            final = dict(
-                await self.robot_runtime.capture_execution_context(
-                    assignment, profile=program.profile, custody={"held_part": held}
-                )
-            )
-            await record("robot_ready.json", final)
-            changes = _robot_changed(fresh, final, program.profile)
-            if changes:
-                raise ValueError(
-                    "Robot state changed during execution preparation: "
-                    + ", ".join(change["field"] for change in changes) + "."
-                )
             evidence = {
-                role: await asyncio.to_thread(verify_evidence_tree, root, reference)
+                role: await asyncio.to_thread(verify_record, root, reference)
                 for role, reference in program.report["evidence_refs"].items()
             }
-            for value in evidence.values():
-                if value.get("authority") == "explicit_experiment_specification":
-                    specification = owned_path(
-                        Path(__file__).resolve().parents[2], value["source_path"]
-                    )
-                    if (
-                        hashlib.sha256(specification.read_bytes()).hexdigest()
-                        != value["source_sha256"]
-                    ):
-                        raise ValueError(
-                            "The explicit experiment specification changed after validation."
-                        )
-            self._check_scene_age(evidence, final["measured_at_ros_ns"], program.profile)
             part = evidence["part"]
             from ...tools.exact_ref_resolver import approved_cad_path, _load_sources
 
@@ -636,29 +552,52 @@ class PrimitiveExecutionRuntime:
             instances = await asyncio.to_thread(
                 fixture_instances, share, self.profile["world_file"], cad_path
             )
-            checked = {item["step_index"]: item for item in fresh_report["checked_steps"]}
+            checked = {item["step_index"]: item for item in program.report["checked_steps"]}
             placement_parent = (self.profile["placement_attachment"]
                                 if program.report["scope"] == GAZEBO_LINK_ATTACHER_SCOPE and "goal" in evidence else None)
-            trajectories = {
-                index: prepare_trajectory(
-                    checked[index]["trajectory"],
-                    fresh,
-                    checked[index]["resolved_params"].get(
-                        "speed", fresh["policy"]["trajectory_time_scale"]
-                    ),
+            # Compose stores raw trajectories. Apply the saved duration scale
+            # once; do not plan or repeat Compose's joint-limit checks here.
+            trajectories = {}
+            for index, step in enumerate(program.steps, 1):
+                if step["primitive_symbol"] != "move_cartesian":
+                    continue
+                trajectory = deepcopy(checked[index]["trajectory"])
+                speed = checked[index]["resolved_params"].get(
+                    "speed", program.robot["policy"]["trajectory_time_scale"]
+                )
+                trajectory["time_from_start_ns"] = [
+                    int(stamp * speed) for stamp in trajectory["time_from_start_ns"]
+                ]
+                for field, divisor in (("velocities", speed), ("accelerations", speed * speed)):
+                    trajectory[field] = [[number / divisor for number in row] for row in trajectory[field]]
+                trajectories[index] = trajectory
+            calculations = {
+                index: (await asyncio.to_thread(verify_record, root, checked[index]["calculation_ref"]))["result"]
+                for index, step in enumerate(program.steps, 1)
+                if step["primitive_symbol"] in {"compute_pick_targets", "compute_place_targets"}
+            }
+            parameters = {
+                index: deepcopy(checked[index]["resolved_params"])
+                if "resolved_params" in checked[index] else resolve_selected_values(
+                    step["params"],
+                    read_evidence=lambda ref, pointer: _evidence_value(program.inputs, ref, pointer),
+                    results=calculations,
                 )
                 for index, step in enumerate(program.steps, 1)
-                if step["primitive_symbol"] == "move_cartesian"
             }
+            check_stop()
             await record(
                 "prepared.json",
                 {
                     "record_type": "PrimitiveExecutionPreparation",
-                    "validation_ref": validation_ref,
-                    "robot_context_ref": fresh_ref,
+                    "validation_ref": program.validation_ref,
+                    "robot_context_ref": program.report["robot_context_ref"],
                     "trajectories": {str(index): value for index, value in trajectories.items()},
+                    "preparation_timings_sec": dict(preparation_timings),
+                    "created_at_ns": time.time_ns(),
                 },
             )
+            stage_started = time.monotonic()
             async with self.session_factory(configuration, transport_profile, stop) as transport:
                 states = await transport.entity_states([item["model_name"] for item in instances])
                 binding = match_instance(
@@ -683,31 +622,13 @@ class PrimitiveExecutionRuntime:
                         **binding,
                     },
                 )
-                pose = deepcopy(fresh["ee_pose"])
-                part_pose = deepcopy(part.get("reference_pose", part.get("origin_pose")))
-                grasp_transform = None
-                measured_grasp_transform = None
-                joints = deepcopy(fresh["joint_state"])
-                gripper_joint = configuration["gripper"]["joint"]
-                if gripper_joint not in joints["names"]:
-                    raise ValueError("The configured gripper has no measured joint feedback.")
-                gripper_position = joints["positions"][joints["names"].index(gripper_joint)]
-                results: dict[int, Mapping[str, Any]] = {}
+                preparation_timings["transport_and_binding_sec"] = time.monotonic() - stage_started
+                previous_step_finished = None
                 for index, step in enumerate(program.steps, 1):
+                    step_started = time.monotonic()
                     symbol = step["primitive_symbol"]
-                    await check_authority()
-                    self._verify_binding_sources(binding)
-                    feedback = await transport.feedback(
-                        fresh, joints, pose, program.profile["state_change_joint_tolerance_rad"]
-                    )
-                    self._check_scene_age(evidence, feedback["measured_at_ros_ns"], program.profile)
-                    params = resolve_selected_values(
-                        step["params"],
-                        read_evidence=lambda ref, pointer: _evidence_value(
-                            program.inputs, ref, pointer
-                        ),
-                        results=results,
-                    )
+                    check_stop()
+                    params = deepcopy(parameters[index])
                     await emit(
                         "running",
                         f"Running step {index} of {len(program.steps)}: {symbol}",
@@ -724,61 +645,36 @@ class PrimitiveExecutionRuntime:
                             "binding_ref": binding_ref
                             if symbol in {"grasp_part", "release_part"}
                             else None,
+                            "created_at_ns": time.time_ns(),
+                            "preflight_elapsed_sec": time.monotonic() - step_started,
+                            "preflight_feedback_elapsed_sec": None,
+                            "idle_before_step_sec": (
+                                time.monotonic() - previous_step_finished
+                                if previous_step_finished is not None else None
+                            ),
                         },
                     )
                     check_stop()
+                    command_started_at_ns, command_started = time.time_ns(), time.monotonic()
+                    motion_elapsed = completion_feedback_elapsed = None
                     if symbol in {"compute_pick_targets", "compute_place_targets"}:
-                        output = calculate_target(symbol, params, fresh, pose, validation_scope=program.report["scope"],
-                                                  held_part_transform=grasp_transform)
-                        calculation = verify_record(root, checked[index]["calculation_ref"])
-                        if output != calculation["result"]:
-                            raise ValueError(
-                                "Helper outputs differ from the freshly validated program."
-                            )
+                        output = deepcopy(calculations[index])
                     elif symbol == "move_cartesian":
                         command_dispatched = motion_dispatched = True
                         output = await transport.move(trajectories[index])
-                        pose = {
-                            **pose,
-                            **{
-                                key: params[key]
-                                for key in ("x", "y", "z", "qx", "qy", "qz", "qw")
-                                if key in params
-                            },
-                        }
-                        pose = deepcopy(checked[index].get("end_pose", pose))
-                        if grasp_transform is not None:
-                            part_pose = matrix_pose(pose_matrix(pose) @ grasp_transform)
-                        # Mimic joints follow the gripper controller. Retain its
-                        # measured primary joint alongside the checked arm joints.
-                        names = trajectories[index]["joint_names"]
-                        joints = {
-                            "names": names + [gripper_joint],
-                            "positions": trajectories[index]["positions"][-1] + [gripper_position],
-                        }
-                        output["feedback"] = await transport.feedback(
-                            fresh, joints, pose, program.profile["state_change_joint_tolerance_rad"]
-                        )
+                        motion_elapsed = time.monotonic() - command_started
+                        if output.get("success") is not True:
+                            raise RuntimeError("Trajectory completion was not acknowledged.")
                     elif symbol == "grasp_part":
-                        states = await transport.entity_states([binding["model_name"]])
-                        match_instance(
-                            [binding],
-                            states,
-                            part,
-                            cad_scale=0.001 if cad["units"] == "mm" else 1.0,
-                            profile=self.profile,
-                            interaction_root=root, validation_scope=program.report["scope"],
-                        )
                         if held is not None:
-                            raise ValueError("grasp_part requires held_part to be null.")
-                        if is_observed_scope(program.report["scope"]) and "goal" in evidence:
-                            measured_grasp_transform = np.linalg.inv(pose_matrix(feedback["ee_pose"])) @ pose_matrix(part_pose)
+                            raise ValueError(f"grasp_part requires held_part to be null; acknowledged held_part is {held!r}.")
                         command_dispatched = True
                         position = params.get("position", configuration["gripper"]["close"])
                         gripper_request = await record(
                             f"step_{index:04d}_gripper_request.json",
                             {"record_type": "PrimitiveExecutionGripperRequest", "step_index": index,
-                             "joint": configuration["gripper"]["joint"], "target": position},
+                             "joint": configuration["gripper"]["joint"], "target": position,
+                             "created_at_ns": time.time_ns()},
                         )
                         gripper_state = None
                         grip = await transport.gripper_command(position)
@@ -789,8 +685,6 @@ class PrimitiveExecutionRuntime:
                         gripper_request = None
                         if grip.get("success") is not True:
                             raise RuntimeError("Gripper completion was not acknowledged.")
-                        gripper_position = position
-                        joints["positions"][joints["names"].index(gripper_joint)] = position
                         gripper_state = "closed"
                         check_stop()
                         custody_known = False
@@ -799,29 +693,16 @@ class PrimitiveExecutionRuntime:
                             raise RuntimeError("Gazebo attachment was not acknowledged.")
                         output["gripper_feedback"] = grip
                         held = params["part_name"]
-                        grasp_transform = np.linalg.inv(pose_matrix(pose)) @ pose_matrix(part_pose)
                         custody_known = True
                     else:
                         if held is None or params.get("part_name", held) != held:
                             raise ValueError("release_part does not match acknowledged held_part.")
-                        if is_observed_scope(program.report["scope"]) and "goal" in evidence:
-                            if measured_grasp_transform is None:
-                                raise ValueError("Fresh grasp feedback is required to assess the held gear before release.")
-                            measured_part_pose = matrix_pose(pose_matrix(feedback["ee_pose"]) @ measured_grasp_transform)
-                            seated, metrics = (
-                                simulated_placement_check(measured_part_pose, evidence["goal"], fresh, program.profile)
-                                if placement_parent is not None else observed_fitting_check(measured_part_pose, evidence["goal"])
-                            )
-                            if not seated:
-                                message = ("Release misses the simulated placement: " if placement_parent is not None else
-                                           "Release does not establish the checked shaft fitting: ")
-                                raise ValueError(message + str(metrics))
                         command_dispatched = True
                         gripper_request = await record(
                             f"step_{index:04d}_gripper_request.json",
                             {"record_type": "PrimitiveExecutionGripperRequest", "step_index": index,
                              "joint": configuration["gripper"]["joint"],
-                             "target": configuration["gripper"]["open"]},
+                             "target": configuration["gripper"]["open"], "created_at_ns": time.time_ns()},
                         )
                         gripper_state = None
                         grip = await transport.gripper_command(configuration["gripper"]["open"])
@@ -832,8 +713,6 @@ class PrimitiveExecutionRuntime:
                         gripper_request = None
                         if grip.get("success") is not True:
                             raise RuntimeError("Gripper completion was not acknowledged.")
-                        gripper_position = configuration["gripper"]["open"]
-                        joints["positions"][joints["names"].index(gripper_joint)] = gripper_position
                         gripper_state = "open"
                         check_stop()
                         custody_known = False
@@ -850,13 +729,8 @@ class PrimitiveExecutionRuntime:
                                 raise RuntimeError("Gazebo board attachment was not acknowledged.")
                             output["placement_attachment"] = placed
                         output["gripper_feedback"] = grip
-                        if measured_grasp_transform is not None:
-                            output["feedback"] = feedback
-                            output["placement_metrics" if placement_parent is not None else "fitting_metrics"] = metrics
                         held, custody_known = None, True
-                        grasp_transform = None
-                        measured_grasp_transform = None
-                    results[index] = deepcopy(output)
+                    previous_step_finished = time.monotonic()
                     await record(
                         f"step_{index:04d}_result.json",
                         {
@@ -866,6 +740,11 @@ class PrimitiveExecutionRuntime:
                             "outputs": output,
                             "held_part": held,
                             "custody_known": custody_known,
+                            "command_started_at_ns": command_started_at_ns,
+                            "created_at_ns": time.time_ns(),
+                            "command_elapsed_sec": previous_step_finished - command_started,
+                            "motion_elapsed_sec": motion_elapsed,
+                            "completion_feedback_elapsed_sec": completion_feedback_elapsed,
                         },
                     )
                     completed = index
@@ -874,7 +753,7 @@ class PrimitiveExecutionRuntime:
                     "completed",
                     "Primitive program completed with acknowledged gripper, detach and board-attachment commands. Physical fit was not evaluated."
                     if placement_parent is not None else
-                    "All commands acknowledged. Nominal shaft fitting was checked in prediction; post-release seating remains unobserved."
+                    "All commands acknowledged. Shaft fitting was not rechecked during execution; post-release seating remains unobserved."
                     if is_observed_scope(program.report["scope"]) and "goal" in evidence else
                     "Pick-and-place completed. All motion, gripper and attach/detach commands acknowledged."
                     if is_pick_place_scope(program.report["scope"]) else
@@ -901,19 +780,6 @@ class PrimitiveExecutionRuntime:
                     "record_type": "PrimitiveExecutionGripperResult",
                     "request_ref": gripper_request, **exc.diagnostics,
                 })
-        observation = None
-        if status == "completed" and self.capture_runtime is not None:
-            await emit("capturing", "Commands completed; capturing final RGB-D for inspection.")
-            try:
-                path = await asyncio.to_thread(
-                    self.capture_runtime.capture,
-                    directory / "observations",
-                    "execution_" + directory.name,
-                    timeout_sec=self.profile["capture_timeout_sec"],
-                )
-                observation = str(path.relative_to(root))
-            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                message += f" Final RGB-D capture unavailable: {exc}"
         await emit(status, message, completed_steps=completed)
         result = {
             "record_type": "PrimitiveExecutionResult",
@@ -928,28 +794,11 @@ class PrimitiveExecutionRuntime:
             "custody_known": custody_known,
             "last_event_ref": previous_event,
             "record_refs": refs,
-            "observation_ref": observation,
+            "observation_ref": None,
             "assembly_success": None,
             "created_at_ns": time.time_ns(),
+            "elapsed_sec": time.monotonic() - started,
+            "preparation_timings_sec": preparation_timings,
         }
         append_record(root, directory, "result.json", result)
         return result
-
-    @staticmethod
-    def _check_scene_age(evidence: Mapping[str, Any], now: int, profile: Mapping[str, Any]) -> None:
-        # Initial validation checks timestamp metadata and source integrity; this
-        # scope reuses the accepted geometry for the unchanged Gazebo scene.
-        if is_observed_scope(read_validation_scope(profile)):
-            return
-        for value in evidence.values():
-            stamp = value.get("observation_timestamp_ns")
-            if stamp is not None and not 0 <= now - stamp <= profile["scene_max_age_sec"] * 1e9:
-                raise ValueError(
-                    "Observed scene evidence is stale; no subsequent primitive can execute."
-                )
-
-    @staticmethod
-    def _verify_binding_sources(binding: Mapping[str, Any]) -> None:
-        for source in binding["sources"]:
-            if hashlib.sha256(Path(source["path"]).read_bytes()).hexdigest() != source["sha256"]:
-                raise ValueError("Gazebo fixture or mesh changed after instance binding.")

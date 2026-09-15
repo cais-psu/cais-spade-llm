@@ -173,8 +173,11 @@ explicitly under the corresponding heading.
 
 ## Shared runtime boundaries
 
-- Do not inspect or modify `cais_spade_llm/ui/bridge.py` unless the user
-  explicitly requests work on that file.
+- Inspect `cais_spade_llm/ui/bridge.py` whenever needed; read-only inspection does
+  not require user confirmation.
+- Never modify `cais_spade_llm/ui/bridge.py` directly. Keep it read-only because
+  it is already large. Put implementation changes in Spec2Primitives adapters
+  or other approved modules instead of adding code to the bridge.
 - Do not copy ProductAgent or RobotAgent into this directory.
 - Treat ProductAgent and RobotAgent as shared, read-only runtime authorities.
 - Keep the ProductAgent connection under `spec2primitives/agents/pa/` and the

@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1535,10 +1536,10 @@ def test_gazebo_execution_reads_selected_context_only_configuration_and_interloc
 
 
 @pytest.mark.parametrize("agent_state", ["shared", "standalone", "missing", "stopped"])
-def test_gazebo_execution_retries_readiness_without_blocking_the_event_loop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_state: str,
+@pytest.mark.parametrize("start_if_needed", [False, True])
+def test_gazebo_execution_reads_configuration_without_startup_or_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_state: str, start_if_needed: bool,
 ) -> None:
-    """Wait responsively, then start or reuse only the saved simulation RA."""
     runtime, selected, _ = _prepare_composition(tmp_path)
     assignment = primitive_composition._load_inputs(tmp_path).assignment
     selected.context_only = True
@@ -1549,232 +1550,76 @@ def test_gazebo_execution_retries_readiness_without_blocking_the_event_loop(
     host.hardware_stack_status = lambda robot: {"overall": "stopped"}
     if agent_state != "shared":
         host.resource_agents = []
-    if agent_state == "standalone":
+    if agent_state in {"standalone", "stopped"}:
         host._spec2primitives_robot_agent = selected
-    elif agent_state == "stopped":
-        stopped_agent = _LiveRobotAgent(alive=False)
-        stopped_agent.context_only = True
-        host._spec2primitives_robot_agent = stopped_agent
-    host.startup_agent = selected
-    expected_starts = int(agent_state in {"missing", "stopped"})
-    monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_POLL_SECONDS", 0.001)
-
-    async def scenario() -> None:
-        loop = asyncio.get_running_loop()
-        entered = asyncio.Event()
-        release = Event()
-        probes = []
-        reads_before = host.runtime_calls
-
-        def readiness(force: bool = False) -> tuple[bool, str]:
-            probes.append(force)
-            if len(probes) == 1:
-                loop.call_soon_threadsafe(entered.set)
-                assert release.wait(2), "The event loop did not release the blocking probe."
-                return False, "Waiting for core services: /compute_cartesian_path"
-            return True, ""
-
-        monkeypatch.setattr(host, "simulation_start_ready", readiness)
-        task = asyncio.create_task(runtime.execution_configuration(assignment, start_if_needed=True))
-        try:
-            await asyncio.wait_for(entered.wait(), timeout=1)
-            assert not task.done()
-            assert host.runtime_calls == reads_before
-            assert host.start_calls == 0
-            release.set()
-            result = await asyncio.wait_for(task, timeout=3)
-            assert result["configuration"] == selected.controller_config
-            assert probes == [True, True]
-            assert host.runtime_calls == reads_before + 1
-            assert host.start_calls == expected_starts
-            assert host.full_system_start_calls == 0
-            assert not hasattr(selected, "controller")
-            assert await runtime.execution_configuration(assignment) == result
-            selected.alive = False
-            with pytest.raises(RAContextHandoffError, match="RobotAgent.*is not running"):
-                await runtime.execution_configuration(assignment)
-            with pytest.raises(RAContextHandoffError, match="RobotAgent.*is not running"):
-                await runtime.capture_execution_context(assignment, profile={}, custody={"held_part": None})
-            assert host.start_calls == expected_starts
-        finally:
-            release.set()
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("fault, message, expected_starts", [
-    ("timeout", "did not become ready.*core services: /compute_cartesian_path", 0),
-    ("hardware_before_wait", "Hardware stack", 0),
-    ("hardware_during_wait", "Hardware stack", 0),
-    ("agent_during_wait", "RobotAgent changed", 0),
-    ("startup_failed", "Selected RobotAgent failed to start: XMPP startup failed", 1),
-    ("missing_result", "RobotAgent.*is not running", 1),
-    ("wrong_jid", "does not match the PA provisional choice", 1),
-    ("wrong_mode", "execution_mode does not match", 1),
-    ("not_context_only", "context-only", 1),
-    ("hardware_during_start", "Hardware stack", 1),
-    ("agent_unregistered_during_start", "RobotAgent is not running", 1),
-    ("agent_replaced_during_start", "RobotAgent changed", 1),
-])
-def test_gazebo_execution_startup_checks_interlocks_and_exact_owned_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, message: str, expected_starts: int,
-) -> None:
-    """Reject stale startup authority before reading a catalog or creating execution records."""
-    runtime, selected, _ = _prepare_composition(tmp_path)
-    assignment = primitive_composition._load_inputs(tmp_path).assignment
-    original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    selected.context_only = True
-    selected.controller_config = {"gripper": {"joint": "configured_joint"}}
-    host = runtime._host
-    host.system_running = False
-    host.gazebo_state = "running"
-    host.resource_agents = []
-    host.startup_agent = selected
-    hardware = {"overall": "running" if fault == "hardware_before_wait" else "stopped"}
-    host.hardware_stack_status = lambda robot: hardware
-    monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS", 0.02)
-
-    def readiness(force: bool = False) -> tuple[bool, str]:
-        assert force is True
-        if fault == "timeout":
-            return False, "Waiting for core services: /compute_cartesian_path"
-        if fault == "hardware_during_wait":
-            hardware["overall"] = "running"
-        elif fault == "agent_during_wait":
-            host._spec2primitives_robot_agent = selected
-        return True, ""
-
-    start = host.start_spec2primitives_robot_agent
-
-    async def startup(resource_jid: str, execution_mode: str) -> Any:
-        if fault == "startup_failed":
-            host.startup_error = "XMPP startup failed"
-        elif fault == "missing_result":
-            host.startup_agent = None
-        elif fault == "wrong_jid":
-            selected.jid = "ur5e@localhost"
-        elif fault == "wrong_mode":
-            selected.execution_mode = "physical"
-        elif fault == "not_context_only":
-            selected.context_only = False
-        result = await start(resource_jid, execution_mode)
-        if fault == "hardware_during_start":
-            hardware["overall"] = "running"
-        elif fault == "agent_unregistered_during_start":
-            host._spec2primitives_robot_agent = None
-        elif fault == "agent_replaced_during_start":
-            replacement = _LiveRobotAgent(jid=selected.jid)
-            replacement.context_only = True
-            host._spec2primitives_robot_agent = replacement
-        return result
-
-    monkeypatch.setattr(host, "simulation_start_ready", readiness)
-    monkeypatch.setattr(host, "start_spec2primitives_robot_agent", startup)
-    monkeypatch.setattr(
-        selected, "recovery_synthesis_primitive_catalog",
-        lambda: pytest.fail("Rejected startup must not supply an execution catalog."),
-    )
-    with pytest.raises(RAContextHandoffError, match=message):
-        asyncio.run(runtime.execution_configuration(assignment, start_if_needed=True))
-    assert host.start_calls == expected_starts
-    assert host.full_system_start_calls == 0
-    assert not (tmp_path / "execution").exists()
-    assert all(path.read_bytes() == data for path, data in original.items())
+    selected.alive = agent_state != "stopped"
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Loading execution configuration needs no agent startup or ROS readiness probe.")
+    monkeypatch.setattr(host, "simulation_start_ready", forbidden)
+    monkeypatch.setattr(host, "start_spec2primitives_robot_agent", forbidden)
+    monkeypatch.setattr(host, "_run_on_agent_runtime", forbidden)
+    result = asyncio.run(runtime.execution_configuration(assignment, start_if_needed=start_if_needed))
+    if agent_state == "missing":
+        manifest = Path(__file__).resolve().parents[2] / "initialization/resources/robot_xarm6.json"
+        expected = json.loads(manifest.read_text())["xarm6"]["gazebo"]["controller"]
+        assert result["configuration"] == expected
+    else:
+        assert result["configuration"] == selected.controller_config
+    assert host.start_calls == host.full_system_start_calls == 0
 
 
 @pytest.mark.parametrize("fault, message", [
-    ("timeout", "did not become ready.*core services: /compute_cartesian_path"),
     ("hardware", "Hardware stack"),
     ("environment", "not exclusively available"),
     ("execution_mode", "not exclusively available"),
     ("system_running", "not exclusively available"),
     ("gazebo_stopped", "Environment is not running"),
-    ("agent_stopped", "RobotAgent.*is not running"),
-    ("agent_replaced", "RobotAgent changed"),
-    ("agent_unregistered", "RobotAgent is not running"),
-    ("agent_readdressed", "RobotAgent is not running"),
     ("agent_ambiguous", "is not unique"),
     ("agent_mode", "execution_mode does not match"),
     ("context_only", "context-only"),
 ])
-def test_gazebo_execution_rechecks_authority_after_readiness_wait(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, message: str,
+def test_gazebo_execution_configuration_keeps_simulation_ownership(
+    tmp_path: Path, fault: str, message: str,
 ) -> None:
-    """A readiness success cannot authorize changed runtime or robot authority."""
     runtime, selected, _ = _prepare_composition(tmp_path)
     assignment = primitive_composition._load_inputs(tmp_path).assignment
-    selected.context_only = True
+    selected.context_only = fault != "context_only"
     selected.controller_config = {"gripper": {"joint": "configured_joint"}}
     host = runtime._host
-    host.system_running = False
-    host.gazebo_state = "running"
-    host.resource_agents = []
-    host._spec2primitives_robot_agent = selected
-    hardware = {"overall": "stopped"}
-    host.hardware_stack_status = lambda robot: hardware
-    monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_POLL_SECONDS", 0.001)
-    if fault == "timeout":
-        monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS", 0.02)
-    probes = []
-
-    def readiness(force: bool = False) -> tuple[bool, str]:
-        probes.append(force)
-        if len(probes) == 1 or fault == "timeout":
-            return False, "Waiting for core services: /compute_cartesian_path"
-        if fault == "hardware":
-            hardware["overall"] = "running"
-        elif fault == "environment":
-            host.robot_env = "real"
-        elif fault == "execution_mode":
-            host.execution_mode = "physical"
-        elif fault == "system_running":
-            host.system_running = True
-        elif fault == "gazebo_stopped":
-            host.gazebo_state = "stopped"
-        elif fault == "agent_stopped":
-            selected.alive = False
-        elif fault == "agent_replaced":
-            replacement = _LiveRobotAgent(jid=selected.jid)
-            replacement.context_only = True
-            host._spec2primitives_robot_agent = replacement
-        elif fault == "agent_unregistered":
-            host._spec2primitives_robot_agent = None
-        elif fault == "agent_readdressed":
-            selected.jid = "ur5e@localhost"
-        elif fault == "agent_ambiguous":
-            host.resource_agents = [_LiveRobotAgent(jid=selected.jid)]
-        elif fault == "agent_mode":
-            selected.execution_mode = "physical"
-        elif fault == "context_only":
-            selected.context_only = False
-        return True, ""
-
-    monkeypatch.setattr(host, "simulation_start_ready", readiness)
-    monkeypatch.setattr(
-        selected, "recovery_synthesis_primitive_catalog",
-        lambda: pytest.fail("Rejected authority must not supply an execution catalog."),
-    )
+    host.system_running = fault == "system_running"
+    host.gazebo_state = "stopped" if fault == "gazebo_stopped" else "running"
+    host.hardware_stack_status = lambda robot: {"overall": "running" if fault == "hardware" else "stopped"}
+    if fault == "environment":
+        host.robot_env = "real"
+    if fault == "execution_mode":
+        host.execution_mode = "physical"
+    if fault == "agent_mode":
+        selected.execution_mode = "physical"
+    if fault == "agent_ambiguous":
+        host.resource_agents.append(_LiveRobotAgent(jid=selected.jid))
     with pytest.raises(RAContextHandoffError, match=message):
-        asyncio.run(runtime.execution_configuration(assignment, start_if_needed=True))
-    assert probes and all(probes)
+        asyncio.run(runtime.execution_configuration(assignment))
     assert host.start_calls == host.full_system_start_calls == 0
-    assert not (tmp_path / "execution").exists()
 
 
 @pytest.mark.parametrize("known", [True, False])
+@pytest.mark.parametrize("new_launch", [False, True])
 def test_gazebo_execution_custody_is_used_by_later_context_capture(
     tmp_path: Path,
     known: bool,
+    new_launch: bool,
 ) -> None:
     from cais_spade_llm.spec2primitives.agents.ra.refinement_records import append_record
 
     root = tmp_path / "interaction"
     runtime, selected, _ = _prepare_composition(root)
     runtime = InProcessRobotAgentCompositionRuntime(runtime._host, contexts_root=tmp_path)
+    if new_launch:
+        runtime._host._ros2_procs = {DUAL_GAZEBO_NAME: SimpleNamespace(pid=123, poll=lambda: None)}
+        runtime._host._gazebo_launch_timing_snapshot = lambda: {
+            "name": DUAL_GAZEBO_NAME, "pid": 123, "t0": 1.0,
+        }
+        selected.robot_state["held_part"] = "medium gear"
     assignment = primitive_composition._load_inputs(root).assignment
     directory = root / "execution/run_1"
     request_ref = append_record(
@@ -1805,15 +1650,15 @@ def test_gazebo_execution_custody_is_used_by_later_context_capture(
             "gripper_state": "closed",
         },
     )
-    if not known:
+    if not known and not new_launch:
         with pytest.raises(ValueError, match="uncertain"):
             asyncio.run(runtime.request_assigned_context(assignment))
         return
     response = asyncio.run(runtime.request_assigned_context(assignment))
-    assert response["robot_state"]["held_part"] == "medium gear"
-    assert response["robot_state"]["gripper_state"] == "closed"
+    assert response["robot_state"]["held_part"] == (None if new_launch else "medium gear")
+    assert response["robot_state"]["gripper_state"] == (None if new_launch else "closed")
     assert "model_name" not in json.dumps(response["robot_state"])
-    assert selected.robot_state.get("held_part") is None
+    assert selected.robot_state.get("held_part") == ("medium gear" if new_launch else None)
 
 
 def test_composition_proposes_with_unbound_parameters_and_ignores_draft_history(
@@ -1927,7 +1772,6 @@ def test_composition_preserves_ra_decisions_in_one_bounded_prompt(tmp_path: Path
     assert kinds == {"propose", "unsupported"}
 
 
-
 def test_composition_progress_precedes_its_single_authoring_call(tmp_path: Path) -> None:
     _prepare_composition(tmp_path)
     updates = []
@@ -1944,7 +1788,6 @@ def test_composition_progress_precedes_its_single_authoring_call(tmp_path: Path)
     assert all("evidence request" not in message for message in updates)
 
 
-
 def test_composition_rejects_oversized_essential_contract_without_truncating(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _prepare_composition(tmp_path)
     inputs = primitive_composition._load_inputs(tmp_path)
@@ -1957,7 +1800,6 @@ def test_composition_rejects_oversized_essential_contract_without_truncating(tmp
         asyncio.run(author_primitive_program_candidate(runtime, tmp_path))
     assert runtime.calls == []
     assert all(path.read_bytes() == content for path, content in original.items())
-
 
 
 @pytest.mark.parametrize("scope", [VALIDATION_SCOPE, GAZEBO_PICK_PLACE_SCOPE])
@@ -1999,15 +1841,6 @@ def test_scope_with_no_supported_catalog_entries_can_report_unsupported(tmp_path
     assert "execution support are []" in primitive_composition._composition_prompt(
         inputs, validation_scope=GAZEBO_PICK_PLACE_SCOPE,
     )
-
-
-
-
-
-
-
-
-
 
 
 def test_parameterized_composition_uses_only_selected_ra_isolated_llm(tmp_path: Path) -> None:
@@ -2168,7 +2001,6 @@ def test_composition_rejects_unapproved_or_traversing_value_refs(tmp_path: Path,
     assert "error" in read_primitive_composition_diagnostic(tmp_path)["trace"][0]["result"]
 
 
-
 def test_composition_load_validates_completion_once_per_integrity_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2241,7 +2073,6 @@ def test_composition_rejects_retired_evidence_actions_and_keeps_independent_atte
     assert second.path.parent.name == "attempt_0002" and second.record["status"] == "unsupported"
     assert first.path.read_bytes() == before and "EXCHANGES" not in fresh.calls[0]["prompt"]
     assert read_primitive_composition_diagnostic(tmp_path)["attempt_count"] == 2
-
 
 
 def test_parameterized_composition_blocks_changed_trace_before_ra_call(tmp_path: Path) -> None:

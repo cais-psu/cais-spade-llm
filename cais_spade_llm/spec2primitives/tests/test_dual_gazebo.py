@@ -14,6 +14,7 @@ import pytest
 from cais_spade_llm.spec2primitives import spec2primitives_ui
 from cais_spade_llm.spec2primitives.adapters.dual_gazebo import (
     DUAL_GAZEBO_NAME,
+    read_dual_gazebo_started_at_ns,
     read_dual_gazebo_status,
     start_dual_gazebo,
     stop_dual_gazebo,
@@ -186,6 +187,33 @@ def test_reads_stopped_and_running_status() -> None:
 
     assert status.state == "running"
     assert status.blocked_reason is None
+
+
+@pytest.mark.parametrize("fault", [None, "missing", "name", "pid", "stopped", "future", "nonfinite"])
+def test_custody_launch_time_uses_existing_process_identity_without_ros(monkeypatch, fault):
+    """Only matching live launch metadata can establish the history boundary."""
+    from cais_spade_llm.spec2primitives.adapters import dual_gazebo
+
+    runtime = FakeRuntime()
+    launch = {"name": DUAL_GAZEBO_NAME, "pid": 123, "t0": 10.0}
+    runtime._ros2_procs = {DUAL_GAZEBO_NAME: SimpleNamespace(
+        pid=123, poll=lambda: 0 if fault == "stopped" else None,
+    )}
+    runtime._gazebo_launch_timing_snapshot = lambda: None if fault == "missing" else dict(launch)
+    if fault == "name":
+        launch["name"] = "gazebo_dual"
+    elif fault == "pid":
+        launch["pid"] = 456
+    elif fault == "future":
+        launch["t0"] = 30.0
+    elif fault == "nonfinite":
+        launch["t0"] = float("nan")
+    monkeypatch.setattr(dual_gazebo, "time", SimpleNamespace(
+        monotonic=lambda: 20.0, time_ns=lambda: 100_000_000_000,
+    ))
+    runtime.status_error = RuntimeError("This metadata read must not probe runtime status.")
+    assert read_dual_gazebo_started_at_ns(runtime) == (90_000_000_000 if fault is None else 0)
+    assert runtime.start_calls == runtime.stop_calls == []
 
 
 @pytest.mark.parametrize("hardware_stack", ["xarm6", "ur5e", "dual robots"])

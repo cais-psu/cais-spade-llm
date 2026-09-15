@@ -82,6 +82,7 @@ def load_refinement_profile() -> dict[str, Any]:
     for field in (
         "deadline_sec",
         "service_timeout_sec",
+        "worker_startup_timeout_sec",
         "planning_timeout_sec",
         "state_max_age_sec",
         "max_capture_skew_sec",

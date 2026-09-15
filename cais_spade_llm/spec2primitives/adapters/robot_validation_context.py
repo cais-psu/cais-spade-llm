@@ -148,6 +148,7 @@ class MeasuredRobotContextRuntime:
         profile: dict[str, Any],
         publish: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        """Capture fresh feedback against the simulation clock and retain timeout details."""
         import rclpy
         from rcl_interfaces.srv import GetParameters, ListParameters
         from rclpy.node import Node
@@ -176,82 +177,53 @@ class MeasuredRobotContextRuntime:
         subscription = node.create_subscription(
             JointState, resource["joint_states_topic"], lambda value: received.append(value), 10
         )
-        deadline = time.monotonic() + float(profile["service_timeout_sec"])
+        # A new ROS context must discover its peers before it can supply data.
+        # Keep startup separate from the age of the measured feedback.
+        deadline = time.monotonic() + float(profile["worker_startup_timeout_sec"])
 
         def call(client: Any, request: Any) -> Any:
             remaining = max(0.0, deadline - time.monotonic())
             if not client.wait_for_service(timeout_sec=remaining):
-                raise RuntimeError("Robot model parameter service is unavailable.")
-            future = client.call_async(request)
-            executor.spin_until_future_complete(
-                future, timeout_sec=max(0.0, deadline - time.monotonic())
+                raise RuntimeError(f"Robot model parameter service is unavailable: {client.srv_name}.")
+            timeout = min(float(profile["service_timeout_sec"]), max(0.0, deadline - time.monotonic()))
+            response_deadline = time.monotonic() + timeout
+            retry_at = response_deadline - timeout / 2
+            futures = [client.call_async(request)] if timeout > 0 else []
+            try:
+                while futures:
+                    for future in futures:
+                        if future.done() and future.result() is not None:
+                            return future.result()
+                    remaining = max(0.0, response_deadline - time.monotonic())
+                    if remaining <= 0 or len(futures) == 2 and all(future.done() for future in futures):
+                        break
+                    if len(futures) == 1 and (time.monotonic() >= retry_at or futures[0].done()):
+                        # These reads have no side effects. Keep a slow first
+                        # reply eligible so retrying cannot shorten its budget.
+                        futures.append(client.call_async(request))
+                        continue
+                    wait_until = retry_at if len(futures) == 1 else response_deadline
+                    executor.spin_once(timeout_sec=min(0.1, max(0.0, wait_until - time.monotonic())))
+            finally:
+                for future in futures:
+                    client.remove_pending_request(future)
+                    if not future.done():
+                        future.cancel()
+            selection = (
+                f"{len(request.names)} parameters" if hasattr(request, "names")
+                else "prefixes=" + ", ".join(request.prefixes)
             )
-            if not future.done() or future.result() is None:
-                future.cancel()
-                raise RuntimeError("Robot model parameter read timed out.")
-            return future.result()
+            raise RuntimeError(
+                f"Robot model parameter read timed out: {client.srv_name} "
+                f"({selection}; {len(futures)} attempts within {timeout:g} seconds)."
+            )
 
         try:
             frame, ee_link, tcp_link = (
                 move_group[key] for key in ("frame_id", "ee_link", "tcp_link")
             )
-            transforms = None
-            while time.monotonic() < deadline:
-                executor.spin_once(timeout_sec=0.05)
-                if not received:
-                    continue
-                try:
-                    transforms = [
-                        buffer.lookup_transform(frame, link, rclpy.time.Time())
-                        for link in (ee_link, tcp_link)
-                    ]
-                except TransformException:
-                    continue
-                now_ns = node.get_clock().now().nanoseconds
-                joint = received[-1]
-                stamps = [joint.header.stamp.sec * 10**9 + joint.header.stamp.nanosec]
-                stamps.extend(
-                    t.header.stamp.sec * 10**9 + t.header.stamp.nanosec for t in transforms
-                )
-                # The planning-frame-to-EE/TCP transforms are dynamic; unlike a
-                # static tool edge, a zero stamp cannot establish their freshness.
-                if any(
-                    stamp <= 0
-                    or not 0 <= now_ns - stamp <= float(profile["state_max_age_sec"]) * 1e9
-                    for stamp in stamps
-                ):
-                    transforms = None
-                    continue
-                if max(stamps) - min(stamps) > float(profile["max_capture_skew_sec"]) * 1e9:
-                    transforms = None
-                    continue
-                break
-            if transforms is None or not received:
-                raise RuntimeError("Fresh joint state and EE/TCP transforms are unavailable.")
-            if (
-                len(joint.name) != len(joint.position)
-                or not joint.name
-                or len(set(joint.name)) != len(joint.name)
-                or not all(math.isfinite(value) for value in joint.position)
-            ):
-                raise ValueError("Measured joint state is invalid.")
-            poses = []
-            for transform in transforms:
-                translation, rotation = (
-                    transform.transform.translation,
-                    transform.transform.rotation,
-                )
-                pose = {
-                    "x": translation.x,
-                    "y": translation.y,
-                    "z": translation.z,
-                    "qx": rotation.x,
-                    "qy": rotation.y,
-                    "qz": rotation.z,
-                    "qw": rotation.w,
-                }
-                pose_matrix(pose)
-                poses.append(pose)
+            # Parameter discovery may take longer than the feedback age limit.
+            # Read the model first while subscriptions collect current samples.
             parameter_node = resource["move_group_node"].rstrip("/")
             listing = node.create_client(ListParameters, parameter_node + "/list_parameters")
             prefixes = [
@@ -294,12 +266,93 @@ class MeasuredRobotContextRuntime:
                 for name in ("robot_description", "robot_description_semantic")
             ):
                 raise RuntimeError("The selected robot's URDF/SRDF parameters are unavailable.")
-            now_ns = node.get_clock().now().nanoseconds
-            if any(
-                not 0 <= now_ns - stamp <= float(profile["state_max_age_sec"]) * 1e9
-                for stamp in stamps
+            touch_links = gripper_touch_links(
+                model_parameters["robot_description"], configuration["gripper"]["joint"]
+            )
+            joint = None
+            transforms = None
+            last_issue = f"No JointState messages received on {resource['joint_states_topic']}."
+            while time.monotonic() < deadline:
+                executor.spin_once(timeout_sec=0.05)
+                transforms = None
+                if not received:
+                    continue
+                now_ns = node.get_clock().now().nanoseconds
+                if now_ns <= 0:
+                    last_issue = "The simulation clock has not supplied a positive time."
+                    continue
+                # JointState can arrive ahead of the lower-rate /clock update.
+                # Select a buffered sample without accepting future timestamps
+                # or relaxing the existing age and capture-skew checks below.
+                joint = next((value for value in reversed(received)
+                              if value.header.stamp.sec * 10**9 + value.header.stamp.nanosec <= now_ns), None)
+                if joint is None:
+                    latest_stamp = received[-1].header.stamp
+                    last_issue = (
+                        f"No joint state at or before ROS time {now_ns} on {resource['joint_states_topic']}; "
+                        f"latest stamp is {latest_stamp.sec * 10**9 + latest_stamp.nanosec}."
+                    )
+                    continue
+                try:
+                    transforms = [
+                        buffer.lookup_transform(frame, link, rclpy.time.Time())
+                        for link in (ee_link, tcp_link)
+                    ]
+                except TransformException as exc:
+                    last_issue = f"TF lookup failed for {frame} -> {ee_link} and {frame} -> {tcp_link}: {exc}"
+                    continue
+                stamps = [joint.header.stamp.sec * 10**9 + joint.header.stamp.nanosec]
+                stamps.extend(
+                    t.header.stamp.sec * 10**9 + t.header.stamp.nanosec for t in transforms
+                )
+                # The planning-frame-to-EE/TCP transforms are dynamic; unlike a
+                # static tool edge, a zero stamp cannot establish their freshness.
+                if any(
+                    stamp <= 0
+                    or not 0 <= now_ns - stamp <= float(profile["state_max_age_sec"]) * 1e9
+                    for stamp in stamps
+                ):
+                    last_issue = (
+                        f"Feedback timestamps do not satisfy state_max_age_sec={profile['state_max_age_sec']}: "
+                        f"ROS time={now_ns}, {resource['joint_states_topic']} stamp={stamps[0]}, "
+                        f"{frame} -> {ee_link} stamp={stamps[1]}, {frame} -> {tcp_link} stamp={stamps[2]}."
+                    )
+                    transforms = None
+                    continue
+                if max(stamps) - min(stamps) > float(profile["max_capture_skew_sec"]) * 1e9:
+                    last_issue = (
+                        f"Feedback timestamp skew is {(max(stamps) - min(stamps)) / 1e9:.6g} seconds; "
+                        f"max_capture_skew_sec={profile['max_capture_skew_sec']}."
+                    )
+                    transforms = None
+                    continue
+                break
+            if transforms is None or joint is None:
+                raise RuntimeError("Fresh joint state and EE/TCP transforms are unavailable. " + last_issue)
+            if (
+                len(joint.name) != len(joint.position)
+                or not joint.name
+                or len(set(joint.name)) != len(joint.name)
+                or not all(math.isfinite(value) for value in joint.position)
             ):
-                raise RuntimeError("Measured robot feedback became stale during parameter capture.")
+                raise ValueError("Measured joint state is invalid.")
+            poses = []
+            for transform in transforms:
+                translation, rotation = (
+                    transform.transform.translation,
+                    transform.transform.rotation,
+                )
+                pose = {
+                    "x": translation.x,
+                    "y": translation.y,
+                    "z": translation.z,
+                    "qx": rotation.x,
+                    "qy": rotation.y,
+                    "qz": rotation.z,
+                    "qw": rotation.w,
+                }
+                pose_matrix(pose)
+                poses.append(pose)
             record = {
                 "record_type": "RobotValidationContext",
                 "resource_jid": resource_jid,
@@ -311,9 +364,7 @@ class MeasuredRobotContextRuntime:
                 "ee_pose": poses[0],
                 "tcp_pose": poses[1],
                 "position_tolerance_m": float(move_group["position_tolerance_m"]),
-                "touch_links": gripper_touch_links(
-                    model_parameters["robot_description"], configuration["gripper"]["joint"]
-                ),
+                "touch_links": touch_links,
                 "ee_from_tcp": (
                     np.linalg.inv(pose_matrix(poses[0])) @ pose_matrix(poses[1])
                 ).tolist(),

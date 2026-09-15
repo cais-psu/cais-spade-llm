@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from ...adapters.gazebo_execution import prepare_trajectory
 from ...adapters.isolated_moveit import IsolatedMoveItSession
 from ...adapters.robot_validation_context import matrix_pose, pose_matrix
 from ...adapters.target_calculation import CalculationUnavailable, calculate_target
@@ -1022,10 +1023,27 @@ async def validate_program(
                     result = await session.check_segment(
                         joints=joints, start_pose=pose, target_pose=target, attached=attached
                     )
+                    if result["status"] == "passed":
+                        speed = params.get("speed", robot["policy"].get("trajectory_time_scale"))
+                        try:
+                            # Check the same timing execution will use, retaining
+                            # the raw plan so execution scales it exactly once.
+                            prepare_trajectory(result["trajectory"], robot, speed)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            source = "RA-authored" if "speed" in params else "default trajectory_time_scale"
+                            result = {
+                                **result,
+                                "status": "failed",
+                                "message": (
+                                    f"{exc} Checked move_cartesian with speed={speed!r} ({source}). "
+                                    "speed multiplies trajectory duration; larger values slow motion. "
+                                    "RA must revise the program and validate again."
+                                ),
+                            }
                     checked_steps.append({"step_index": index, "resolved_params": params, **result})
                     if result["status"] != "passed":
                         findings.append(
-                            _finding(index, "motion", result["status"], result["message"])
+                            _finding(index, "motion", result["status"], result["message"], authority="RA")
                         )
                         prefix_valid = False
                         continue

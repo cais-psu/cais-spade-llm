@@ -2731,27 +2731,21 @@ def _apply_primitive_execution_diagnostic(
         f"color={'green' if status == 'completed' else 'red' if status in {'failed', 'blocked', 'unknown', 'interrupted'} else 'grey'} outline"
     )
     message = str(diagnostic.get("message", "Validate a program before running it in Gazebo."))
-    if status == "idle" and composition_status == "validated_for_declared_scope":
-        message = "Saved program validated. Run in Gazebo checks current readiness before executing."
-    elif status in {"unknown", "interrupted", "reset_required", "reset_completed"} and not gazebo_running:
+    if not active and not gazebo_running:
         message = (
-            "Gazebo is stopped. Run in Gazebo will start a clean shared scene and complete "
-            "readiness checks before dispatching the validated program.\n\nRecorded detail: " + message
+            "Start Dual Gazebo Environment with its top Start control before Run in Gazebo. "
+            "Run uses that environment to execute the saved primitives.\n\nRecorded detail: " + message
         )
+    elif status == "idle" and composition_status == "validated_for_declared_scope":
+        message = "Saved program ready. Run in Gazebo loads and executes its primitives without revalidation."
     elements["execution_message"].set_text(message)
-    already_attempted = (
-        bool(elements.get("execution_candidate_ref"))
-        and (diagnostic.get("candidate_ref") or {}).get("ref")
-        == elements.get("execution_candidate_ref")
-        and (diagnostic.get("result") or {}).get("command_dispatched", True)
-    )
     _set_enabled(
         elements["run_program_button"],
         available
+        and gazebo_running
         and composition_status == "validated_for_declared_scope"
         and not busy
-        and not active
-        and not already_attempted,
+        and not active,
     )
     elements["stop_execution_button"].set_visibility(active)
     elements["execution_trace"].content = json.dumps(
@@ -3906,7 +3900,7 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
             try:
                 await progress({
                     "status": "preparing",
-                    "message": "Checking the saved program and waiting for Gazebo readiness.",
+                    "message": "Loading the saved primitive program.",
                 })
                 candidate_ref = phase_5_elements["execution_candidate_ref"]
                 if not isinstance(candidate_ref, str):

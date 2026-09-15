@@ -3,9 +3,10 @@ from __future__ import annotations
 """Test persisted execution authority and command ordering without live motion."""
 
 import asyncio
+import json
+import math
 import threading
 import time
-from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -26,13 +27,11 @@ from cais_spade_llm.spec2primitives.adapters.gazebo_execution import (
     prepare_trajectory,
 )
 from cais_spade_llm.spec2primitives.adapters.robot_validation_context import (
-    MeasuredRobotContextRuntime,
     matrix_pose,
     pose_matrix,
 )
-from cais_spade_llm.spec2primitives.adapters import in_process_robot_agent
 from cais_spade_llm.spec2primitives.adapters.in_process_robot_agent import InProcessRobotAgentCompositionRuntime
-from cais_spade_llm.spec2primitives.agents.ra import RAContextHandoffError
+from cais_spade_llm.spec2primitives.agents.ra import program_execution
 from cais_spade_llm.spec2primitives.agents.ra.execution_state import (
     assert_execution_available,
     execution_busy,
@@ -276,14 +275,7 @@ class _Transport:
         return {name: {"pose": matrix_pose(pose)} for name in names}
 
     async def feedback(self, *args: Any) -> dict[str, Any]:
-        if self.fail == "feedback":
-            raise RuntimeError("Measured prefix differs.")
-        expected = dict(zip(args[1]["names"], args[1]["positions"], strict=True))
-        gripper_calls = [
-            call[1] for call in self.calls if isinstance(call, tuple) and call[0] == "gripper"
-        ]
-        assert expected["gripper_joint"] == (gripper_calls[-1] if gripper_calls else self.initial_gripper_position)
-        return {"measured_at_ros_ns": 1000000000}
+        pytest.fail("Run must not check measured state against the predicted primitive prefix.")
 
     async def move(self, trajectory: Any) -> dict[str, Any]:
         self.calls.append("move_cartesian")
@@ -296,7 +288,7 @@ class _Transport:
             raise RuntimeError("Trajectory rejected.")
         if self.fail == "timeout":
             raise TimeoutError("Trajectory has no terminal result.")
-        return {"success": True}
+        return {"success": self.fail != "move_negative_ack"}
 
     async def gripper_command(self, position: float) -> dict[str, Any]:
         self.calls.append(("gripper", position))
@@ -309,6 +301,104 @@ class _Transport:
         if self.fail == "negative_ack":
             return {"success": False, "attached": False}
         return {"success": True, "attached": attach}
+
+
+@pytest.mark.parametrize("fault", [None, "evidence", "configuration"])
+def test_execution_loads_saved_steps_once_without_runtime_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    """Dispatch the saved program exactly, even when later validation would be unavailable."""
+    from cais_spade_llm.spec2primitives.adapters import target_calculation
+    from cais_spade_llm.spec2primitives.agents.ra import program_validation
+
+    root = tmp_path / "interaction"
+    robot, part, model = _validated(root)
+    program = load_validated_program(root)
+    original = {path: path.read_bytes() for path in root.rglob("*.json")}
+    checked = {item["step_index"]: item for item in program.report["checked_steps"]}
+    calculations = {index: read_pin(root, item["calculation_ref"])["result"]
+                    for index, item in checked.items() if "calculation_ref" in item}
+    parameters = {index: program_execution.resolve_selected_values(
+        step["params"], read_evidence=lambda ref, pointer: _evidence_value(program.inputs, ref, pointer),
+        results=calculations) for index, step in enumerate(program.steps, 1)}
+    expected = [prepare_trajectory(item["trajectory"], program.robot,
+                                  item["resolved_params"].get("speed", program.robot["policy"]["trajectory_time_scale"]))
+                for item in checked.values() if "trajectory" in item]
+    dispatched = []
+    configuration_reads = []
+    started = False
+    read_configuration = robot.execution_configuration
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Run must use saved results without robot capture, validation, recalculation or final capture.")
+
+    async def configuration(*args: Any, **kwargs: Any) -> Any:
+        assert not started and not configuration_reads
+        value = deepcopy(await read_configuration(*args, **kwargs))
+        configuration_reads.append(value)
+        return value
+
+    def preparation_only(function: Any) -> Any:
+        def read(*args: Any, **kwargs: Any) -> Any:
+            assert not started, "No source reads between primitives."
+            return function(*args, **kwargs)
+        return read
+
+    for name in ("read_pin", "verify_record", "verify_evidence_tree", "_load_inputs"):
+        monkeypatch.setattr(program_execution, name, preparation_only(getattr(program_execution, name)))
+    monkeypatch.setattr(robot, "execution_configuration", configuration)
+    monkeypatch.setattr(robot, "capture_execution_context", forbidden)
+    monkeypatch.setattr(robot, "capture_validation_context", forbidden)
+    monkeypatch.setattr(target_calculation, "calculate_target", forbidden)
+    monkeypatch.setattr(program_validation, "prepare_trajectory", forbidden)
+
+    class Transport(_Transport):
+        feedback = forbidden
+
+        async def move(self, trajectory: Any) -> dict[str, Any]:
+            dispatched.append(deepcopy(trajectory))
+            result = await super().move(trajectory)
+            if len(dispatched) == 1:
+                if fault == "evidence":
+                    reference = checked[6]["calculation_ref"]
+                    (root / reference["ref"]).write_text("changed after loading")
+                elif fault == "configuration":
+                    monkeypatch.setattr(robot, "execution_configuration", forbidden)
+            return result
+
+    async def progress(event: Any) -> None:
+        nonlocal started
+        if event["message"].startswith("Running step "):
+            started = True
+
+    transport = Transport(part)
+    result = asyncio.run(PrimitiveExecutionRuntime(
+        robot_runtime=robot, validator=forbidden, session_factory=transport, share=_SHARE,
+        capture_runtime=SimpleNamespace(capture=forbidden),
+    ).run(root, progress=progress))
+    assert result["status"] == "completed", result
+    assert result["completed_steps"] == len(program.steps)
+    assert dispatched == expected
+    assert len(configuration_reads) == len(model.calls) == 1
+    assert not execution_busy()
+    directory = (root / result["request_ref"]["ref"]).parent
+    assert not (directory / "validation.json").exists()
+    assert not (directory / "robot_initial.json").exists()
+    assert not (directory / "observations").exists()
+    prepared = json.loads((directory / "prepared.json").read_text())
+    assert prepared["validation_ref"] == program.validation_ref
+    assert prepared["robot_context_ref"] == program.report["robot_context_ref"]
+    assert "validation_sec" not in result["preparation_timings_sec"]
+    assert "initial_context_sec" not in result["preparation_timings_sec"]
+    for index, step in enumerate(program.steps, 1):
+        request = json.loads((directory / f"step_{index:04d}_request.json").read_text())
+        assert request["primitive_symbol"] == step["primitive_symbol"]
+        assert request["resolved_params"] == parameters[index]
+        if index in calculations:
+            output = json.loads((directory / f"step_{index:04d}_result.json").read_text())["outputs"]
+            assert output == calculations[index]
+    if fault is None:
+        assert all(path.read_bytes() == data for path, data in original.items())
 
 
 @pytest.mark.parametrize("now_ros", [102_400_000_000, 400_000_000_000])
@@ -325,10 +415,23 @@ def test_observed_geometry_reuse_survives_final_validation_and_execution(
     assert program.report["status"] == "passed"
     assert program.report["final_robot_context_ref"]
     original = {path: path.read_bytes() for path in root.rglob("*.json")}
+    feedback_durations = []
+    motion_durations = []
 
     class Transport(_Transport):
         async def feedback(self, *args: Any) -> dict[str, Any]:
-            return {**await super().feedback(*args), "measured_at_ros_ns": now_ros}
+            started = time.monotonic()
+            await asyncio.sleep(.004)
+            result = {**await super().feedback(*args), "measured_at_ros_ns": now_ros}
+            feedback_durations.append(time.monotonic() - started)
+            return result
+
+        async def move(self, trajectory: Any) -> dict[str, Any]:
+            started = time.monotonic()
+            await asyncio.sleep(.002)
+            result = await super().move(trajectory)
+            motion_durations.append(time.monotonic() - started)
+            return result
 
     transport = Transport(part)
     executor = PrimitiveExecutionRuntime(
@@ -338,25 +441,33 @@ def test_observed_geometry_reuse_survives_final_validation_and_execution(
     assert result["status"] == "completed", result
     assert result["completed_steps"] == len(program.steps)
     assert transport.calls.count("move_cartesian") == 6
+    assert result["elapsed_sec"] >= sum(result["preparation_timings_sec"].values())
+    steps = [read_pin(root, reference) for reference in result["record_refs"]
+             if Path(reference["ref"]).name.startswith('step_')]
+    requests = [value for value in steps if value['record_type'] == 'PrimitiveExecutionStepRequest']
+    completions = [value for value in steps if value['record_type'] == 'PrimitiveExecutionStepResult']
+    assert requests[0]['idle_before_step_sec'] is None
+    assert all(value['idle_before_step_sec'] >= 0 for value in requests[1:])
+    assert all(value['preflight_elapsed_sec'] >= 0 for value in requests)
+    assert all(value['command_elapsed_sec'] >= 0 and value['created_at_ns'] >= value['command_started_at_ns']
+               for value in completions)
+    # Check the actual fake transport work; event-loop timers may wake before
+    # the requested sleep duration at the clock's resolution.
+    assert feedback_durations == []
+    motion_elapsed = iter(motion_durations)
+    for request, value in zip(requests, completions, strict=True):
+        assert request['preflight_feedback_elapsed_sec'] is None
+        assert value['completion_feedback_elapsed_sec'] is None
+        if value['primitive_symbol'] == 'move_cartesian':
+            assert 0 < next(motion_elapsed) <= value['motion_elapsed_sec']
+            assert value['motion_elapsed_sec'] <= value['command_elapsed_sec']
+        else:
+            assert value['motion_elapsed_sec'] is None
+            assert value['completion_feedback_elapsed_sec'] is None
+    assert next(motion_elapsed, None) is None
     assert all(path.read_bytes() == content for path, content in original.items())
     for role, stamp in zip(("part", "scene"), stamps, strict=True):
         assert read_pin(root, program.report["evidence_refs"][role])["observation_timestamp_ns"] == stamp
-
-
-@pytest.mark.parametrize("scope", [GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE, VALIDATION_SCOPE])
-@pytest.mark.parametrize("now_ros", [102_400_000_000, 400_000_000_000])
-def test_execution_scene_age_reuse_is_limited_to_observed_scope(scope: str, now_ros: int) -> None:
-    """Execution retains the observation-age and clock checks for other scopes."""
-    evidence = {"part": {"observation_timestamp_ns": 168_674_000_000},
-                "scene": {"observation_timestamp_ns": 168_522_000_000}}
-    original = deepcopy(evidence)
-    profile = {**load_refinement_profile(), "validation_scope": scope}
-    if scope == GAZEBO_OBSERVED_SCOPE:
-        PrimitiveExecutionRuntime._check_scene_age(evidence, now_ros, profile)
-    else:
-        with pytest.raises(ValueError, match="Observed scene evidence is stale"):
-            PrimitiveExecutionRuntime._check_scene_age(evidence, now_ros, profile)
-    assert evidence == original
 
 
 @pytest.mark.parametrize("bore_radius_m", [.00501, .004987318])
@@ -375,6 +486,7 @@ def test_calculated_targets_with_no_clearance_cannot_authorize_execution(
         return await validate_program(**kwargs, session_factory=_PlanningSession)
     result = asyncio.run(PrimitiveRefinementRuntime(
         program_runtime=model, robot_runtime=Robot(), product_runtime=product, validator=validator,
+        profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE},
     ).compose(tmp_path))
     assert result["status"] == "failed"
     report = read_pin(tmp_path, result["validation_refs"][-1])
@@ -386,260 +498,33 @@ def test_calculated_targets_with_no_clearance_cannot_authorize_execution(
     assert not (tmp_path / "execution").exists()
 
 
-@pytest.mark.parametrize("blocker", [None, "readiness", "hardware", "agent_stopped"])
-def test_restored_program_starts_selected_agent_once_before_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str | None,
+@pytest.mark.parametrize("agent_state", ["missing", "stopped", "running"])
+def test_restored_program_runs_without_starting_an_agent_or_probing_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_state: str,
 ) -> None:
-    """Start the owned RA for a restored program, preserving retries, ordering and replay guards."""
     root = tmp_path / "interaction"
     robot, part, model = _validated(root, monkeypatch=monkeypatch)
-    program = load_validated_program(root)
-    original = {path: path.read_bytes() for path in root.rglob("*.json")}
-    configuration = asyncio.run(robot.execution_configuration())["configuration"]
-    selected = _LiveRobotAgent(primitive_catalog=_declared_geometry_catalog(), robot_state={"held_part": None})
+    selected = _LiveRobotAgent(primitive_catalog=_declared_geometry_catalog())
     selected.context_only = True
-    selected.controller_config = configuration
-    host = _LiveRobotAgentHost([], system_running=False, gazebo_state="running", startup_agent=selected)
-    hardware = {"overall": "stopped"}
-    host.hardware_stack_status = lambda name: hardware
+    selected.controller_config = asyncio.run(robot.execution_configuration())["configuration"]
+    selected.alive = agent_state == "running"
+    host = _LiveRobotAgentHost([], system_running=False, gazebo_state="running")
+    host._spec2primitives_robot_agent = selected if agent_state != "missing" else None
+    host.hardware_stack_status = lambda name: {"overall": "stopped"}
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Run must not start an agent, probe planning services or use the agent event loop.")
+    monkeypatch.setattr(host, "simulation_start_ready", forbidden)
+    monkeypatch.setattr(host, "start_spec2primitives_robot_agent", forbidden)
+    monkeypatch.setattr(host, "_run_on_agent_runtime", forbidden)
     adapter = InProcessRobotAgentCompositionRuntime(host, contexts_root=tmp_path)
     transport = _Transport(part)
-    move = transport.move
-
-    async def acknowledged_move(trajectory: Any) -> dict[str, Any]:
-        result = await move(trajectory)
-        if blocker == "agent_stopped":
-            selected.alive = False
-        return result
-
-    @asynccontextmanager
-    async def measured_context(self: Any, **kwargs: Any) -> Any:
-        assert kwargs["resource_jid"] == program.inputs.assignment.selected_resource_jid
-        assert kwargs["configuration"] == configuration
-        yield await robot.capture_validation_context()
-
-    monkeypatch.setattr(transport, "move", acknowledged_move)
-    monkeypatch.setattr(MeasuredRobotContextRuntime, "validation_context", measured_context)
-    monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_POLL_SECONDS", 0.001)
-    if blocker == "readiness":
-        monkeypatch.setattr(in_process_robot_agent, "_ROBOT_AGENT_STARTUP_TIMEOUT_SECONDS", 0.02)
-    executor = PrimitiveExecutionRuntime(
-        robot_runtime=adapter, validator=_validator, session_factory=transport, share=_SHARE,
-    )
-
-    async def scenario() -> dict[str, Any]:
-        nonlocal blocker
-        loop = asyncio.get_running_loop()
-        entered = asyncio.Event()
-        release = threading.Event()
-        probes = []
-
-        def readiness(force: bool = False) -> tuple[bool, str]:
-            probes.append(force)
-            if len(probes) == 1:
-                loop.call_soon_threadsafe(entered.set)
-                assert release.wait(2), "The event loop did not release the readiness probe."
-            if blocker == "hardware":
-                hardware["overall"] = "running"
-            return (False, "Waiting for core services: /compute_cartesian_path") if blocker == "readiness" else (True, "")
-
-        monkeypatch.setattr(host, "simulation_start_ready", readiness)
-        first = asyncio.create_task(executor.run(root))
-        second = None
-        try:
-            await asyncio.wait_for(entered.wait(), 5)
-            second = asyncio.create_task(executor.run(root))
-            await asyncio.sleep(0)
-            assert execution_busy()
-            assert host.start_calls == 0
-            assert transport.calls == []
-            release.set()
-            a, b = await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), 10)
-            if blocker in {"readiness", "hardware"}:
-                assert isinstance(a, RAContextHandoffError), a
-                assert isinstance(b, RAContextHandoffError), b
-                assert str(a) == str(b)
-                assert ("/compute_cartesian_path" if blocker == "readiness" else "Hardware stack") in str(a)
-                assert host.start_calls == 0
-                assert transport.calls == []
-                assert not (root / "execution").exists()
-                blocker = None
-                hardware["overall"] = "stopped"
-                a = await executor.run(root)
-            else:
-                assert a == b
-            assert host.start_calls == 1
-            assert host.full_system_start_calls == 0
-            assert host.resource_agents == []
-            assert host._spec2primitives_robot_agent is selected
-            assert all(probes)
-            with pytest.raises(ValueError, match="already has an execution attempt"):
-                await executor.run(root)
-            assert host.start_calls == 1
-            return a
-        finally:
-            release.set()
-            await asyncio.gather(first, *([second] if second is not None else []), return_exceptions=True)
-
-    result = asyncio.run(scenario())
-    if blocker == "agent_stopped":
-        assert result["status"] == "failed", result
-        assert "RobotAgent" in result["message"] and "is not running" in result["message"]
-        assert result["command_dispatched"] is True
-        assert transport.calls == ["move_cartesian"]
-    else:
-        assert result["status"] == "completed", result
-        assert result["completed_steps"] == len(program.steps)
-        assert transport.calls == [
-            "move_cartesian", "move_cartesian", ("gripper", 1.0), ("attach", "gear_medium"),
-            "move_cartesian", "move_cartesian", "move_cartesian", ("gripper", 0.0),
-            ("detach", "gear_medium"), "move_cartesian",
-        ]
-    assert len(model.calls) == 1
-    assert all(path.read_bytes() == data for path, data in original.items())
-    assert len(list((root / "execution").glob("run_*"))) == 1
-
-
-@pytest.mark.parametrize("validation_passes", [True, False])
-def test_saved_program_revalidates_current_gripper_and_peer_joints_before_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validation_passes: bool,
-) -> None:
-    """A changed start state reaches fresh validation, which still controls all dispatch."""
-    root = tmp_path / "interaction"
-    before = {
-        "gripper_joint": 0.40933734448149295,
-        "ur5e_wrist_1_joint": -1.6023756639112603,
-        "ur5e_elbow_joint": 1.6267104080390862,
-    }
-    current = {
-        "gripper_joint": 0.42478389357529167,
-        "ur5e_wrist_1_joint": -1.5995845939332678,
-        "ur5e_elbow_joint": 1.623759949144783,
-    }
-    robot, part, model = _validated(root, initial_joint_positions=before, monkeypatch=monkeypatch)
-    program = load_validated_program(root)
-    original = {path: path.read_bytes() for path in root.rglob("*.json")}
-    capture = robot.capture_validation_context
-    validation_inputs = []
-    planning_inputs = []
-    transport = _Transport(part, initial_gripper_position=current["gripper_joint"])
-
-    async def current_capture(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        record = await capture(*args, **kwargs)
-        joints = record["joint_state"]
-        for name, position in current.items():
-            joints["positions"][joints["names"].index(name)] = position
-        return record
-
-    class Planner(_TimedPlanner):
-        async def check_segment(self, **request: Any) -> dict[str, Any]:
-            assert transport.calls == [], "All segments must be validated before the first command."
-            planning_inputs.append(deepcopy(request["joints"]))
-            if not validation_passes:
-                return {"status": "failed", "message": "Current state is in collision."}
-            return await super().check_segment(**request)
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        validation_inputs.append(deepcopy(kwargs["robot"]["joint_state"]))
-        assert kwargs["steps"] == program.steps
-        assert kwargs["cache"] == {}
-        return await validate_program(**kwargs, session_factory=Planner)
-
-    monkeypatch.setattr(robot, "capture_validation_context", current_capture)
-    executor = PrimitiveExecutionRuntime(
-        robot_runtime=robot, validator=validator, session_factory=transport, share=_SHARE,
-    )
-    result = asyncio.run(executor.run(root))
-    assert len(validation_inputs) == 1
-    assert planning_inputs[0] == validation_inputs[0]
-    measured = dict(zip(validation_inputs[0]["names"], validation_inputs[0]["positions"], strict=True))
-    assert {name: measured[name] for name in current} == current
-    view = read_primitive_execution_diagnostic(root)
-    assert any("Revalidating the unchanged saved program" in event["message"] for event in view["events"])
-    if validation_passes:
-        assert result["status"] == "completed", result
-        assert result["completed_steps"] == len(program.steps)
-        assert transport.calls == [
-            "move_cartesian", "move_cartesian", ("gripper", 1.0), ("attach", "gear_medium"),
-            "move_cartesian", "move_cartesian", "move_cartesian", ("gripper", 0.0),
-            ("detach", "gear_medium"), "move_cartesian",
-        ]
-        with pytest.raises(ValueError, match="already has an execution attempt"):
-            asyncio.run(executor.run(root))
-    else:
-        assert result["status"] == "blocked", result
-        assert "Fresh validation did not pass" in result["message"]
-        assert result["command_dispatched"] is False
-        assert transport.stop is None and transport.calls == []
-    assert len(model.calls) == 1
-    assert all(path.read_bytes() == data for path, data in original.items())
-
-
-@pytest.mark.parametrize("model_changed", [False, True])
-def test_execution_revalidates_saved_program_after_gazebo_launch_filename_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_changed: bool,
-) -> None:
-    """Retain saved authority and command ordering across a harmless simulation restart."""
-    root = tmp_path / "interaction"
-    robot, part, model = _validated(
-        root, launch_parameters_path="/tmp/launch_params_before", monkeypatch=monkeypatch,
-    )
-    program = load_validated_program(root)
-    original = {path: path.read_bytes() for path in root.rglob("*.json")}
-    capture = robot.capture_validation_context
-    fresh_validations = []
-
-    async def current_capture(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        record = await capture(*args, **kwargs)
-        parameters = record["model_parameters"]
-        parameters["robot_description"] = parameters["robot_description"].replace(
-            "/tmp/launch_params_before", "/tmp/launch_params_after",
-        )
-        if model_changed:
-            parameters["robot_description"] = parameters["robot_description"].replace('upper="3"', 'upper="2"')
-        record["model_parameters_sha256"] = fingerprint(parameters)
-        return record
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        fresh_validations.append(kwargs["robot"]["model_parameters"]["robot_description"])
-        return await _validator(**kwargs)
-
-    monkeypatch.setattr(robot, "capture_validation_context", current_capture)
-    transport = _Transport(part)
-    executor = PrimitiveExecutionRuntime(
-        robot_runtime=robot, validator=validator, session_factory=transport, share=_SHARE,
-    )
-    result = asyncio.run(executor.run(root))
-    if model_changed:
-        assert result["status"] == "blocked", result
-        assert result["command_dispatched"] is False
-        assert result["completed_steps"] == 0
-        assert fresh_validations == transport.calls == []
-        assert execution_custody(tmp_path, "xarm6@localhost") == {"held_part": None, "gripper_state": None}
-        event_path = root / result["last_event_ref"]["ref"]
-        event_bytes = event_path.read_bytes()
-        try:
-            event_path.write_bytes(b"{}")
-            with pytest.raises(ValueError, match="Execution records cannot be verified"):
-                execution_custody(tmp_path, "xarm6@localhost")
-        finally:
-            event_path.write_bytes(event_bytes)
-        original.update({path: path.read_bytes() for path in (root / "execution").rglob("*.json")})
-        model_changed = False
-        result = asyncio.run(executor.run(root))
+    result = asyncio.run(PrimitiveExecutionRuntime(
+        robot_runtime=adapter, validator=forbidden, session_factory=transport, share=_SHARE,
+    ).run(root))
     assert result["status"] == "completed", result
-    assert result["completed_steps"] == len(program.steps)
-    assert len(fresh_validations) == 1
-    assert "/tmp/launch_params_after" in fresh_validations[0]
-    assert transport.calls == [
-        "move_cartesian", "move_cartesian", ("gripper", 1.0), ("attach", "gear_medium"),
-        "move_cartesian", "move_cartesian", "move_cartesian", ("gripper", 0.0),
-        ("detach", "gear_medium"), "move_cartesian",
-    ]
-    with pytest.raises(ValueError, match="already has an execution attempt"):
-        asyncio.run(executor.run(root))
+    assert transport.calls.count("move_cartesian") == 6
+    assert host.start_calls == host.full_system_start_calls == 0
     assert len(model.calls) == 1
-    assert all(path.read_bytes() == data for path, data in original.items())
 
 
 @pytest.mark.parametrize("lateral_offset,cad_origin_offset", [
@@ -661,10 +546,7 @@ def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(
 
     class Capture:
         def capture(self, directory: Path, identifier: str, *, timeout_sec: float) -> Path:
-            directory.mkdir()
-            path = directory / "capture.json"
-            path.write_text('{"status": "captured", "source": "controlled RGB-D fixture"}')
-            return path
+            pytest.fail("Run only executes the saved primitives; it must not capture RGB-D.")
 
     executor = PrimitiveExecutionRuntime(
         robot_runtime=robot,
@@ -701,21 +583,19 @@ def test_whole_program_reuses_saved_authority_and_actual_cad_mapping(
     assert len(model.calls) == 1, "Execution must not call composition again."
     assert all(path.read_bytes() == data for path, data in original.items())
     assert result["assembly_success"] is None
-    assert (root / result["observation_ref"]).is_file()
+    assert result["observation_ref"] is None
     view = read_primitive_execution_diagnostic(root)
     assert view["status"] == "completed", view
     assert execution_custody(tmp_path, "xarm6@localhost") == {
         "held_part": None,
         "gripper_state": "open",
     }
-    with pytest.raises(ValueError, match="already has an execution attempt"):
-        asyncio.run(executor.run(root))
 
 
 @pytest.mark.parametrize(
     "failure,expected_status,expected_calls",
     [
-        ("feedback", "blocked", 0),
+        ("move_negative_ack", "failed", 1),
         ("move", "failed", 1),
         ("timeout", "unknown", 1),
         ("attach", "unknown", 4),
@@ -862,78 +742,6 @@ def test_saved_assembly_scope_survives_pick_place_default(tmp_path: Path) -> Non
     assert all(path.read_bytes() == data for path, data in original.items())
 
 
-@pytest.mark.parametrize("scope", [VALIDATION_SCOPE, "unknown", None, "different_binding"])
-def test_fresh_validation_scope_mismatch_blocks_before_transport(tmp_path: Path, scope: str | None) -> None:
-    """A passing report for another scope never authorizes a Gazebo command."""
-    root = tmp_path / "interaction"
-    robot, part, _ = _validated(root)
-    transport = _Transport(part)
-
-    async def mismatched(**kwargs: Any) -> dict[str, Any]:
-        result = await _validator(**kwargs)
-        assert result["status"] == "passed"
-        if scope == "different_binding":
-            result["binding_ref"] = {"ref": "different_binding.json", "sha256": "a" * 64}
-        else:
-            result["scope"] = scope
-        return result
-
-    executor = PrimitiveExecutionRuntime(
-        robot_runtime=robot, validator=mismatched, session_factory=transport, share=_SHARE,
-    )
-    result = asyncio.run(executor.run(root))
-    assert result["status"] == "blocked", result
-    assert result["command_dispatched"] is False
-    assert transport.stop is None and transport.calls == []
-
-
-@pytest.mark.parametrize("mismatch", [
-    "during_preparation", "configuration_sha256", "model_parameters_sha256",
-    "ee_link", "ee_from_tcp", "held_part", "joint_state.names",
-])
-def test_fresh_robot_mismatch_blocks_before_any_command(tmp_path: Path, mismatch: str) -> None:
-    """Require compatible authority and stable current state throughout fresh validation."""
-    root = tmp_path / "interaction"
-    robot, part, _ = _validated(root)
-    capture = robot.capture_execution_context
-    captures = []
-    validations = []
-
-    async def changed(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        value = await capture(*args, **kwargs)
-        captures.append(value)
-        if mismatch == "during_preparation" and len(captures) > 1:
-            value["joint_state"]["positions"][0] = 0.1
-        elif mismatch == "ee_from_tcp":
-            value["ee_from_tcp"][0][3] += 0.01
-        elif mismatch == "joint_state.names":
-            value["joint_state"]["names"][0] = "different_joint"
-        elif mismatch not in {"during_preparation", "ee_from_tcp", "joint_state.names"}:
-            value[mismatch] = "changed"
-        return value
-
-    async def validator(**kwargs: Any) -> dict[str, Any]:
-        validations.append(kwargs["robot"])
-        return await _validator(**kwargs)
-
-    robot.capture_execution_context = changed
-    transport = _Transport(part)
-    result = asyncio.run(
-        PrimitiveExecutionRuntime(
-            robot_runtime=robot, validator=validator, session_factory=transport, share=_SHARE
-        ).run(root)
-    )
-    assert result["status"] == "blocked", result
-    assert result["command_dispatched"] is False
-    assert len(validations) == (1 if mismatch == "during_preparation" else 0)
-    expected_message = {
-        "during_preparation": "joint_state.positions['joint1']",
-        "configuration_sha256": "Live RobotAgent configuration differs",
-    }.get(mismatch, mismatch)
-    assert expected_message in result["message"]
-    assert transport.calls == []
-
-
 def test_actual_stl_binding_accounts_for_visual_transform_and_ambiguity() -> None:
     profile = load_execution_profile()
     instances = fixture_instances(
@@ -1048,6 +856,151 @@ def test_timing_scales_without_replanning_and_rejects_unsafe_speed(tmp_path: Pat
         prepare_trajectory(trajectory, robot, 2.0)
 
 
+@pytest.mark.parametrize("fault,speed,error", [
+    (None, None, "Trajectory velocity exceeds limits for joint1."),
+    (None, 0.45, "Trajectory velocity exceeds limits for joint1."),
+    (None, 2.0, None),
+    ("acceleration", None, "Trajectory acceleration exceeds limits for joint1."),
+    ("acceleration", 2.0, None),
+    ("position_difference", None, "Trajectory velocity exceeds limits for joint1."),
+    ("velocity_difference", None, "Trajectory acceleration exceeds limits for joint1."),
+    ("configured_velocity", 2.0, "Trajectory velocity exceeds limits for joint1."),
+    ("missing_trajectory", 2.0, "trajectory"),
+    ("missing_timing", 2.0, "time_from_start_ns"),
+    ("invalid_timing", 2.0, "invalid time stamps"),
+    ("missing_acceleration_limit", 2.0, "Acceleration limits are unavailable"),
+])
+def test_composition_checks_effective_speed_before_accepting_motion(
+    tmp_path: Path, fault: str | None, speed: float | None, error: str | None,
+) -> None:
+    """Composition rejects unsafe timing without changing parameters or scaling the stored plan."""
+    inputs, robot, refs, roles = _setup(tmp_path)
+    robot["policy"]["trajectory_time_scale"] = 0.45
+    steps = _program(refs)
+    if speed is not None:
+        for step in steps:
+            if step["primitive_symbol"] == "move_cartesian":
+                step["params"]["speed"] = speed
+    original = deepcopy(steps)
+    trajectory = {
+        "joint_names": ["joint1"],
+        "positions": [[0.0], [0.5]],
+        "velocities": [[0.5], [0.5]],
+        "accelerations": [[0.0], [0.0]],
+        "time_from_start_ns": [0, 1000000000],
+    }
+    if fault in {"acceleration", "velocity_difference"}:
+        trajectory.update(positions=[[0.0], [0.1]], velocities=[[0.0], [0.3]])
+        if fault == "acceleration":
+            trajectory.update(velocities=[[0.1], [0.1]], accelerations=[[0.5], [0.5]])
+    if fault == "position_difference":
+        trajectory["velocities"] = [[0.0], [0.0]]
+    if fault == "configured_velocity":
+        robot["model_parameters"].update({
+            "robot_description_planning.joint_limits.joint1.has_velocity_limits": True,
+            "robot_description_planning.joint_limits.joint1.max_velocity": 0.2,
+        })
+    if fault == "missing_timing":
+        trajectory.pop("time_from_start_ns")
+    if fault == "invalid_timing":
+        trajectory["time_from_start_ns"] = [0, 0]
+    if fault == "missing_acceleration_limit":
+        robot["model_parameters"].pop("robot_description_planning.joint_limits.joint1.max_acceleration")
+    original_trajectory = deepcopy(trajectory)
+
+    class Planner(_PlanningSession):
+        async def check_segment(self, **request: Any) -> dict[str, Any]:
+            result = await super().check_segment(**request)
+            if len(self.calls) == 1:
+                if fault == "missing_trajectory":
+                    result.pop("trajectory")
+                else:
+                    result["trajectory"] = trajectory
+            return result
+
+    planner = Planner()
+    report = asyncio.run(validate_program(
+        inputs=inputs, steps=steps, robot=robot, evidence=roles,
+        directory=tmp_path / "calculations", cache={},
+        profile={**load_refinement_profile(), "validation_scope": VALIDATION_SCOPE},
+        session_factory=lambda *args: planner,
+    ))
+    assert steps == original
+    assert trajectory == original_trajectory
+    assert report["motion_executed"] is False
+    assert len(report["checked_steps"]) == len(steps)
+    checked = report["checked_steps"][1]
+    if fault != "missing_trajectory":
+        assert checked["trajectory"] == original_trajectory
+    if error:
+        assert report["status"] == checked["status"] == "failed", report
+        finding = next(item for item in report["findings"] if item["check"] == "motion")
+        assert finding["authority"] == "RA" and finding["step_index"] == 2
+        assert error in finding["message"]
+        assert f"speed={speed if speed is not None else 0.45}" in finding["message"]
+        assert ("default trajectory_time_scale" in finding["message"]) == (speed is None)
+        assert "larger values slow motion" in finding["message"]
+        assert len(planner.calls) == 1 and planner.custody == []
+        assert all(item["status"] == "unknown" for item in report["checked_steps"][2:])
+    else:
+        assert report["status"] == "passed", report
+        prepared = prepare_trajectory(checked["trajectory"], robot, speed)
+        assert prepared["time_from_start_ns"] == [0, 2000000000]
+
+
+def test_composition_sends_timing_failure_to_ra_for_authored_speed_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsafe default reaches RA, which alone authors a slower accepted revision."""
+    _, robot, refs, product, _ = _binding_fixture(tmp_path, monkeypatch, GAZEBO_PICK_PLACE_SCOPE)
+    robot["policy"]["trajectory_time_scale"] = 0.45
+    steps = _program(refs)
+    revised = deepcopy(steps)
+    for step in revised:
+        if step["primitive_symbol"] == "move_cartesian":
+            step["params"]["speed"] = 2.0
+    model = _MessageProgramRuntime([
+        _program_action([(step["primitive_symbol"], step["params"]) for step in program])
+        for program in (steps, revised)
+    ])
+
+    class Robot:
+        async def capture_validation_context(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {**deepcopy(robot), "captured_at_ns": time.time_ns()}
+
+    class Planner(_PlanningSession):
+        async def check_segment(self, **request: Any) -> dict[str, Any]:
+            result = await super().check_segment(**request)
+            if result["status"] == "passed":
+                result["trajectory"]["velocities"] = [[0.5], [0.5]]
+            return result
+
+    async def validator(**kwargs: Any) -> dict[str, Any]:
+        return await validate_program(**kwargs, session_factory=Planner)
+
+    result = asyncio.run(PrimitiveRefinementRuntime(
+        program_runtime=model, robot_runtime=Robot(), product_runtime=product,
+        validator=validator,
+        profile={**load_refinement_profile(), "validation_scope": GAZEBO_PICK_PLACE_SCOPE},
+    ).compose(tmp_path))
+    assert result["status"] == "validated_for_declared_scope", result
+    assert len(model.calls) == len(result["candidate_refs"]) == 2
+    assert result["pa_batches"] == 1 and result["motion_executed"] is False
+    first, second = [read_pin(tmp_path, ref) for ref in result["candidate_refs"]]
+    assert first["primitive_steps"] == steps
+    assert second["primitive_steps"] == revised
+    feedback = json.loads(model.calls[1]["prompt"].split("COMPOSITION_INPUT\n", 1)[1])["refinement_context"]
+    finding = next(item for item in feedback["findings"] if item["check"] == "motion")
+    assert finding["authority"] == "RA"
+    assert "speed=0.45 (default trajectory_time_scale)" in finding["message"]
+    assert "Maximum=1.11111111, limit=1" in finding["message"]
+    assert all("speed" not in step["params"] for step in feedback["previous_candidate"])
+    report = read_pin(tmp_path, result["validation_refs"][-1])
+    assert report["status"] == "passed"
+    assert report["checked_steps"][1]["trajectory"]["velocities"] == [[0.5], [0.5]]
+    assert report["checked_steps"][1]["trajectory"]["time_from_start_ns"] == [0, 1000000000]
+
+
 @pytest.mark.parametrize("clock_samples,stamp_ns,stop_during_wait,error", [
     pytest.param([10_000_000_000], 9_900_000_000, False, None, id="already_fresh"),
     pytest.param([10_000_000_000, 10_020_000_000, 10_100_000_000], 10_035_000_000, False, None, id="clock_lags_reply"),
@@ -1115,7 +1068,7 @@ def test_entity_feedback_waits_for_clock_without_repeating_requests(
         if stop_during_wait:
             stop.set()
 
-    session.executor = SimpleNamespace(spin_once=spin)
+    session._wait_for_update = spin
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
             session._entity_states(["selected_instance"])
@@ -1152,10 +1105,13 @@ def test_gripper_target_outside_configured_travel_is_rejected_before_dispatch(
 
 
 @pytest.mark.parametrize('rate,fault', [
-    (1.0, None), (0.43, None), (0.0, 'paused'), (1.0, 'rejected'),
+    (1.0, None), (0.43, None), (0.035, None), (0.0, 'paused'), (1.0, 'rejected'),
     (1.0, 'aborted'), (1.0, 'stale'), (1.0, 'missing'), (1.0, 'nonfinite'),
     (1.0, 'clock_reset'), (1.0, 'stop'), (1.0, 'cancel_missing'),
     (1.0, 'late_acceptance'), (1.0, 'acceptance_missing'),
+    (1.0, 'clock_lag'), (0.43, 'clock_lag'), (1.0, 'clock_lag_7ms'),
+    (1.0, 'duplicate'), (1.0, 'feedback_reset'), (1.0, 'future_clock_domain'),
+    (1.0, 'simulation_timeout'),
 ])
 def test_gripper_action_completion_uses_simulation_feedback_and_owned_cancellation(
     monkeypatch, rate, fault,
@@ -1191,12 +1147,16 @@ def test_gripper_action_completion_uses_simulation_feedback_and_owned_cancellati
                           'move_time_sec': 0.4, 'feedback_timeout_pad_sec': 0.5,
                           'position_tolerance': 0.01, 'settle_sec': 0.08}}
     profile = {**load_execution_profile(), 'state_max_age_sec': 0.2,
-               'service_timeout_sec': 0.2, 'stop_timeout_sec': 0.2,
+               'service_timeout_sec': 0.5 if fault in {'clock_lag', 'clock_lag_7ms'} else 0.2,
+               'stop_timeout_sec': 0.2,
                'trajectory_timeout_pad_sec': 1.0}
     session = GazeboExecutionSession(config, profile, stop)
 
     def now():
-        return int((2 + rate * wall) * 1e9) if fault != 'clock_reset' or wall < 0.1 else 0
+        value = 2 + rate * wall
+        if fault in {'clock_lag', 'clock_lag_7ms'}:
+            value = math.floor(value * 10) / 10
+        return int(value * 1e9) if fault != 'clock_reset' or wall < 0.1 else 0
 
     response = SimpleNamespace(status=4, result=SimpleNamespace(error_code=0, error_string=''))
 
@@ -1209,6 +1169,8 @@ def test_gripper_action_completion_uses_simulation_feedback_and_owned_cancellati
         if fault == 'aborted' and rate * wall >= 0.2:
             response.status, response.result.error_code, response.result.error_string = 6, -5, 'goal tolerance'
             return True
+        if fault == 'simulation_timeout':
+            return False
         return rate * wall >= 0.4
 
     terminal = Future(response, terminal_ready)
@@ -1236,37 +1198,53 @@ def test_gripper_action_completion_uses_simulation_feedback_and_owned_cancellati
         if fault in {'stop', 'cancel_missing', 'late_acceptance'} and wall >= 0.1:
             stop.set()
         stamp = now() if fault != 'stale' else 1_000_000_000
+        if fault in {'clock_lag', 'clock_lag_7ms'}:
+            stamp = int((2 + rate * wall + (0.007 if fault == 'clock_lag_7ms' else 0)) * 1e9)
+        elif fault == 'duplicate' or (fault == 'feedback_reset' and wall >= 0.3):
+            stamp = 2_000_000_000
+        elif fault == 'future_clock_domain':
+            stamp = 1_700_000_000_000_000_000
         value = 0.411 + (0.85 - 0.411) * min(1, rate * wall / 0.4)
-        session.joints = SimpleNamespace(
+        session._joint(SimpleNamespace(
             name=[] if fault == 'missing' else ['drive'],
             position=[float('nan') if fault == 'nonfinite' else value],
             header=SimpleNamespace(stamp=SimpleNamespace(sec=stamp // 10**9, nanosec=stamp % 10**9)),
-        )
+        ))
 
     monkeypatch.setattr(gazebo_execution, 'time', SimpleNamespace(monotonic=lambda: wall))
     session.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=now())),
                                    destroy_node=lambda: None)
-    session.executor = SimpleNamespace(spin_once=spin, shutdown=lambda: None)
+    session._wait_for_update = spin
+    session.executor = SimpleNamespace(shutdown=lambda **kwargs: None)
     session.gripper = SimpleNamespace(send_goal_async=send)
-    if fault is None:
+    if fault in {None, 'clock_lag', 'clock_lag_7ms'}:
         result = session._gripper_command(0.85)
         assert result['success'] and result['termination_confirmed']
         assert result['position'] == pytest.approx(0.85)
         assert result['elapsed_simulation_sec'] >= 0.46
+        assert 0 <= result['feedback_age_sec'] <= profile['state_max_age_sec']
+        assert result['clock_ros_ns'] >= result['stamp_ns']
         if rate == 0.43:
             assert result['elapsed_wall_sec'] > 0.9
+        if rate == 0.035:
+            assert result['elapsed_wall_sec'] > 10.9
+        assert cancelled_calls == []
     else:
         with pytest.raises(GripperCommandError) as error:
             session._gripper_command(0.85)
         assert error.value.outcome_known == (fault not in {'cancel_missing', 'acceptance_missing'})
         assert not error.value.diagnostics['success']
+        if fault == 'paused':
+            assert 'clock stopped advancing' in str(error.value)
+        elif fault == 'simulation_timeout':
+            assert 'timed out in Gazebo simulation time' in str(error.value)
     try:
         session._close()
     except TimeoutError:
         assert fault in {'cancel_missing', 'acceptance_missing'}
     assert len(sent) == 1
     assert len(cancelled_calls) <= 1
-    assert wall < 4
+    assert wall < (1.0 / rate if rate == 0.035 else 4)
 
 
 @pytest.mark.parametrize('topic', ['/xarm/controller/joint_trajectory', '/ur5e/controller/joint_trajectory'])
@@ -1274,6 +1252,68 @@ def test_gripper_action_uses_configured_controller(topic):
     assert gripper_action_name(topic) == topic.removesuffix('/joint_trajectory') + '/follow_joint_trajectory'
     with pytest.raises(ValueError):
         gripper_action_name('/unrelated')
+
+
+def test_execution_feedback_keeps_spinning_between_commands_and_joins_on_close(monkeypatch):
+    """Feedback advances without command waits and the owned thread is stopped on close."""
+    monkeypatch.setitem(sys.modules, 'rclpy.executors', SimpleNamespace(
+        ExternalShutdownException=type('ExternalShutdownException', (Exception,), {}),
+        ShutdownException=type('ShutdownException', (Exception,), {}),
+    ))
+    session = GazeboExecutionSession({}, load_execution_profile(), threading.Event())
+    received = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def spin(*, timeout_sec):
+        calls.append(threading.get_ident())
+        session._joint(SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=2, nanosec=0))))
+        received.set()
+        release.wait(timeout_sec)
+
+    session.node = SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=2_000_000_000)),
+        destroy_node=lambda: calls.append('node destroyed'),
+    )
+    session.executor = SimpleNamespace(spin_once=spin, shutdown=lambda **kwargs: release.set())
+    session._spin_thread = threading.Thread(target=session._spin)
+    session._spin_thread.start()
+    try:
+        assert received.wait(1)
+        assert session.joints is not None
+        assert calls[0] != threading.get_ident()
+    finally:
+        session._close()
+    assert not session._spin_thread.is_alive()
+    assert calls[-1] == 'node destroyed'
+
+
+@pytest.mark.parametrize('fault', [None, 'new_attempt', 'new_run', 'ra_submission'])
+def test_execution_loads_selected_dependencies_without_rebuilding_history(tmp_path, monkeypatch, fault):
+    from cais_spade_llm.spec2primitives.agents.ra import primitive_composition, program_execution
+
+    root = tmp_path / 'interaction'
+    _validated(root)
+
+    def forbidden_history(*args, **kwargs):
+        pytest.fail('Execution must not reconstruct unrelated composition history.')
+
+    monkeypatch.setattr(primitive_composition, '_read_composition_history', forbidden_history)
+    older = root / 'composition/refinement_runs/run_0000'
+    older.mkdir()
+    (older / 'result.json').write_text('Unrelated historical run must not be read.')
+    if fault == 'new_attempt':
+        attempts = sorted((root / 'composition/primitive_program_candidates').glob('attempt_*'))
+        (attempts[-1].parent / f'attempt_{len(attempts) + 1:04d}').mkdir()
+    elif fault == 'new_run':
+        (root / 'composition/refinement_runs/run_9999').mkdir()
+    elif fault == 'ra_submission':
+        monkeypatch.setattr(program_execution, '_action', lambda response: {'kind': 'propose', 'primitive_steps': []})
+    if fault:
+        with pytest.raises((ValueError, RuntimeError)):
+            load_validated_program(root)
+    else:
+        assert load_validated_program(root).steps
 
 
 @pytest.mark.parametrize("failed_primitive,known", [("grasp_part", True), ("grasp_part", False), ("release_part", True)])
@@ -1314,7 +1354,7 @@ def test_gripper_failure_preserves_diagnostics_and_acknowledged_attachment_custo
     assert verify_record(root, failed["request_ref"])["target"] == failed["target"]
 
 
-def _interrupted_reset_fixture(contexts_root):
+def _interrupted_reset_fixture(contexts_root, *, robot_record_name="robot_ready.json"):
     """Journal both robots without constructing composition, ROS or hardware clients."""
     roots = [contexts_root / "interaction_a", contexts_root / "interaction_b"]
     for index, (root, jid) in enumerate(zip(roots, ["xarm6@localhost", "ur5e@localhost"], strict=True)):
@@ -1323,7 +1363,7 @@ def _interrupted_reset_fixture(contexts_root):
             "record_type": "PrimitiveExecutionRequest", "resource_jid": jid,
             "created_at_ns": index + 1, "total_steps": 1, "candidate_ref": {},
         })
-        append_record(root, directory, "robot_ready.json", {
+        append_record(root, directory, robot_record_name, {
             "record_type": "RobotValidationContext", "joint_state": {"names": ["arm_a", "arm_b"]},
         })
         append_record(root, directory, "result.json", {
@@ -1362,6 +1402,147 @@ class _ResetHost:
         return True, ""
 
 
+@pytest.mark.parametrize("state", ["running", "stopped", "starting"])
+def test_run_uses_top_gazebo_without_lifecycle_calls(tmp_path: Path, state: str) -> None:
+    """Run existing primitives without starting/stopping Gazebo or authoring another program."""
+    root = tmp_path / "interaction"
+    robot, part, model = _validated(root)
+    original = {path: path.read_bytes() for path in root.rglob("*.json")}
+
+    class Host(_ResetHost):
+        def ros2_start(self, name: str) -> None:
+            pytest.fail("Run in Gazebo must not start the environment.")
+
+        def ros2_stop(self, name: str) -> None:
+            pytest.fail("Run in Gazebo must not stop the environment.")
+
+    host = Host()
+    host.state = state
+    host._ros2_procs = {"gazebo_dual_spec2primitives": SimpleNamespace(
+        pid=123, poll=lambda: None if state == "running" else 0,
+    )}
+    launch = {"name": "gazebo_dual_spec2primitives", "pid": 123, "t0": time.monotonic() - 1.0}
+    host._gazebo_launch_timing_snapshot = lambda: dict(launch)
+    transport = _Transport(part)
+    executor = PrimitiveExecutionRuntime(
+        robot_runtime=robot, validator=_validator, session_factory=transport,
+        share=_SHARE, dual_gazebo=host,
+    )
+    if state != "running":
+        with pytest.raises(RuntimeError, match="top Start control"):
+            asyncio.run(executor.run(root))
+        assert transport.calls == []
+        assert not (root / "execution").exists()
+    else:
+        first = asyncio.run(executor.run(root))
+        assert first["status"] == "completed", first
+        first_records = {path: path.read_bytes() for path in (root / "execution").rglob("*.json")}
+        second = asyncio.run(executor.run(root))
+        assert second["status"] == "completed", second
+        assert first["request_ref"] != second["request_ref"]
+        assert transport.calls.count("move_cartesian") == 12
+        assert all(path.read_bytes() == content for path, content in first_records.items())
+        for result in (first, second):
+            assert read_pin(root, result["request_ref"])["fresh_simulation"] is False
+    assert len(model.calls) == 1
+    assert not execution_busy()
+    assert all(path.read_bytes() == content for path, content in original.items())
+
+
+@pytest.mark.parametrize("new_launch,unknown,copied", [
+    (False, False, False), (False, True, False),
+    (True, False, False), (True, True, False), (True, False, True),
+])
+def test_execution_custody_uses_only_acknowledgments_in_the_owned_gazebo_launch(
+    tmp_path: Path, new_launch: bool, unknown: bool, copied: bool,
+) -> None:
+    """A restart excludes old custody; a same-launch retry retains its attachment."""
+    from cais_spade_llm.spec2primitives.adapters.dual_gazebo import read_dual_gazebo_started_at_ns
+
+    root = tmp_path / "interaction"
+    robot, part, model = _validated(root)
+    host = _ResetHost(running=True)
+    process = SimpleNamespace(pid=123, poll=lambda: None)
+    host._ros2_procs = {"gazebo_dual_spec2primitives": process}
+    launch = {"name": "gazebo_dual_spec2primitives", "pid": 123, "t0": time.monotonic() - 1.0}
+    host._gazebo_launch_timing_snapshot = lambda: dict(launch)
+
+    class Transport(_Transport):
+        async def move(self, trajectory: Any) -> dict[str, Any]:
+            result = await super().move(trajectory)
+            if self.calls.count("move_cartesian") == 4:
+                if unknown:
+                    raise TimeoutError("No terminal acknowledgment.")
+                raise RuntimeError("Controller stopped after grasp and lift.")
+            return result
+
+    transport = Transport(part)
+    executor = PrimitiveExecutionRuntime(
+        robot_runtime=robot, validator=_validator, session_factory=transport,
+        share=_SHARE, dual_gazebo=host,
+    )
+    first = asyncio.run(executor.run(root))
+    assert first["completed_steps"] == 6 and first["held_part"] == "medium gear"
+    assert first["status"] == ("unknown" if unknown else "failed")
+    assert ("attach", "gear_medium") in transport.calls
+    if new_launch:
+        process.pid = 456
+        launch.update(pid=456, t0=time.monotonic())
+    started_at_ns = read_dual_gazebo_started_at_ns(host)
+    if copied:
+        # Replay the old executor's step-4 failure: it copied medium gear into
+        # helper/motion results in a new scene without issuing another grasp.
+        directory = root / "execution" / f"run_{time.time_ns()}_copied"
+        request_ref = append_record(root, directory, "request.json", {
+            "record_type": "PrimitiveExecutionRequest", "resource_jid": "xarm6@localhost",
+            "created_at_ns": time.time_ns(), "fresh_simulation": False,
+            "total_steps": 10, "candidate_ref": read_pin(root, first["request_ref"])["candidate_ref"],
+        })
+        step_ref = append_record(root, directory, "step_0001_result.json", {
+            "record_type": "PrimitiveExecutionStepResult", "step_index": 1,
+            "primitive_symbol": "compute_pick_targets", "outputs": {},
+            "held_part": "medium gear", "custody_known": True,
+        })
+        append_record(root, directory, "result.json", {
+            "record_type": "PrimitiveExecutionResult", "request_ref": request_ref,
+            "status": "failed", "message": "grasp_part requires held_part to be null.",
+            "command_dispatched": True, "completed_steps": 3,
+            "held_part": "medium gear", "gripper_state": "closed", "custody_known": True,
+            "record_refs": [step_ref], "last_event_ref": None,
+        })
+    original = {path: path.read_bytes() for path in root.rglob("*.json")}
+    if unknown and not new_launch:
+        with pytest.raises(ValueError, match="uncertain"):
+            execution_custody(tmp_path, "xarm6@localhost", _started_at_ns=started_at_ns)
+        with pytest.raises(ValueError, match="both robots"):
+            assert_execution_available(tmp_path, _started_at_ns=started_at_ns)
+    else:
+        expected = {"held_part": None, "gripper_state": None} if new_launch else {
+            "held_part": "medium gear", "gripper_state": "closed",
+        }
+        # Repeated reads model reconnect; they cannot discard current custody.
+        for _ in range(2):
+            assert execution_custody(tmp_path, "xarm6@localhost", _started_at_ns=started_at_ns) == expected
+        assert_execution_available(tmp_path, _started_at_ns=started_at_ns)
+        if new_launch:
+            fresh_transport = _Transport(part)
+            executor = PrimitiveExecutionRuntime(
+                robot_runtime=robot, validator=_validator, session_factory=fresh_transport,
+                share=_SHARE, dual_gazebo=host,
+            )
+            result = asyncio.run(executor.run(root))
+            assert result["status"] == "completed", result
+            assert ("attach", "gear_medium") in fresh_transport.calls
+            assert ("detach", "gear_medium") in fresh_transport.calls
+            assert execution_custody(tmp_path, "xarm6@localhost", _started_at_ns=started_at_ns) == {
+                "held_part": None, "gripper_state": "open",
+            }
+            assert read_pin(root, result["request_ref"])["fresh_simulation"] is False
+    assert len(model.calls) == 1
+    assert host.calls == []
+    assert all(path.read_bytes() == content for path, content in original.items())
+
+
 class _ResetProbe:
     def __init__(self, profile, stop):
         self.stop = stop
@@ -1384,11 +1565,22 @@ class _ResetProbe:
                     name: {"position": 0.1, "stamp_ns": 2 * 10**9, "publisher_gid": "new_joint"} for name in required}}
 
 
-@pytest.mark.parametrize("fault", [None, "stopped", "start", "readiness", "interlock", "record", "history", "old_program"])
+@pytest.mark.parametrize("fault", [None, "stopped", "start", "readiness", "interlock", "record", "history", "old_program", "initial_context", "saved_context"])
 def test_verified_reset_covers_both_robots_and_never_rewrites_history(tmp_path, fault):
     from cais_spade_llm.spec2primitives.agents.ra.execution_state import assert_interaction_current
 
-    root, peer = _interrupted_reset_fixture(tmp_path)
+    root, peer = _interrupted_reset_fixture(
+        tmp_path, robot_record_name="robot_initial.json" if fault == "initial_context" else "robot_ready.json",
+    )
+    if fault == "saved_context":
+        for owner in (root, peer):
+            path = next(owner.glob("execution/run_*/robot_ready.json"))
+            robot = json.loads(path.read_text())
+            reference = append_record(owner, owner / "composition", "robot.json", robot)
+            append_record(owner, path.parent, "prepared.json", {
+                "record_type": "PrimitiveExecutionPreparation", "robot_context_ref": reference,
+            })
+            path.unlink()
     original = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
     host = _ResetHost(running=fault != "stopped")
 
@@ -1411,6 +1603,7 @@ def test_verified_reset_covers_both_robots_and_never_rewrites_history(tmp_path, 
             assert_execution_available(tmp_path)
         return
     assert result["status"] == "reset_completed"
+    assert result["baseline"]["required_joints"] == ["arm_a", "arm_b"]
     assert host.calls == (["start"] if fault == "stopped" else ["stop", "start"])
     if fault == "record":
         path = next(root.glob("execution/reset_*/result.json"))
@@ -1439,19 +1632,8 @@ def test_verified_reset_covers_both_robots_and_never_rewrites_history(tmp_path, 
     assert_interaction_current(fresh)
 
 
-@pytest.mark.parametrize(("running", "expected_calls"), [
-    (False, ["start"]),
-    (True, []),
-])
-def test_run_starts_clean_scene_and_supersedes_failed_manual_reset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, running: bool,
-    expected_calls: list[str],
-) -> None:
-    """Recover from stopped Gazebo and make its clean-scene record authoritative."""
-    async def immediate(function: Any, *args: Any) -> Any:
-        return function(*args)
-
-    monkeypatch.setattr(asyncio, "to_thread", immediate)
+def test_saved_fresh_simulation_records_preserve_historical_custody(tmp_path: Path) -> None:
+    """Keep historical clean-scene records readable without starting another scene."""
     interrupted, _ = _interrupted_reset_fixture(tmp_path)
     reset_directory = interrupted / "execution" / "reset_3_failed"
     reset_request = append_record(interrupted, reset_directory, "request.json", {
@@ -1469,17 +1651,6 @@ def test_run_starts_clean_scene_and_supersedes_failed_manual_reset(
         },
         "last_event_ref": None,
     })
-
-    host, progress = _ResetHost(running=running), []
-    executor = PrimitiveExecutionRuntime(robot_runtime=object(), dual_gazebo=host)
-    async def report(event: dict[str, Any]) -> None:
-        progress.append(event)
-
-    fresh = asyncio.run(executor._start_gazebo_if_stopped(tmp_path, report))
-    assert fresh is True
-    assert host.calls == expected_calls
-    assert progress[-1]["status"] == "preparing"
-    assert_execution_available(tmp_path, fresh_simulation=fresh)
 
     root = tmp_path / "interaction_program"
     directory = root / "execution" / "run_4_clean"
@@ -1600,7 +1771,10 @@ def test_transport_stop_cancels_the_goal_and_waits_for_its_terminal_result(
             terminal.finished = True
 
     session = GazeboExecutionSession({}, load_execution_profile(), stop)
-    session.executor = SimpleNamespace(spin_once=spin)
+    session._wait_for_update = spin
+    session.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=2_000_000_000),
+    ))
     session.arm = SimpleNamespace(send_goal_async=lambda goal: Future(Goal()))
     trajectory = {
         "joint_names": ["joint1"],
@@ -1613,6 +1787,153 @@ def test_transport_stop_cancels_the_goal_and_waits_for_its_terminal_result(
         session._move(trajectory)
     assert calls == ["cancel", "terminal acknowledgment"]
     assert session.goal is None
+
+
+@pytest.mark.parametrize("outcome,error", [
+    ("slow_success", None),
+    ("timeout_success", None),
+    ("stop_success", "Execution stopped"),
+    ("aborted", "controller status 6, MoveIt error_code -4"),
+    ("error_result", "controller status 4, MoveIt error_code -4"),
+    ("simulation_timeout", "timed out in Gazebo simulation time"),
+    ("paused", "clock stopped advancing"),
+    ("clock_reset", "clock moved backwards"),
+    ("clock_missing", "clock is unavailable before trajectory dispatch"),
+    ("cancel_missing", "no terminal acknowledgment; motion state is unknown"),
+])
+def test_trajectory_completion_uses_simulation_time_and_terminal_result(
+    monkeypatch: pytest.MonkeyPatch, outcome: str, error: str | None,
+) -> None:
+    """Replay the slow step-7 timing and preserve terminal, Stop and clock failures."""
+    from cais_spade_llm.spec2primitives.adapters import gazebo_execution
+
+    class Future:
+        def __init__(self, value: Any, done: bool = True) -> None:
+            self.value, self.finished = value, done
+
+        def done(self) -> bool:
+            return self.finished
+
+        def result(self) -> Any:
+            return self.value
+
+    def point(**kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs, time_from_start=SimpleNamespace(sec=0, nanosec=0))
+
+    monkeypatch.setitem(sys.modules, "trajectory_msgs.msg", SimpleNamespace(JointTrajectoryPoint=point))
+    monkeypatch.setitem(sys.modules, "moveit_msgs.action", SimpleNamespace(
+        ExecuteTrajectory=SimpleNamespace(Goal=lambda: SimpleNamespace(
+            trajectory=SimpleNamespace(joint_trajectory=SimpleNamespace(joint_names=[], points=[])),
+        )),
+    ))
+    wall = 0.0
+    cancelled_at = None
+    sent = []
+    cancel_calls = []
+    stop = threading.Event()
+    profile = load_execution_profile()
+    session = GazeboExecutionSession({}, profile, stop)
+    # The recorded trajectory lasted 1.104200916 simulation seconds; the
+    # controller reported success after approximately 12.07 wall seconds.
+    duration_ns = 1_104_200_916
+    completion_wall = 12.07
+
+    def clock_ns() -> int:
+        if outcome == "clock_missing" or (outcome == "clock_reset" and wall >= 0.1):
+            return 0
+        if outcome == "paused":
+            return 2_000_000_000
+        rate = duration_ns / 1e9 / completion_wall if outcome == "slow_success" else 1.0
+        return 2_000_000_000 + int(wall * rate * 1e9)
+
+    terminal = Future(SimpleNamespace(
+        status=5, result=SimpleNamespace(error_code=SimpleNamespace(val=-7)),
+    ), done=False)
+    if outcome in {"slow_success", "timeout_success", "stop_success", "error_result"}:
+        terminal.value.status = 4
+        terminal.value.result.error_code.val = -4 if outcome == "error_result" else 1
+    elif outcome == "aborted":
+        terminal.value.status = 6
+        terminal.value.result.error_code.val = -4
+
+    class Goal:
+        accepted = True
+
+        def get_result_async(self) -> Future:
+            return terminal
+
+        def cancel_goal_async(self) -> Future:
+            nonlocal cancelled_at
+            cancelled_at = wall
+            cancel_calls.append(wall)
+            if outcome == "timeout_success":
+                # Cancellation loses a race with terminal success.
+                terminal.finished = True
+                return Future(SimpleNamespace(goals_canceling=[]))
+            return Future(SimpleNamespace(goals_canceling=[1]))
+
+    def send(goal: Any) -> Future:
+        sent.append(goal)
+        return Future(Goal())
+
+    def spin(*, timeout_sec: float) -> None:
+        nonlocal wall
+        wall += timeout_sec
+        if outcome == "stop_success" and wall >= 0.1:
+            stop.set()
+        if (outcome == "slow_success" and wall >= completion_wall
+                or outcome in {"aborted", "error_result"} and wall >= 0.1):
+            terminal.finished = True
+        if cancelled_at is not None and outcome != "cancel_missing" and wall >= cancelled_at + 0.05:
+            terminal.finished = True
+
+    monkeypatch.setattr(gazebo_execution, "time", SimpleNamespace(monotonic=lambda: wall))
+    session.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=clock_ns()),
+    ))
+    session._wait_for_update = spin
+    session.arm = SimpleNamespace(send_goal_async=send)
+    trajectory = {
+        "joint_names": ["xarm6_joint1"], "positions": [[0.0], [0.2]],
+        "velocities": [[0.0], [0.0]], "accelerations": [[0.0], [0.0]],
+        "time_from_start_ns": [0, duration_ns],
+    }
+    original = deepcopy(trajectory)
+    if error is None:
+        assert session._move(trajectory) == {"success": True, "error_code": 1}
+    else:
+        with pytest.raises((RuntimeError, TimeoutError), match=error):
+            session._move(trajectory)
+    if outcome == "slow_success":
+        assert wall >= completion_wall > duration_ns / 1e9 + profile["trajectory_timeout_pad_sec"]
+        assert cancel_calls == []
+    elif outcome == "clock_reset":
+        session._finish_outstanding_goal()
+    elif outcome == "cancel_missing":
+        assert session.goal is not None and not terminal.done()
+        assert wall <= duration_ns / 1e9 + profile["trajectory_timeout_pad_sec"] + profile["stop_timeout_sec"] + 0.1
+    elif outcome == "paused":
+        assert profile["service_timeout_sec"] <= wall <= profile["service_timeout_sec"] + 0.1
+    elif outcome in {"timeout_success", "simulation_timeout"}:
+        assert len(cancel_calls) == 1
+        assert cancel_calls[0] >= duration_ns / 1e9 + profile["trajectory_timeout_pad_sec"]
+    elif outcome == "stop_success":
+        assert stop.is_set() and len(cancel_calls) == 1
+    if outcome != "cancel_missing":
+        assert session.goal is None
+    assert len(cancel_calls) <= 1
+    assert trajectory == original
+    if outcome == "clock_missing":
+        assert sent == []
+    else:
+        assert len(sent) == 1
+        dispatched = sent[0].trajectory.joint_trajectory
+        assert dispatched.joint_names == trajectory["joint_names"]
+        assert [point.positions for point in dispatched.points] == trajectory["positions"]
+        assert [point.velocities for point in dispatched.points] == trajectory["velocities"]
+        assert [point.accelerations for point in dispatched.points] == trajectory["accelerations"]
+        assert [point.time_from_start.sec * 10**9 + point.time_from_start.nanosec
+                for point in dispatched.points] == trajectory["time_from_start_ns"]
 
 
 def test_interrupted_execution_does_not_resume_or_assume_empty_custody(tmp_path: Path) -> None:
@@ -1718,11 +2039,11 @@ def test_attachment_service_uses_the_selected_parent_and_requires_acknowledgment
     assert (request.model2_name, request.link2_name) == ("gear_medium", "link")
 
 
-@pytest.mark.parametrize("fault", [None, "wrong_target", "missing_board", "board_ack", "board_timeout"])
+@pytest.mark.parametrize("fault", [None, "missing_board", "board_ack", "board_timeout"])
 def test_link_attachment_execution_places_only_after_acknowledged_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
 ) -> None:
-    """An interfering nominal fit can place, but neither a bad target nor failed board custody can pass."""
+    """Run the saved release while requiring acknowledgment of board attachment."""
     from xml.etree import ElementTree as ET
 
     fixture_package = ET.parse(_SHARE / "package.xml").getroot().findtext("name")
@@ -1755,13 +2076,6 @@ def test_link_attachment_execution_places_only_after_acknowledged_target(
                 return {}
             return await super().entity_states(names)
 
-        async def feedback(self, *args: Any) -> dict[str, Any]:
-            result = await super().feedback(*args)
-            pose = deepcopy(args[2])
-            if self.calls.count("move_cartesian") == 5:
-                pose["z"] += .002 if fault == "wrong_target" else .0005
-            return {**result, "ee_pose": pose, "measured_at_ros_ns": 102_400_000_000}
-
         async def attachment(self, binding: Any, attach: bool, *, parent: Any = None) -> dict[str, Any]:
             if parent is None:
                 return await super().attachment(binding, attach)
@@ -1775,13 +2089,13 @@ def test_link_attachment_execution_places_only_after_acknowledged_target(
         robot_runtime=robot, validator=_validator, session_factory=transport,
     ).run(root))
     assert package_lookups == [fixture_package]
-    assert result["status"] == {None: "completed", "wrong_target": "failed", "missing_board": "blocked",
+    assert result["status"] == {None: "completed", "missing_board": "blocked",
                                 "board_ack": "failed", "board_timeout": "unknown"}[fault], result
     assert len(model.calls) == 1
     assert all(path.read_bytes() == content for path, content in original.items())
     assert result["assembly_success"] is None
     board_commands = [call for call in transport.calls if isinstance(call, tuple) and call[0] == "board_attachment"]
-    if fault in {"wrong_target", "missing_board"}:
+    if fault == "missing_board":
         assert board_commands == []
         assert not any(isinstance(call, tuple) and call[0] == "detach" for call in transport.calls)
     else:
@@ -1797,62 +2111,27 @@ def test_link_attachment_execution_places_only_after_acknowledged_target(
             release_ref = next(ref for ref in result["record_refs"] if ref["ref"].endswith("step_0009_result.json"))
             release = read_pin(root, release_ref)["outputs"]
             assert release["placement_attachment"]["parent"] == parent
-            assert release["placement_metrics"]["position_error_m"] == pytest.approx(.0005)
+            assert "placement_metrics" not in release
 
 
-@pytest.mark.parametrize("above_seat, unsupported", [(False, None), (True, None), (False, "threading"), (False, "press fit"), (False, "snap fit"), (False, "noncircular")])
-def test_fitting_execution_checks_fresh_pose_before_release(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, above_seat: bool, unsupported: str | None,
+def test_fitting_execution_uses_saved_release_without_claiming_live_seating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import json
-    from cais_spade_llm.spec2primitives.agents.ra import primitive_composition, refinement, program_execution
-
     root = tmp_path / "fitting_execution"
-    robot, part, model = _validated(root, fitting=True,
-        validation_profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE}, now_ros=102_400_000_000)
-    target = json.loads(model.calls[-1]["prompt"].split("COMPOSITION_INPUT\n", 1)[1])["target_feature"]
-    original = primitive_composition._load_inputs
-
-    def load(path: Path) -> Any:
-        inputs = original(path)
-        return replace(inputs, composition_input={**inputs.composition_input, "target_feature": target})
-
-    for module in (primitive_composition, refinement, program_execution):
-        monkeypatch.setattr(module, "_load_inputs", load)
-
-    class Transport(_Transport):
-        async def feedback(self, *args: Any) -> Any:
-            result = await super().feedback(*args)
-            pose = deepcopy(args[2])
-            if above_seat and self.calls.count("move_cartesian") == 5:
-                pose["z"] += .002
-            return {**result, "ee_pose": pose, "measured_at_ros_ns": 102_400_000_000}
-
-    transport = Transport(part)
-    async def validator(**kwargs: Any) -> Any:
-        if unsupported:
-            evidence = deepcopy(kwargs["evidence"])
-            if unsupported == "noncircular":
-                goal = {**read_pin(root, evidence["goal"]), "status": "unsupported",
-                        "reason": "The approved CAD has no supported pair of coaxial circular end faces.", "product_geometry": {}}
-                evidence["goal"] = append_record(root, root / "checked_fixture", "goal.json", goal)
-            else:
-                evidence["specification"] = append_record(root, root / "checked_fixture", "specification.json", {
-                    "record_type": "AssemblyValidationSpecification", "status": "accepted",
-                    "family": "vertical_gear_assembly" if unsupported == "threading" else unsupported,
-                    "requires_threading": unsupported == "threading",
-                })
-            kwargs["evidence"] = evidence
-        return await _validator(**kwargs)
-    runtime = PrimitiveExecutionRuntime(robot_runtime=robot, session_factory=transport, validator=validator, share=_SHARE)
-    result = asyncio.run(runtime.run(root))
-    if unsupported:
-        assert result["status"] == "blocked" and not result["command_dispatched"], result
-        assert transport.calls == [] and result["assembly_success"] is None
-        return
-    assert (result["status"] == "completed") is (not above_seat), result
-    detached = [call for call in transport.calls if isinstance(call, tuple) and call[0] == "detach"]
-    assert bool(detached) is (not above_seat)
-    if above_seat:
-        assert "shaft fitting" in result["message"] or "shaft fitting" in result.get("reason", ""), result
-        assert transport.calls.count("move_cartesian") == 5
+    robot, part, model = _validated(
+        root, fitting=True,
+        validation_profile={**load_refinement_profile(), "validation_scope": GAZEBO_OBSERVED_SCOPE},
+        now_ros=102_400_000_000, monkeypatch=monkeypatch,
+    )
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Release must not remeasure or validate the saved fitting program.")
+    transport = _Transport(part)
+    monkeypatch.setattr(transport, "feedback", forbidden)
+    result = asyncio.run(PrimitiveExecutionRuntime(
+        robot_runtime=robot, session_factory=transport, validator=forbidden, share=_SHARE,
+    ).run(root))
+    assert result["status"] == "completed", result
+    assert ("detach", "gear_medium") in transport.calls
+    assert "not rechecked" in result["message"]
+    assert result["assembly_success"] is None
+    assert len(model.calls) == 1

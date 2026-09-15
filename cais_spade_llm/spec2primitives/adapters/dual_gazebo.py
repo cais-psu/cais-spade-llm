@@ -68,6 +68,35 @@ def read_dual_gazebo_status(runtime: DualGazeboRuntime) -> DualGazeboStatus:
     return DualGazeboStatus(state=state)
 
 
+def read_dual_gazebo_started_at_ns(runtime: DualGazeboRuntime) -> int:
+    """Read the current owned launch time without querying ROS or changing Gazebo.
+
+    Args:
+        runtime: Application runtime with its existing process and timing data.
+
+    Returns:
+        Launch time in wall-clock nanoseconds, or zero without matching ownership.
+    """
+    reader = getattr(runtime, "_gazebo_launch_timing_snapshot", None)
+    if not callable(reader):
+        return 0
+    launch = reader()
+    process = getattr(runtime, "_ros2_procs", {}).get(DUAL_GAZEBO_NAME)
+    if (not isinstance(launch, dict) or launch.get("name") != DUAL_GAZEBO_NAME
+            or process is None or process.poll() is not None
+            or launch.get("pid") != process.pid):
+        return 0
+    t0 = launch.get("t0")
+    if type(t0) not in (int, float) or not math.isfinite(t0) or t0 < 0:
+        return 0
+    elapsed = time.monotonic() - t0
+    if elapsed < 0:
+        return 0
+    # ros2_start replaces the whole Gazebo process. Its existing monotonic
+    # launch time scopes acknowledgments without a reset or another ROS client.
+    return max(0, time.time_ns() - int(elapsed * 1e9))
+
+
 def start_dual_gazebo(runtime: DualGazeboRuntime) -> str | None:
     """Start `gazebo_dual_spec2primitives` after a fresh state and hardware check."""
     status = read_dual_gazebo_status(runtime)

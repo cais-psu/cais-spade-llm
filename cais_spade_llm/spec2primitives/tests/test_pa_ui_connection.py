@@ -1846,7 +1846,7 @@ def test_incompatible_saved_completion_is_rejected_without_rewriting(tmp_path):
 def test_gazebo_execution_button_requires_validated_program_and_idle_simulation(
     composition_status: str, gazebo_running: bool, busy: bool, available: bool, enabled: bool
 ) -> None:
-    """Expose execution only after the displayed program and simulator are ready."""
+    """Require the environment started by the top controls before exposing Run."""
     with spec2primitives_ui.ui.column() as container:
         elements = spec2primitives_ui._render_phase_5_diagnostics()
     try:
@@ -1861,8 +1861,9 @@ def test_gazebo_execution_button_requires_validated_program_and_idle_simulation(
         assert elements["run_program_button"].text == "Run in Gazebo"
         assert (not elements["run_program_button"]._props.get("disable", False)) is enabled
         assert not elements["stop_execution_button"].visible
-        if composition_status == "validated_for_declared_scope":
-            assert "Saved program validated" in elements["execution_message"].text
+        if composition_status == "validated_for_declared_scope" and gazebo_running:
+            assert "Saved program ready" in elements["execution_message"].text
+            assert "without revalidation" in elements["execution_message"].text
     finally:
         container.delete()
 
@@ -1902,7 +1903,7 @@ def test_gazebo_execution_progress_stop_and_reconnect_preserve_composition() -> 
             composition_status="validated_for_declared_scope",
         )
         assert not elements["stop_execution_button"].visible
-        assert elements["run_program_button"]._props.get("disable", False)
+        assert not elements["run_program_button"]._props.get("disable", False)
         assert elements["candidate_status_badge"].text == "validated_for_declared_scope"
         spec2primitives_ui._apply_primitive_execution_diagnostic(
             elements,
@@ -1917,8 +1918,8 @@ def test_gazebo_execution_progress_stop_and_reconnect_preserve_composition() -> 
 
 
 @pytest.mark.parametrize("status", ["unknown", "interrupted", "reset_required", "reset_completed"])
-def test_interrupted_gazebo_history_allows_run_without_a_reset_button(status):
-    """Let execution own a clean restart instead of exposing a manual reset action."""
+def test_interrupted_gazebo_history_requires_the_top_environment_controls(status):
+    """Execution never offers to start or reset a stopped simulator."""
     with spec2primitives_ui.ui.column() as container:
         elements = spec2primitives_ui._render_phase_5_diagnostics()
     try:
@@ -1929,9 +1930,52 @@ def test_interrupted_gazebo_history_allows_run_without_a_reset_button(status):
                 available=True, gazebo_running=False, composition_status="validated_for_declared_scope",
                 busy=False,
             )
-            assert not elements["run_program_button"]._props.get("disable", False)
-            assert "Run in Gazebo will start a clean shared scene" in elements["execution_message"].text
+            assert elements["run_program_button"]._props.get("disable", False)
+            assert "top Start control" in elements["execution_message"].text
             assert "Reset verification evidence." in elements["execution_message"].text
+    finally:
+        container.delete()
+
+
+@pytest.mark.parametrize("status", ["failed", "stopped", "completed", "unknown", "interrupted"])
+@pytest.mark.parametrize("gazebo_running", [False, True])
+def test_attempted_gazebo_program_can_retry_in_the_running_scene(status: str, gazebo_running: bool) -> None:
+    """Retain previous results while allowing an explicit, freshly checked Run."""
+    with spec2primitives_ui.ui.column() as container:
+        elements = spec2primitives_ui._render_phase_5_diagnostics()
+    try:
+        candidate_ref = "composition/primitive_program_candidates/attempt_0002/candidate.json"
+        elements["execution_candidate_ref"] = candidate_ref
+        elements["candidate_status_badge"].set_text("validated_for_declared_scope")
+        message = "Step 9 (move_cartesian): RuntimeError: Fresh robot feedback does not match the validated program prefix."
+        diagnostic = {
+            "status": status,
+            "message": message,
+            "candidate_ref": {"ref": candidate_ref, "sha256": "a" * 64},
+            "result": {"command_dispatched": True, "completed_steps": 8,
+                       "held_part": "medium gear", "gripper_state": "closed"},
+        }
+        for busy in (False, True, False):
+            spec2primitives_ui._apply_primitive_execution_diagnostic(
+                elements, diagnostic, available=True, gazebo_running=gazebo_running,
+                composition_status="validated_for_declared_scope", busy=busy,
+            )
+            assert bool(elements["run_program_button"]._props.get("disable", False)) == (not gazebo_running or busy)
+            assert elements["execution_status"].text == status
+            assert elements["candidate_status_badge"].text == "validated_for_declared_scope"
+            assert not elements["stop_execution_button"].visible
+            assert elements["execution_message"].text.count(message) == 1
+            assert json.loads(elements["execution_trace"].content) == diagnostic
+            if gazebo_running:
+                assert elements["execution_message"].text == message
+            else:
+                assert "top Start control" in elements["execution_message"].text
+        spec2primitives_ui._apply_primitive_execution_diagnostic(
+            elements, {**diagnostic, "status": "preparing"}, available=True,
+            gazebo_running=False, composition_status="validated_for_declared_scope",
+        )
+        assert elements["run_program_button"]._props["disable"]
+        assert elements["stop_execution_button"].visible
     finally:
         container.delete()
 
@@ -2023,10 +2067,10 @@ def test_gazebo_execution_preparation_survives_polling_and_allows_safe_retry(
         try:
             await asyncio.wait_for(entered.wait(), timeout=3)
             assert elements["execution_status"].text == "preparing"
-            assert "waiting for Gazebo readiness" in elements["execution_message"].text
+            assert "Loading the saved primitive program." in elements["execution_message"].text
             await timers[0]()
             assert elements["execution_status"].text == "preparing"
-            assert "waiting for Gazebo readiness" in elements["execution_message"].text
+            assert "Loading the saved primitive program." in elements["execution_message"].text
             assert elements["run_program_button"]._props["disable"]
             await click_run()
             assert calls == [(candidate_ref, binding_ref)]
@@ -2043,7 +2087,7 @@ def test_gazebo_execution_preparation_survives_polling_and_allows_safe_retry(
                 await click_run()
             assert commands == ["move_cartesian"]
             assert elements["execution_status"].text == "completed"
-            assert elements["run_program_button"]._props["disable"]
+            assert not elements["run_program_button"]._props.get("disable", False)
         finally:
             release.set()
             if not task.done():

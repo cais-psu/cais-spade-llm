@@ -103,50 +103,6 @@ def verified_reset(contexts_root: Path) -> dict[str, Any] | None:
     return {"request": request, "result": result, "covered": covered}
 
 
-def interrupted_reset_cleared_scene(contexts_root: Path) -> bool:
-    """Return whether the latest failed reset proved the old ROS scene disappeared."""
-    resets = []
-    for path in contexts_root.glob("*/execution/reset_*/request.json"):
-        root = path.parents[2]
-        request_ref = pin(root, path)
-        request = verify_record(root, request_ref)
-        if request.get("record_type") != "PrimitiveExecutionResetRequest":
-            raise ValueError("Invalid Gazebo reset request.")
-        resets.append((int(request["created_at_ns"]), root, path.parent, request_ref))
-    if not resets:
-        return False
-    _, root, directory, request_ref = max(resets, key=lambda item: item[0])
-    result_path = directory / "result.json"
-    if not result_path.exists():
-        return False
-    result = verify_record(root, pin(root, result_path))
-    if (
-        result.get("record_type") != "PrimitiveExecutionResetResult"
-        or result.get("request_ref") != request_ref
-    ):
-        raise ValueError("Gazebo reset result does not match its request.")
-    previous = None
-    for path in sorted(directory.glob("event_*.json")):
-        reference = pin(root, path)
-        event = verify_record(root, reference)
-        if event.get("previous_event_ref") != previous:
-            raise ValueError("Gazebo reset event lineage changed.")
-        previous = reference
-    if result.get("last_event_ref") != previous:
-        raise ValueError("Gazebo reset result does not match its events.")
-    stopped = result.get("stopped") or {}
-    endpoints = stopped.get("endpoints") or {}
-    publishers = endpoints.get("publishers") or {}
-    return (
-        result.get("status") == "reset_required"
-        and stopped.get("process_status") == "stopped"
-        and endpoints.get("services") == []
-        and "/clock" in publishers
-        and len(publishers) >= 2
-        and not any(publishers.values())
-    )
-
-
 def _fresh_simulation_cutoff(contexts_root: Path) -> int:
     """Return the newest execution-owned clean-scene start timestamp."""
     cutoff = 0
@@ -160,9 +116,9 @@ def _fresh_simulation_cutoff(contexts_root: Path) -> int:
     return cutoff
 
 
-def _applicable_verified_reset(contexts_root: Path) -> dict[str, Any] | None:
-    """Ignore an older failed manual reset after execution owns a clean restart."""
-    cutoff = _fresh_simulation_cutoff(contexts_root)
+def _applicable_verified_reset(contexts_root: Path, *, _started_at_ns: int = 0) -> dict[str, Any] | None:
+    """Let the current owned launch supersede older manual reset records."""
+    cutoff = max(_started_at_ns, _fresh_simulation_cutoff(contexts_root))
     latest_reset = 0
     for path in contexts_root.glob("*/execution/reset_*/request.json"):
         root = path.parents[2]
@@ -175,21 +131,38 @@ def _applicable_verified_reset(contexts_root: Path) -> dict[str, Any] | None:
     return verified_reset(contexts_root)
 
 
-def assert_interaction_current(root: Path) -> None:
-    """Keep pre-reset observations, context and programs unavailable for new robot work."""
-    reset = _applicable_verified_reset(root.parent)
+def assert_interaction_current(root: Path, *, _started_at_ns: int = 0) -> None:
+    """Respect manual invalidation unless a later owned launch supersedes it.
+
+    Args:
+        root: Interaction whose context and program will be read.
+        _started_at_ns: Current owned Gazebo launch time, when available.
+
+    Raises:
+        ValueError: An applicable reset invalidated this interaction.
+    """
+    reset = _applicable_verified_reset(root.parent, _started_at_ns=_started_at_ns)
     if reset is not None and root.name in reset["request"]["invalidated_interactions"]:
         raise ValueError("Gazebo was reset. Start a fresh interaction, observe the scene and compose again.")
 
 
 def assert_execution_available(
-    contexts_root: Path, *, fresh_simulation: bool = False,
+    contexts_root: Path, *, fresh_simulation: bool = False, _started_at_ns: int = 0,
 ) -> None:
-    """Block either robot when an earlier command may still be active."""
+    """Block either robot when an earlier command may still be active.
+
+    Args:
+        contexts_root: The owned collection of interaction records.
+        fresh_simulation: Existing caller-owned clean-start allowance.
+        _started_at_ns: Current owned Gazebo launch time, when available.
+
+    Raises:
+        ValueError: Applicable execution records are invalid or have unknown outcomes.
+    """
     if fresh_simulation:
         return
-    reset = _applicable_verified_reset(contexts_root)
-    cutoff = _fresh_simulation_cutoff(contexts_root)
+    reset = _applicable_verified_reset(contexts_root, _started_at_ns=_started_at_ns)
+    cutoff = max(_started_at_ns, _fresh_simulation_cutoff(contexts_root))
     for path in contexts_root.glob("*/execution/run_*/request.json"):
         root = path.parents[2]
         request_ref = pin(root, path)
@@ -291,8 +264,10 @@ def read_primitive_execution_diagnostic(root: Path, *, include_active: bool = Tr
         }
 
 
-def execution_custody(contexts_root: Path, resource_jid: str) -> Mapping[str, Any] | None:
-    """Return only verified semantic custody from the latest resource execution.
+def execution_custody(
+    contexts_root: Path, resource_jid: str, *, _started_at_ns: int = 0,
+) -> Mapping[str, Any] | None:
+    """Read acknowledged held_part from the applicable execution history.
 
     Unknown acknowledgments and unfinished commands must not appear as an empty
     gripper in a later composition snapshot. Simulator identifiers stay private.
@@ -300,15 +275,17 @@ def execution_custody(contexts_root: Path, resource_jid: str) -> Mapping[str, An
     Args:
         contexts_root: The owned collection of interaction records.
         resource_jid: The exact resource whose latest custody is required.
+        _started_at_ns: Current owned Gazebo launch time, when available.
 
     Returns:
-        Verified held-part and gripper state, or None when no execution exists.
+        Verified held-part and gripper state, initially empty for an owned launch.
+        None when neither execution history nor a launch boundary is available.
 
     Raises:
         ValueError: Records are invalid, commands are unfinished, or custody is unknown.
     """
-    reset = _applicable_verified_reset(contexts_root)
-    cutoff = _fresh_simulation_cutoff(contexts_root)
+    reset = _applicable_verified_reset(contexts_root, _started_at_ns=_started_at_ns)
+    cutoff = max(_started_at_ns, _fresh_simulation_cutoff(contexts_root))
     matches = []
     for path in contexts_root.glob("*/execution/run_*/request.json"):
         root = path.parents[2]
@@ -320,7 +297,48 @@ def execution_custody(contexts_root: Path, resource_jid: str) -> Mapping[str, An
         if request.get("resource_jid") == resource_jid:
             matches.append((request["created_at_ns"], root, path.parent))
     if not matches:
-        return {"held_part": None, "gripper_state": None} if reset is not None else None
+        return {"held_part": None, "gripper_state": None} if reset is not None or _started_at_ns else None
+    if _started_at_ns:
+        # A new Gazebo process has no attachments from the previous process.
+        # Older executors copied stale custody into new runs even when no grasp
+        # occurred. Reconstruct only acknowledged changes in this launch.
+        held, gripper_state = None, None
+        for _, root, directory in sorted(matches, key=lambda item: item[0]):
+            result_path = directory / "result.json"
+            if not result_path.exists():
+                raise ValueError("A previous execution has no final custody acknowledgment; further robot work is blocked.")
+            result = verify_record(root, pin(root, result_path))
+            if result.get("request_ref") != pin(root, directory / "request.json"):
+                raise ValueError("An execution result does not match its request.")
+            if result.get("custody_known") is not True:
+                raise ValueError("Execution custody is uncertain; inspect the recorded execution before further robot work.")
+            previous = None
+            for path in sorted(directory.glob("event_*.json")):
+                reference = pin(root, path)
+                event = verify_record(root, reference)
+                if event.get("previous_event_ref") != previous:
+                    raise ValueError("Execution event lineage changed.")
+                previous = reference
+            if result.get("last_event_ref") != previous:
+                raise ValueError("Execution result does not match its events.")
+            for reference in result.get("record_refs", []):
+                record = verify_record(root, reference)
+                if record.get("record_type") in {"PrimitiveExecutionGripperRequest", "PrimitiveExecutionGripperResult"}:
+                    gripper_state = result["gripper_state"]
+                if record.get("record_type") != "PrimitiveExecutionStepResult":
+                    continue
+                symbol = record.get("primitive_symbol")
+                if symbol not in {"grasp_part", "release_part"}:
+                    continue
+                outputs = record.get("outputs", {})
+                attached = symbol == "grasp_part"
+                if (outputs.get("success") is not True or outputs.get("attached") is not attached
+                        or record.get("custody_known") is not True
+                        or (attached and not isinstance(record.get("held_part"), str))
+                        or (not attached and record.get("held_part") is not None)):
+                    raise ValueError("Execution grasp/release has no matching custody acknowledgment.")
+                held, gripper_state = record["held_part"], result["gripper_state"]
+        return {"held_part": held, "gripper_state": gripper_state}
     _, root, directory = max(matches, key=lambda item: item[0])
     result_path = directory / "result.json"
     if not result_path.exists():
