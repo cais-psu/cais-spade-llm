@@ -1,0 +1,1438 @@
+<?xml version="1.0" ?>
+<sdf version="1.4">
+  <world name="default">
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <!-- View from the front aisle: M1/M2 run left to right, with Assembly
+         Station to their right. This does not change the perception cameras. -->
+    <gui>
+      <camera name="user_camera">
+        <pose>-4.5 -9 11.0 0 0.80 1.57079632679</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+    <!-- Machining Station: M1 and M2 are side by side. Both front doors face
+         ur5e-1 and ur5e-2; KMR side access is reserved for later integration. -->
+    <include>
+      <uri>model://haas_mini_mill</uri>
+      <name>M1</name>
+      <pose>-6 2.3 0 0 0 -1.5707963268</pose>
+    </include>
+    <include>
+      <uri>model://haas_mini_mill</uri>
+      <name>M2</name>
+      <pose>-2.6 2.3 0 0 0 -1.5707963268</pose>
+    </include>
+
+    <model name="M1_KMR_docking_pose">
+      <static>true</static>
+      <pose>-7.25 2.3 0.004 0 0 -1.57079632679</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
+          <material><ambient>0.10 0.35 0.80 0.45</ambient><diffuse>0.10 0.35 0.80 0.45</diffuse></material>
+          <transparency>0.55</transparency>
+        </visual>
+      </link>
+    </model>
+    <!-- Spawn-only KMR occupies the Storage dock. Motion and controllers follow later. -->
+    <include>
+      <uri>model://KMR</uri>
+      <name>KMR</name>
+      <pose>-8.15 2.3 0 0 0 -1.57079632679</pose>
+    </include>
+    <model name="M2_KMR_docking_pose">
+      <static>true</static>
+      <pose>-3.85 2.3 0.004 0 0 -1.57079632679</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
+          <material><ambient>0.10 0.35 0.80 0.45</ambient><diffuse>0.10 0.35 0.80 0.45</diffuse></material>
+          <transparency>0.55</transparency>
+        </visual>
+      </link>
+    </model>
+    <!-- Passive layout fixtures. Conveyor transport and KMR execution are not implemented. -->
+    <model name="ur5e-1 pedestal">
+      <static>true</static>
+      <pose>-6 1.1 0 0 0 0</pose>
+      <link name="link">
+        <collision name="column">
+          <pose>0 0 0.38 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.32 0.32 0.76</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="column">
+          <pose>0 0 0.38 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.32 0.32 0.76</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.3 .35 .4 1</ambient>
+            <diffuse>.3 .35 .4 1</diffuse>
+          </material>
+        </visual>
+        <collision name="mounting_plate">
+          <pose>0 0 0.78 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.04</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="mounting_plate">
+          <pose>0 0 0.78 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.12 .16 .2 1</ambient>
+            <diffuse>.12 .16 .2 1</diffuse>
+          </material>
+        </visual>
+        <collision name="foot">
+          <pose>0 0 0.025 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.44 0.44 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="foot">
+          <pose>0 0 0.025 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.44 0.44 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.16 .2 .24 1</ambient>
+            <diffuse>.16 .2 .24 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="ur5e-2 pedestal">
+      <static>true</static>
+      <pose>-2.6 1.1 0 0 0 0</pose>
+      <link name="link">
+        <collision name="column">
+          <pose>0 0 0.38 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.32 0.32 0.76</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="column">
+          <pose>0 0 0.38 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.32 0.32 0.76</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.3 .35 .4 1</ambient>
+            <diffuse>.3 .35 .4 1</diffuse>
+          </material>
+        </visual>
+        <collision name="mounting_plate">
+          <pose>0 0 0.78 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.04</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="mounting_plate">
+          <pose>0 0 0.78 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.12 .16 .2 1</ambient>
+            <diffuse>.12 .16 .2 1</diffuse>
+          </material>
+        </visual>
+        <collision name="foot">
+          <pose>0 0 0.025 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.44 0.44 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="foot">
+          <pose>0 0 0.025 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.44 0.44 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.16 .2 .24 1</ambient>
+            <diffuse>.16 .2 .24 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="M1 staging tray">
+      <static>true</static>
+      <pose>-6.55 1.1 0 0 0 0</pose>
+      <link name="link">
+        <collision name="pedestal">
+          <pose>0 0 0.48 0 0 0</pose>
+          <geometry><box><size>0.10 0.10 0.96</size></box></geometry>
+        </collision>
+        <visual name="pedestal">
+          <pose>0 0 0.48 0 0 0</pose>
+          <geometry><box><size>0.10 0.10 0.96</size></box></geometry>
+          <material><ambient>.22 .27 .32 1</ambient><diffuse>.22 .27 .32 1</diffuse></material>
+        </visual>
+        <collision name="surface">
+          <pose>0 0 0.98 0 0 0</pose>
+          <geometry><box><size>0.22 0.22 0.04</size></box></geometry>
+        </collision>
+        <visual name="surface">
+          <pose>0 0 0.98 0 0 0</pose>
+          <geometry><box><size>0.22 0.22 0.04</size></box></geometry>
+          <material><ambient>.66 .72 .77 1</ambient><diffuse>.66 .72 .77 1</diffuse></material>
+        </visual>
+        <collision name="rear_edge">
+          <pose>0 0.10 1.015 0 0 0</pose>
+          <geometry><box><size>0.22 0.02 0.03</size></box></geometry>
+        </collision>
+        <visual name="rear_edge">
+          <pose>0 0.10 1.015 0 0 0</pose>
+          <geometry><box><size>0.22 0.02 0.03</size></box></geometry>
+          <material><ambient>.15 .5 .44 1</ambient><diffuse>.15 .5 .44 1</diffuse></material>
+        </visual>
+        <collision name="left_edge">
+          <pose>-0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+        </collision>
+        <visual name="left_edge">
+          <pose>-0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+          <material><ambient>.15 .5 .44 1</ambient><diffuse>.15 .5 .44 1</diffuse></material>
+        </visual>
+        <collision name="right_edge">
+          <pose>0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+        </collision>
+        <visual name="right_edge">
+          <pose>0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+          <material><ambient>.15 .5 .44 1</ambient><diffuse>.15 .5 .44 1</diffuse></material>
+        </visual>
+        <visual name="capacity_one_nest">
+          <pose>0 0 1.001 0 0 0</pose>
+          <geometry><box><size>0.14 0.14 0.002</size></box></geometry>
+          <material><ambient>.22 .65 .5 1</ambient><diffuse>.22 .65 .5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="M2 staging tray">
+      <static>true</static>
+      <pose>-3.15 1.1 0 0 0 0</pose>
+      <link name="link">
+        <collision name="pedestal">
+          <pose>0 0 0.48 0 0 0</pose>
+          <geometry><box><size>0.10 0.10 0.96</size></box></geometry>
+        </collision>
+        <visual name="pedestal">
+          <pose>0 0 0.48 0 0 0</pose>
+          <geometry><box><size>0.10 0.10 0.96</size></box></geometry>
+          <material><ambient>.22 .27 .32 1</ambient><diffuse>.22 .27 .32 1</diffuse></material>
+        </visual>
+        <collision name="surface">
+          <pose>0 0 0.98 0 0 0</pose>
+          <geometry><box><size>0.22 0.22 0.04</size></box></geometry>
+        </collision>
+        <visual name="surface">
+          <pose>0 0 0.98 0 0 0</pose>
+          <geometry><box><size>0.22 0.22 0.04</size></box></geometry>
+          <material><ambient>.66 .72 .77 1</ambient><diffuse>.66 .72 .77 1</diffuse></material>
+        </visual>
+        <collision name="rear_edge">
+          <pose>0 0.10 1.015 0 0 0</pose>
+          <geometry><box><size>0.22 0.02 0.03</size></box></geometry>
+        </collision>
+        <visual name="rear_edge">
+          <pose>0 0.10 1.015 0 0 0</pose>
+          <geometry><box><size>0.22 0.02 0.03</size></box></geometry>
+          <material><ambient>.15 .5 .44 1</ambient><diffuse>.15 .5 .44 1</diffuse></material>
+        </visual>
+        <collision name="left_edge">
+          <pose>-0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+        </collision>
+        <visual name="left_edge">
+          <pose>-0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+          <material><ambient>.15 .5 .44 1</ambient><diffuse>.15 .5 .44 1</diffuse></material>
+        </visual>
+        <collision name="right_edge">
+          <pose>0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+        </collision>
+        <visual name="right_edge">
+          <pose>0.10 0 1.015 0 0 0</pose>
+          <geometry><box><size>0.02 0.20 0.03</size></box></geometry>
+          <material><ambient>.15 .5 .44 1</ambient><diffuse>.15 .5 .44 1</diffuse></material>
+        </visual>
+        <visual name="capacity_one_nest">
+          <pose>0 0 1.001 0 0 0</pose>
+          <geometry><box><size>0.14 0.14 0.002</size></box></geometry>
+          <material><ambient>.22 .65 .5 1</ambient><diffuse>.22 .65 .5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="Storage">
+      <static>true</static>
+      <pose>-9.15 2.3 0 0 0 1.57079632679</pose>
+      <link name="link">
+        <collision name="leg_0">
+          <pose>-0.585 -0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_0">
+          <pose>-0.585 -0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.22 .27 .32 1</ambient>
+            <diffuse>.22 .27 .32 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_1">
+          <pose>-0.585 0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_1">
+          <pose>-0.585 0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.22 .27 .32 1</ambient>
+            <diffuse>.22 .27 .32 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_2">
+          <pose>0.585 -0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_2">
+          <pose>0.585 -0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.22 .27 .32 1</ambient>
+            <diffuse>.22 .27 .32 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_3">
+          <pose>0.585 0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_3">
+          <pose>0.585 0.46 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 0.04 1.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.22 .27 .32 1</ambient>
+            <diffuse>.22 .27 .32 1</diffuse>
+          </material>
+        </visual>
+        <collision name="shelf_0">
+          <pose>0 0 0.08 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 1 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="shelf_0">
+          <pose>0 0 0.08 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 1 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.35 .5 .66 1</ambient>
+            <diffuse>.35 .5 .66 1</diffuse>
+          </material>
+        </visual>
+        <collision name="shelf_1">
+          <pose>0 0 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 1 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="shelf_1">
+          <pose>0 0 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 1 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.35 .5 .66 1</ambient>
+            <diffuse>.35 .5 .66 1</diffuse>
+          </material>
+        </visual>
+        <collision name="shelf_2">
+          <pose>0 0 1.12 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 1 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="shelf_2">
+          <pose>0 0 1.12 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 1 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.35 .5 .66 1</ambient>
+            <diffuse>.35 .5 .66 1</diffuse>
+          </material>
+        </visual>
+        <collision name="back">
+          <pose>0 0.48 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 0.04 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="back">
+          <pose>0 0.48 0.6 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.25 0.04 1.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.24 .35 .48 1</ambient>
+            <diffuse>.24 .35 .48 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Two four-position kitting trays keep the exact NIST parts separated and pickable. -->
+        <collision name="KET_kitting_tray">
+          <pose>0 -0.20 1.155 0 0 0</pose>
+          <geometry><box><size>1.10 0.28 0.02</size></box></geometry>
+        </collision>
+        <visual name="KET_kitting_tray">
+          <pose>0 -0.20 1.155 0 0 0</pose>
+          <geometry><box><size>1.10 0.28 0.02</size></box></geometry>
+          <material><ambient>.18 .28 .38 1</ambient><diffuse>.18 .28 .38 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_kitting_tray">
+          <pose>0 -0.20 0.635 0 0 0</pose>
+          <geometry><box><size>1.10 0.28 0.02</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_kitting_tray">
+          <pose>0 -0.20 0.635 0 0 0</pose>
+          <geometry><box><size>1.10 0.28 0.02</size></box></geometry>
+          <material><ambient>.18 .28 .38 1</ambient><diffuse>.18 .28 .38 1</diffuse></material>
+        </visual>
+        <visual name="KET_slot_1">
+          <pose>-0.42 -0.20 1.166 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <visual name="KET_slot_2">
+          <pose>-0.14 -0.20 1.166 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <visual name="KET_slot_3">
+          <pose>0.14 -0.20 1.166 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <visual name="KET_slot_4">
+          <pose>0.42 -0.20 1.166 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <collision name="KET_divider_0">
+          <pose>-0.55 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_divider_0">
+          <pose>-0.55 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="KET_divider_1">
+          <pose>-0.28 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_divider_1">
+          <pose>-0.28 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="KET_divider_2">
+          <pose>0.00 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_divider_2">
+          <pose>0.00 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="KET_divider_3">
+          <pose>0.28 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_divider_3">
+          <pose>0.28 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="KET_divider_4">
+          <pose>0.55 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_divider_4">
+          <pose>0.55 -0.20 1.1775 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="KET_front_edge">
+          <pose>0 -0.34 1.1775 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_front_edge">
+          <pose>0 -0.34 1.1775 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="KET_rear_edge">
+          <pose>0 -0.06 1.1775 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+        </collision>
+        <visual name="KET_rear_edge">
+          <pose>0 -0.06 1.1775 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <visual name="RGOCG_slot_1">
+          <pose>-0.42 -0.20 0.646 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <visual name="RGOCG_slot_2">
+          <pose>-0.14 -0.20 0.646 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <visual name="RGOCG_slot_3">
+          <pose>0.14 -0.20 0.646 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <visual name="RGOCG_slot_4">
+          <pose>0.42 -0.20 0.646 0 0 0</pose>
+          <geometry><box><size>0.23 0.20 0.002</size></box></geometry>
+          <material><ambient>.34 .58 .72 1</ambient><diffuse>.34 .58 .72 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_divider_0">
+          <pose>-0.55 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_divider_0">
+          <pose>-0.55 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_divider_1">
+          <pose>-0.28 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_divider_1">
+          <pose>-0.28 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_divider_2">
+          <pose>0.00 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_divider_2">
+          <pose>0.00 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_divider_3">
+          <pose>0.28 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_divider_3">
+          <pose>0.28 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_divider_4">
+          <pose>0.55 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_divider_4">
+          <pose>0.55 -0.20 0.6575 0 0 0</pose>
+          <geometry><box><size>0.015 0.28 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_front_edge">
+          <pose>0 -0.34 0.6575 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_front_edge">
+          <pose>0 -0.34 0.6575 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+        <collision name="RGOCG_rear_edge">
+          <pose>0 -0.06 0.6575 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+        </collision>
+        <visual name="RGOCG_rear_edge">
+          <pose>0 -0.06 0.6575 0 0 0</pose>
+          <geometry><box><size>1.10 0.015 0.025</size></box></geometry>
+          <material><ambient>.12 .20 .28 1</ambient><diffuse>.12 .20 .28 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="Storage_KMR_docking_pose">
+      <static>true</static>
+      <pose>-8.15 2.30 0.004 0 0 -1.57079632679</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
+          <material><ambient>0.10 0.35 0.80 0.45</ambient><diffuse>0.10 0.35 0.80 0.45</diffuse></material>
+          <transparency>0.55</transparency>
+        </visual>
+      </link>
+    </model>
+    <model name="Conveyor">
+      <static>true</static>
+      <pose>-3.75 0.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="belt">
+          <pose>0 0 0.98 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6.0 0.3 0.07</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="belt">
+          <pose>0 0 0.98 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6.0 0.3 0.07</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.16 .19 .22 1</ambient>
+            <diffuse>.16 .19 .22 1</diffuse>
+          </material>
+        </visual>
+        <collision name="frame_0">
+          <pose>0 -0.18 0.96 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6.0 0.06 0.13</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="frame_0">
+          <pose>0 -0.18 0.96 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6.0 0.06 0.13</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.92 .51 .1 1</ambient>
+            <diffuse>.92 .51 .1 1</diffuse>
+          </material>
+        </visual>
+        <collision name="frame_1">
+          <pose>0 0.18 0.96 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6.0 0.06 0.13</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="frame_1">
+          <pose>0 0.18 0.96 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>6.0 0.06 0.13</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.92 .51 .1 1</ambient>
+            <diffuse>.92 .51 .1 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_0_0">
+          <pose>-2.75 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_0_0">
+          <pose>-2.75 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_0_1">
+          <pose>-2.75 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_0_1">
+          <pose>-2.75 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_1_0">
+          <pose>-0.9 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_1_0">
+          <pose>-0.9 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_1_1">
+          <pose>-0.9 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_1_1">
+          <pose>-0.9 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_2_0">
+          <pose>0.9 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_2_0">
+          <pose>0.9 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_2_1">
+          <pose>0.9 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_2_1">
+          <pose>0.9 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_3_0">
+          <pose>2.75 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_3_0">
+          <pose>2.75 -0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <collision name="leg_3_1">
+          <pose>2.75 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="leg_3_1">
+          <pose>2.75 0.17 0.46 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.06 0.06 0.92</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.27 .32 .38 1</ambient>
+            <diffuse>.27 .32 .38 1</diffuse>
+          </material>
+        </visual>
+        <visual name="loading_position_1">
+          <pose>-2.25 0 1.016 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.16 0.24 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.16 .65 .5 1</ambient>
+            <diffuse>.16 .65 .5 1</diffuse>
+          </material>
+        </visual>
+        <visual name="loading_position_2">
+          <pose>1.15 0 1.016 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.16 0.24 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.16 .65 .5 1</ambient>
+            <diffuse>.16 .65 .5 1</diffuse>
+          </material>
+        </visual>
+        <visual name="output_nest">
+          <pose>2.97 0 1.015 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.16 0.24 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>.12 .45 .82 1</ambient>
+            <diffuse>.12 .45 .82 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <!-- Static straight pickup buffer; transport and occupancy follow later. -->
+    <model name="Buffer For Machined parts">
+      <static>true</static>
+      <pose>-0.50 0.50 1.015 0 0 0</pose>
+      <link name="link">
+        <!-- Four direct-part accumulation zones. The shallow fixed channel
+             supports horizontal pegs without removable carriers. -->
+        <collision name="zone_1_belt"><pose>-.18 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry></collision>
+        <visual name="zone_1_belt"><pose>-.18 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry><material><ambient>.12 .17 .20 1</ambient><diffuse>.12 .17 .20 1</diffuse></material></visual>
+        <collision name="zone_2_belt"><pose>-.06 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry></collision>
+        <visual name="zone_2_belt"><pose>-.06 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry><material><ambient>.20 .25 .28 1</ambient><diffuse>.20 .25 .28 1</diffuse></material></visual>
+        <collision name="zone_3_belt"><pose>.06 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry></collision>
+        <visual name="zone_3_belt"><pose>.06 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry><material><ambient>.12 .17 .20 1</ambient><diffuse>.12 .17 .20 1</diffuse></material></visual>
+        <collision name="zone_4_belt"><pose>.18 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry></collision>
+        <visual name="zone_4_belt"><pose>.18 0 0 0 0 0</pose><geometry><box><size>.119 .24 .004</size></box></geometry><material><ambient>.20 .25 .28 1</ambient><diffuse>.20 .25 .28 1</diffuse></material></visual>
+
+        <collision name="guide_left"><pose>0 .019 .003 0.25 0 0</pose><geometry><box><size>.48 .012 .004</size></box></geometry></collision>
+        <visual name="guide_left"><pose>0 .019 .003 0.25 0 0</pose><geometry><box><size>.48 .012 .004</size></box></geometry><material><ambient>.62 .68 .72 1</ambient><diffuse>.62 .68 .72 1</diffuse></material></visual>
+        <collision name="guide_right"><pose>0 -.019 .003 -0.25 0 0</pose><geometry><box><size>.48 .012 .004</size></box></geometry></collision>
+        <visual name="guide_right"><pose>0 -.019 .003 -0.25 0 0</pose><geometry><box><size>.48 .012 .004</size></box></geometry><material><ambient>.62 .68 .72 1</ambient><diffuse>.62 .68 .72 1</diffuse></material></visual>
+
+        <!-- Passive representations of a drive, photoeye, reflector, and
+             retracted stop for each future independently controlled zone. -->
+        <visual name="zone_1_drive"><pose>-.18 -.095 .025 0 0 0</pose><geometry><box><size>.055 .045 .046</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <visual name="zone_2_drive"><pose>-.06 -.095 .025 0 0 0</pose><geometry><box><size>.055 .045 .046</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <visual name="zone_3_drive"><pose>.06 -.095 .025 0 0 0</pose><geometry><box><size>.055 .045 .046</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <visual name="zone_4_drive"><pose>.18 -.095 .025 0 0 0</pose><geometry><box><size>.055 .045 .046</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <visual name="zone_1_photoeye"><pose>-.18 .040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.12 .22 .36 1</ambient><diffuse>.12 .22 .36 1</diffuse></material></visual>
+        <visual name="zone_2_photoeye"><pose>-.06 .040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.12 .22 .36 1</ambient><diffuse>.12 .22 .36 1</diffuse></material></visual>
+        <visual name="zone_3_photoeye"><pose>.06 .040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.12 .22 .36 1</ambient><diffuse>.12 .22 .36 1</diffuse></material></visual>
+        <visual name="zone_4_photoeye"><pose>.18 .040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.12 .22 .36 1</ambient><diffuse>.12 .22 .36 1</diffuse></material></visual>
+        <visual name="zone_1_reflector"><pose>-.18 -.040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material></visual>
+        <visual name="zone_2_reflector"><pose>-.06 -.040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material></visual>
+        <visual name="zone_3_reflector"><pose>.06 -.040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material></visual>
+        <visual name="zone_4_reflector"><pose>.18 -.040 .004 0 0 0</pose><geometry><box><size>.014 .008 .012</size></box></geometry><material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material></visual>
+        <collision name="zone_1_stop"><pose>-.133 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry></collision>
+        <visual name="zone_1_stop"><pose>-.133 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <collision name="zone_2_stop"><pose>-.013 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry></collision>
+        <visual name="zone_2_stop"><pose>-.013 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <collision name="zone_3_stop"><pose>.107 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry></collision>
+        <visual name="zone_3_stop"><pose>.107 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <collision name="zone_4_stop"><pose>.227 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry></collision>
+        <visual name="zone_4_stop"><pose>.227 0 -.003 0 0 0</pose><geometry><box><size>.004 .026 .008</size></box></geometry><material><ambient>.52 .58 .64 1</ambient><diffuse>.52 .58 .64 1</diffuse></material></visual>
+        <collision name="downstream_stop">
+          <pose>.235 0 .017 0 0 0</pose>
+          <geometry><box><size>.01 .045 .03</size></box></geometry>
+        </collision>
+        <visual name="downstream_stop">
+          <pose>.235 0 .017 0 0 0</pose>
+          <geometry><box><size>.01 .045 .03</size></box></geometry>
+          <material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material>
+        </visual>
+        <!-- Inclined top face bridges the 10 mm gap and 2 mm height change. -->
+        <collision name="transfer_plate">
+          <pose>-0.244803883865 0 0.000019419324 0 -0.197395559850 0</pose>
+          <geometry><box><size>0.010198039027 .24 .002</size></box></geometry>
+        </collision>
+        <visual name="transfer_plate">
+          <pose>-0.244803883865 0 0.000019419324 0 -0.197395559850 0</pose>
+          <geometry><box><size>0.010198039027 .24 .002</size></box></geometry>
+          <material><ambient>.48 .52 .56 1</ambient><diffuse>.48 .52 .56 1</diffuse></material>
+        </visual>
+        <collision name="infeed_guide_left"><pose>-.33 .0545 .010 0 0 -.375912</pose><geometry><box><size>.19352 .008 .016</size></box></geometry></collision>
+        <visual name="infeed_guide_left"><pose>-.33 .0545 .010 0 0 -.375912</pose><geometry><box><size>.19352 .008 .016</size></box></geometry><material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material></visual>
+        <collision name="infeed_guide_right"><pose>-.33 -.0545 .010 0 0 .375912</pose><geometry><box><size>.19352 .008 .016</size></box></geometry></collision>
+        <visual name="infeed_guide_right"><pose>-.33 -.0545 .010 0 0 .375912</pose><geometry><box><size>.19352 .008 .016</size></box></geometry><material><ambient>.92 .51 .1 1</ambient><diffuse>.92 .51 .1 1</diffuse></material></visual>
+        <visual name="waiting_position_1">
+          <pose>-0.18 0 .00215 0 0 0</pose>
+          <geometry><box><size>.065 .026 .0003</size></box></geometry>
+          <material><ambient>.16 .65 .50 1</ambient><diffuse>.16 .65 .50 1</diffuse></material>
+        </visual>
+        <visual name="waiting_position_2">
+          <pose>-0.06 0 .00215 0 0 0</pose>
+          <geometry><box><size>.065 .026 .0003</size></box></geometry>
+          <material><ambient>.16 .65 .50 1</ambient><diffuse>.16 .65 .50 1</diffuse></material>
+        </visual>
+        <visual name="waiting_position_3">
+          <pose>0.06 0 .00215 0 0 0</pose>
+          <geometry><box><size>.065 .026 .0003</size></box></geometry>
+          <material><ambient>.16 .65 .50 1</ambient><diffuse>.16 .65 .50 1</diffuse></material>
+        </visual>
+        <visual name="waiting_position_4">
+          <pose>0.18 0 .00215 0 0 0</pose>
+          <geometry><box><size>.065 .026 .0003</size></box></geometry>
+          <material><ambient>.12 .45 .82 1</ambient><diffuse>.12 .45 .82 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <!-- Evaluator-only ground truth. Spec2Primitives recognition must not consume it. -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+      <update_rate>50</update_rate>
+    </plugin>
+    <!-- IFRA LinkAttacher world plugin (services: /ATTACHLINK, /DETACHLINK) -->
+    <plugin name="gazebo_link_attacher" filename="libgazebo_link_attacher.so"/>
+    <include>
+      <uri>model://table</uri>
+      <name>table_xarm6</name>
+      <pose>0.0 0.40 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://table</uri>
+      <name>table_ur5e</name>
+      <pose>0.0 -0.40 0 0 0 0</pose>
+    </include>
+
+    <model name="GMC_Laser_Plate_Virtual">
+      <static>true</static>
+      <!-- The CAD top faces down; the newly exposed opposite face stays at z=1.0439916. -->
+      <!-- Table surface is z=1.015. The plate's lower face retains the 20 mm gap. -->
+      <pose>0 0 1.0439916 3.141592653589793 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <pose>-0.192 -0.192 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/GMC_Laser_Plate_Virtual.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.192 -0.192 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/GMC_Laser_Plate_Virtual.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/White</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Static NIST gear fixture. The three hidden M6 fasteners are not modeled. -->
+    <model name="Gear_Plate">
+      <static>true</static>
+      <pose>-0.0205504 0.1448242 1.0439916 0 0 -1.57079632679</pose>
+      <link name="Gear_Plate">
+        <collision name="collision">
+          <pose>-0.2131605 0.2018883 0.0847159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Plate.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2018883 0.0847159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Plate.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+      <link name="Gear_Shaft_1">
+        <pose>0 0.0500000 0.0050000 0 0 0</pose>
+        <collision name="collision">
+          <pose>0 0 0.0100000 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.005</radius>
+              <length>0.020</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2318883 0.0797159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Shaft.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+      <link name="Gear_Shaft_2">
+        <pose>0 0.0200000 0.0050000 0 0 0</pose>
+        <collision name="collision">
+          <pose>0 0 0.0100000 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.005</radius>
+              <length>0.020</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2318883 0.0797159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Shaft.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+      <link name="Gear_Shaft_3">
+        <pose>0 -0.0300000 0.0050000 0 0 0</pose>
+        <collision name="collision">
+          <pose>0 0 0.0100000 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.005</radius>
+              <length>0.020</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131605 0.2318883 0.0797159 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://cad_models/Gear_Shaft.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== PERCEPTION CAMERAS ========== -->
+    <!-- Storage camera faces the shelves from the front aisle. -->
+    <model name="cam_storage">
+      <static>true</static>
+      <pose>-8.20 0.75 2.35 0 0.694 2.047</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_storage</namespace>
+            </ros>
+            <camera_name>cam_storage</camera_name>
+            <frame_name>cam_storage_link</frame_name>
+            <min_depth>0.05</min_depth>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above Prusa MK4-2 (pick detection) -->
+    <model name="cam_mk4_2">
+      <static>true</static>
+      <pose>0.50 -0.50 1.75 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.8</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_mk4_2</namespace>
+            </ros>
+            <camera_name>cam_mk4_2</camera_name>
+            <frame_name>cam_mk4_2_link</frame_name>
+            <min_depth>0.05</min_depth>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Camera above the full 384 mm Spec2Primitives NIST plate. -->
+    <model name="cam_assembly">
+      <static>true</static>
+      <pose>0 0 1.55 0 1.5708 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+          <transparency>1.0</transparency>
+        </visual>
+        <sensor type="depth" name="depth_camera">
+          <update_rate>15.0</update_rate>
+          <camera>
+            <horizontal_fov>0.95</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>2.0</far>
+            </clip>
+          </camera>
+          <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>cam_assembly</namespace>
+            </ros>
+            <camera_name>cam_assembly</camera_name>
+            <frame_name>cam_assembly_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- Empty Exit tray. Completed subassembly transfer is implemented later. -->
+    <model name="Exit">
+      <static>true</static>
+      <pose>0.50 0.58 1.04 0 0 0</pose>
+      <link name="link">
+        <collision name="surface">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+        </collision>
+        <visual name="surface">
+          <geometry><box><size>0.4 0.4 0.05</size></box></geometry>
+          <material>
+            <ambient>.34 .58 .82 1</ambient>
+            <diffuse>.34 .58 .82 1</diffuse>
+          </material>
+        </visual>
+        <collision name="rear_edge">
+          <pose>0 0.19 0.045 0 0 0</pose>
+          <geometry><box><size>0.4 0.02 0.04</size></box></geometry>
+        </collision>
+        <visual name="rear_edge">
+          <pose>0 0.19 0.045 0 0 0</pose>
+          <geometry><box><size>0.4 0.02 0.04</size></box></geometry>
+          <material><ambient>.12 .34 .60 1</ambient><diffuse>.12 .34 .60 1</diffuse></material>
+        </visual>
+        <collision name="side_edge_1">
+          <pose>-0.19 0 0.045 0 0 0</pose>
+          <geometry><box><size>0.02 0.38 0.04</size></box></geometry>
+        </collision>
+        <visual name="side_edge_1">
+          <pose>-0.19 0 0.045 0 0 0</pose>
+          <geometry><box><size>0.02 0.38 0.04</size></box></geometry>
+          <material><ambient>.12 .34 .60 1</ambient><diffuse>.12 .34 .60 1</diffuse></material>
+        </visual>
+        <collision name="side_edge_2">
+          <pose>0.19 0 0.045 0 0 0</pose>
+          <geometry><box><size>0.02 0.38 0.04</size></box></geometry>
+        </collision>
+        <visual name="side_edge_2">
+          <pose>0.19 0 0.045 0 0 0</pose>
+          <geometry><box><size>0.02 0.38 0.04</size></box></geometry>
+          <material><ambient>.12 .34 .60 1</ambient><diffuse>.12 .34 .60 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- All three exact gears start completed on the printer bed.
+         Initial inventory does not change the active assembly_board-v1 order. -->
+    <include>
+      <uri>model://prusa_mk4_2</uri>
+      <name>prusa_mk4_2</name>
+      <pose>0.50 -0.50 1.04 0 0 -1.57079632679</pose>
+    </include>
+    <include>
+      <uri>model://gear_small</uri>
+      <name>gear_small</name>
+      <pose>0.44 -0.58 1.11 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://gear_medium</uri>
+      <name>gear_medium</name>
+      <pose>0.44 -0.50 1.11 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://gear_large</uri>
+      <name>gear_large</name>
+      <pose>0.44 -0.42 1.11 0 0 0</pose>
+    </include>
+
+    <!-- Exact NIST KET CAD on the upper Storage shelf. -->
+    <model name="KET4_Square_4mm">
+      <pose>-8.95 1.88 1.165 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.01</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.004 0.004 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.002 -0.002 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET4_Square_4mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="KET8_Square_8mm">
+      <pose>-8.95 2.16 1.165 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.03</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.008 0.007 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.004 -0.0035 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET8_Square_8mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="KET12_Square_12mm">
+      <pose>-8.95 2.44 1.165 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.04</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.012 0.008 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.006 -0.004 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET12_Square_12mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="KET16_Square_16mm">
+      <pose>-8.95 2.72 1.165 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.016 0.010 0.05</size></box></geometry></collision>
+        <visual name="visual"><pose>-0.008 -0.005 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/KET16_Square_16mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Exact NIST RGOCG CAD on the middle Storage shelf. -->
+    <model name="RGOCG4-50_Round_4mm">
+      <pose>-8.95 1.88 0.645 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.01</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.002</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.002 -0.002 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG4-50_Round_4mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="RGOCG8-50_8mm">
+      <pose>-8.95 2.16 0.645 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.02</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.004</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.004 -0.004 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG8-50_8mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="RGOCG12-50_12mm">
+      <pose>-8.95 2.44 0.645 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.006</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.006 -0.006 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG12-50_12mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+    <model name="RGOCG16-50_16mm">
+      <pose>-8.95 2.72 0.645 0 0 1.57079632679</pose>
+      <link name="link">
+        <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.08</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+        <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.05</length></cylinder></geometry></collision>
+        <visual name="visual"><pose>-0.008 -0.008 0 0 0 0</pose><geometry><mesh><uri>model://cad_models/RGOCG16-50_16mm.STL</uri><scale>0.001 0.001 0.001</scale></mesh></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <!-- Re-enabling gravity to 9.81 so the objects can sit on the tables instead of flying -->
+      <gravity>0 0 -9.81</gravity>
+    </physics>
+
+  </world>
+</sdf>

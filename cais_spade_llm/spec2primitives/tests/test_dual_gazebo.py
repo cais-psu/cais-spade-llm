@@ -22,11 +22,15 @@ from cais_spade_llm.spec2primitives.adapters.dual_gazebo import (
 )
 
 
-@pytest.mark.parametrize('world,passive', [
-    ('table_spec2primitives.world', False),
-    ('table_spec2primitives.world', True), ('table.world', False),
+@pytest.mark.parametrize('world,passive,expected_direct', [
+    ('table_spec2primitives.world', False, True),
+    ('table_spec2primitives.world', True, False),
+    ('table_recovery_framework.world', False, True),
+    ('table_recovery_framework.world', True, False),
+    ('single_table.world', False, False),
+    ('single_table.world', True, False),
 ])
-def test_icra_gripper_followers_preserve_other_simulation_modes(world, passive):
+def test_icra_gripper_followers_preserve_other_simulation_modes(world, passive, expected_direct):
     """Change only follower control, preserving every other robot model element."""
     launch = Path(__file__).resolve().parents[3] / 'ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py'
     module = ast.parse(launch.read_text())
@@ -46,7 +50,7 @@ def test_icra_gripper_followers_preserve_other_simulation_modes(world, passive):
             ET.SubElement(plugin, key).text = value
     before = ET.tostring(root)
     configure(root, 'xarm6_', world_file=world, passive=passive)
-    if world != 'table_spec2primitives.world' or passive:
+    if not expected_direct:
         assert ET.tostring(root) == before
         return
     assert root.findall('.//hasPID') == []
@@ -61,12 +65,15 @@ def test_icra_gripper_followers_preserve_other_simulation_modes(world, passive):
 @pytest.mark.parametrize(('world', 'passive', 'expected'), [
     ('table_spec2primitives.world', False, 0.0),
     ('table_spec2primitives.world', True, 0.85),
-    ('table.world', False, 0.85),
+    ('table_recovery_framework.world', False, 0.0),
+    ('table_recovery_framework.world', True, 0.85),
+    ('single_table.world', False, 0.85),
+    ('single_table.world', True, 0.85),
 ])
 def test_icra_xarm_gripper_starts_open_without_changing_other_modes(
     world, passive, expected,
 ):
-    """Start the active ICRA xArm gripper at its configured open target."""
+    """Start the active ICRA and recovery framework xArm gripper open."""
     launch = Path(__file__).resolve().parents[3] / 'ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py'
     module = ast.parse(launch.read_text())
     function = next(node for node in module.body if isinstance(node, ast.FunctionDef)

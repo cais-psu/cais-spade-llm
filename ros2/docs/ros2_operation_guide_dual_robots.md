@@ -68,7 +68,7 @@ ros2 launch cais_lab_robotics xarm6_ur5e_gazebo.launch.py
 ```
 
 **What happens:**
-1. Gazebo Classic starts with `table.world` (two wooden tables side-by-side, assembly board, printers, parts).
+1. Gazebo Classic starts with `table_recovery_framework.world` (two wooden tables side-by-side, assembly board, printers, parts).
 2. After **30 seconds**: Both robots spawn as a single combined model. Robot positions are encoded in the URDF fixed joints (not spawn arguments).
 3. After spawn completes: All controllers load (`joint_state_broadcaster`, xArm6 arm/gripper, UR5e arm).
 

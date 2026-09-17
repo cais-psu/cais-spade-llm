@@ -1,0 +1,188 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="haas_mini_mill">
+    <static>true</static>
+
+    <!-- Local +X is the front door. Local -Y is the automatic side window. -->
+    <link name="enclosure">
+      <collision name="base_collision">
+        <pose>0 0 0.125 0 0 0</pose>
+        <geometry><box><size>1.65 1.70 0.25</size></box></geometry>
+      </collision>
+      <visual name="base_visual">
+        <pose>0 0 0.125 0 0 0</pose>
+        <geometry><box><size>1.65 1.70 0.25</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+      </visual>
+
+      <collision name="rear_collision">
+        <pose>-0.735 0 0.965 0 0 0</pose>
+        <geometry><box><size>0.18 1.70 1.43</size></box></geometry>
+      </collision>
+      <visual name="rear_visual">
+        <pose>-0.735 0 0.965 0 0 0</pose>
+        <geometry><box><size>0.18 1.70 1.43</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+
+      <collision name="left_side_collision">
+        <pose>0 0.775 0.965 0 0 0</pose>
+        <geometry><box><size>1.47 0.15 1.43</size></box></geometry>
+      </collision>
+      <visual name="left_side_visual">
+        <pose>0 0.775 0.965 0 0 0</pose>
+        <geometry><box><size>1.47 0.15 1.43</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+
+      <!-- Four panels surround the collision-free automatic side window. -->
+      <collision name="side_window_lower_collision">
+        <pose>0 -0.775 0.475 0 0 0</pose>
+        <geometry><box><size>1.47 0.15 0.70</size></box></geometry>
+      </collision>
+      <visual name="side_window_lower_visual">
+        <pose>0 -0.775 0.475 0 0 0</pose>
+        <geometry><box><size>1.47 0.15 0.70</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <collision name="side_window_upper_collision">
+        <pose>0 -0.775 1.500 0 0 0</pose>
+        <geometry><box><size>1.47 0.15 0.36</size></box></geometry>
+      </collision>
+      <visual name="side_window_upper_visual">
+        <pose>0 -0.775 1.500 0 0 0</pose>
+        <geometry><box><size>1.47 0.15 0.36</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <collision name="side_window_front_collision">
+        <pose>0.635 -0.775 1.050 0 0 0</pose>
+        <geometry><box><size>0.20 0.15 0.54</size></box></geometry>
+      </collision>
+      <visual name="side_window_front_visual">
+        <pose>0.635 -0.775 1.050 0 0 0</pose>
+        <geometry><box><size>0.20 0.15 0.54</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <collision name="side_window_rear_collision">
+        <pose>-0.635 -0.775 1.050 0 0 0</pose>
+        <geometry><box><size>0.20 0.15 0.54</size></box></geometry>
+      </collision>
+      <visual name="side_window_rear_visual">
+        <pose>-0.635 -0.775 1.050 0 0 0</pose>
+        <geometry><box><size>0.20 0.15 0.54</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <visual name="side_window_visual">
+        <pose>0 -0.776 1.050 1.57079632679 0 0</pose>
+        <geometry><box><size>1.05 0.54 0.012</size></box></geometry>
+        <material>
+          <ambient>0.08 0.20 0.28 0.45</ambient>
+          <diffuse>0.08 0.20 0.28 0.45</diffuse>
+        </material>
+        <transparency>0.55</transparency>
+      </visual>
+
+      <!-- Front panels leave the robot-tending door collision-free. -->
+      <collision name="front_lower_collision">
+        <pose>0.735 0 0.475 0 0 0</pose>
+        <geometry><box><size>0.18 1.70 0.70</size></box></geometry>
+      </collision>
+      <visual name="front_lower_visual">
+        <pose>0.735 0 0.475 0 0 0</pose>
+        <geometry><box><size>0.18 1.70 0.70</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <collision name="front_upper_collision">
+        <pose>0.735 0 1.560 0 0 0</pose>
+        <geometry><box><size>0.18 1.70 0.24</size></box></geometry>
+      </collision>
+      <visual name="front_upper_visual">
+        <pose>0.735 0 1.560 0 0 0</pose>
+        <geometry><box><size>0.18 1.70 0.24</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <collision name="front_left_collision">
+        <pose>0.735 0.690 1.075 0 0 0</pose>
+        <geometry><box><size>0.18 0.32 0.73</size></box></geometry>
+      </collision>
+      <visual name="front_left_visual">
+        <pose>0.735 0.690 1.075 0 0 0</pose>
+        <geometry><box><size>0.18 0.32 0.73</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <collision name="front_right_collision">
+        <pose>0.735 -0.690 1.075 0 0 0</pose>
+        <geometry><box><size>0.18 0.32 0.73</size></box></geometry>
+      </collision>
+      <visual name="front_right_visual">
+        <pose>0.735 -0.690 1.075 0 0 0</pose>
+        <geometry><box><size>0.18 0.32 0.73</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <visual name="front_door_left_visual">
+        <pose>0.826 0.235 1.075 0 1.57079632679 0</pose>
+        <geometry><box><size>0.47 0.73 0.012</size></box></geometry>
+        <material><ambient>0.08 0.20 0.28 0.45</ambient><diffuse>0.08 0.20 0.28 0.45</diffuse></material>
+        <transparency>0.55</transparency>
+      </visual>
+      <visual name="front_door_right_visual">
+        <pose>0.826 -0.235 1.075 0 1.57079632679 0</pose>
+        <geometry><box><size>0.47 0.73 0.012</size></box></geometry>
+        <material><ambient>0.08 0.20 0.28 0.45</ambient><diffuse>0.08 0.20 0.28 0.45</diffuse></material>
+        <transparency>0.55</transparency>
+      </visual>
+
+      <collision name="roof_collision">
+        <pose>0 0 1.725 0 0 0</pose>
+        <geometry><box><size>1.65 1.70 0.20</size></box></geometry>
+      </collision>
+      <visual name="roof_visual">
+        <pose>0 0 1.725 0 0 0</pose>
+        <geometry><box><size>1.65 1.70 0.20</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+      </visual>
+      <visual name="header_visual">
+        <pose>0.842 0 1.615 0 0 0</pose>
+        <geometry><box><size>0.04 1.06 0.12</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+      </visual>
+      <visual name="control_panel_visual">
+        <pose>0.940 -0.700 1.270 0 0 0</pose>
+        <geometry><box><size>0.16 0.30 0.56</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+      </visual>
+      <visual name="control_screen_visual">
+        <pose>1.022 -0.700 1.350 0 1.57079632679 0</pose>
+        <geometry><box><size>0.18 0.22 0.008</size></box></geometry>
+        <material><ambient>0.05 0.25 0.10 1</ambient><diffuse>0.05 0.25 0.10 1</diffuse></material>
+      </visual>
+    </link>
+
+    <link name="workholding">
+      <pose>0.55 0 0.855 0 0 0</pose>
+      <collision name="table_collision">
+        <geometry><box><size>0.60 0.76 0.10</size></box></geometry>
+      </collision>
+      <visual name="table_visual">
+        <geometry><box><size>0.60 0.76 0.10</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+      </visual>
+      <collision name="vise_collision">
+        <pose>0 0 0.105 0 0 0</pose>
+        <geometry><box><size>0.20 0.24 0.11</size></box></geometry>
+      </collision>
+      <visual name="vise_visual">
+        <pose>0 0 0.105 0 0 0</pose>
+        <geometry><box><size>0.20 0.24 0.11</size></box></geometry>
+        <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+      </visual>
+    </link>
+
+    <link name="front_access">
+      <pose>1.05 0 1.05 0 0 0</pose>
+    </link>
+    <link name="side_access">
+      <pose>0 -1.05 1.05 0 0 0</pose>
+    </link>
+  </model>
+</sdf>

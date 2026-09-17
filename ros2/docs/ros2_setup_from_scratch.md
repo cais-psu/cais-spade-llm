@@ -140,8 +140,9 @@ Dual robots:
 ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 ```
 
-The dual simulation uses the single world file
-`ros2/cais_lab_robotics/worlds/table.world`.
+The dual simulation defaults to
+`ros2/cais_lab_robotics/worlds/table_recovery_framework.world` with NIST components.
+Use `world_file:=table_spec2primitives.world` for the separate Spec2Primitives scene.
 
 ## 7. Verify the Running Simulation
 

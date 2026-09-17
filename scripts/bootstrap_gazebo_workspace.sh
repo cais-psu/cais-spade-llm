@@ -71,6 +71,10 @@ STALE_FAST_WORLD="${ROS2_WS}/install/cais_lab_robotics/share/cais_lab_robotics/w
 if [[ -e "${STALE_FAST_WORLD}" || -L "${STALE_FAST_WORLD}" ]]; then
   rm -f "${STALE_FAST_WORLD}"
 fi
+STALE_TABLE_WORLD="${ROS2_WS}/install/cais_lab_robotics/share/cais_lab_robotics/worlds/table.world"
+if [[ -e "${STALE_TABLE_WORLD}" || -L "${STALE_TABLE_WORLD}" ]]; then
+  rm -f "${STALE_TABLE_WORLD}"
+fi
 
 copy_file_if_not_same \
   "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
@@ -89,6 +93,14 @@ if ! ros2 pkg prefix realsense2_camera >/dev/null 2>&1 || \
   echo "RealSense ROS packages are required for wrist-camera perception." >&2
   echo "Install them, then rerun bootstrap:" >&2
   echo "  sudo apt install ros-${ROS_DISTRO}-realsense2-camera ros-${ROS_DISTRO}-realsense2-description" >&2
+  exit 1
+fi
+
+if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1 || \
+   ! ros2 pkg prefix nav2_msgs >/dev/null 2>&1; then
+  echo "Nav2 is required for recovery-framework KMR base planning." >&2
+  echo "Install it, then rerun bootstrap:" >&2
+  echo "  sudo apt install ros-${ROS_DISTRO}-navigation2 ros-${ROS_DISTRO}-nav2-bringup" >&2
   exit 1
 fi
 

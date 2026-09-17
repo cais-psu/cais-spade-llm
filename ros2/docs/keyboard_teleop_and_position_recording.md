@@ -234,7 +234,7 @@ In interactive mode:
 | `Path incomplete (X%)` | Target position may be unreachable. Try a smaller step size (`-` key). |
 | `Goal rejected` | MoveIt can't plan to the target. The robot may be at a joint limit. Try a different direction. |
 | Save doesn't work | Check that `cais_spade_llm/initialization/resources/robot_xarm6.json` exists and is writable. |
-| Perception node: `/get_entity_state not available` | The `libgazebo_ros_state.so` plugin must be in `table.world`. Restart the simulation after adding it. |
+| Perception node: `/get_entity_state not available` | The `libgazebo_ros_state.so` plugin must be in `table_recovery_framework.world`. Restart the simulation after adding it. |
 | Perception node: `Failed to get state` | Deadlock issue — make sure `gazebo_camera_detector.py` uses `MultiThreadedExecutor` with separate callback groups. |
 
 ---

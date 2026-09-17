@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""
-All-in-one: Gazebo Classic + MoveIt2 for BOTH xArm6 and UR5e in ONE move_group.
+"""Launch the selected dual-robot Gazebo world with MoveIt and RViz.
 
-A single MoveIt move_group manages both robots. In RViz, use the `dual_robots`
-planning group for paired xArm6 + UR5e motion, or toggle to individual groups:
-  - dual_robots           → xArm6 + UR5e arms together
-  - xarm6_xarm6           → xArm6 arm (6-DOF)
-  - xarm6_xarm_gripper    → xArm6 gripper
-  - ur5e_ur_manipulator   → UR5e arm (6-DOF)
+The default recovery framework world uses ur5e-2 and ur5e-3, with individual
+ur5e_2_ur_manipulator and ur5e_3_ur_manipulator planning groups.
+table_spec2primitives.world retains the xarm6_xarm6 and ur5e_ur_manipulator
+groups. Both configurations provide the paired dual_robots group.
 
 Usage:
     ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
@@ -460,6 +457,22 @@ def _launch_arg_enabled(context, name, default='false'):
 
 
 def launch_setup(context, *args, **kwargs):
+    """Select the recovery framework launch or the existing xArm6/UR5e setup."""
+    if LaunchConfiguration('world_file').perform(context) == 'table_recovery_framework.world':
+        return [IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([
+                    FindPackageShare('cais_lab_robotics'), 'launch',
+                    'recovery_framework_gazebo.launch.py',
+                ])
+            ),
+            launch_arguments={
+                name: LaunchConfiguration(name) for name in (
+                    'world_file', 'run_perception', 'include_assembly_parts',
+                    'include_loose_parts', 'launch_gazebo', 'launch_moveit', 'launch_rviz',
+                )
+            }.items(),
+        )]
     xarm_prefix = 'xarm6_'
     ur5e_prefix = 'ur5e_'
     run_perception = LaunchConfiguration('run_perception')
@@ -539,10 +552,11 @@ def launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
+    """Declare the world selection and Gazebo, MoveIt, and RViz launch options."""
     return LaunchDescription([
         DeclareLaunchArgument(
             'world_file',
-            default_value='table.world',
+            default_value='table_recovery_framework.world',
             description='Package-local Gazebo world filename under cais_lab_robotics/worlds.',
         ),
         DeclareLaunchArgument(
@@ -562,7 +576,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'run_perception',
-            default_value='true',
+            default_value='false',
             description='Automatically start gazebo_camera_detector for /detect_part and /detect_all.',
         ),
         DeclareLaunchArgument(

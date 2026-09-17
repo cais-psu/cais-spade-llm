@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="800" viewBox="0 0 1400 800">
+<title>Recovery framework accepted Gazebo layout</title>
+<desc>Storage with the parked sideways KMP omniMove 400, close vertical KMR docking markers beside two machines, and a four-zone direct-part Conveyor buffer; ur5e-3 above ur5e-4, printer with three gears beside ur5e-4, and Exit beside ur5e-3.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10Z" fill="#3877ae"/></marker></defs>
+<rect width="1400" height="800" fill="#f8fafc"/>
+<text x="35" y="42" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="27" fill="#21364f">Recovery framework — accepted Gazebo layout</text>
+<text x="35" y="72" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#52647a">Static geometry and resource contracts · handling and transport remain planned</text>
+<rect x="35" y="122" width="132" height="248" rx="3" fill="#dfeafb" stroke="#3b76ba" stroke-width="2"/>
+<text x="101" y="149" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="22" fill="#21364f">Storage</text>
+<text x="101" y="171" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#21364f">yaw +90°</text>
+<rect x="54" y="190" width="39" height="153" rx="3" fill="#b7cadb" stroke="#52677f" stroke-width="2"/>
+<circle cx="73" cy="210" r="8" fill="#e9b14b" stroke="#158573" stroke-width="2"/>
+<circle cx="73" cy="247" r="8" fill="#e9b14b" stroke="#158573" stroke-width="2"/>
+<circle cx="73" cy="284" r="8" fill="#e9b14b" stroke="#158573" stroke-width="2"/>
+<circle cx="73" cy="321" r="8" fill="#e9b14b" stroke="#158573" stroke-width="2"/>
+<text x="73" y="361" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">KET</text>
+<rect x="109" y="190" width="39" height="153" rx="3" fill="#b7cadb" stroke="#52677f" stroke-width="2"/>
+<circle cx="128" cy="210" r="8" fill="#8fc9e8" stroke="#158573" stroke-width="2"/>
+<circle cx="128" cy="247" r="8" fill="#8fc9e8" stroke="#158573" stroke-width="2"/>
+<circle cx="128" cy="284" r="8" fill="#8fc9e8" stroke="#158573" stroke-width="2"/>
+<circle cx="128" cy="321" r="8" fill="#8fc9e8" stroke="#158573" stroke-width="2"/>
+<text x="128" y="361" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">RGOCG</text>
+<rect x="181" y="204" width="65" height="83" rx="3" fill="#e1edff" stroke="#3b76ba" stroke-width="2"/>
+<rect x="187" y="210" width="53" height="71" rx="8" fill="#202c37" stroke="#87541d" stroke-width="2"/>
+<rect x="192" y="216" width="43" height="59" rx="5" fill="#efad40" stroke="#cad2dc" stroke-width="2"/>
+<rect x="195" y="249" width="36" height="21" rx="3" fill="#cad2dc" stroke="#52677f" stroke-width="2"/>
+<circle cx="214" cy="227" r="13" fill="#cad2dc" stroke="#158573" stroke-width="2"/>
+<circle cx="214" cy="227" r="6" fill="#efad40" stroke="#158573" stroke-width="2"/>
+<text x="214" y="307" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="14" fill="#21364f">KMR at Storage</text>
+<text x="214" y="326" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">base yaw −90°</text>
+<text x="214" y="343" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">arm local yaw +90°</text>
+<rect x="280" y="204" width="65" height="83" rx="3" fill="#e1edff" stroke="#3b76ba" stroke-width="2"/>
+<text x="312" y="232" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#21364f">M1 KMR</text>
+<text x="312" y="251" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#21364f">dock</text>
+<text x="312" y="273" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">yaw −90°</text>
+<rect x="355" y="125" width="190" height="155" rx="3" fill="#e3eaf2" stroke="#52677f" stroke-width="2"/>
+<text x="450" y="183" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="30" fill="#21364f">M1</text>
+<rect x="389" y="230" width="122" height="50" rx="3" fill="#c8d3df" stroke="#158573" stroke-width="2"/>
+<text x="450" y="260" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="14" fill="#21364f">front_access</text>
+<circle cx="450" cy="332" r="30" fill="#d6f1e8" stroke="#158573" stroke-width="2"/>
+<text x="450" y="337" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#21364f">ur5e-1</text>
+<rect x="370" y="315" width="42" height="32" rx="3" fill="#d6f1e8" stroke="#158573" stroke-width="2"/>
+<text x="391" y="366" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">M1 staging</text>
+<rect x="675" y="125" width="190" height="155" rx="3" fill="#e3eaf2" stroke="#52677f" stroke-width="2"/>
+<text x="770" y="183" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="30" fill="#21364f">M2</text>
+<rect x="709" y="230" width="122" height="50" rx="3" fill="#c8d3df" stroke="#158573" stroke-width="2"/>
+<text x="770" y="260" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="14" fill="#21364f">front_access</text>
+<circle cx="770" cy="332" r="30" fill="#d6f1e8" stroke="#158573" stroke-width="2"/>
+<text x="770" y="337" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#21364f">ur5e-2</text>
+<rect x="690" y="315" width="42" height="32" rx="3" fill="#d6f1e8" stroke="#158573" stroke-width="2"/>
+<text x="711" y="366" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">M2 staging</text>
+<rect x="603" y="203" width="65" height="83" rx="3" fill="#e1edff" stroke="#3b76ba" stroke-width="2"/>
+<text x="635" y="229" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#21364f">M2 KMR</text>
+<text x="635" y="247" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#21364f">dock</text>
+<text x="635" y="269" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">yaw −90°</text>
+<path d="M246 245 H271" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)" stroke-dasharray="7 5"/>
+<path d="M214 204 V102 H635 V194" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)" stroke-dasharray="7 5"/>
+<text x="444" y="96" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#21364f">Predefined routes: Storage ↔ M1 / M2 only</text>
+<rect x="1006" y="209" width="365" height="407" rx="3" fill="#efe2cb" stroke="#8f7960" stroke-width="2"/>
+<text x="1188" y="195" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="23" fill="#21364f">Assembly Station</text>
+<rect x="355" y="384" width="650" height="37" rx="3" fill="#202c37" stroke="#ce8a30" stroke-width="2"/>
+<rect x="432" y="384" width="36" height="37" rx="3" fill="#61b99f" stroke="#158573" stroke-width="2"/>
+<rect x="752" y="384" width="36" height="37" rx="3" fill="#61b99f" stroke="#158573" stroke-width="2"/>
+<path d="M845 402 H975" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="677" y="458" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="18" fill="#21364f">One straight Conveyor</text>
+<text x="677" y="481" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="14" fill="#52647a">M1/M2 → Buffer For Machined parts</text>
+<rect x="1005" y="389" width="16" height="27" rx="0" fill="#98a4ad" stroke="#52677f" stroke-width="2"/>
+<rect x="1021" y="385" width="117" height="35" rx="0" fill="#202c37" stroke="#ce8a30" stroke-width="2"/>
+<rect x="1025" y="390" width="22" height="25" rx="1" fill="#61b99f" stroke="#158573" stroke-width="2"/>
+<rect x="1053" y="390" width="22" height="25" rx="1" fill="#61b99f" stroke="#158573" stroke-width="2"/>
+<rect x="1081" y="390" width="22" height="25" rx="1" fill="#61b99f" stroke="#158573" stroke-width="2"/>
+<rect x="1109" y="390" width="22" height="25" rx="1" fill="#78adeb" stroke="#158573" stroke-width="2"/>
+<path d="M1025 399 H1131 M1025 406 H1131" fill="none" stroke="#d4d9dd" stroke-width="2"/>
+<circle cx="1036" cy="386" r="3" fill="#be2e2e"/><circle cx="1064" cy="386" r="3" fill="#be2e2e"/><circle cx="1092" cy="386" r="3" fill="#be2e2e"/><circle cx="1120" cy="386" r="3" fill="#be2e2e"/>
+<path d="M1138 385 V420" stroke="#ce8a30" stroke-width="5"/>
+<text x="1064" y="445" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#21364f">Buffer For</text>
+<text x="1064" y="462" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#21364f">Machined parts</text>
+<text x="1064" y="481" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#52647a">4 direct-part zones</text>
+<circle cx="1180" cy="330" r="33" fill="#d6f1e8" stroke="#158573" stroke-width="2"/>
+<text x="1180" y="335" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#21364f">ur5e-3</text>
+<text x="1180" y="285" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#21364f">TOP · y=+0.50</text>
+<path d="M1120 385 V351 H1145" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="1090" y="367" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#21364f">pickup</text>
+<rect x="1129" y="413" width="105" height="63" rx="3" fill="#94a3b8" stroke="#425773" stroke-width="2"/>
+<text x="1181" y="439" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#ffffff">Assembly</text>
+<text x="1181" y="461" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#ffffff">NIST fixtures</text>
+<path d="M1180 365 V406" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="1260" y="280" width="91" height="59" rx="3" fill="#f4e6ea" stroke="#a34b66" stroke-width="2"/>
+<text x="1306" y="306" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="19" fill="#21364f">Exit</text>
+<text x="1306" y="326" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">capacity 1</text>
+<path d="M1216 330 H1251" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)"/>
+<circle cx="1180" cy="542" r="33" fill="#d6f1e8" stroke="#158573" stroke-width="2"/>
+<text x="1180" y="547" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="16" fill="#21364f">ur5e-4</text>
+<text x="1180" y="597" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#21364f">BOTTOM · y=-0.50</text>
+<path d="M1180 509 V482" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="1254" y="506" width="102" height="77" rx="3" fill="#d8dae2" stroke="#596273" stroke-width="2"/>
+<rect x="1264" y="516" width="69" height="54" rx="3" fill="#485462" stroke="#596273" stroke-width="2"/>
+<path d="M1340 511 V577 M1320 511 H1350 M1320 577 H1350" fill="none" stroke="#ef7818" stroke-width="5"/>
+<circle cx="1280" cy="527" r="4" fill="#78bd5a" stroke="#158573" stroke-width="2"/>
+<circle cx="1280" cy="543" r="6" fill="#78bd5a" stroke="#158573" stroke-width="2"/>
+<circle cx="1280" cy="561" r="8" fill="#78bd5a" stroke="#158573" stroke-width="2"/>
+<path d="M1250 542 H1216" fill="none" stroke="#3877ae" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="1305" y="488" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#21364f">3D Printing Station</text>
+<text x="1305" y="600" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="11" fill="#21364f">3 gears · faces ur5e-4</text>
+<text x="1009" y="637" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="13" fill="#52647a">Top view: +y ↑   +x → · diagrammatic spacing</text>
+<rect x="35" y="666" width="1330" height="99" rx="8" fill="#edf2f8" stroke="#c8d3df" stroke-width="2"/>
+<text x="55" y="695" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="15" fill="#21364f">Nominal flow: Storage → KMR → M1/M2 → ur5e-1/ur5e-2 → Conveyor → Buffer For Machined parts → ur5e-3 → Assembly Station → Exit</text>
+<text x="55" y="725" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="15" fill="#52647a">Each peg advances only into an empty zone. Full buffer: stop upstream delivery → use M1/M2 staging nests.</text>
+<text x="55" y="750" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="14" fill="#52647a">No removable carriers or collection tray. Part slippage remains ur5e-3 → ur5e-4. Motion remains planned.</text>
+<text x="35" y="786" text-anchor="start" font-family="DejaVu Sans, sans-serif" font-size="12" fill="#64748b">Exact poses and capacities: recovery_framework_gazebo.json</text>
+</svg>

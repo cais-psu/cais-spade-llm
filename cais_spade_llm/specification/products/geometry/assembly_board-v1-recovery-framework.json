@@ -1,0 +1,131 @@
+{
+  "gazebo": {
+    "assembly_board": {
+      "center": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0439916
+      },
+      "thickness_m": 0.0089916,
+      "slot_floor_z_m": 1.0439916,
+      "slots": {
+        "gear_small": [
+          0.0294496,
+          0.1448242
+        ],
+        "gear_medium": [
+          -0.0005504,
+          0.1448242
+        ],
+        "gear_large": [
+          -0.0505504,
+          0.1448242
+        ],
+        "KET4_Square_4mm": [
+          -0.00055,
+          -0.005176
+        ],
+        "KET8_Square_8mm": [
+          0.07445,
+          -0.080176
+        ],
+        "KET12_Square_12mm": [
+          -0.15055,
+          -0.005176
+        ],
+        "KET16_Square_16mm": [
+          -0.15055,
+          -0.155176
+        ],
+        "RGOCG4-50_Round_4mm": [
+          -0.00055,
+          -0.155176
+        ],
+        "RGOCG8-50_8mm": [
+          -0.07555,
+          -0.155176
+        ],
+        "RGOCG12-50_12mm": [
+          -0.15055,
+          0.069824
+        ],
+        "RGOCG16-50_16mm": [
+          0.07445,
+          0.069824
+        ]
+      }
+    },
+    "parts": {
+      "model_map": {
+        "gear_small": "gear_small",
+        "gear_medium": "gear_medium",
+        "gear_large": "gear_large",
+        "KET4_Square_4mm": "KET4_Square_4mm",
+        "KET8_Square_8mm": "KET8_Square_8mm",
+        "KET12_Square_12mm": "KET12_Square_12mm",
+        "KET16_Square_16mm": "KET16_Square_16mm",
+        "RGOCG4-50_Round_4mm": "RGOCG4-50_Round_4mm",
+        "RGOCG8-50_8mm": "RGOCG8-50_8mm",
+        "RGOCG12-50_12mm": "RGOCG12-50_12mm",
+        "RGOCG16-50_16mm": "RGOCG16-50_16mm"
+      },
+      "heights_m": {
+        "gear_small": 0.02,
+        "gear_medium": 0.02,
+        "gear_large": 0.02,
+        "KET4_Square_4mm": 0.05,
+        "KET8_Square_8mm": 0.05,
+        "KET12_Square_12mm": 0.05,
+        "KET16_Square_16mm": 0.05,
+        "RGOCG4-50_Round_4mm": 0.05,
+        "RGOCG8-50_8mm": 0.05,
+        "RGOCG12-50_12mm": 0.05,
+        "RGOCG16-50_16mm": 0.05
+      },
+      "cad_filename_map": {
+        "gear_small": "Gear_Small.STL",
+        "gear_medium": "Gear_Medium.STL",
+        "gear_large": "Gear_Large.STL",
+        "KET4_Square_4mm": "KET4_Square_4mm.STL",
+        "KET8_Square_8mm": "KET8_Square_8mm.STL",
+        "KET12_Square_12mm": "KET12_Square_12mm.STL",
+        "KET16_Square_16mm": "KET16_Square_16mm.STL",
+        "RGOCG4-50_Round_4mm": "RGOCG4-50_Round_4mm.STL",
+        "RGOCG8-50_8mm": "RGOCG8-50_8mm.STL",
+        "RGOCG12-50_12mm": "RGOCG12-50_12mm.STL",
+        "RGOCG16-50_16mm": "RGOCG16-50_16mm.STL"
+      },
+      "initial_source_resource_map": {
+        "gear_small": "3D Printing Station",
+        "gear_medium": "3D Printing Station",
+        "gear_large": "3D Printing Station",
+        "KET4_Square_4mm": "Storage",
+        "KET8_Square_8mm": "Storage",
+        "KET12_Square_12mm": "Storage",
+        "KET16_Square_16mm": "Storage",
+        "RGOCG4-50_Round_4mm": "Storage",
+        "RGOCG8-50_8mm": "Storage",
+        "RGOCG12-50_12mm": "Storage",
+        "RGOCG16-50_16mm": "Storage"
+      },
+      "assembly_target_map": {
+        "gear_small": "Gear_Plate/Gear_Shaft_1",
+        "gear_medium": "Gear_Plate/Gear_Shaft_2",
+        "gear_large": "Gear_Plate/Gear_Shaft_3",
+        "KET4_Square_4mm": "GMC_Laser_Plate_Virtual/KET4_Square_4mm",
+        "KET8_Square_8mm": "GMC_Laser_Plate_Virtual/KET8_Square_8mm",
+        "KET12_Square_12mm": "GMC_Laser_Plate_Virtual/KET12_Square_12mm",
+        "KET16_Square_16mm": "GMC_Laser_Plate_Virtual/KET16_Square_16mm",
+        "RGOCG4-50_Round_4mm": "GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm",
+        "RGOCG8-50_8mm": "GMC_Laser_Plate_Virtual/RGOCG8-50_8mm",
+        "RGOCG12-50_12mm": "GMC_Laser_Plate_Virtual/RGOCG12-50_12mm",
+        "RGOCG16-50_16mm": "GMC_Laser_Plate_Virtual/RGOCG16-50_16mm"
+      }
+    },
+    "target_reference": {
+      "source": "recovery_framework_configuration",
+      "target_point": "inserted_part_origin",
+      "surface_role": "assembly_slot"
+    }
+  }
+}

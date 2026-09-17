@@ -129,6 +129,7 @@ def build_ros2_launch_cmds(
     ur5e_rtde_trajectory_script: Path,
     ur5e_rtde_trajectory_status: Path,
 ) -> dict[str, str]:
+    """Build the ROS2 launch commands used by the operator UI."""
     teleop_script = str(teleop_script_path(project_root))
     hardware_config = load_hardware_arms_config(project_root)
     hardware_config_path = hardware_arms_config_path(project_root)
@@ -151,7 +152,8 @@ def build_ros2_launch_cmds(
     return {
         "gazebo_dual": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
-            "run_perception:=false include_assembly_parts:=true include_loose_parts:=true"
+            "world_file:=table_recovery_framework.world run_perception:=false "
+            "include_assembly_parts:=true include_loose_parts:=true"
         ),
         "gazebo_dual_spec2primitives": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
@@ -320,6 +322,7 @@ def ros2_launch_required_paths(
     ur5e_rg2_gripper_script: Path,
     ur5e_rtde_trajectory_script: Path,
 ) -> list[tuple[Path, str]]:
+    """Return required launch assets and the remedy for each missing asset."""
     launch_key = str(name or "").strip().lower()
     cais_lab_robotics_share = ros2_workspace_install_share_pkg_path("cais_lab_robotics")
     repo_hardware_config = (
@@ -428,6 +431,82 @@ def ros2_launch_required_paths(
             "ROS2 workspace is missing the dual-robot RViz config. Re-run `make bootstrap-gazebo`.",
         ),
     )
+    recovery_framework_world_asset = (
+        (
+            cais_lab_robotics_share / "worlds" / "table_recovery_framework.world",
+            "ROS2 workspace is missing the recovery framework NIST world. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "launch" / "recovery_framework_gazebo.launch.py",
+            "ROS2 workspace is missing the recovery framework UR5e launch. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "launch" / "ur5e_rg2_gazebo.launch.py",
+            "ROS2 workspace is missing the UR5e/RG2 model builder. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "config" / "recovery_framework_gazebo.json",
+            "ROS2 workspace is missing the recovery framework robot bindings. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "config" / "recovery_framework_kmr_controllers.yaml",
+            "ROS2 workspace is missing the recovery framework KMR controllers. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "config" / "recovery_framework_nav2.yaml",
+            "ROS2 workspace is missing the recovery framework Nav2 configuration. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share
+            / "config"
+            / "recovery_framework_navigate_to_pose.xml",
+            "ROS2 workspace is missing the recovery framework Nav2 goal tree. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share
+            / "config"
+            / "recovery_framework_navigate_through_poses.xml",
+            "ROS2 workspace is missing the recovery framework Nav2 docking tree. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "config" / "recovery_framework_map.yaml",
+            "ROS2 workspace is missing the recovery framework KMR map metadata. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "config" / "recovery_framework_map.pgm",
+            "ROS2 workspace is missing the recovery framework KMR occupancy map. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "urdf" / "KMR_recovery.urdf.xacro",
+            "ROS2 workspace is missing the articulated recovery framework KMR model. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "scripts" / "kmr_base_controller.py",
+            "ROS2 workspace is missing the recovery framework KMR docking controller. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "scripts" / "recovery_drag_markers.py",
+            "ROS2 workspace is missing the recovery framework RViz marker node. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+        (
+            cais_lab_robotics_share / "rviz" / "recovery_framework.rviz",
+            "ROS2 workspace is missing the recovery framework RViz configuration. "
+            "Re-run `make bootstrap-gazebo`.",
+        ),
+    )
     spec2primitives_world_asset = (
         (
             cais_lab_robotics_share / "worlds" / "table_spec2primitives.world",
@@ -436,7 +515,7 @@ def ros2_launch_required_paths(
         ),
     )
     dual_launch_assets = {
-        "gazebo_dual": dual_assets,
+        "gazebo_dual": (*dual_assets, *recovery_framework_world_asset),
         "gazebo_dual_spec2primitives": (*dual_assets, *spec2primitives_world_asset),
     }
     dual_passive_assets = (

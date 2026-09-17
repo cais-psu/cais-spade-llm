@@ -251,8 +251,13 @@ def _make_controller_spawner(controller_names):
     )
 
 
-def _build_ur5e_rg2_description(controllers_yaml, *, passive=False):
-    ur5e_prefix = 'ur5e_'
+def _build_ur5e_rg2_description(
+    controllers_yaml, *, passive=False, ur5e_prefix='ur5e_',
+    base_xyz=UR5E_BASE_XYZ, base_rpy=UR5E_BASE_RPY, initial_positions=None,
+):
+    """Build one UR5e/RG2 instance with explicit joint and mounting bindings."""
+    if initial_positions is None:
+        initial_positions = UR5E_HOME_RAD
 
     ur5e_raw = subprocess.check_output([
         'xacro',
@@ -266,7 +271,7 @@ def _build_ur5e_rg2_description(controllers_yaml, *, passive=False):
     ur5e_root = ET.fromstring(ur5e_raw)
     _set_ros2_control_initial_positions(
         ur5e_root,
-        {f'{ur5e_prefix}{joint}': value for joint, value in UR5E_HOME_RAD.items()},
+        {f'{ur5e_prefix}{joint}': value for joint, value in initial_positions.items()},
     )
     _strip_world_links_and_joints(ur5e_root)
     _strip_gazebo_ros2_control_plugin(ur5e_root)
@@ -337,7 +342,7 @@ def _build_ur5e_rg2_description(controllers_yaml, *, passive=False):
     )
     ET.SubElement(world_joint, 'parent', {'link': 'world'})
     ET.SubElement(world_joint, 'child', {'link': f'{ur5e_prefix}base_link'})
-    ET.SubElement(world_joint, 'origin', {'xyz': UR5E_BASE_XYZ, 'rpy': UR5E_BASE_RPY})
+    ET.SubElement(world_joint, 'origin', {'xyz': base_xyz, 'rpy': base_rpy})
 
     for elem in list(ur5e_root):
         combined_root.append(elem)

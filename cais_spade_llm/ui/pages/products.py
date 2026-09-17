@@ -19,6 +19,12 @@ _GEO_DIR = _SPEC_DIR / "geometry"
 _INIT_DIR = Path("cais_spade_llm/initialization/products")
 _PRODUCT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DEFAULT_PRODUCT_INSTRUCTIONS = "This product requires to be printed and assembled as specified."
+_RECOVERY_PRODUCT_FILENAME = "assembly_board-v1-recovery-framework.json"
+_KNOWN_NIST_MAP_KEYS = (
+    "cad_filename_map",
+    "initial_source_resource_map",
+    "assembly_target_map",
+)
 
 _PRODUCT_CONFIG_ORDER = [
     "type",
@@ -179,7 +185,70 @@ def _validate_geometry_payload(payload: Any) -> str:
         if not isinstance(heights_m, dict):
             return f"{env_key}.parts.heights_m must be an object"
 
+        configured_nist_maps = [key for key in _KNOWN_NIST_MAP_KEYS if key in parts]
+        if configured_nist_maps:
+            component_names = set(slots)
+            if set(model_map) != component_names:
+                return f"{env_key}.parts.model_map must contain exactly the assembly_board slots"
+            if set(heights_m) != component_names:
+                return f"{env_key}.parts.heights_m must contain exactly the assembly_board slots"
+            for map_key in _KNOWN_NIST_MAP_KEYS:
+                values = parts.get(map_key)
+                if not isinstance(values, dict):
+                    return f"{env_key}.parts.{map_key} must be an object"
+                if set(values) != component_names:
+                    return (
+                        f"{env_key}.parts.{map_key} must contain exactly the assembly_board slots"
+                    )
+                if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+                    return f"{env_key}.parts.{map_key} values must be non-empty strings"
+
     return ""
+
+
+def _preferred_product_file(product_files: list[str]) -> str | None:
+    """Prefer the recovery-framework manifest when it is available."""
+    for product_file in product_files:
+        if Path(product_file).name == _RECOVERY_PRODUCT_FILENAME:
+            return product_file
+    return product_files[0] if product_files else None
+
+
+def _known_nist_component_rows(geometry: dict[str, Any]) -> list[dict[str, str]]:
+    """Build Products-page rows from one recovery geometry configuration."""
+    parts = geometry.get("parts", {}) if isinstance(geometry, dict) else {}
+    if not isinstance(parts, dict) or not all(key in parts for key in _KNOWN_NIST_MAP_KEYS):
+        return []
+
+    model_map = parts.get("model_map", {})
+    cad_filename_map = parts.get("cad_filename_map", {})
+    initial_source_resource_map = parts.get("initial_source_resource_map", {})
+    assembly_target_map = parts.get("assembly_target_map", {})
+    if not all(
+        isinstance(values, dict)
+        for values in (
+            model_map,
+            cad_filename_map,
+            initial_source_resource_map,
+            assembly_target_map,
+        )
+    ):
+        return []
+
+    board = geometry.get("assembly_board", {})
+    slots = board.get("slots", {}) if isinstance(board, dict) else {}
+    if not isinstance(slots, dict):
+        return []
+    return [
+        {
+            "identifier": str(identifier),
+            "cad_filename": str(cad_filename_map.get(identifier, "")),
+            "gazebo_model": str(model_map.get(identifier, "")),
+            "initial_source_resource": str(initial_source_resource_map.get(identifier, "")),
+            "assembly_target": str(assembly_target_map.get(identifier, "")),
+        }
+        for identifier in slots
+    ]
 
 
 def _paths_match(path_a: str | Path | None, path_b: str | Path | None) -> bool:
@@ -253,7 +322,7 @@ def render(bridge: SystemBridge) -> None:
 
                 product_select = ui.select(
                     {f: Path(f).stem for f in product_files},
-                    value=product_files[0] if product_files else None,
+                    value=_preferred_product_file(product_files),
                     label="Product",
                 ).classes("w-64")
 
@@ -289,7 +358,7 @@ def render(bridge: SystemBridge) -> None:
                     if select_path and select_path in product_select.options:
                         product_select.value = select_path
                     elif files:
-                        product_select.value = files[0]
+                        product_select.value = _preferred_product_file(files)
                     else:
                         product_select.value = None
                     product_select.update()
@@ -858,6 +927,41 @@ def render(bridge: SystemBridge) -> None:
                         .classes("w-96")
                     )
 
+                known_nist_components = ui.column().classes("w-full gap-1")
+                with known_nist_components:
+                    ui.label("Known NIST Components").classes("text-base font-semibold")
+                    known_nist_table = ui.table(
+                        columns=[
+                            {
+                                "name": "identifier",
+                                "label": "Identifier",
+                                "field": "identifier",
+                            },
+                            {
+                                "name": "cad_filename",
+                                "label": "CAD filename",
+                                "field": "cad_filename",
+                            },
+                            {
+                                "name": "gazebo_model",
+                                "label": "Gazebo model",
+                                "field": "gazebo_model",
+                            },
+                            {
+                                "name": "initial_source_resource",
+                                "label": "Initial source resource",
+                                "field": "initial_source_resource",
+                            },
+                            {
+                                "name": "assembly_target",
+                                "label": "Assembly target",
+                                "field": "assembly_target",
+                            },
+                        ],
+                        rows=[],
+                    ).classes("w-full")
+                known_nist_components.set_visibility(False)
+
                 order_editor = (
                     ui.textarea(label="Product Order JSON")
                     .classes("w-full font-mono")
@@ -913,12 +1017,6 @@ def render(bridge: SystemBridge) -> None:
                     env_payload = payload.get(env_key)
                     return env_payload if isinstance(env_payload, dict) else {}
 
-                def _current_geometry_slots() -> list[str]:
-                    geometry = _load_selected_geometry()
-                    board = geometry.get("assembly_board", {}) if isinstance(geometry, dict) else {}
-                    slots = board.get("slots", {}) if isinstance(board, dict) else {}
-                    return [str(name) for name in slots.keys()] if isinstance(slots, dict) else []
-
                 def _default_order_payload() -> dict[str, Any]:
                     product_name = str(_product_state.get("name", "") or "").strip()
                     product_jid = str(_product_state.get("meta", {}).get("jid", "") or "").strip()
@@ -933,10 +1031,21 @@ def render(bridge: SystemBridge) -> None:
                     }
 
                 def _refresh_parts_options() -> None:
-                    slots = _current_geometry_slots()
+                    geometry = _load_selected_geometry()
+                    board = geometry.get("assembly_board", {}) if isinstance(geometry, dict) else {}
+                    slots_by_name = board.get("slots", {}) if isinstance(board, dict) else {}
+                    slots = (
+                        [str(name) for name in slots_by_name]
+                        if isinstance(slots_by_name, dict)
+                        else []
+                    )
                     part_select.options = {slot: slot for slot in slots}
                     part_select.update()
                     part_select.set_enabled(str(parts_mode.value or "all") == "selected")
+                    known_rows = _known_nist_component_rows(geometry)
+                    known_nist_table.rows = known_rows
+                    known_nist_table.update()
+                    known_nist_components.set_visibility(bool(known_rows))
 
                 def _sync_parts_controls_from_editor() -> None:
                     try:

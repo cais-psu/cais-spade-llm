@@ -53,15 +53,18 @@ ASSEMBLY_PART_MODELS = {
     'table_xarm6',
     'table_ur5e',
     'gear_small',
-    'rect_pin_small',
-    'circ_pin_small',
     'gear_medium',
-    'rect_pin_medium',
-    'circ_pin_medium',
     'gear_large',
-    'rect_pin_large',
-    'circ_pin_large',
-    'assembly_board_v1',
+    'KET4_Square_4mm',
+    'KET8_Square_8mm',
+    'KET12_Square_12mm',
+    'KET16_Square_16mm',
+    'RGOCG4-50_Round_4mm',
+    'RGOCG8-50_8mm',
+    'RGOCG12-50_12mm',
+    'RGOCG16-50_16mm',
+    'GMC_Laser_Plate_Virtual',
+    'Gear_Plate',
     'prusa_mk3',
     'prusa_mk4_1',
     'prusa_mk4_2',
@@ -72,17 +75,20 @@ ASSEMBLY_PART_MODELS = {
 }
 LOOSE_PART_MODELS = {
     'gear_small',
-    'rect_pin_small',
-    'circ_pin_small',
     'gear_medium',
-    'rect_pin_medium',
-    'circ_pin_medium',
     'gear_large',
-    'rect_pin_large',
-    'circ_pin_large',
+    'KET4_Square_4mm',
+    'KET8_Square_8mm',
+    'KET12_Square_12mm',
+    'KET16_Square_16mm',
+    'RGOCG4-50_Round_4mm',
+    'RGOCG8-50_8mm',
+    'RGOCG12-50_12mm',
+    'RGOCG16-50_16mm',
 }
 PRUSA_PRINTERS_AND_ASSEMBLY_BOARD_MODELS = {
-    'assembly_board_v1',
+    'GMC_Laser_Plate_Virtual',
+    'Gear_Plate',
     'prusa_mk3',
     'prusa_mk4_1',
     'prusa_mk4_2',
@@ -269,8 +275,8 @@ def _tune_xarm_gripper_joint_dynamics(root, prefix):
 def _configure_spec2primitives_gripper_followers(
     root: ET.Element, prefix: str, *, world_file: str, passive: bool,
 ) -> None:
-    """Select direct finger following for the active ICRA attachment simulation."""
-    if world_file != 'table_spec2primitives.world' or passive:
+    """Select direct finger following for ICRA and recovery framework attachment."""
+    if world_file not in ('table_spec2primitives.world', 'table_recovery_framework.world') or passive:
         return
     expected = {
         f'{prefix}{name}' for name in (
@@ -299,7 +305,7 @@ def _configure_spec2primitives_gripper_followers(
 
 def _xarm_gripper_initial_position(*, world_file: str, passive: bool) -> float:
     """Return the xArm drive-joint startup position for this simulation mode."""
-    if world_file == 'table_spec2primitives.world' and not passive:
+    if world_file in ('table_spec2primitives.world', 'table_recovery_framework.world') and not passive:
         return 0.0
     return 0.85
 
@@ -780,6 +786,7 @@ def launch_setup(context, *args, **kwargs):
                 ' && python3 ',
                 PathJoinSubstitution([FindPackageShare('cais_lab_robotics'), 'launch', 'auto_link_attacher_node.py']),
                 ' --ros-args -p use_sim_time:=true',
+                ' -p world_file:=', str(gazebo_world),
                 ' -p attach_distance_threshold:=0.06',
                 ' -p finger_distance_threshold:=0.04',
                 ' -p attach_distance_threshold_ur5e:=0.04',
@@ -883,7 +890,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'world_file',
-            default_value='table.world',
+            default_value='table_recovery_framework.world',
             description='Package-local Gazebo world filename under cais_lab_robotics/worlds.',
         ),
         DeclareLaunchArgument(
@@ -910,7 +917,7 @@ def generate_launch_description():
             'include_prusa_printers_and_assembly_board',
             default_value='true',
             description=(
-                'Spawn prusa_mk3, prusa_mk4_1, prusa_mk4_2, and assembly_board_v1.'
+                'Spawn prusa_mk3, prusa_mk4_1, prusa_mk4_2, GMC_Laser_Plate_Virtual, and Gear_Plate.'
             ),
         ),
         OpaqueFunction(function=launch_setup),

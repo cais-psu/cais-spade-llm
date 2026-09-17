@@ -63,14 +63,14 @@ ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 
 ## 6. Confirm World Plugin Line Exists
 
-`table.world` must include the IFRA world plugin entry:
+`table_recovery_framework.world` must include the IFRA world plugin entry:
 
 ```xml
-<plugin name="gazebo_ros_link_attacher" filename="libgazebo_link_attacher.so"/>
+<plugin name="gazebo_link_attacher" filename="libgazebo_link_attacher.so"/>
 ```
 
 In this repository it is already present in:
-`ros2/cais_lab_robotics/worlds/table.world`
+`ros2/cais_lab_robotics/worlds/table_recovery_framework.world`
 
 ## 7. Verify LinkAttacher Is Active
 
@@ -109,5 +109,5 @@ These are the editable, versioned files in this repo for your setup:
 - `ros2/cais_lab_robotics/launch/dual_moveit_gazebo.launch.py`
 - `ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py`
 - `ros2/cais_lab_robotics/rviz/dual_moveit.rviz`
-- `ros2/cais_lab_robotics/worlds/table.world`
+- `ros2/cais_lab_robotics/worlds/table_recovery_framework.world`
 - `ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp`

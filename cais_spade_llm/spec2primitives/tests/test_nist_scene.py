@@ -1,14 +1,20 @@
-"""Tests for the dedicated Spec2Primitives NIST Gazebo scene and launch route."""
+"""Tests for the Spec2Primitives and recovery framework NIST Gazebo scenes."""
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import math
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from cais_spade_llm.ui.ros2_processes import (
     build_ros2_launch_cmds,
+    ros2_launch_prereq_error,
     ros2_launch_required_paths,
 )
 
@@ -20,6 +26,7 @@ WORLD_PATH = (
     / "worlds"
     / "table_spec2primitives.world"
 )
+RECOVERY_WORLD_PATH = WORLD_PATH.with_name("table_recovery_framework.world")
 CAD_ROOT = REPOSITORY_ROOT / "ros2" / "cais_lab_robotics" / "cad_models"
 
 KET_MODELS = {
@@ -39,6 +46,23 @@ GEAR_POSES = {
     "gear_medium": "0.40 -0.30 1.10 0 0 0",
     "gear_large": "0.50 -0.30 1.10 0 0 0",
 }
+RECOVERY_KET_POSES = {
+    "KET4_Square_4mm": "-8.95 1.88 1.165 0 0 1.57079632679",
+    "KET8_Square_8mm": "-8.95 2.16 1.165 0 0 1.57079632679",
+    "KET12_Square_12mm": "-8.95 2.44 1.165 0 0 1.57079632679",
+    "KET16_Square_16mm": "-8.95 2.72 1.165 0 0 1.57079632679",
+}
+RECOVERY_RGOCG_POSES = {
+    "RGOCG4-50_Round_4mm": "-8.95 1.88 0.645 0 0 1.57079632679",
+    "RGOCG8-50_8mm": "-8.95 2.16 0.645 0 0 1.57079632679",
+    "RGOCG12-50_12mm": "-8.95 2.44 0.645 0 0 1.57079632679",
+    "RGOCG16-50_16mm": "-8.95 2.72 0.645 0 0 1.57079632679",
+}
+RECOVERY_GEAR_POSES = {
+    "gear_small": "0.44 -0.58 1.11 0 0 0",
+    "gear_medium": "0.44 -0.50 1.11 0 0 0",
+    "gear_large": "0.44 -0.42 1.11 0 0 0",
+}
 GEAR_SHAFT_POSES = {
     "Gear_Shaft_1": "0 0.0500000 0.0050000 0 0 0",
     "Gear_Shaft_2": "0 0.0200000 0.0050000 0 0 0",
@@ -51,8 +75,17 @@ GMC_GEAR_MOUNT_HOLE_CENTERS_MM = {
 }
 
 
-def _world() -> ET.Element:
-    world = ET.parse(WORLD_PATH).getroot().find("world")
+@pytest.fixture(
+    params=(WORLD_PATH, RECOVERY_WORLD_PATH),
+    ids=lambda path: path.name,
+)
+def world_path(request: pytest.FixtureRequest) -> Path:
+    """Run the NIST scene checks against each independently selectable world."""
+    return request.param
+
+
+def _world(world_path: Path) -> ET.Element:
+    world = ET.parse(world_path).getroot().find("world")
     assert world is not None
     return world
 
@@ -75,8 +108,8 @@ def _required_text(element: ET.Element, path: str) -> str:
     return value.strip()
 
 
-def test_plate_uses_exact_mesh_pose_scale_and_collision() -> None:
-    plate = _models_by_name(_world())["GMC_Laser_Plate_Virtual"]
+def test_plate_uses_exact_mesh_pose_scale_and_collision(world_path: Path) -> None:
+    plate = _models_by_name(_world(world_path))["GMC_Laser_Plate_Virtual"]
 
     assert _required_text(plate, "static") == "true"
     assert _required_text(plate, "pose") == (
@@ -93,8 +126,8 @@ def test_plate_uses_exact_mesh_pose_scale_and_collision() -> None:
         assert _required_text(element, "geometry/mesh/scale") == "0.001 0.001 0.001"
 
 
-def test_installed_gear_fixture_uses_exact_cad_and_collisions() -> None:
-    world = _world()
+def test_installed_gear_fixture_uses_exact_cad_and_collisions(world_path: Path) -> None:
+    world = _world(world_path)
     gear_plate_models = [
         model for model in world.findall("model") if model.attrib["name"] == "Gear_Plate"
     ]
@@ -144,8 +177,8 @@ def test_installed_gear_fixture_uses_exact_cad_and_collisions() -> None:
         assert _required_text(shaft, "visual/material/script/name") == "Gazebo/Grey"
 
 
-def test_gear_fixture_surfaces_and_cad_centers_align() -> None:
-    models = _models_by_name(_world())
+def test_gear_fixture_surfaces_and_cad_centers_align(world_path: Path) -> None:
+    models = _models_by_name(_world(world_path))
     gmc_pose = [float(value) for value in _required_text(
         models["GMC_Laser_Plate_Virtual"], "pose"
     ).split()]
@@ -186,12 +219,13 @@ def test_gear_fixture_surfaces_and_cad_centers_align() -> None:
         )
 
 
-def test_pin_models_use_exact_stls_collisions_poses_and_neutral_material() -> None:
-    models = _models_by_name(_world())
+def test_pin_models_use_exact_stls_collisions_poses_and_neutral_material(world_path: Path) -> None:
+    models = _models_by_name(_world(world_path))
 
     for name, (pose, box_size) in KET_MODELS.items():
         model = models[name]
-        assert _required_text(model, "pose") == pose
+        expected_pose = RECOVERY_KET_POSES[name] if world_path == RECOVERY_WORLD_PATH else pose
+        assert _required_text(model, "pose") == expected_pose
         assert _required_text(model, "link/collision/geometry/box/size") == box_size
         assert (
             _required_text(model, "link/visual/geometry/mesh/uri")
@@ -204,7 +238,8 @@ def test_pin_models_use_exact_stls_collisions_poses_and_neutral_material() -> No
 
     for name, (pose, radius) in RGOCG_MODELS.items():
         model = models[name]
-        assert _required_text(model, "pose") == pose
+        expected_pose = RECOVERY_RGOCG_POSES[name] if world_path == RECOVERY_WORLD_PATH else pose
+        assert _required_text(model, "pose") == expected_pose
         assert _required_text(model, "link/collision/geometry/cylinder/radius") == radius
         assert _required_text(model, "link/collision/geometry/cylinder/length") == "0.05"
         assert (
@@ -217,33 +252,48 @@ def test_pin_models_use_exact_stls_collisions_poses_and_neutral_material() -> No
         assert _required_text(model, "link/visual/material/script/name") == "Gazebo/Grey"
 
 
-def test_printers_gears_and_camera_configuration() -> None:
-    world = _world()
+def test_printers_gears_and_camera_configuration(world_path: Path) -> None:
+    world = _world(world_path)
     models = _models_by_name(world)
     includes = _includes_by_name(world)
 
-    printer_poses = {
-        "prusa_mk3": "-0.4 0 1.04 0 0 0",
-        "prusa_mk4_1": "0.4 0.3 1.04 0 0 0",
-        "prusa_mk4_2": "0.4 -0.3 1.04 0 0 0",
-    }
-    for name, pose in printer_poses.items():
-        assert _required_text(models[name], "pose") == pose
-    for name, pose in GEAR_POSES.items():
-        assert _required_text(includes[name], "uri") == f"model://{name}"
-        assert _required_text(includes[name], "pose") == pose
+    printer_poses = {"prusa_mk4_2": "0.50 -0.50 1.04 0 0 -1.57079632679"}
+    if world_path == WORLD_PATH:
+        printer_poses.update({
+            "prusa_mk4_2": "0.4 -0.3 1.04 0 0 0",
+            "prusa_mk3": "-0.4 0 1.04 0 0 0",
+            "prusa_mk4_1": "0.4 0.3 1.04 0 0 0",
+        })
+    if world_path == WORLD_PATH:
+        for name, pose in printer_poses.items():
+            assert _required_text(models[name], "pose") == pose
+        for name, pose in GEAR_POSES.items():
+            assert _required_text(includes[name], "uri") == f"model://{name}"
+            assert _required_text(includes[name], "pose") == pose
+    else:
+        assert _required_text(includes["prusa_mk4_2"], "uri") == "model://prusa_mk4_2"
+        assert _required_text(includes["prusa_mk4_2"], "pose") == printer_poses["prusa_mk4_2"]
+        for name, pose in RECOVERY_GEAR_POSES.items():
+            assert _required_text(includes[name], "uri") == f"model://{name}"
+            assert _required_text(includes[name], "pose") == pose
+        assert {"prusa_mk3", "prusa_mk4_1"}.isdisjoint(models)
+        assert _required_text(models["Exit"], "pose") == "0.50 0.58 1.04 0 0 0"
 
     cameras = {"cam_mk3", "cam_mk4_1", "cam_mk4_2", "cam_assembly"}
+    if world_path == RECOVERY_WORLD_PATH:
+        cameras = {"cam_storage", "cam_mk4_2", "cam_assembly"}
     camera_far_m = {
         "cam_mk3": "5.0",
         "cam_mk4_1": "5.0",
         "cam_mk4_2": "5.0",
+        "cam_storage": "5.0",
         "cam_assembly": "2.0",
     }
     camera_min_depth_m = {
         "cam_mk3": "0.05",
         "cam_mk4_1": "0.05",
         "cam_mk4_2": "0.05",
+        "cam_storage": "0.05",
     }
     assert cameras <= models.keys()
     for name in cameras:
@@ -304,16 +354,16 @@ def test_gear_models_use_nist_stl_visuals_and_configured_collisions() -> None:
         )
 
 
-def test_dedicated_world_has_no_mock_pin_models() -> None:
-    source = WORLD_PATH.read_text(encoding="utf-8")
+def test_dedicated_world_has_no_mock_pin_models(world_path: Path) -> None:
+    source = world_path.read_text(encoding="utf-8")
 
     assert "rect_pin_" not in source
     assert "circ_pin_" not in source
     assert "assembly_board_v1" not in source
 
 
-def test_all_nist_mesh_references_resolve_without_copies() -> None:
-    world = _world()
+def test_all_nist_mesh_references_resolve_without_copies(world_path: Path) -> None:
+    world = _world(world_path)
     expected_stems = {
         "GMC_Laser_Plate_Virtual",
         "Gear_Plate",
@@ -334,6 +384,18 @@ def test_all_nist_mesh_references_resolve_without_copies() -> None:
         assert (CAD_ROOT / f"{stem}.STL").is_file()
 
 
+def test_nist_world_preserves_state_and_attachment_plugins(world_path: Path) -> None:
+    """Keep evaluator feedback and acknowledged attachment in both NIST scenes."""
+    world = _world(world_path)
+    plugins = {plugin.attrib["name"]: plugin for plugin in world.findall("plugin")}
+
+    state = plugins["gazebo_ros_state"]
+    assert state.attrib["filename"] == "libgazebo_ros_state.so"
+    assert _required_text(state, "ros/namespace") == "/"
+    assert _required_text(state, "update_rate") == "50"
+    assert plugins["gazebo_link_attacher"].attrib["filename"] == "libgazebo_link_attacher.so"
+
+
 def test_spec2primitives_process_command_and_world_prerequisite_are_exact() -> None:
     commands = build_ros2_launch_cmds(
         project_root=REPOSITORY_ROOT,
@@ -352,21 +414,58 @@ def test_spec2primitives_process_command_and_world_prerequisite_are_exact() -> N
     )
     assert commands["gazebo_dual"] == (
         "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
-        "run_perception:=false include_assembly_parts:=true include_loose_parts:=true"
+        "world_file:=table_recovery_framework.world run_perception:=false "
+        "include_assembly_parts:=true include_loose_parts:=true"
     )
 
-    required_paths = ros2_launch_required_paths(
-        "gazebo_dual_spec2primitives",
-        venv_python=Path("/tmp/spec2primitives-venv"),
-        ur5e_rg2_gripper_script=Path("/tmp/spec2primitives-gripper.py"),
-        ur5e_rtde_trajectory_script=Path(
-            "/tmp/spec2primitives/config/runtime/trajectory.py"
-        ),
-    )
-    assert any(
-        path.name == "table_spec2primitives.world" and "Spec2Primitives NIST world" in error
-        for path, error in required_paths
-    )
+    for name, world_file, description in (
+        ("gazebo_dual", "table_recovery_framework.world", "recovery framework NIST world"),
+        ("gazebo_dual_spec2primitives", "table_spec2primitives.world", "Spec2Primitives NIST world"),
+    ):
+        required_paths = ros2_launch_required_paths(
+            name,
+            venv_python=Path("/tmp/spec2primitives-venv"),
+            ur5e_rg2_gripper_script=Path("/tmp/spec2primitives-gripper.py"),
+            ur5e_rtde_trajectory_script=Path(
+                "/tmp/spec2primitives/config/runtime/trajectory.py"
+            ),
+        )
+        worlds = [(path, error) for path, error in required_paths if path.suffix == ".world"]
+        assert len(worlds) == 1
+        path, error = worlds[0]
+        assert path.parts[-3:] == ("cais_lab_robotics", "worlds", world_file)
+        assert description in error
+        assert "make bootstrap-gazebo" in error
+
+
+@pytest.mark.parametrize("missing_world", [
+    "table_recovery_framework.world", "table_spec2primitives.world",
+])
+def test_missing_nist_world_blocks_only_its_launch(
+    monkeypatch: pytest.MonkeyPatch, missing_world: str,
+) -> None:
+    """A missing selected world fails preflight even when other assets exist."""
+    monkeypatch.setattr(Path, "is_file", lambda path: True)
+    monkeypatch.setattr(Path, "exists", lambda path: path.name != missing_world)
+    for name, world_file in (
+        ("gazebo_dual", "table_recovery_framework.world"),
+        ("gazebo_dual_spec2primitives", "table_spec2primitives.world"),
+    ):
+        error = ros2_launch_prereq_error(
+            name,
+            gazebo_workspace_launch_files={name: "dual_moveit_gazebo.launch.py"},
+            venv_python=Path("/tmp/spec2primitives-venv"),
+            ur5e_rg2_gripper_script=Path("/tmp/spec2primitives-gripper.py"),
+            ur5e_rtde_trajectory_script=Path(
+                "/tmp/spec2primitives/config/runtime/trajectory.py"
+            ),
+        )
+        if world_file == missing_world:
+            assert error is not None
+            assert missing_world in error
+            assert "make bootstrap-gazebo" in error
+        else:
+            assert error is None
 
 
 def test_world_file_argument_defaults_and_pass_through_are_declared() -> None:
@@ -381,9 +480,126 @@ def test_world_file_argument_defaults_and_pass_through_are_declared() -> None:
 
     for source in (xarm_launch, dual_launch):
         assert "'world_file'" in source
-        assert "default_value='table.world'" in source
+        assert "default_value='table_recovery_framework.world'" in source
     assert "'world_file': world_file" in dual_launch
     assert "LaunchConfiguration('world_file').perform(context)" in xarm_launch
+    assert "' -p world_file:=', str(gazebo_world)" in xarm_launch
+
+
+@pytest.mark.parametrize("include_assembly_parts,include_loose_parts,include_printers", [
+    (True, True, True), (True, False, True), (True, False, False), (False, True, True),
+])
+def test_nist_world_filtering_preserves_passive_scene_options(
+    world_path: Path, include_assembly_parts: bool, include_loose_parts: bool,
+    include_printers: bool,
+) -> None:
+    """Remove NIST loose parts and fixtures when the selected launch disables them."""
+    launch = REPOSITORY_ROOT / "ros2/cais_lab_robotics/launch/xarm6_ur5e_gazebo.launch.py"
+    module = ast.parse(launch.read_text())
+    constants = {
+        "ASSEMBLY_PART_MODELS", "LOOSE_PART_MODELS",
+        "PRUSA_PRINTERS_AND_ASSEMBLY_BOARD_MODELS", "GAZEBO_TABLE_SURFACE_Z_M",
+    }
+    nodes = [node for node in module.body if (
+        isinstance(node, ast.FunctionDef) and node.name == "_filtered_world"
+    ) or (
+        isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id in constants for target in node.targets)
+    )]
+    scope = {"ET": ET, "tempfile": tempfile}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(launch), "exec"), scope)
+    output = Path(scope["_filtered_world"](
+        world_path, include_assembly_parts=include_assembly_parts,
+        include_loose_parts=include_loose_parts,
+        include_prusa_printers_and_assembly_board=include_printers,
+    ))
+    try:
+        world = _world(output)
+    finally:
+        output.unlink()
+    names = set(_models_by_name(world)) | set(_includes_by_name(world))
+    original = _world(world_path)
+    expected = set(_models_by_name(original)) | set(_includes_by_name(original))
+    if not include_assembly_parts:
+        expected -= scope["ASSEMBLY_PART_MODELS"]
+    else:
+        if not include_loose_parts:
+            expected -= {*KET_MODELS, *RGOCG_MODELS, *GEAR_POSES}
+        if not include_printers:
+            expected -= {
+                "GMC_Laser_Plate_Virtual", "Gear_Plate",
+                "prusa_mk3", "prusa_mk4_1", "prusa_mk4_2",
+            }
+    assert names == expected
+    assert {include.findtext("uri") for include in world.findall("include")} >= {
+        "model://ground_plane", "model://sun",
+    }
+
+
+def test_auto_link_attacher_reads_nist_poses_without_mock_fallbacks(
+    world_path: Path, tmp_path: Path,
+) -> None:
+    """Read the selected world's initial parts and respect an empty scene."""
+    launch = REPOSITORY_ROOT / "ros2/cais_lab_robotics/launch/auto_link_attacher_node.py"
+    module = ast.parse(launch.read_text())
+    names = next(node for node in module.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "PART_NAMES"
+                         for target in node.targets))
+    cls = next(node for node in module.body if isinstance(node, ast.ClassDef)
+               and node.name == "AutoLinkAttacher")
+    function = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "_load_part_positions")
+    scope = {"ET": ET, "Path": Path}
+    exec(compile(ast.Module(body=[names, function], type_ignores=[]), str(launch), "exec"), scope)
+    warnings = []
+    parameter = SimpleNamespace(value=str(world_path))
+    node = SimpleNamespace(
+        get_parameter=lambda name: parameter,
+        get_logger=lambda: SimpleNamespace(warn=warnings.append),
+    )
+    positions = scope[function.name](node)
+    if world_path == RECOVERY_WORLD_PATH:
+        expected_poses = {
+            **RECOVERY_KET_POSES,
+            **RECOVERY_RGOCG_POSES,
+            **RECOVERY_GEAR_POSES,
+        }
+    else:
+        expected_poses = {
+            **{name: values[0] for name, values in KET_MODELS.items()},
+            **{name: values[0] for name, values in RGOCG_MODELS.items()},
+            **GEAR_POSES,
+        }
+    assert set(positions) == set(expected_poses)
+    for name, pose in expected_poses.items():
+        assert positions[name] == tuple(float(value) for value in pose.split()[:3])
+    assert warnings == []
+
+    empty_world = tmp_path / "empty.world"
+    empty_world.write_text('<sdf version="1.4"><world name="default"/></sdf>')
+    parameter.value = str(empty_world)
+    assert scope[function.name](node) == {}
+    parameter.value = str(tmp_path / "missing.world")
+    assert scope[function.name](node) == {}
+    assert len(warnings) == 1
+
+
+def test_recovery_world_is_used_by_product_and_robot_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve NIST geometry from the surviving default world without ROS calls."""
+    from cais_spade_llm.product import profile
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    monkeypatch.delenv("CAIS_GAZEBO_WORLD_PATH", raising=False)
+    monkeypatch.delenv("CAIS_GAZEBO_WORLD_FILE", raising=False)
+    assert profile._gazebo_world_path() == WORLD_PATH.with_name("table_recovery_framework.world")
+    pose = profile._load_gazebo_model_spawn_pose(
+        model_name="KET4_Square_4mm", world_path=str(profile._gazebo_world_path()),
+    )
+    assert pose == {"x": -8.95, "y": 1.88, "z": 1.165}
+    width = gazebo_pick_place_controller._model_footprint_width_from_gazebo_world("KET8_Square_8mm")
+    assert width == 0.008
 
 
 def test_spec2primitives_navigation_and_route_pass_the_composed_runtime() -> None:

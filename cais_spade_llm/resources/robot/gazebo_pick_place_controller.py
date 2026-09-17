@@ -2420,8 +2420,8 @@ def _gazebo_world_file_candidates() -> list[Path]:
         candidates.append(Path(env_path).expanduser())
     module_path = Path(__file__).resolve()
     for parent in module_path.parents:
-        candidates.append(parent / "ros2/cais_lab_robotics/worlds/table.world")
-    candidates.append(Path.home() / "ros2_ws/src/cais_lab_robotics/worlds/table.world")
+        candidates.append(parent / "ros2/cais_lab_robotics/worlds/table_recovery_framework.world")
+    candidates.append(Path.home() / "ros2_ws/src/cais_lab_robotics/worlds/table_recovery_framework.world")
     return candidates
 
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Automatic IFRA LinkAttacher bridge for xArm6 + UR5e grippers."""
 
+from __future__ import annotations
+
 import importlib
 import math
 import os
@@ -23,27 +25,17 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 PART_NAMES = [
     'gear_small',
-    'rect_pin_small',
-    'circ_pin_small',
     'gear_medium',
-    'rect_pin_medium',
-    'circ_pin_medium',
     'gear_large',
-    'rect_pin_large',
-    'circ_pin_large',
+    'KET4_Square_4mm',
+    'KET8_Square_8mm',
+    'KET12_Square_12mm',
+    'KET16_Square_16mm',
+    'RGOCG4-50_Round_4mm',
+    'RGOCG8-50_8mm',
+    'RGOCG12-50_12mm',
+    'RGOCG16-50_16mm',
 ]
-
-DEFAULT_PART_POSES = {
-    'gear_small': (-0.4, 0.1, 1.15),
-    'rect_pin_small': (-0.4, 0.0, 1.15),
-    'circ_pin_small': (-0.4, -0.1, 1.15),
-    'gear_medium': (0.4, 0.4, 1.15),
-    'rect_pin_medium': (0.4, 0.3, 1.15),
-    'circ_pin_medium': (0.4, 0.2, 1.15),
-    'gear_large': (0.4, -0.2, 1.15),
-    'rect_pin_large': (0.4, -0.3, 1.15),
-    'circ_pin_large': (0.4, -0.4, 1.15),
-}
 
 
 def _import_linkattacher_srvs():
@@ -68,6 +60,8 @@ def _import_linkattacher_srvs():
 
 
 class AutoLinkAttacher(Node):
+    """Attach observed NIST components through the existing gripper checks."""
+
     def __init__(self) -> None:
         super().__init__('auto_link_attacher')
         attach_srv, detach_srv = _import_linkattacher_srvs()
@@ -76,6 +70,11 @@ class AutoLinkAttacher(Node):
 
         self.declare_parameter('world_frame', 'world')
         self.declare_parameter('model_name', 'dual_robot')
+        self.declare_parameter(
+            'world_file',
+            str(Path(get_package_share_directory('cais_lab_robotics'))
+                / 'worlds' / 'table_recovery_framework.world'),
+        )
         self.declare_parameter('attach_distance_threshold', 0.06)
         self.declare_parameter('finger_distance_threshold', 0.04)
         self.declare_parameter('attach_distance_threshold_ur5e', 0.04)
@@ -153,7 +152,7 @@ class AutoLinkAttacher(Node):
                 qos_profile_sensor_data,
             )
         else:
-            self.get_logger().warn('gazebo_msgs/ModelStates not available; using static/fallback part poses')
+            self.get_logger().warn('gazebo_msgs/ModelStates not available; using selected world part poses')
 
         self.joint_positions: dict[str, float] = {}
         self.part_positions = self._load_part_positions()
@@ -182,15 +181,16 @@ class AutoLinkAttacher(Node):
         self.create_timer(0.10, self._timer_cb)
 
     def _load_part_positions(self) -> dict[str, tuple[float, float, float]]:
-        positions = dict(DEFAULT_PART_POSES)
+        """Read loose-part poses from the selected world, including filtered scenes."""
+        positions: dict[str, tuple[float, float, float]] = {}
         try:
-            world_path = Path(get_package_share_directory('cais_lab_robotics')) / 'worlds' / 'table.world'
+            world_path = Path(self.get_parameter('world_file').value)
             root = ET.parse(str(world_path)).getroot()
             world_elem = root.find('world')
             if world_elem is None:
                 return positions
-            for model in world_elem.findall('model'):
-                name = model.get('name', '')
+            for model in [*world_elem.findall('model'), *world_elem.findall('include')]:
+                name = model.get('name', '') if model.tag == 'model' else model.findtext('name', '')
                 if name not in PART_NAMES:
                     continue
                 pose_elem = model.find('pose')
@@ -200,8 +200,8 @@ class AutoLinkAttacher(Node):
                 if len(xyzrpy) < 3:
                     continue
                 positions[name] = (float(xyzrpy[0]), float(xyzrpy[1]), float(xyzrpy[2]))
-        except Exception as exc:
-            self.get_logger().warn(f'Failed parsing world part poses, using defaults: {exc}')
+        except (OSError, ET.ParseError, ValueError) as exc:
+            self.get_logger().warn(f'Failed parsing selected world part poses: {exc}')
         return positions
 
     def _joint_state_cb(self, msg: JointState) -> None:

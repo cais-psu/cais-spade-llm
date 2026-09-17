@@ -1,0 +1,306 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="KMR">
+  <xacro:arg name="controllers_file" default=""/>
+
+  <material name="KUKA_orange"><color rgba="0.96 0.36 0.03 1"/></material>
+  <material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material>
+  <material name="KMR_grey"><color rgba="0.48 0.50 0.52 1"/></material>
+  <material name="KMR_light"><color rgba="0.76 0.78 0.80 1"/></material>
+  <material name="KMR_deck"><color rgba="0.19 0.21 0.23 1"/></material>
+  <material name="KMR_clear"><color rgba="0.60 0.62 0.64 1"/></material>
+  <material name="KMR_blue"><color rgba="0.14 0.58 0.92 1"/></material>
+  <material name="KMR_scanner"><color rgba="0.12 0.62 0.78 1"/></material>
+  <material name="KMR_red"><color rgba="0.85 0.02 0.02 1"/></material>
+  <material name="RG2_white"><color rgba="0.80 0.80 0.80 1"/></material>
+  <material name="RG2_black"><color rgba="0.10 0.10 0.10 1"/></material>
+
+  <!-- KMP omniMove 400. The 400 kg mass is the vendor's nominal platform mass. -->
+  <link name="KMR_base_link">
+    <inertial>
+      <origin xyz="0 0 0.35" rpy="0 0 0"/>
+      <mass value="400"/>
+      <inertia ixx="20.03" ixy="0" ixz="0" iyy="55.16" iyz="0" izz="61.17"/>
+    </inertial>
+    <collision name="mobile_platform">
+      <origin xyz="0 0 0.35" rpy="0 0 0"/>
+      <geometry><box size="1.08 0.63 0.70"/></geometry>
+    </collision>
+    <visual name="mobile_platform_lower">
+      <origin xyz="0 0 0.29" rpy="0 0 0"/>
+      <geometry><box size="1.08 0.63 0.46"/></geometry>
+      <material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material>
+    </visual>
+    <visual name="mobile_platform_upper">
+      <origin xyz="0 0 0.585" rpy="0 0 0"/>
+      <geometry><box size="1.00 0.55 0.23"/></geometry>
+      <material name="KMR_light"><color rgba="0.76 0.78 0.80 1"/></material>
+    </visual>
+    <visual name="top_deck">
+      <origin xyz="0 0 0.695" rpy="0 0 0"/>
+      <geometry><box size="0.96 0.53 0.01"/></geometry>
+      <material name="KMR_deck"><color rgba="0.19 0.21 0.23 1"/></material>
+    </visual>
+    <visual name="clear_deck">
+      <origin xyz="0.255 0 0.696" rpy="0 0 0"/>
+      <geometry><box size="0.43 0.49 0.008"/></geometry>
+      <material name="KMR_clear"><color rgba="0.60 0.62 0.64 1"/></material>
+    </visual>
+    <visual name="iiwa_mounting_plate">
+      <origin xyz="-0.25 0 0.689" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.125" length="0.022"/></geometry>
+      <material name="KMR_deck"><color rgba="0.19 0.21 0.23 1"/></material>
+    </visual>
+    <visual name="left_KUKA_panel">
+      <origin xyz="0 0.316 0.40" rpy="0 0 0"/>
+      <geometry><box size="0.78 0.012 0.20"/></geometry>
+      <material name="KUKA_orange"><color rgba="0.96 0.36 0.03 1"/></material>
+    </visual>
+    <visual name="right_KUKA_panel">
+      <origin xyz="0 -0.316 0.40" rpy="0 0 0"/>
+      <geometry><box size="0.78 0.012 0.20"/></geometry>
+      <material name="KUKA_orange"><color rgba="0.96 0.36 0.03 1"/></material>
+    </visual>
+    <visual name="left_RGB_LED_band">
+      <origin xyz="0 0.323 0.535" rpy="0 0 0"/>
+      <geometry><box size="0.88 0.008 0.025"/></geometry>
+      <material name="KMR_blue"><color rgba="0.14 0.58 0.92 1"/></material>
+    </visual>
+    <visual name="right_RGB_LED_band">
+      <origin xyz="0 -0.323 0.535" rpy="0 0 0"/>
+      <geometry><box size="0.88 0.008 0.025"/></geometry>
+      <material name="KMR_blue"><color rgba="0.14 0.58 0.92 1"/></material>
+    </visual>
+
+    <collision name="front_safety_scanner">
+      <origin xyz="0.56 0 0.22" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.105" length="0.07"/></geometry>
+    </collision>
+    <collision name="rear_safety_scanner">
+      <origin xyz="-0.56 0 0.22" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.105" length="0.07"/></geometry>
+    </collision>
+    <visual name="front_safety_scanner">
+      <origin xyz="0.56 0 0.22" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.105" length="0.07"/></geometry>
+      <material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material>
+    </visual>
+    <visual name="rear_safety_scanner">
+      <origin xyz="-0.56 0 0.22" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.105" length="0.07"/></geometry>
+      <material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material>
+    </visual>
+    <visual name="front_safety_scanner_window">
+      <origin xyz="0.598 0 0.22" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.072" length="0.004"/></geometry>
+      <material name="KMR_scanner"><color rgba="0.12 0.62 0.78 1"/></material>
+    </visual>
+    <visual name="rear_safety_scanner_window">
+      <origin xyz="-0.598 0 0.22" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.072" length="0.004"/></geometry>
+      <material name="KMR_scanner"><color rgba="0.12 0.62 0.78 1"/></material>
+    </visual>
+
+    <visual name="emergency_stop_left"><origin xyz="0.40 0.326 0.59" rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.027" length="0.04"/></geometry><material name="KMR_red"><color rgba="0.85 0.02 0.02 1"/></material></visual>
+    <visual name="emergency_stop_right"><origin xyz="0.40 -0.326 0.59" rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.027" length="0.04"/></geometry><material name="KMR_red"><color rgba="0.85 0.02 0.02 1"/></material></visual>
+    <visual name="led_sound_buzzer"><origin xyz="-0.43 0.22 0.68" rpy="0 0 0"/><geometry><cylinder radius="0.022" length="0.04"/></geometry><material name="KUKA_orange"><color rgba="0.96 0.36 0.03 1"/></material></visual>
+
+    <xacro:macro name="ultrasonic" params="name x y">
+      <visual name="${name}"><origin xyz="${x} ${y} 0.34" rpy="0 0 0"/><geometry><sphere radius="0.018"/></geometry><material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material></visual>
+    </xacro:macro>
+    <xacro:ultrasonic name="ultrasonic_1" x="0.43" y="0.326"/>
+    <xacro:ultrasonic name="ultrasonic_2" x="0.15" y="0.326"/>
+    <xacro:ultrasonic name="ultrasonic_3" x="-0.15" y="0.326"/>
+    <xacro:ultrasonic name="ultrasonic_4" x="-0.43" y="0.326"/>
+    <xacro:ultrasonic name="ultrasonic_5" x="0.43" y="-0.326"/>
+    <xacro:ultrasonic name="ultrasonic_6" x="0.15" y="-0.326"/>
+    <xacro:ultrasonic name="ultrasonic_7" x="-0.15" y="-0.326"/>
+    <xacro:ultrasonic name="ultrasonic_8" x="-0.43" y="-0.326"/>
+
+    <xacro:macro name="kmr_wheel" params="name x y roller_yaw">
+      <collision name="${name}">
+        <origin xyz="${x} ${y} 0.135" rpy="1.57079632679 0 0"/>
+        <geometry><cylinder radius="0.125" length="0.024"/></geometry>
+      </collision>
+      <visual name="${name}">
+        <origin xyz="${x} ${y} 0.135" rpy="1.57079632679 0 0"/>
+        <geometry><cylinder radius="0.125" length="0.024"/></geometry>
+        <material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material>
+      </visual>
+      <visual name="${name}_roller_1">
+        <origin xyz="${x + 0.065} ${y} 0.205" rpy="0 0.78539816339 ${roller_yaw}"/>
+        <geometry><cylinder radius="0.012" length="0.105"/></geometry>
+        <material name="KMR_grey"><color rgba="0.48 0.50 0.52 1"/></material>
+      </visual>
+      <visual name="${name}_roller_2">
+        <origin xyz="${x - 0.065} ${y} 0.205" rpy="0 -0.78539816339 ${roller_yaw}"/>
+        <geometry><cylinder radius="0.012" length="0.105"/></geometry>
+        <material name="KMR_grey"><color rgba="0.48 0.50 0.52 1"/></material>
+      </visual>
+      <visual name="${name}_roller_3">
+        <origin xyz="${x + 0.065} ${y} 0.065" rpy="0 -0.78539816339 ${roller_yaw}"/>
+        <geometry><cylinder radius="0.012" length="0.105"/></geometry>
+        <material name="KMR_grey"><color rgba="0.48 0.50 0.52 1"/></material>
+      </visual>
+      <visual name="${name}_roller_4">
+        <origin xyz="${x - 0.065} ${y} 0.065" rpy="0 0.78539816339 ${roller_yaw}"/>
+        <geometry><cylinder radius="0.012" length="0.105"/></geometry>
+        <material name="KMR_grey"><color rgba="0.48 0.50 0.52 1"/></material>
+      </visual>
+    </xacro:macro>
+    <xacro:kmr_wheel name="wheel_front_left" x="0.36" y="0.348" roller_yaw="0"/>
+    <xacro:kmr_wheel name="wheel_front_right" x="0.36" y="-0.348" roller_yaw="0"/>
+    <xacro:kmr_wheel name="wheel_rear_left" x="-0.36" y="0.348" roller_yaw="0"/>
+    <xacro:kmr_wheel name="wheel_rear_right" x="-0.36" y="-0.348" roller_yaw="0"/>
+  </link>
+
+  <xacro:macro name="iiwa_mesh_link" params="name visual_mesh collision_mesh mass ixx iyy izz inertial_xyz:='0 0 0' mesh_z:='0' mesh_scale:='1 1 1'">
+    <link name="${name}">
+      <inertial>
+        <origin xyz="${inertial_xyz}" rpy="0 0 0"/>
+        <mass value="${mass}"/>
+        <inertia ixx="${ixx}" ixy="0" ixz="0" iyy="${iyy}" iyz="0" izz="${izz}"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 ${mesh_z}" rpy="0 0 0"/>
+        <geometry><mesh filename="package://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/${visual_mesh}" scale="${mesh_scale}"/></geometry>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${mesh_z}" rpy="0 0 0"/>
+        <geometry><mesh filename="package://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/${collision_mesh}" scale="${mesh_scale}"/></geometry>
+      </collision>
+    </link>
+  </xacro:macro>
+
+  <xacro:iiwa_mesh_link name="iiwa_link_0" visual_mesh="base_link.dae" collision_mesh="base_link.stl" mass="5" ixx="0.05" iyy="0.06" izz="0.03" inertial_xyz="-0.1 0 0.07"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_1" visual_mesh="link_1.dae" collision_mesh="link_1.stl" mass="4" ixx="0.1" iyy="0.09" izz="0.02" inertial_xyz="0 -0.03 0.12"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_2" visual_mesh="link_2.dae" collision_mesh="link_2.stl" mass="4" ixx="0.05" iyy="0.018" izz="0.044" inertial_xyz="0.0003 0.059 0.042"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_3" visual_mesh="link_3.dae" collision_mesh="link_3.stl" mass="3" ixx="0.08" iyy="0.075" izz="0.01" inertial_xyz="0 0.03 0.13"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_4" visual_mesh="link_4.dae" collision_mesh="link_4.stl" mass="2.7" ixx="0.03" iyy="0.01" izz="0.029" inertial_xyz="0 0.067 0.034"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_5" visual_mesh="link_5.dae" collision_mesh="link_5.stl" mass="1.7" ixx="0.02" iyy="0.018" izz="0.005" inertial_xyz="0.0001 0.021 0.076"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_6" visual_mesh="link_6.dae" collision_mesh="link_6.stl" mass="1.8" ixx="0.025" iyy="0.0136" izz="0.0247" inertial_xyz="0 0.0006 0.0004"/>
+  <xacro:iiwa_mesh_link name="iiwa_link_7" visual_mesh="link_7_2.stl" collision_mesh="link_7_2.stl" mass="0.428571" ixx="0.01" iyy="0.01" izz="0.01" inertial_xyz="0 0 0.02" mesh_z="0.07" mesh_scale="0.001 0.001 0.001"/>
+
+  <joint name="iiwa_root_joint" type="fixed">
+    <origin xyz="-0.25 0 0.70" rpy="0 0 1.57079632679"/>
+    <parent link="KMR_base_link"/><child link="iiwa_link_0"/>
+  </joint>
+  <joint name="joint_a1" type="revolute"><origin xyz="0 0 0" rpy="0 0 0"/><parent link="iiwa_link_0"/><child link="iiwa_link_1"/><axis xyz="0 0 1"/><limit effort="320" lower="-2.9668" upper="2.9668" velocity="1.4834"/></joint>
+  <joint name="joint_a2" type="revolute"><origin xyz="-0.00043624 0 0.36" rpy="0 0 0"/><parent link="iiwa_link_1"/><child link="iiwa_link_2"/><axis xyz="0 1 0"/><limit effort="320" lower="-2.0942" upper="2.0942" velocity="1.4834"/></joint>
+  <joint name="joint_a3" type="revolute"><origin xyz="0 0 0" rpy="0 0 0"/><parent link="iiwa_link_2"/><child link="iiwa_link_3"/><axis xyz="0 0 1"/><limit effort="176" lower="-2.9668" upper="2.9668" velocity="1.7452"/></joint>
+  <joint name="joint_a4" type="revolute"><origin xyz="0.00043624 0 0.42" rpy="0 0 0"/><parent link="iiwa_link_3"/><child link="iiwa_link_4"/><axis xyz="0 -1 0"/><limit effort="176" lower="-2.0942" upper="2.0942" velocity="1.3089"/></joint>
+  <joint name="joint_a5" type="revolute"><origin xyz="0 0 0" rpy="0 0 0"/><parent link="iiwa_link_4"/><child link="iiwa_link_5"/><axis xyz="0 0 1"/><limit effort="110" lower="-2.9668" upper="2.9668" velocity="2.2688"/></joint>
+  <joint name="joint_a6" type="revolute"><origin xyz="0 0 0.4" rpy="0 0 0"/><parent link="iiwa_link_5"/><child link="iiwa_link_6"/><axis xyz="0 1 0"/><limit effort="40" lower="-2.0942" upper="2.0942" velocity="2.356"/></joint>
+  <joint name="joint_a7" type="revolute"><origin xyz="0 0 0" rpy="0 0 0"/><parent link="iiwa_link_6"/><child link="iiwa_link_7"/><axis xyz="0 0 1"/><limit effort="40" lower="-3.0541" upper="3.0541" velocity="2.356"/></joint>
+
+  <link name="iiwa_tool0"/>
+  <joint name="joint_a7-tool0" type="fixed"><origin xyz="0 0 0.154" rpy="0 0 0"/><parent link="iiwa_link_7"/><child link="iiwa_tool0"/></joint>
+  <link name="rg2_adapter">
+    <inertial><origin xyz="0 0 0"/><mass value="0.05"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/></inertial>
+    <visual><geometry><cylinder radius="0.025" length="0.020"/></geometry><material name="KMR_dark"><color rgba="0.08 0.09 0.10 1"/></material></visual>
+    <collision><geometry><cylinder radius="0.025" length="0.020"/></geometry></collision>
+  </link>
+  <joint name="rg2_adapter_joint" type="fixed"><origin xyz="0 0 0.010" rpy="0 0 0"/><parent link="iiwa_tool0"/><child link="rg2_adapter"/></joint>
+
+  <xacro:macro name="rg2_mesh_link" params="name mesh color mass:='0.05'">
+    <link name="${name}">
+      <inertial><origin xyz="0 0 0"/><mass value="${mass}"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+      <visual><geometry><mesh filename="package://cais_lab_robotics/models/KMR/meshes/rg2/visual/${mesh}.stl"/></geometry><material name="${color}"/></visual>
+      <collision><geometry><mesh filename="package://cais_lab_robotics/models/KMR/meshes/rg2/collision/${mesh}.stl"/></geometry></collision>
+    </link>
+  </xacro:macro>
+  <xacro:rg2_mesh_link name="rg2_base_link" mesh="base_link" color="RG2_white" mass="0.78"/>
+  <joint name="rg2_mount_joint" type="fixed"><origin xyz="0 0 0.010" rpy="0 0 0"/><parent link="rg2_adapter"/><child link="rg2_base_link"/></joint>
+  <link name="KMR_rg2_finger_width_mock_link">
+    <!-- Gazebo removes massless links, which would also remove this command joint. -->
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.01"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+  <joint name="KMR_rg2_finger_width" type="prismatic"><origin xyz="0 0 0" rpy="0 0 0"/><parent link="rg2_base_link"/><child link="KMR_rg2_finger_width_mock_link"/><axis xyz="0 0 1"/><limit lower="0.015" upper="0.110" velocity="0.127" effort="40"/></joint>
+
+  <xacro:rg2_mesh_link name="rg2_left_outer_knuckle" mesh="outer_knuckle" color="RG2_white"/>
+  <xacro:rg2_mesh_link name="rg2_right_outer_knuckle" mesh="outer_knuckle" color="RG2_white"/>
+  <xacro:rg2_mesh_link name="rg2_left_inner_knuckle" mesh="inner_knuckle" color="RG2_white"/>
+  <xacro:rg2_mesh_link name="rg2_right_inner_knuckle" mesh="inner_knuckle" color="RG2_white"/>
+  <xacro:rg2_mesh_link name="rg2_left_inner_finger" mesh="inner_finger" color="RG2_black"/>
+  <xacro:rg2_mesh_link name="rg2_right_inner_finger" mesh="inner_finger" color="RG2_black"/>
+
+  <joint name="rg2_finger_joint" type="revolute"><origin xyz="0 -0.017178 0.125797" rpy="0 0 0"/><parent link="rg2_base_link"/><child link="rg2_left_outer_knuckle"/><axis xyz="-1 0 0"/><limit lower="-0.558505" upper="0.785398" velocity="100" effort="1000"/><mimic joint="KMR_rg2_finger_width" multiplier="-10.383795" offset="0.785398"/></joint>
+  <joint name="rg2_right_outer_knuckle_joint" type="revolute"><origin xyz="0 0.017178 0.125797" rpy="0 0 3.14159265359"/><parent link="rg2_base_link"/><child link="rg2_right_outer_knuckle"/><axis xyz="1 0 0"/><limit lower="-0.785398" upper="0.785398" velocity="100" effort="1000"/><mimic joint="rg2_finger_joint" multiplier="-1" offset="0"/></joint>
+  <joint name="rg2_left_inner_knuckle_joint" type="revolute"><origin xyz="0 -0.007678 0.142297" rpy="0 0 0"/><parent link="rg2_base_link"/><child link="rg2_left_inner_knuckle"/><axis xyz="1 0 0"/><limit lower="-0.785398" upper="0.785398" velocity="100" effort="1000"/><mimic joint="rg2_finger_joint" multiplier="-1" offset="0"/></joint>
+  <joint name="rg2_right_inner_knuckle_joint" type="revolute"><origin xyz="0 0.007678 0.142297" rpy="0 0 -3.14159265359"/><parent link="rg2_base_link"/><child link="rg2_right_inner_knuckle"/><axis xyz="1 0 0"/><limit lower="-0.785398" upper="0.785398" velocity="100" effort="1000"/><mimic joint="rg2_finger_joint" multiplier="-1" offset="0"/></joint>
+  <joint name="rg2_left_inner_finger_joint" type="revolute"><origin xyz="0 -0.039592 0.038177" rpy="0 0 0"/><parent link="rg2_left_outer_knuckle"/><child link="rg2_left_inner_finger"/><axis xyz="1 0 0"/><limit lower="-0.872665" upper="0.872665" velocity="100" effort="1000"/><mimic joint="rg2_finger_joint" multiplier="1" offset="0"/></joint>
+  <joint name="rg2_right_inner_finger_joint" type="revolute"><origin xyz="0 -0.039592 0.038177" rpy="0 0 0"/><parent link="rg2_right_outer_knuckle"/><child link="rg2_right_inner_finger"/><axis xyz="1 0 0"/><limit lower="-0.872665" upper="0.872665" velocity="100" effort="1000"/><mimic joint="rg2_finger_joint" multiplier="1" offset="0"/></joint>
+  <link name="rg2_gripper_tcp"/>
+  <joint name="rg2_tcp_joint" type="fixed"><origin xyz="0 0 0.218" rpy="0 0 0"/><parent link="rg2_base_link"/><child link="rg2_gripper_tcp"/></joint>
+
+  <!-- Keep commanded arm transforms deterministic while the planar base plugin moves. -->
+  <xacro:macro name="disable_arm_gravity" params="link_name">
+    <gazebo reference="${link_name}">
+      <gravity>false</gravity>
+      <kinematic>true</kinematic>
+    </gazebo>
+  </xacro:macro>
+  <xacro:disable_arm_gravity link_name="iiwa_link_1"/>
+  <xacro:disable_arm_gravity link_name="iiwa_link_2"/>
+  <xacro:disable_arm_gravity link_name="iiwa_link_3"/>
+  <xacro:disable_arm_gravity link_name="iiwa_link_4"/>
+  <xacro:disable_arm_gravity link_name="iiwa_link_5"/>
+  <xacro:disable_arm_gravity link_name="iiwa_link_6"/>
+  <xacro:disable_arm_gravity link_name="iiwa_link_7"/>
+  <xacro:disable_arm_gravity link_name="rg2_base_link"/>
+  <xacro:disable_arm_gravity link_name="KMR_rg2_finger_width_mock_link"/>
+  <xacro:disable_arm_gravity link_name="rg2_left_outer_knuckle"/>
+  <xacro:disable_arm_gravity link_name="rg2_right_outer_knuckle"/>
+  <xacro:disable_arm_gravity link_name="rg2_left_inner_knuckle"/>
+  <xacro:disable_arm_gravity link_name="rg2_right_inner_knuckle"/>
+  <xacro:disable_arm_gravity link_name="rg2_left_inner_finger"/>
+  <xacro:disable_arm_gravity link_name="rg2_right_inner_finger"/>
+  <gazebo reference="KMR_base_link">
+    <gravity>false</gravity>
+    <kinematic>true</kinematic>
+  </gazebo>
+
+  <ros2_control name="KMR_control" type="system">
+    <hardware><plugin>gazebo_ros2_control/GazeboSystem</plugin></hardware>
+    <xacro:macro name="controlled_joint" params="name initial">
+      <joint name="${name}"><command_interface name="position"/><state_interface name="position"><param name="initial_value">${initial}</param></state_interface><state_interface name="velocity"/></joint>
+    </xacro:macro>
+    <xacro:controlled_joint name="joint_a1" initial="0"/>
+    <xacro:controlled_joint name="joint_a2" initial="0"/>
+    <xacro:controlled_joint name="joint_a3" initial="0"/>
+    <xacro:controlled_joint name="joint_a4" initial="0"/>
+    <xacro:controlled_joint name="joint_a5" initial="0"/>
+    <xacro:controlled_joint name="joint_a6" initial="0"/>
+    <xacro:controlled_joint name="joint_a7" initial="0"/>
+    <joint name="KMR_rg2_finger_width"><command_interface name="position"/><state_interface name="position"><param name="initial_value">0.11</param></state_interface></joint>
+  </ros2_control>
+
+  <gazebo>
+    <plugin name="KMR_gazebo_ros2_control" filename="libgazebo_ros2_control.so">
+      <ros><namespace>/KMR</namespace></ros>
+      <robot_param>robot_description</robot_param>
+      <robot_param_node>robot_state_publisher</robot_param_node>
+      <parameters>$(arg controllers_file)</parameters>
+    </plugin>
+    <plugin name="KMR_planar_move" filename="libgazebo_ros_planar_move.so">
+      <ros><namespace>/KMR</namespace></ros>
+      <update_rate>100</update_rate><publish_rate>50</publish_rate>
+      <publish_odom>true</publish_odom><publish_odom_tf>false</publish_odom_tf>
+      <odometry_frame>world</odometry_frame><robot_base_frame>KMR_base_link</robot_base_frame>
+      <covariance_x>0.0001</covariance_x><covariance_y>0.0001</covariance_y><covariance_yaw>0.001</covariance_yaw>
+    </plugin>
+  </gazebo>
+
+  <xacro:macro name="mimic_plugin" params="name joint mimic multiplier offset">
+    <gazebo><plugin name="${name}" filename="libgazebo_mimic_joint_plugin.so"><joint>${joint}</joint><mimicJoint>${mimic}</mimicJoint><multiplier>${multiplier}</multiplier><offset>${offset}</offset><sensitiveness>0.003</sensitiveness><maxEffort>3.0</maxEffort></plugin></gazebo>
+  </xacro:macro>
+  <xacro:mimic_plugin name="KMR_rg2_left_outer_mimic" joint="KMR_rg2_finger_width" mimic="rg2_finger_joint" multiplier="-10.383795" offset="0.785398"/>
+  <xacro:mimic_plugin name="KMR_rg2_right_outer_mimic" joint="rg2_finger_joint" mimic="rg2_right_outer_knuckle_joint" multiplier="-1" offset="0"/>
+  <xacro:mimic_plugin name="KMR_rg2_left_inner_knuckle_mimic" joint="rg2_finger_joint" mimic="rg2_left_inner_knuckle_joint" multiplier="-1" offset="0"/>
+  <xacro:mimic_plugin name="KMR_rg2_right_inner_knuckle_mimic" joint="rg2_finger_joint" mimic="rg2_right_inner_knuckle_joint" multiplier="-1" offset="0"/>
+  <xacro:mimic_plugin name="KMR_rg2_left_inner_finger_mimic" joint="rg2_finger_joint" mimic="rg2_left_inner_finger_joint" multiplier="1" offset="0"/>
+  <xacro:mimic_plugin name="KMR_rg2_right_inner_finger_mimic" joint="rg2_finger_joint" mimic="rg2_right_inner_finger_joint" multiplier="1" offset="0"/>
+</robot>

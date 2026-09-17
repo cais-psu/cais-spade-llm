@@ -1,0 +1,160 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+- Class: rviz_common/Views
+  Name: Views
+- Class: nav2_rviz_plugins/Navigation 2
+  Name: Navigation 2
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Class: rviz_default_plugins/RobotModel
+    Description Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /robot_description
+    Enabled: false
+    Name: RobotModel
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /robot_description
+    Update Interval: 0
+    Visual Enabled: true
+  - Class: moveit_rviz_plugin/MotionPlanning
+    Acceleration_Scaling_Factor: 0.3
+    Enabled: true
+    Name: MotionPlanning
+    Move Group Namespace: ''
+    Planning Scene Topic: /monitored_planning_scene
+    Robot Description: robot_description
+    Velocity_Scaling_Factor: 0.4
+    Scene Geometry:
+      Scene Alpha: 0.8999999761581421
+    Scene Robot:
+      Robot Alpha: 0.5
+    Planning Request:
+      Planning Group: all_robots
+      Interactive Marker Size: 0.2
+      Query Start State: false
+      Query Goal State: true
+    Planned Path:
+      Loop Animation: false
+      State Display Time: 0.05s
+      Trajectory Topic: /move_group/display_planned_path
+  - Class: rviz_default_plugins/InteractiveMarkers
+    Enabled: true
+    Name: Recovery Current-State Goals
+    Show Axes: false
+    Show Descriptions: true
+    Show Visual Aids: false
+    Interactive Markers Namespace: /recovery_drag_markers
+  - Alpha: 0.45
+    Class: rviz_default_plugins/Map
+    Color Scheme: map
+    Enabled: false
+    Name: KMR Fixed Occupancy Map
+    Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /KMR/map
+  - Alpha: 0.3
+    Class: rviz_default_plugins/Map
+    Color Scheme: costmap
+    Enabled: false
+    Name: KMR Global Costmap
+    Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /KMR/global_costmap/costmap
+  - Alpha: 0.45
+    Class: rviz_default_plugins/Map
+    Color Scheme: costmap
+    Enabled: false
+    Name: KMR Local Costmap
+    Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /KMR/local_costmap/costmap
+  - Class: rviz_default_plugins/Path
+    Color: 20; 255; 20
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.04
+    Name: KMR Planned Path
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /KMR/planned_path
+  - Class: rviz_default_plugins/Path
+    Color: 40; 170; 255
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.04
+    Name: KMR Nav2 Path
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /KMR/plan
+  - Class: rviz_default_plugins/Polygon
+    Color: 255; 80; 20
+    Enabled: true
+    Name: KMR Footprint
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /KMR/local_costmap/published_footprint
+  - Class: rviz_default_plugins/TF
+    Enabled: false
+    Name: TF
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: world
+    Frame Rate: 15
+  Name: root
+  Tools:
+  - Class: rviz_default_plugins/Interact
+    Hide Inactive Objects: true
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: nav2_rviz_plugins/GoalTool
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 14
+      Focal Point:
+        X: -4.5
+        Y: 1
+        Z: 1
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.8
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 4.71238898038
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1400

@@ -1,0 +1,243 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="KMR">
+    <static>true</static>
+
+    <link name="mobile_platform_link">
+      <collision name="mobile_platform">
+        <pose>0 0 0.35 0 0 0</pose>
+        <geometry><box><size>1.08 0.63 0.70</size></box></geometry>
+      </collision>
+      <collision name="front_safety_scanner">
+        <pose>0.58 0 0.23 0 1.57079632679 0</pose>
+        <geometry><cylinder><radius>0.075</radius><length>0.03</length></cylinder></geometry>
+      </collision>
+      <collision name="rear_safety_scanner">
+        <pose>-0.58 0 0.23 0 1.57079632679 0</pose>
+        <geometry><cylinder><radius>0.075</radius><length>0.03</length></cylinder></geometry>
+      </collision>
+      <collision name="wheel_front_left">
+        <pose>0.36 0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+      </collision>
+      <collision name="wheel_front_right">
+        <pose>0.36 -0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+      </collision>
+      <collision name="wheel_rear_left">
+        <pose>-0.36 0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+      </collision>
+      <collision name="wheel_rear_right">
+        <pose>-0.36 -0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+      </collision>
+      <visual name="mobile_platform_lower">
+        <pose>0 0 0.29 0 0 0</pose>
+        <geometry><box><size>1.08 0.63 0.46</size></box></geometry>
+        <material><ambient>0.09 0.10 0.11 1</ambient><diffuse>0.09 0.10 0.11 1</diffuse></material>
+      </visual>
+      <visual name="mobile_platform_upper">
+        <pose>0 0 0.585 0 0 0</pose>
+        <geometry><box><size>1.00 0.55 0.23</size></box></geometry>
+        <material><ambient>0.76 0.78 0.80 1</ambient><diffuse>0.76 0.78 0.80 1</diffuse></material>
+      </visual>
+      <visual name="top_deck">
+        <pose>0 0 0.695 0 0 0</pose>
+        <geometry><box><size>0.96 0.53 0.01</size></box></geometry>
+        <material><ambient>0.19 0.21 0.23 1</ambient><diffuse>0.19 0.21 0.23 1</diffuse></material>
+      </visual>
+      <visual name="clear_deck">
+        <pose>0.255 0 0.696 0 0 0</pose>
+        <geometry><box><size>0.43 0.49 0.008</size></box></geometry>
+        <material><ambient>0.60 0.62 0.64 1</ambient><diffuse>0.60 0.62 0.64 1</diffuse></material>
+      </visual>
+      <visual name="iiwa_mounting_plate">
+        <pose>-0.25 0 0.689 0 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.022</length></cylinder></geometry>
+        <material><ambient>0.18 0.19 0.20 1</ambient><diffuse>0.18 0.19 0.20 1</diffuse></material>
+      </visual>
+      <visual name="left_KUKA_panel">
+        <pose>0 0.316 0.40 0 0 0</pose>
+        <geometry><box><size>0.78 0.012 0.20</size></box></geometry>
+        <material><ambient>0.96 0.45 0.05 1</ambient><diffuse>0.96 0.45 0.05 1</diffuse></material>
+      </visual>
+      <visual name="right_KUKA_panel">
+        <pose>0 -0.316 0.40 0 0 0</pose>
+        <geometry><box><size>0.78 0.012 0.20</size></box></geometry>
+        <material><ambient>0.96 0.45 0.05 1</ambient><diffuse>0.96 0.45 0.05 1</diffuse></material>
+      </visual>
+      <visual name="left_RGB_LED_band">
+        <pose>0 0.323 0.535 0 0 0</pose>
+        <geometry><box><size>0.88 0.008 0.025</size></box></geometry>
+        <material><ambient>0.14 0.58 0.92 1</ambient><diffuse>0.14 0.58 0.92 1</diffuse><emissive>0.05 0.22 0.38 1</emissive></material>
+      </visual>
+      <visual name="right_RGB_LED_band">
+        <pose>0 -0.323 0.535 0 0 0</pose>
+        <geometry><box><size>0.88 0.008 0.025</size></box></geometry>
+        <material><ambient>0.14 0.58 0.92 1</ambient><diffuse>0.14 0.58 0.92 1</diffuse><emissive>0.05 0.22 0.38 1</emissive></material>
+      </visual>
+      <visual name="front_safety_scanner">
+        <pose>0.58 0 0.23 0 1.57079632679 0</pose>
+        <geometry><cylinder><radius>0.075</radius><length>0.03</length></cylinder></geometry>
+        <material><ambient>0.04 0.07 0.09 1</ambient><diffuse>0.04 0.07 0.09 1</diffuse></material>
+      </visual>
+      <visual name="front_safety_scanner_window">
+        <pose>0.593 0 0.23 0 1.57079632679 0</pose>
+        <geometry><cylinder><radius>0.055</radius><length>0.004</length></cylinder></geometry>
+        <material><ambient>0.12 0.62 0.78 1</ambient><diffuse>0.12 0.62 0.78 1</diffuse><emissive>0.03 0.15 0.20 1</emissive></material>
+      </visual>
+      <visual name="rear_safety_scanner">
+        <pose>-0.58 0 0.23 0 1.57079632679 0</pose>
+        <geometry><cylinder><radius>0.075</radius><length>0.03</length></cylinder></geometry>
+        <material><ambient>0.04 0.07 0.09 1</ambient><diffuse>0.04 0.07 0.09 1</diffuse></material>
+      </visual>
+      <visual name="rear_safety_scanner_window">
+        <pose>-0.593 0 0.23 0 1.57079632679 0</pose>
+        <geometry><cylinder><radius>0.055</radius><length>0.004</length></cylinder></geometry>
+        <material><ambient>0.12 0.62 0.78 1</ambient><diffuse>0.12 0.62 0.78 1</diffuse><emissive>0.03 0.15 0.20 1</emissive></material>
+      </visual>
+      <visual name="wheel_front_left">
+        <pose>0.36 0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+        <material><ambient>0.04 0.04 0.04 1</ambient><diffuse>0.04 0.04 0.04 1</diffuse></material>
+      </visual>
+      <visual name="wheel_front_right">
+        <pose>0.36 -0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+        <material><ambient>0.04 0.04 0.04 1</ambient><diffuse>0.04 0.04 0.04 1</diffuse></material>
+      </visual>
+      <visual name="wheel_rear_left">
+        <pose>-0.36 0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+        <material><ambient>0.04 0.04 0.04 1</ambient><diffuse>0.04 0.04 0.04 1</diffuse></material>
+      </visual>
+      <visual name="wheel_rear_right">
+        <pose>-0.36 -0.315 0.20 1.57079632679 0 0</pose>
+        <geometry><cylinder><radius>0.125</radius><length>0.09</length></cylinder></geometry>
+        <material><ambient>0.04 0.04 0.04 1</ambient><diffuse>0.04 0.04 0.04 1</diffuse></material>
+      </visual>
+      <!-- Four diagonal roller details on each wheel make the omniMove layout recognizable. -->
+      <visual name="wheel_front_left_roller_1"><pose>0.295 0.348 0.265 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_left_roller_2"><pose>0.425 0.348 0.265 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_left_roller_3"><pose>0.295 0.348 0.135 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_left_roller_4"><pose>0.425 0.348 0.135 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_right_roller_1"><pose>0.295 -0.348 0.265 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_right_roller_2"><pose>0.425 -0.348 0.265 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_right_roller_3"><pose>0.295 -0.348 0.135 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_front_right_roller_4"><pose>0.425 -0.348 0.135 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_left_roller_1"><pose>-0.425 0.348 0.265 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_left_roller_2"><pose>-0.295 0.348 0.265 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_left_roller_3"><pose>-0.425 0.348 0.135 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_left_roller_4"><pose>-0.295 0.348 0.135 0 -0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_right_roller_1"><pose>-0.425 -0.348 0.265 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_right_roller_2"><pose>-0.295 -0.348 0.265 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_right_roller_3"><pose>-0.425 -0.348 0.135 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="wheel_rear_right_roller_4"><pose>-0.295 -0.348 0.135 0 0.78539816339 0</pose><geometry><cylinder><radius>0.012</radius><length>0.105</length></cylinder></geometry><material><ambient>.48 .50 .52 1</ambient><diffuse>.48 .50 .52 1</diffuse></material></visual>
+      <visual name="emergency_stop_left"><pose>0.40 0.326 0.59 1.57079632679 0 0</pose><geometry><cylinder><radius>0.027</radius><length>0.04</length></cylinder></geometry><material><ambient>.85 .02 .02 1</ambient><diffuse>.85 .02 .02 1</diffuse></material></visual>
+      <visual name="emergency_stop_right"><pose>0.40 -0.326 0.59 1.57079632679 0 0</pose><geometry><cylinder><radius>0.027</radius><length>0.04</length></cylinder></geometry><material><ambient>.85 .02 .02 1</ambient><diffuse>.85 .02 .02 1</diffuse></material></visual>
+      <visual name="led_sound_buzzer"><pose>-0.43 0.22 0.68 0 0 0</pose><geometry><cylinder><radius>0.022</radius><length>0.04</length></cylinder></geometry><material><ambient>.96 .45 .05 1</ambient><diffuse>.96 .45 .05 1</diffuse></material></visual>
+      <visual name="ultrasonic_1"><pose>0.43 0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_2"><pose>0.15 0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_3"><pose>-0.15 0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_4"><pose>-0.43 0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_5"><pose>0.43 -0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_6"><pose>0.15 -0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_7"><pose>-0.15 -0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+      <visual name="ultrasonic_8"><pose>-0.43 -0.326 0.34 0 0 0</pose><geometry><sphere><radius>0.018</radius></sphere></geometry><material><ambient>.08 .08 .09 1</ambient><diffuse>.08 .08 .09 1</diffuse></material></visual>
+    </link>
+
+    <!-- The LBR iiwa 14 R820 upright [0, 0, 0, 0, 0, 0, 0] configuration is baked into these static
+         poses. This layout increment intentionally provides no joints or control. -->
+    <link name="iiwa_link_0">
+      <pose>-0.250000000 0.000000000 0.700000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_0"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/base_link.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_0"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/base_link.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_1">
+      <pose>-0.250000000 0.000000000 0.700000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_1"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_1.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_1"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_1.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_2">
+      <pose>-0.250000000 -0.000436240 1.060000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_2"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_2.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_2"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_2.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_3">
+      <pose>-0.250000000 -0.000436240 1.060000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_3"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_3.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_3"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_3.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_4">
+      <pose>-0.250000000 0.000000000 1.480000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_4"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_4.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_4"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_4.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_5">
+      <pose>-0.250000000 0.000000000 1.480000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_5"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_5.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_5"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_5.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_6">
+      <pose>-0.250000000 0.000000000 1.880000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_6"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_6.stl</uri></mesh></geometry></collision>
+      <visual name="iiwa_link_6"><geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_6.dae</uri></mesh></geometry></visual>
+    </link>
+    <link name="iiwa_link_7">
+      <pose>-0.250000000 0.000000000 1.880000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="iiwa_link_7">
+        <pose>0 0 0.07 0 0 0</pose>
+        <geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/collision/link_7_2.stl</uri><scale>0.001 0.001 0.001</scale></mesh></geometry>
+      </collision>
+      <visual name="iiwa_link_7">
+        <pose>0 0 0.07 0 0 0</pose>
+        <geometry><mesh><uri>model://KMR/meshes/lbr_iiwa_14_r820/visual/link_7_2.stl</uri><scale>0.001 0.001 0.001</scale></mesh></geometry>
+        <material><ambient>0.55 0.55 0.55 1</ambient><diffuse>0.55 0.55 0.55 1</diffuse></material>
+      </visual>
+    </link>
+
+    <link name="rg2_adapter">
+      <pose>-0.250000000 0.000000000 2.044000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="adapter"><geometry><cylinder><radius>0.025</radius><length>0.020</length></cylinder></geometry></collision>
+      <visual name="adapter"><geometry><cylinder><radius>0.025</radius><length>0.020</length></cylinder></geometry><material><ambient>0.22 0.22 0.23 1</ambient><diffuse>0.22 0.22 0.23 1</diffuse></material></visual>
+    </link>
+
+    <!-- RG2 finger poses correspond to finger_width=0.110 m. -->
+    <link name="rg2_base_link">
+      <pose>-0.250000000 0.000000000 2.054000000 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="rg2_base_link"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/base_link.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_base_link"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/base_link.stl</uri></mesh></geometry><material><ambient>0.80 0.80 0.80 1</ambient><diffuse>0.80 0.80 0.80 1</diffuse></material></visual>
+    </link>
+    <link name="rg2_left_outer_knuckle">
+      <pose>-0.232822000 0.000000000 2.179797000 0.356919549 0.000000000 1.57079632679</pose>
+      <collision name="rg2_left_outer_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/outer_knuckle.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_left_outer_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/outer_knuckle.stl</uri></mesh></geometry><material><ambient>0.80 0.80 0.80 1</ambient><diffuse>0.80 0.80 0.80 1</diffuse></material></visual>
+    </link>
+    <link name="rg2_right_outer_knuckle">
+      <pose>-0.267178000 0.000000000 2.179797000 0.356919550 0.000000000 -1.57079632639</pose>
+      <collision name="rg2_right_outer_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/outer_knuckle.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_right_outer_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/outer_knuckle.stl</uri></mesh></geometry><material><ambient>0.80 0.80 0.80 1</ambient><diffuse>0.80 0.80 0.80 1</diffuse></material></visual>
+    </link>
+    <link name="rg2_left_inner_knuckle">
+      <pose>-0.242322000 0.000000000 2.196297000 0.356919549 0.000000000 1.57079632679</pose>
+      <collision name="rg2_left_inner_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/inner_knuckle.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_left_inner_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/inner_knuckle.stl</uri></mesh></geometry><material><ambient>0.80 0.80 0.80 1</ambient><diffuse>0.80 0.80 0.80 1</diffuse></material></visual>
+    </link>
+    <link name="rg2_right_inner_knuckle">
+      <pose>-0.257678000 0.000000000 2.196297000 0.356919550 0.000000000 -1.57079632639</pose>
+      <collision name="rg2_right_inner_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/inner_knuckle.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_right_inner_knuckle"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/inner_knuckle.stl</uri></mesh></geometry><material><ambient>0.80 0.80 0.80 1</ambient><diffuse>0.80 0.80 0.80 1</diffuse></material></visual>
+    </link>
+    <link name="rg2_left_inner_finger">
+      <pose>-0.182386539 0.000000000 2.201734959 0.000000000 0.000000000 1.57079632679</pose>
+      <collision name="rg2_left_inner_finger"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/inner_finger.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_left_inner_finger"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/inner_finger.stl</uri></mesh></geometry><material><ambient>0.10 0.10 0.10 1</ambient><diffuse>0.10 0.10 0.10 1</diffuse></material></visual>
+    </link>
+    <link name="rg2_right_inner_finger">
+      <pose>-0.317613461 0.000000000 2.201734959 0.000000000 0.000000000 -1.57079632639</pose>
+      <collision name="rg2_right_inner_finger"><geometry><mesh><uri>model://KMR/meshes/rg2/collision/inner_finger.stl</uri></mesh></geometry></collision>
+      <visual name="rg2_right_inner_finger"><geometry><mesh><uri>model://KMR/meshes/rg2/visual/inner_finger.stl</uri></mesh></geometry><material><ambient>0.10 0.10 0.10 1</ambient><diffuse>0.10 0.10 0.10 1</diffuse></material></visual>
+    </link>
+  </model>
+</sdf>

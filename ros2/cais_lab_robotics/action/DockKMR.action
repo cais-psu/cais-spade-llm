@@ -1,0 +1,13 @@
+# Goal: one exact configured destination resource.
+string target_resource
+---
+bool success
+string final_resource
+string message
+---
+string active_route_from
+string active_route_to
+uint32 waypoint_index
+geometry_msgs/Pose2D current_pose
+float64 remaining_distance_m
+float64 remaining_yaw_rad

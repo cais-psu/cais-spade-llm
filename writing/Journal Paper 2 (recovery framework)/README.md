@@ -1,5 +1,152 @@
 # Journal Paper 2: Recovery Framework
 
+## Current Implementation Roadmap
+
+Follow [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and the
+[M1/M2 layout](MACHINING_STATION_LAYOUT.md) ([drawing](MACHINING_STATION_LAYOUT.svg)).
+**Phase 2 — Gazebo layout is complete as of 2026-09-16.** The accepted static
+layout is the recovery-framework baseline. The dashboard's **Start Dual Gazebo +
+RViz** opens [table_recovery_framework.world](../../ros2/cais_lab_robotics/worlds/table_recovery_framework.world).
+
+**Accepted Gazebo baseline:** Storage is on the left, M1/M2 remain side by
+side with a **1 m horizontal gap to the assembly table**, and both machine robots
+share one straight passive Conveyor. `ur5e-1` handles M1 and `ur5e-2` handles M2.
+At Assembly Station, **`ur5e-3` is the top robot** (`y=0.50`) and **`ur5e-4` is
+the bottom robot** (`y=-0.50`). Each has independent arm/gripper controllers,
+joints, frames, and MoveIt groups.
+
+Buffer For Machined parts is a straight, four-zone accumulation conveyor
+connected to Conveyor by a short inclined transfer plate and tapered infeed.
+The square and round pegs travel directly on the belts, lying horizontally in
+a shallow fixed guide channel. When the next zone is empty, the occupied zone
+advances its peg; parts do not push one another. Zone 4 stops for `ur5e-3` to
+pick directly into assembly using one grasp. No removable carriers, carrier
+supply stands, or empty-carrier collection tray are present. A full buffer
+applies backpressure to Conveyor; machine robots use their staging nests.
+Transport, sensing, stop actuation, and occupancy control remain planned.
+
+`prusa_mk4_2` is beside `ur5e-4` at `(0.50, -0.50, 1.04)`, with its open front
+facing that robot. All three exact models, `gear_small`, `gear_medium`, and
+`gear_large`, start separately on its bed. Their inventory does not change the
+active order. `Exit` remains an empty capacity-one tray, assigned to `ur5e-3`
+for the future completed `assembly_board-v1` transfer. The four KET and four
+RGOCG parts remain in the rotated Storage kitting trays.
+
+The accepted source world keeps a static `KMR` on `Storage_KMR_docking_pose` at
+`(-8.15, 2.30, 0)` with clockwise world yaw `-1.57079632679`. Phase 3 motion
+validation moved this dock 0.10 m east because the earlier pose left
+insufficient clearance for the padded Nav2 footprint. Its detailed KMP
+omniMove 400 appearance uses the official scanner-to-scanner envelope, four 250 mm Mecanum
+wheels, safety scanners, ultrasonic sensors, RGB bands, and emergency stops.
+The platform is parked sideways at world yaw `-1.57079632679`; the complete
+LBR iiwa 14 R820, nominal adapter, and open OnRobot RG2 assembly has local yaw
+`1.57079632679` around the unchanged arm mount at `(-0.25, 0, 0.70)`. These
+rotations cancel in the world, so the arm keeps its previous world-facing yaw.
+The machine docking markers are both vertical and closer to their side-access
+faces: M1 is at `(-7.25, 2.30, 0)` and M2 is at
+`(-3.85, 2.30, 0)`, both with yaw `-1.57079632679`. Each leaves approximately
+40 mm between the KMR scanner envelope and the machine enclosure. The
+predefined routes remain Storage–M1/M2 only. `mount_verified: false` records
+that the lab arm and adapter transforms still require measurement.
+
+**Phase 3 has started with KMR simulation control.** The recovery launch removes
+that one static KMR include from a temporary runtime-world copy and spawns one
+articulated `KMR` at the same accepted pose. Its planar KMP omniMove 400 base,
+seven LBR iiwa joints, and `KMR_rg2_finger_width` joint publish live state.
+Nav2 now plans collision-aware base paths against the committed fixed cell map.
+The named `/KMR/dock` action retains the configured Storage–M1 and Storage–M2
+routes; M1-to-M2 docking remains rejected until KMR returns to `Storage`.
+Arbitrary travel uses a `1.20 m/s` simulation speed override. This exceeds the
+KMP omniMove 400 physical limits and cannot support physical cycle-time claims.
+Named docking follows the configured,
+map-validated Storage–M1/M2 waypoints deterministically while holding the
+requested yaw. It travels at up to `1.20 m/s` and slows to `0.40 m/s` for the
+last `0.20 m`. A `1.00 m/s²` command ramp prevents the planar simulation plugin
+from applying an abrupt velocity step to the articulated KMR. Return to Storage
+from an arbitrary pose uses Nav2 to reach the
+Storage approach before the deterministic final motion.
+
+At startup, the recovery base controller moves the KMR iiwa to its upright
+transport pose and maintains that pose while the base travels. The articulated
+KMP root, iiwa, and RG2 links are kinematic and gravity-free in this recovery
+simulation so inertial impulses from the planar base plugin cannot interrupt
+base motion. Their commanded joints remain available through `ros2_control`.
+Dynamic wheel-force, payload, and joint-torque fidelity remain later validation
+work.
+
+The recovery MoveIt model adds `KMR_iiwa_arm` and `KMR_rg2_gripper`.
+`all_robots` contains the four UR5e arms and `KMR_iiwa_arm`. The recovery
+configuration no longer contains `dual_robots`. Recovery-specific RViz
+markers wait for live joint and KMR odometry state, then place five orange arm
+targets at the current TCP transforms and one blue KMR docking marker at the
+current base pose. RViz now starts only after that live-state gate passes, so
+the five built-in orange MoveIt goal models also initialize at the current TCP
+poses instead of their default poses.
+The combined RViz model receives the configured `Storage_KMR_docking_pose`
+through a steady-clock preview as soon as the KMR controller starts, so it no
+longer appears briefly at the world origin while Gazebo loads. `/KMR/dock` and
+the blue actionable base marker still require fresh `/KMR/odom`. The KMR
+base is controlled separately from `ros2_control`. Drag and rotate the blue
+`KMR_base` marker to stage any target within the map, then right-click it to
+plan, execute, plan and execute, reset, or cancel. Named **Dock at Storage**,
+**Dock at M1**, and **Dock at M2** actions remain available. Dragging alone
+never moves KMR; Nav2 rejects targets outside the map or in fixed obstacles.
+For immediate random travel, select **Nav2 Goal** in the RViz toolbar, click a
+clear floor position, drag the arrow to set yaw, and release. RViz sends that
+goal to the validated proxy through RViz's native `/navigate_to_pose` endpoint;
+the same proxy remains available explicitly as
+`/KMR/validated_navigate_to_pose`. The arrow disappears when it is released
+because release submits the immediate plan-and-execute request. The proxy
+requires fresh odometry, the parked iiwa state, available Nav2, and an unused
+base-action slot.
+The blue marker's separate Plan/Execute path uses
+`/KMR/validated_follow_path`. Its menu action captures the blue marker's current
+pose directly. For a reviewed request, drag `KMR_base`, choose **Plan KMR
+base (path only)**, wait for the path, and then choose **Execute stored KMR base
+plan (moves)**. **Plan+Execute KMR base (moves)** performs both steps. **Cancel
+KMR base motion** stops either workflow.
+The recovery RViz configuration includes the **Navigation 2** panel required by
+the **Nav2 Goal** tool. The visible blue `KMR_base` pad is the x/y drag surface;
+select **Interact** in the RViz toolbar, left-drag the pad, use its ring for
+yaw, and right-click the same pad for its menu. **Publish Point** is not a
+navigation command because it provides no yaw.
+The duplicate `RobotModel` display is disabled and the display rate is 15 FPS
+to reduce rendering load while the MoveIt scene continues to show all five
+robots.
+The fixed occupancy-map display remains available in RViz but starts disabled
+because the WSL OpenGL driver fails its indexed-map shader; Nav2 still loads
+and enforces the same map. The planned paths and KMR controls remain visible.
+The fixed map does not detect people or moved equipment. The UR controller spawner waits directly for
+`/controller_manager`; its successful activation then starts the serialized KMR
+spawn and KMR controller spawner without waiting for the stalled UR Gazebo
+spawn-client response. All recovery MoveIt arm requests now default to 40%
+velocity and 30% acceleration while retaining the configured joint limits.
+
+Direct named M1-to-M2 docking remains outside `predefined_routes`. A future
+machining-breakdown recovery event may generate that candidate through the
+northern aisle, but execution must first validate Nav2 clearance, the parked
+iiwa state, M2 availability, docking tolerance, and MoveIt manipulation.
+
+**Known NIST Products is complete.** Select
+`assembly_board-v1-recovery-framework` on the Products page to see all eleven
+exact components in **Known NIST Components** and **Selected Parts**. Its default
+order uses `"parts": "all"`; saved subset orders preserve the same exact
+identifiers. The recovery geometry binds every component to its CAD filename,
+Gazebo model, initial source resource, and assembly target without a
+Spec2Primitives recognition dependency. `GMC_Laser_Plate_Virtual`, `Gear_Plate`,
+and `Gear_Shaft_1`–`Gear_Shaft_3` remain targets rather than selectable parts.
+
+**Next:** add station collision geometry to MoveIt and validate KMR manipulation
+reach at Storage, M1, and M2. Resource/attachment bindings, machine behavior,
+Conveyor/buffer transport, printing, perception, and recovery experiments remain
+**planned**. `simulation_control_integrated: true` covers the KMR simulation
+controller; `integrated: false` continues to record that ResourceAgent execution
+is not connected. The old `table.world` and mocked board/pegs have been removed.
+Earlier xArm6 and hardware references below describe the previous framework.
+Historical verification in the implementation plan retains its original robot
+names; it does not establish successful handling or recovery in the expanded
+scene.
+
 ## Working Thesis
 
 CAIS-SPADE-LLM provides a layered recovery framework for multi-agent manufacturing

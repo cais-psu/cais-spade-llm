@@ -496,8 +496,8 @@ _SAFETY_INTENT_PREVIEWS = _USER_VERIFIED_SAFETY / "intent_previews.json"
 _SAFETY_PREVIEW_DIR = _USER_VERIFIED_SAFETY / "previews"
 _SAFETY_VERIFIED_DIR = _USER_VERIFIED_SAFETY / "verified"
 _SAFETY_PREVIEW_HISTORY_LIMIT = 10
-_GAZEBO_WORLD_FILE = _PROJECT_ROOT / "ros2" / "cais_lab_robotics" / "worlds" / "table.world"
-_RESETTABLE_GAZEBO_MODEL_PREFIXES = ("gear_", "rect_pin_", "circ_pin_")
+_GAZEBO_WORLD_FILE = _PROJECT_ROOT / "ros2" / "cais_lab_robotics" / "worlds" / "table_recovery_framework.world"
+_RESETTABLE_GAZEBO_MODEL_PREFIXES = ("gear_", "KET", "RGOCG")
 _ROBOT_TAUGHT_FUNCTIONS_DIR = _BASE / "resources" / "robot" / "taught_functions"
 _ROBOT_FUNCTION_CAPTURE_MAX_AXIS_OFFSET_M = 0.250
 
@@ -37478,8 +37478,10 @@ class SystemBridge:
         poses: dict[str, tuple[float, float, float, float, float, float]] = {}
         try:
             root = ET.parse(_GAZEBO_WORLD_FILE).getroot()
-            for model in root.findall(".//world/model"):
-                name = str(model.get("name", "")).strip()
+            for model in [*root.findall(".//world/model"), *root.findall(".//world/include")]:
+                name = str(
+                    model.get("name", "") if model.tag == "model" else model.findtext("name", "")
+                ).strip()
                 if not name or not any(
                     name.startswith(prefix) for prefix in _RESETTABLE_GAZEBO_MODEL_PREFIXES
                 ):

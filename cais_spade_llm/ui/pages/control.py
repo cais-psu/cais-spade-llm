@@ -23,8 +23,8 @@ log = logging.getLogger(__name__)
 # Gazebo launch variants with friendly labels.
 _GAZEBO_VARIANTS = {
     "gazebo_dual": (
-        "Dual Robots (xArm6 + UR5e)",
-        "No-hardware Gazebo + MoveIt/RViz; RViz controls xArm6 and UR5e planning groups",
+        "Dual Robots (ur5e-2 + ur5e-3)",
+        "Recovery framework Gazebo + MoveIt/RViz with two UR5e robots",
     ),
     "gazebo_xarm6": ("xArm6 Only", "Single xArm6 Gazebo + MoveIt + RViz"),
     "gazebo_ur5e": ("UR5e Only", "Single UR5e + RG2 Gazebo + MoveIt + RViz"),

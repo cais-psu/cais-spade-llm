@@ -1,0 +1,19 @@
+<!-- Recovery-framework multi-goal navigation stops without backup or spin. -->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <PipelineSequence name="NavigateWithReplanning">
+      <RateController hz="0.333">
+        <ReactiveSequence>
+          <RemovePassedGoals
+            input_goals="{goals}"
+            output_goals="{goals}"
+            radius="0.10"
+            global_frame="world"
+            robot_base_frame="KMR_base_link"/>
+          <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+        </ReactiveSequence>
+      </RateController>
+      <FollowPath path="{path}" controller_id="FollowPath"/>
+    </PipelineSequence>
+  </BehaviorTree>
+</root>

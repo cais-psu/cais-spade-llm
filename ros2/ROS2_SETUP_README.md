@@ -165,7 +165,19 @@ Dual robots:
 ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
 ```
 
-All dual-robot simulation modes use `cais_lab_robotics/worlds/table.world`.
+Dual-robot simulation defaults to
+`cais_lab_robotics/worlds/table_recovery_framework.world`, which contains the
+NIST components. Spec2Primitives explicitly selects `table_spec2primitives.world`
+through the `world_file` launch argument.
+
+The recovery framework scene uses two UR5e/RG2 robots: `ur5e-2` and `ur5e-3`.
+In RViz, select `ur5e_2_ur_manipulator` or `ur5e_3_ur_manipulator` for an
+individual arm, or `dual_robots` for the pair. Their poses and initial joints
+come from
+[recovery_framework_gazebo.json](../cais_spade_llm/initialization/recovery_framework_gazebo.json).
+Dashboard Robot Functions and agent resource bindings for these instances
+follow in the resource-behavior phase. The Spec2Primitives scene retains its
+xArm6 + UR5e setup.
 
 ## Safe Edit and Rebuild Workflow
 

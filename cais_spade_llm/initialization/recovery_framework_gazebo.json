@@ -1,0 +1,705 @@
+{
+  "robots": [
+    {
+      "resource_id": "ur5e-1",
+      "prefix": "ur5e_1_",
+      "base_xyz": [
+        -6.0,
+        1.1,
+        0.8
+      ],
+      "base_rpy": [
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "initial_joint_positions": {
+        "shoulder_pan_joint": 2.232023449619252,
+        "shoulder_lift_joint": -1.5960064086763361,
+        "elbow_joint": 1.615863605277993,
+        "wrist_1_joint": -1.592172956911188,
+        "wrist_2_joint": -1.5690505595531368,
+        "wrist_3_joint": 2.232159020791153
+      }
+    },
+    {
+      "resource_id": "ur5e-2",
+      "prefix": "ur5e_2_",
+      "base_xyz": [
+        -2.6,
+        1.1,
+        0.8
+      ],
+      "base_rpy": [
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "initial_joint_positions": {
+        "shoulder_pan_joint": 2.232023449619252,
+        "shoulder_lift_joint": -1.5960064086763361,
+        "elbow_joint": 1.615863605277993,
+        "wrist_1_joint": -1.592172956911188,
+        "wrist_2_joint": -1.5690505595531368,
+        "wrist_3_joint": 2.232159020791153
+      }
+    },
+    {
+      "resource_id": "ur5e-3",
+      "prefix": "ur5e_3_",
+      "base_xyz": [
+        0.0,
+        0.5,
+        1.021
+      ],
+      "base_rpy": [
+        0.0,
+        0.0,
+        3.142
+      ],
+      "initial_joint_positions": {
+        "shoulder_pan_joint": 2.232023449619252,
+        "shoulder_lift_joint": -1.5960064086763361,
+        "elbow_joint": 1.615863605277993,
+        "wrist_1_joint": -1.592172956911188,
+        "wrist_2_joint": -1.5690505595531368,
+        "wrist_3_joint": 2.232159020791153
+      }
+    },
+    {
+      "resource_id": "ur5e-4",
+      "prefix": "ur5e_4_",
+      "base_xyz": [
+        0.0,
+        -0.5,
+        1.021
+      ],
+      "base_rpy": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "initial_joint_positions": {
+        "shoulder_pan_joint": 2.232023449619252,
+        "shoulder_lift_joint": -1.5960064086763361,
+        "elbow_joint": 1.615863605277993,
+        "wrist_1_joint": -1.592172956911188,
+        "wrist_2_joint": -1.5690505595531368,
+        "wrist_3_joint": 2.232159020791153
+      }
+    }
+  ],
+  "machines": [
+    {
+      "resource_id": "M1",
+      "gazebo_model": "haas_mini_mill",
+      "world_pose": [
+        -6.0,
+        2.3,
+        0.0,
+        0.0,
+        0.0,
+        -1.57079632679
+      ],
+      "front_access_link": "front_access",
+      "side_access_link": "side_access",
+      "workholding_link": "workholding",
+      "KMR_docking_pose": [
+        -7.25,
+        2.3,
+        0.0,
+        0.0,
+        0.0,
+        -1.57079632679
+      ],
+      "nominal_parts": [
+        "KET4_Square_4mm",
+        "KET8_Square_8mm",
+        "KET12_Square_12mm",
+        "KET16_Square_16mm"
+      ],
+      "handling_robot": "ur5e-1",
+      "staging_pose": [
+        -6.55,
+        1.1,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "staging_capacity": 1,
+      "conveyor_loading_pose": [
+        -6.0,
+        0.5,
+        1.015,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "resource_id": "M2",
+      "gazebo_model": "haas_mini_mill",
+      "world_pose": [
+        -2.6,
+        2.3,
+        0.0,
+        0.0,
+        0.0,
+        -1.57079632679
+      ],
+      "front_access_link": "front_access",
+      "side_access_link": "side_access",
+      "workholding_link": "workholding",
+      "KMR_docking_pose": [
+        -3.85,
+        2.3,
+        0.0,
+        0.0,
+        0.0,
+        -1.57079632679
+      ],
+      "nominal_parts": [
+        "RGOCG4-50_Round_4mm",
+        "RGOCG8-50_8mm",
+        "RGOCG12-50_12mm",
+        "RGOCG16-50_16mm"
+      ],
+      "handling_robot": "ur5e-2",
+      "staging_pose": [
+        -3.15,
+        1.1,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "staging_capacity": 1,
+      "conveyor_loading_pose": [
+        -2.6,
+        0.5,
+        1.015,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "minimum_station_gap": 1.0,
+  "Storage": {
+    "world_pose": [
+      -9.15,
+      2.3,
+      0.0,
+      0.0,
+      0.0,
+      1.57079632679
+    ],
+    "size": [
+      1.25,
+      1.0,
+      1.2
+    ],
+    "KMR_docking_pose": [
+      -8.15,
+      2.3,
+      0.0,
+      0.0,
+      0.0,
+      -1.57079632679
+    ],
+    "slots": {
+      "KET4_Square_4mm": [
+        -8.95,
+        1.88,
+        1.165,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "KET8_Square_8mm": [
+        -8.95,
+        2.16,
+        1.165,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "KET12_Square_12mm": [
+        -8.95,
+        2.44,
+        1.165,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "KET16_Square_16mm": [
+        -8.95,
+        2.72,
+        1.165,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "RGOCG4-50_Round_4mm": [
+        -8.95,
+        1.88,
+        0.645,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "RGOCG8-50_8mm": [
+        -8.95,
+        2.16,
+        0.645,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "RGOCG12-50_12mm": [
+        -8.95,
+        2.44,
+        0.645,
+        0.0,
+        0.0,
+        1.57079632679
+      ],
+      "RGOCG16-50_16mm": [
+        -8.95,
+        2.72,
+        0.645,
+        0.0,
+        0.0,
+        1.57079632679
+      ]
+    },
+    "kitting_trays": [
+      {
+        "parts": "KET",
+        "surface_z": 1.165,
+        "capacity": 4
+      },
+      {
+        "parts": "RGOCG",
+        "surface_z": 0.645,
+        "capacity": 4
+      }
+    ]
+  },
+  "Conveyor": {
+    "world_pose": [
+      -3.75,
+      0.5,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "length": 6.0,
+    "width": 0.3,
+    "surface_height": 1.015,
+    "transport_enabled": false,
+    "output_nest_pose": [
+      -0.78,
+      0.5,
+      1.015,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "output_nest_capacity": 1,
+    "output_handling_robot": "ur5e-3",
+    "normal_output_transfer": "Buffer For Machined parts",
+    "full_buffer_behavior": "apply backpressure",
+    "part_transport": "direct_on_belt",
+    "part_orientation_rpy": [
+      0.0,
+      1.57079632679,
+      0.0
+    ],
+    "loading_requires_stopped_belt": true,
+    "loading_requires_reserved_clear_segment": true
+  },
+  "Buffer For Machined parts": {
+    "world_pose": [
+      -0.5,
+      0.5,
+      1.015,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "length": 0.48,
+    "width": 0.24,
+    "surface_height": 1.017,
+    "slot_poses": [
+      [
+        -0.68,
+        0.5,
+        1.017,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        -0.56,
+        0.5,
+        1.017,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        -0.44,
+        0.5,
+        1.017,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        -0.32,
+        0.5,
+        1.017,
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "pickup_pose": [
+      -0.32,
+      0.5,
+      1.017,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "capacity": 4,
+    "initial_state": "empty",
+    "transport_enabled": false,
+    "handling_robot": "ur5e-3",
+    "normal_input_resource": "Conveyor",
+    "nominal_grasps_per_machined_part": 1,
+    "nominal_sequence": [
+      "ur5e-1 or ur5e-2 places the completed peg horizontally on a reserved stopped Conveyor segment",
+      "Conveyor feeds the peg directly into empty reserved zone 1 of Buffer For Machined parts",
+      "Independent zones advance one peg at a time into an empty reserved downstream zone with acknowledged sensor feedback",
+      "Zone 4 stops; ur5e-3 picks the peg directly into assembly",
+      "Confirmed pickup, clear zone 4, and robot clearance permit the next advance",
+      "A full buffer applies backpressure to Conveyor; machine robots use their staging nests"
+    ],
+    "part_transport": "direct_on_belt",
+    "part_orientation_rpy": [
+      0.0,
+      1.57079632679,
+      0.0
+    ],
+    "part_length_m": 0.05,
+    "supported_part_cross_section_m": [
+      0.004,
+      0.016
+    ],
+    "guide_type": "fixed shallow V-channel",
+    "guide_clear_width_m": 0.026,
+    "zone_pitch": 0.12,
+    "zone_capacity": 1,
+    "control_implemented": false,
+    "sensor_feedback_enabled": false,
+    "zones": [
+      {
+        "zone": 1,
+        "pose": [-0.68, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "capacity": 1,
+        "initial_part": null,
+        "belt_collision": "zone_1_belt",
+        "drive_visual": "zone_1_drive",
+        "sensor_visual": "zone_1_photoeye",
+        "stop_collision": "zone_1_stop",
+        "initial_stop_state": "retracted",
+        "control_implemented": false,
+        "downstream_zone": 2
+      },
+      {
+        "zone": 2,
+        "pose": [-0.56, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "capacity": 1,
+        "initial_part": null,
+        "belt_collision": "zone_2_belt",
+        "drive_visual": "zone_2_drive",
+        "sensor_visual": "zone_2_photoeye",
+        "stop_collision": "zone_2_stop",
+        "initial_stop_state": "retracted",
+        "control_implemented": false,
+        "downstream_zone": 3
+      },
+      {
+        "zone": 3,
+        "pose": [-0.44, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "capacity": 1,
+        "initial_part": null,
+        "belt_collision": "zone_3_belt",
+        "drive_visual": "zone_3_drive",
+        "sensor_visual": "zone_3_photoeye",
+        "stop_collision": "zone_3_stop",
+        "initial_stop_state": "retracted",
+        "control_implemented": false,
+        "downstream_zone": 4
+      },
+      {
+        "zone": 4,
+        "pose": [-0.32, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "capacity": 1,
+        "initial_part": null,
+        "belt_collision": "zone_4_belt",
+        "drive_visual": "zone_4_drive",
+        "sensor_visual": "zone_4_photoeye",
+        "stop_collision": "zone_4_stop",
+        "initial_stop_state": "retracted",
+        "control_implemented": false,
+        "downstream_zone": null
+      }
+    ],
+    "transfer_requirements": [
+      "downstream zone empty and reserved",
+      "source part identity known",
+      "source and destination drives synchronized",
+      "destination sensor acknowledges arrival",
+      "source sensor acknowledges departure",
+      "robot clear of transfer corridor"
+    ],
+    "pickup_requirements": [
+      "zone 4 stopped and stop raised",
+      "part identity observed",
+      "assembly destination available"
+    ],
+    "release_requirements": [
+      "part pickup acknowledged",
+      "zone 4 sensor clear",
+      "robot clear of transfer corridor"
+    ],
+    "fault_behavior": "stop affected zones and upstream delivery; preserve last confirmed part custody"
+  },
+  "3D Printing Station": {
+    "gazebo_model": "prusa_mk4_2",
+    "world_pose": [
+      0.5,
+      -0.5,
+      1.04,
+      0.0,
+      0.0,
+      -1.57079632679
+    ],
+    "supported_products": [
+      "gear_small",
+      "gear_medium",
+      "gear_large"
+    ],
+    "initial_state": "completed",
+    "initial_products": [
+      "gear_small",
+      "gear_medium",
+      "gear_large"
+    ],
+    "output_poses": {
+      "gear_small": [
+        0.44,
+        -0.58,
+        1.11,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "gear_medium": [
+        0.44,
+        -0.5,
+        1.11,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "gear_large": [
+        0.44,
+        -0.42,
+        1.11,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "handling_robot": "ur5e-4"
+  },
+  "Exit": {
+    "world_pose": [
+      0.5,
+      0.58,
+      1.04,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "completed_product_pose": [
+      0.5,
+      0.58,
+      1.075,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "capacity": 1,
+    "initial_state": "empty",
+    "handling_robot": "ur5e-3",
+    "completed_product": "assembly_board-v1"
+  },
+  "KMR": {
+    "spawned": true,
+    "gazebo_model": "KMR",
+    "initial_pose": [
+      -8.15,
+      2.3,
+      0.0,
+      0.0,
+      0.0,
+      -1.57079632679
+    ],
+    "integrated": false,
+    "simulation_control_integrated": true,
+    "manufacturer": "KUKA",
+    "platform_model": "KMR iiwa",
+    "mobile_platform_model": "KMP omniMove 400",
+    "platform_body_dimensions_m": [
+      1.08,
+      0.63,
+      0.70
+    ],
+    "platform_overall_dimensions_m": [
+      1.19,
+      0.72,
+      0.70
+    ],
+    "wheel_diameter_m": 0.25,
+    "arm_model": "LBR iiwa 14 R820",
+    "arm_mount_xyz": [
+      -0.25,
+      0.0,
+      0.70
+    ],
+    "arm_mount_rpy": [
+      0.0,
+      0.0,
+      1.57079632679
+    ],
+    "end_effector": "OnRobot RG2",
+    "arm_reach_m": 0.82,
+    "arm_payload_kg": 14,
+    "gripper_stroke_m": 0.11,
+    "mount_verified": false,
+    "parked_arm_configuration": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "arm_joint_names": [
+      "joint_a1",
+      "joint_a2",
+      "joint_a3",
+      "joint_a4",
+      "joint_a5",
+      "joint_a6",
+      "joint_a7"
+    ],
+    "arm_controller": "/KMR/KMR_iiwa_joint_trajectory_controller",
+    "gripper_joint": "KMR_rg2_finger_width",
+    "gripper_controller": "/KMR/KMR_rg2_gripper_traj_controller",
+    "base_command_topic": "/KMR/cmd_vel",
+    "base_odometry_topic": "/KMR/odom",
+    "docking_action": "/KMR/dock",
+    "base_control": {
+      "linear_speed_mps": 1.2,
+      "angular_speed_radps": 0.5,
+      "linear_acceleration_mps2": 1.0,
+      "angular_acceleration_radps2": 1.0,
+      "docking_linear_speed_mps": 0.4,
+      "docking_slow_distance_m": 0.2,
+      "simulation_speed_override": true,
+      "arm_parking_duration_sec": 1.0,
+      "arm_hold_duration_sec": 3600.0,
+      "arm_parked_tolerance_rad": 0.075,
+      "minimum_in_place_angular_speed_radps": 0.1,
+      "position_tolerance_m": 0.03,
+      "yaw_tolerance_rad": 0.035,
+      "control_rate_hz": 20.0,
+      "odometry_timeout_sec": 0.5,
+      "arm_state_timeout_sec": 2.0,
+      "command_timeout_sec": 0.25,
+      "waypoint_timeout_sec": 60.0
+    },
+    "predefined_routes": [
+      [
+        "Storage",
+        "M1"
+      ],
+      [
+        "Storage",
+        "M2"
+      ]
+    ],
+    "predefined_route_waypoints": [
+      {
+        "resources": [
+          "Storage",
+          "M1"
+        ],
+        "poses": [
+          [
+            -8.15,
+            2.3,
+            -1.57079632679
+          ],
+          [
+            -7.25,
+            2.3,
+            -1.57079632679
+          ]
+        ]
+      },
+      {
+        "resources": [
+          "Storage",
+          "M2"
+        ],
+        "poses": [
+          [
+            -8.15,
+            2.3,
+            -1.57079632679
+          ],
+          [
+            -8.15,
+            3.85,
+            -1.57079632679
+          ],
+          [
+            -3.95,
+            3.85,
+            -1.57079632679
+          ],
+          [
+            -3.95,
+            2.3,
+            -1.57079632679
+          ],
+          [
+            -3.85,
+            2.3,
+            -1.57079632679
+          ]
+        ]
+      }
+    ]
+  }
+}
