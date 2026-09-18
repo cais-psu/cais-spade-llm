@@ -12,6 +12,10 @@
     KMR_rg2_gripper_traj_controller:
       type: joint_trajectory_controller/JointTrajectoryController
 
+/KMR/joint_state_broadcaster:
+  ros__parameters:
+    update_rate: 50
+
 /KMR/KMR_iiwa_joint_trajectory_controller:
   ros__parameters:
     joints:

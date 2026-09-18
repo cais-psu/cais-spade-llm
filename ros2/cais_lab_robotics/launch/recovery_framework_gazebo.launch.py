@@ -86,7 +86,11 @@ def _controller_config(robots: list[dict[str, Any]]) -> dict[str, Any]:
         'update_rate': 1000, 'use_sim_time': True,
         'joint_state_broadcaster': {'type': 'joint_state_broadcaster/JointStateBroadcaster'},
     }
-    config = {'controller_manager': {'ros__parameters': manager}}
+    config = {
+        'controller_manager': {'ros__parameters': manager},
+        # Feedback does not need the 1000 Hz physics/control update rate.
+        'joint_state_broadcaster': {'ros__parameters': {'update_rate': 50}},
+    }
     for robot in robots:
         prefix = robot['prefix']
         for controller, joints in (
@@ -520,7 +524,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
         ur_spawner = Node(
             package='controller_manager', executable='spawner', output='screen',
             arguments=[
-                'joint_state_broadcaster', *[name for name in controllers if name != 'controller_manager'],
+                *[name for name in controllers if name != 'controller_manager'],
                 '--controller-manager', '/controller_manager', '--controller-manager-timeout', '60.0',
                 '--service-call-timeout', '60.0', '--switch-timeout', '60.0', '--activate-as-group',
             ], parameters=[{'use_sim_time': True}],
@@ -641,7 +645,10 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             Node(
                 package='robot_state_publisher', executable='robot_state_publisher',
                 name='robot_state_publisher',
-                parameters=[{'robot_description': planning_description, 'use_sim_time': True}],
+                parameters=[{
+                    'robot_description': planning_description, 'use_sim_time': True,
+                    'publish_frequency': 50.0,
+                }],
                 output='screen',
             ),
             Node(

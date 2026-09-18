@@ -8,6 +8,7 @@ import math
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -780,6 +781,7 @@ def test_invalid_robot_bindings_are_rejected_before_launch(tmp_path: Path, fault
 def test_each_controller_owns_only_its_ur5e_joints() -> None:
     robots = scene._load_robots(ROBOTS_PATH)
     config = scene._controller_config(robots)
+    assert config['joint_state_broadcaster']['ros__parameters']['update_rate'] == 50
     joint_sets = []
     for robot in robots:
         prefix = robot['prefix']
@@ -818,9 +820,9 @@ def test_kmr_routes_are_reversible_and_reject_cross_machine_motion() -> None:
     assert kmr_base.route_for(routes, 'M2', 'Storage') == tuple(reversed(storage_m2))
     assert kmr_base.route_for(routes, 'M1', 'M2') is None
     assert kmr['base_control'] == {
-        'linear_speed_mps': 1.2,
+        'linear_speed_mps': 1.5,
         'angular_speed_radps': 0.5,
-        'linear_acceleration_mps2': 1.0,
+        'linear_acceleration_mps2': 1.5,
         'angular_acceleration_radps2': 1.0,
         'docking_linear_speed_mps': 0.4,
         'docking_slow_distance_m': 0.2,
@@ -925,6 +927,115 @@ def test_kmr_fixed_routes_are_clear_for_the_padded_footprint() -> None:
             start = finish
 
 
+@pytest.mark.parametrize(
+    ('odom_updated', 'arm_updated', 'arm_parked', 'reason'),
+    [
+        (None, 9.9, True, 'KMR odometry is stale'),
+        (9.49, 9.9, True, 'KMR odometry is stale'),
+        (9.9, None, True, 'KMR arm state is stale'),
+        (9.9, 7.99, True, 'KMR arm state is stale'),
+        (9.9, 9.9, False, 'KMR arm left its parked configuration'),
+        (9.5, 8.0, True, None),
+        (9.9, 9.9, True, None),
+    ],
+)
+def test_kmr_feedback_watchdogs_report_the_failed_gate(
+    odom_updated: float | None,
+    arm_updated: float | None,
+    arm_parked: bool,
+    reason: str | None,
+) -> None:
+    """Keep feedback expiry in wall time and distinguish each stop cause."""
+
+    assert kmr_base.base_state_stop_reason(
+        10.0, odom_updated, 0.5, arm_updated, 2.0, arm_parked,
+    ) == reason
+
+
+def test_kmr_stop_does_not_refresh_commands_or_resume_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the actual ROS gate in an isolated domain without moving a robot."""
+
+    rclpy = pytest.importorskip('rclpy')
+    pytest.importorskip('cais_lab_robotics.action')
+    from geometry_msgs.msg import Twist
+    from nav_msgs.msg import Odometry
+    from rclpy import executors
+
+    monkeypatch.setenv('ROS_DOMAIN_ID', '221')
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    real_init = rclpy.init
+    monkeypatch.setattr(rclpy, 'init', lambda: real_init(args=[
+        '--ros-args', '-p', f'config_file:={ROBOTS_PATH}',
+    ]))
+
+    class GateExecutor:
+        def __init__(self, **_kwargs: object) -> None:
+            self.node = None
+
+        def add_node(self, node: object) -> None:
+            self.node = node
+
+        def spin(self) -> None:
+            node = self.node
+            outputs = []
+            joint_states = []
+            monkeypatch.setattr(kmr_base, 'time', SimpleNamespace(monotonic=lambda: 1000.0))
+            monkeypatch.setattr(node.cmd_pub, 'publish', outputs.append)
+            monkeypatch.setattr(node.joint_pub, 'publish', joint_states.append)
+            node._initial_arm_parked = True
+            node._navigation_active = True
+            node._arm_positions = dict(zip(
+                node.kmr['arm_joint_names'], node.kmr['parked_arm_configuration'],
+            ))
+            node._arm_positions[node.kmr['gripper_joint']] = node.kmr['gripper_stroke_m']
+            node._arm_state_monotonic = 1000.0
+            odometry = Odometry()
+            odometry.header.stamp.sec = 123
+            odometry.header.stamp.nanosec = 450_000_000
+            node._odom_cb(odometry)
+            command = Twist()
+            command.linear.x = 0.4
+            node._nav_command_cb(command)
+            node._control_tick()
+            assert outputs[-1].linear.x > 0.0
+            assert joint_states[-1].header.stamp == odometry.header.stamp
+
+            expired = 1000.0 - node.command_timeout - 0.1
+            node._nav_command_monotonic = expired
+            for _ in range(2):
+                node._control_tick()
+                assert outputs[-1].linear.x == 0.0
+                assert node._nav_command is command
+                assert node._nav_command_monotonic == expired
+
+            node._nav_command_cb(command)
+            node._control_tick()
+            assert outputs[-1].linear.x > 0.0
+            node._follow_path_active = True
+            node._cancel_base_motion_requested = True
+            node._control_tick()
+            assert outputs[-1].linear.x == 0.0
+            node._release_base_action()
+            assert node._nav_command is None
+            assert node._nav_command_monotonic is None
+            assert node._cancel_base_motion_requested
+            node._nav_command_cb(command)
+            node._control_tick()
+            assert outputs[-1].linear.x == 0.0
+            node._follow_path_active = False
+            assert node._claim_base_action(True)
+            assert not node._cancel_base_motion_requested
+            assert node._nav_command is None
+
+        def shutdown(self) -> None:
+            pass
+
+    monkeypatch.setattr(executors, 'MultiThreadedExecutor', GateExecutor)
+    kmr_base.main()
+
+
 def test_dock_kmr_action_and_controller_contracts_are_exact() -> None:
     action_lines = [
         line for line in DOCK_KMR_ACTION_PATH.read_text(encoding='utf-8').splitlines()
@@ -939,6 +1050,7 @@ def test_dock_kmr_action_and_controller_contracts_are_exact() -> None:
     ]
     config = scene._kmr_controller_config(KMR_CONTROLLERS_PATH)
     manager = config['/KMR/controller_manager']['ros__parameters']
+    assert config['/KMR/joint_state_broadcaster']['ros__parameters']['update_rate'] == 50
     assert set(manager) - {'update_rate', 'use_sim_time'} == {
         'joint_state_broadcaster', 'KMR_iiwa_joint_trajectory_controller',
         'KMR_rg2_gripper_traj_controller',
@@ -1016,6 +1128,8 @@ def test_recovery_rviz_uses_all_robots_and_current_state_markers() -> None:
 
 
 def test_fixed_kmr_map_and_nav2_parameters_match_the_accepted_cell() -> None:
+    """Check the fixed map and navigation settings for the rectangular KMR."""
+
     metadata = scene.yaml.safe_load(RECOVERY_MAP_YAML_PATH.read_text(encoding='utf-8'))
     assert metadata == {
         'image': 'recovery_framework_map.pgm',
@@ -1064,18 +1178,40 @@ def test_fixed_kmr_map_and_nav2_parameters_match_the_accepted_cell() -> None:
         assert tree.find('.//BackUp') is None
     planner = nav2['planner_server']['ros__parameters']['GridBased']
     assert planner['plugin'] == 'nav2_smac_planner/SmacPlanner2D'
+    assert planner['cost_travel_multiplier'] == 20.0
+    assert planner['smoother'] == {'w_data': 0.4, 'w_smooth': 0.1}
+    global_inflation = nav2['global_costmap']['global_costmap']['ros__parameters']['inflation_layer']
+    assert global_inflation['inflation_radius'] > math.hypot(0.625, 0.39)
+    assert global_inflation['cost_scaling_factor'] == 3.0
     controller = nav2['controller_server']['ros__parameters']['FollowPath']
     assert controller['plugin'] == 'dwb_core::DWBLocalPlanner'
-    assert (controller['max_speed_xy'], controller['max_vel_theta']) == (1.2, 0.5)
-    assert (controller['max_vel_x'], controller['max_vel_y']) == (1.2, 1.2)
-    assert (controller['min_vel_x'], controller['min_vel_y']) == (-1.2, -1.2)
-    assert (controller['acc_lim_x'], controller['acc_lim_y']) == (1.0, 1.0)
-    assert (controller['decel_lim_x'], controller['decel_lim_y']) == (-1.0, -1.0)
+    assert 'ObstacleFootprint' in controller['critics']
+    assert 'BaseObstacle' not in controller['critics']
+    assert controller['ObstacleFootprint.scale'] > 0.0
+    assert controller['PathDist.aggregation_type'] == 'sum'
+    assert controller['PathDist.scale'] == 4.0
+    control = payload['KMR']['base_control']
+    speed = control['linear_speed_mps']
+    acceleration = control['linear_acceleration_mps2']
+    assert (controller['max_speed_xy'], controller['max_vel_theta']) == (speed, 0.5)
+    assert (controller['max_vel_x'], controller['max_vel_y']) == (speed, speed)
+    assert (controller['min_vel_x'], controller['min_vel_y']) == (-speed, -speed)
+    assert (controller['acc_lim_x'], controller['acc_lim_y']) == (acceleration, acceleration)
+    assert (controller['decel_lim_x'], controller['decel_lim_y']) == (-acceleration, -acceleration)
     assert controller['acc_lim_theta'] == 1.0
     assert controller['decel_lim_theta'] == -1.0
-    assert controller['sim_time'] == 0.6
+    assert controller['trajectory_generator_name'] == 'dwb_plugins::LimitedAccelGenerator'
+    assert controller['sim_period'] == 1.0 / control['control_rate_hz']
+    assert nav2['controller_server']['ros__parameters']['controller_frequency'] == control['control_rate_hz']
+    assert controller['sim_time'] >= speed / acceleration
+    assert controller['vx_samples'] * controller['vy_samples'] * controller['vtheta_samples'] <= 500
+    local = nav2['local_costmap']['local_costmap']['ros__parameters']
+    assert speed * controller['sim_time'] + 0.625 < min(local['width'], local['height']) / 2
+    assert 253 * controller['ObstacleFootprint.scale'] < (
+        local['resolution'] * 0.5 * controller['GoalDist.scale']
+    )
     assert controller['linear_granularity'] == 0.02
-    assert controller['Twirling.scale'] == 5.0
+    assert controller['Twirling.scale'] == 20.0
     goal_checker = nav2['controller_server']['ros__parameters']['precise_goal_checker']
     assert goal_checker['xy_goal_tolerance'] == 0.06
     assert goal_checker['yaw_goal_tolerance'] == 0.05
@@ -1108,6 +1244,8 @@ def test_fixed_kmr_map_and_nav2_parameters_match_the_accepted_cell() -> None:
 
 
 def test_dragged_kmr_targets_are_checked_before_nav2_planning() -> None:
+    """Reject targets whose full KMR footprint overlaps the fixed obstacles."""
+
     data = [
         100
         if recovery_map.occupied_at(
@@ -1156,6 +1294,14 @@ def test_dragged_kmr_targets_are_checked_before_nav2_planning() -> None:
     assert not controller_is_clear(-3.75, 0.50)
     assert not controller_is_clear(-10.4, 3.0)
 
+    # These centers clear even the 0.45 m inflation radius, but KMR crosses M1.
+    for x, y, yaw in ((-6.0, 3.65, -math.pi / 2.0), (-7.35, 2.3, 0.0)):
+        assert not recovery_map.occupied_at(x, y)
+        assert not is_clear(x, y, yaw)
+        assert not controller_is_clear(x, y, yaw)
+    assert is_clear(-7.35, 2.3, -math.pi / 2.0)
+    assert controller_is_clear(-7.35, 2.3, -math.pi / 2.0)
+
     marker_source = RECOVERY_MARKERS_PATH.read_text(encoding='utf-8')
     precheck = marker_source.index('if not occupancy_grid_footprint_is_clear(')
     send_goal = marker_source.index('self.compute_path_client.send_goal_async(goal)')
@@ -1179,10 +1325,11 @@ def test_kmr_base_motion_is_nav2_gated_and_fail_closed() -> None:
     assert 'self._navigation_target_is_clear(request)' in controller
     assert 'self._active_goal or self._follow_path_active' in controller
     assert 'remaining_distance <= self.docking_slow_distance' in controller
-    assert 'and self._arm_is_parked()' in controller
+    assert 'self._arm_is_parked()' in controller
+    assert 'reason = self._state_stop_reason()' in controller
     assert '"/KMR/follow_path/_action/status"' in controller
     assert '(self._navigation_active or self._follow_path_active)' in controller
-    assert 'now - command_updated <= self.command_timeout' in controller
+    assert 'now - command_updated > self.command_timeout' in controller
     assert 'self._stop()' in controller
     assert 'body_velocity(' not in controller
     assert 'asyncio.sleep' not in controller
@@ -1345,7 +1492,9 @@ def test_moveit_groups_and_controllers_match_gazebo_without_cross_arm_exclusions
     assert parameters['robot_description'] == planning_description
     controller_config = scene._controller_config(robots)
     controllers = parameters['moveit_simple_controller_manager']
-    expected_ur_controllers = set(controller_config) - {'controller_manager'}
+    expected_ur_controllers = set(controller_config) - {
+        'controller_manager', 'joint_state_broadcaster',
+    }
     assert set(controllers['controller_names']) == expected_ur_controllers | {
         'KMR/KMR_iiwa_joint_trajectory_controller',
         'KMR/KMR_rg2_gripper_traj_controller',

@@ -18,8 +18,11 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
-      cost_travel_multiplier: 2.0
+      cost_travel_multiplier: 20.0
       use_final_approach_orientation: false
+      smoother:
+        w_data: 0.4
+        w_smooth: 0.1
 
 controller_server:
   ros__parameters:
@@ -45,24 +48,28 @@ controller_server:
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: true
-      min_vel_x: -1.20
-      min_vel_y: -1.20
-      max_vel_x: 1.20
-      max_vel_y: 1.20
+      # Keep fine velocity choices near a goal while predicting the full route ahead.
+      trajectory_generator_name: "dwb_plugins::LimitedAccelGenerator"
+      sim_period: 0.05
+      min_vel_x: -1.50
+      min_vel_y: -1.50
+      max_vel_x: 1.50
+      max_vel_y: 1.50
       max_vel_theta: 0.50
       min_speed_xy: 0.0
-      max_speed_xy: 1.20
+      max_speed_xy: 1.50
       min_speed_theta: 0.10
-      acc_lim_x: 1.00
-      acc_lim_y: 1.00
+      acc_lim_x: 1.50
+      acc_lim_y: 1.50
       acc_lim_theta: 1.00
-      decel_lim_x: -1.00
-      decel_lim_y: -1.00
+      decel_lim_x: -1.50
+      decel_lim_y: -1.50
       decel_lim_theta: -1.00
-      vx_samples: 15
-      vy_samples: 15
-      vtheta_samples: 20
-      sim_time: 0.6
+      # Bound CPU work without coarsening footprint collision checks.
+      vx_samples: 7
+      vy_samples: 7
+      vtheta_samples: 9
+      sim_time: 1.2
       linear_granularity: 0.02
       angular_granularity: 0.025
       transform_tolerance: 0.2
@@ -70,15 +77,19 @@ controller_server:
       trans_stopped_velocity: 0.02
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "Twirling", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.05
-      Twirling.scale: 5.0
+      # Use KMR's rectangle for collision rejection, including side approaches.
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "Twirling", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      # Nonzero enables rejection; soft cell costs must not outweigh goal progress.
+      ObstacleFootprint.scale: 0.001
+      Twirling.scale: 20.0
       # KMP omniMove 400 should strafe along a path while preserving its dock yaw.
       PathAlign.scale: 0.0
       PathAlign.forward_point_distance: 0.10
       GoalAlign.scale: 0.0
       GoalAlign.forward_point_distance: 0.10
-      PathDist.scale: 24.0
+      # Score the entire trajectory so an endpoint on the path cannot hide a corner cut.
+      PathDist.aggregation_type: "sum"
+      PathDist.scale: 4.0
       GoalDist.scale: 18.0
       RotateToGoal.scale: 24.0
       RotateToGoal.slowing_factor: 5.0
@@ -93,8 +104,8 @@ local_costmap:
       global_frame: world
       robot_base_frame: KMR_base_link
       rolling_window: true
-      width: 4
-      height: 4
+      width: 6
+      height: 6
       resolution: 0.05
       footprint: "[[0.595, 0.36], [0.595, -0.36], [-0.595, -0.36], [-0.595, 0.36]]"
       footprint_padding: 0.03
@@ -128,8 +139,9 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 8.0
-        inflation_radius: 0.45
+        # SmacPlanner2D plans a centerline; give KMR's long corners room at M1/M2.
+        cost_scaling_factor: 3.0
+        inflation_radius: 1.0
       always_send_full_costmap: true
 
 behavior_server:

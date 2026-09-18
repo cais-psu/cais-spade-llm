@@ -154,6 +154,29 @@ def slew_planar_velocity(
     )
 
 
+def base_state_stop_reason(
+    now: float,
+    odom_updated: float | None,
+    odom_timeout: float,
+    arm_updated: float | None,
+    arm_timeout: float,
+    arm_parked: bool,
+) -> str | None:
+    """Explain a failed base feedback gate, using monotonic wall-clock time.
+
+    Gazebo may pause or run slowly. Feedback expiry must still stop the base
+    without waiting for simulation time to advance.
+    """
+
+    if odom_updated is None or now - odom_updated > odom_timeout:
+        return "KMR odometry is stale"
+    if arm_updated is None or now - arm_updated > arm_timeout:
+        return "KMR arm state is stale"
+    if not arm_parked:
+        return "KMR arm left its parked configuration"
+    return None
+
+
 def occupancy_grid_footprint_is_clear(
     data: tuple[int, ...] | list[int],
     width: int,
@@ -261,7 +284,7 @@ def main() -> None:
 
     import rclpy
     from action_msgs.msg import GoalStatus, GoalStatusArray
-    from builtin_interfaces.msg import Duration
+    from builtin_interfaces.msg import Duration, Time
     from cais_lab_robotics.action import DockKMR
     from control_msgs.action import FollowJointTrajectory
     from geometry_msgs.msg import Pose2D, PoseStamped, Twist
@@ -323,11 +346,13 @@ def main() -> None:
                 float(self.kmr["initial_pose"][5]),
             )
             self._odom_monotonic: float | None = None
+            self._odom_stamp: Time | None = None
             self._nav_command: Twist | None = None
             self._nav_command_monotonic: float | None = None
             self._navigation_active = False
             self._follow_path_active = False
             self._last_output = (0.0, 0.0, 0.0)
+            self._last_hold_reason: str | None = None
             self._arm_positions: dict[str, float] = {}
             self._arm_state_monotonic: float | None = None
             self._initial_arm_parked = False
@@ -474,6 +499,7 @@ def main() -> None:
                     self._yaw_from_quaternion(pose.orientation),
                 )
                 self._odom_monotonic = time.monotonic()
+                self._odom_stamp = message.header.stamp
 
         def _nav_command_cb(self, message: Twist) -> None:
             with self._lock:
@@ -487,7 +513,6 @@ def main() -> None:
             active_states = {
                 GoalStatus.STATUS_ACCEPTED,
                 GoalStatus.STATUS_EXECUTING,
-                GoalStatus.STATUS_CANCELING,
             }
             with self._lock:
                 self._follow_path_active = any(
@@ -495,27 +520,41 @@ def main() -> None:
                 )
 
         def _control_tick(self) -> None:
-            pose, odom_updated, command, command_updated = self._snapshot()
+            pose, odom_updated, command, command_updated, odom_stamp = self._snapshot()
             if pose is not None:
                 state = JointState()
-                state.header.stamp = self.get_clock().now().to_msg()
+                # /clock can advance slower than odometry; preserve measurement time for TF.
+                state.header.stamp = odom_stamp if odom_stamp is not None else self.get_clock().now().to_msg()
                 state.name = list(BASE_STATE_JOINTS)
                 state.position = list(pose)
                 self.joint_pub.publish(state)
                 if odom_updated is not None:
                     self.pose_pub.publish(Pose2D(x=pose[0], y=pose[1], theta=pose[2]))
             now = time.monotonic()
-            permitted = (
-                (self._navigation_active or self._follow_path_active)
-                and self._initial_arm_parked
-                and odom_updated is not None and now - odom_updated <= self.odom_timeout
-                and command is not None and command_updated is not None
-                and now - command_updated <= self.command_timeout
-                and self._arm_is_parked()
-            )
-            if not permitted:
+            if (
+                not (self._navigation_active or self._follow_path_active)
+                or self._cancel_base_motion_requested
+            ):
+                self._last_hold_reason = None
                 self._stop()
                 return
+            reason = self._state_stop_reason()
+            if not self._initial_arm_parked:
+                reason = "KMR arm parking has not completed"
+            if reason is None and (
+                command is None or command_updated is None
+                or now - command_updated > self.command_timeout
+            ):
+                reason = "KMR velocity command is stale"
+            if reason is not None:
+                if reason != self._last_hold_reason:
+                    self.get_logger().warning(f"KMR base held: {reason}")
+                self._last_hold_reason = reason
+                self._stop()
+                return
+            if self._last_hold_reason is not None:
+                self.get_logger().info("KMR base feedback and velocity command are fresh; resuming")
+                self._last_hold_reason = None
             x, y, angular = clamp_planar_velocity(
                 command.linear.x, command.linear.y, command.angular.z,
                 self.max_linear_speed, self.max_angular_speed,
@@ -548,12 +587,15 @@ def main() -> None:
 
         def _snapshot(
             self,
-        ) -> tuple[tuple[float, float, float] | None, float | None, Twist | None, float | None]:
+        ) -> tuple[tuple[float, float, float] | None, float | None, Twist | None, float | None, Time | None]:
             with self._lock:
-                return self._pose, self._odom_monotonic, self._nav_command, self._nav_command_monotonic
+                return (
+                    self._pose, self._odom_monotonic, self._nav_command,
+                    self._nav_command_monotonic, self._odom_stamp,
+                )
 
         def _fresh_pose(self) -> tuple[float, float, float] | None:
-            pose, updated, _, _ = self._snapshot()
+            pose, updated, _, _, _ = self._snapshot()
             if pose is None or updated is None or time.monotonic() - updated > self.odom_timeout:
                 return None
             return pose
@@ -585,6 +627,16 @@ def main() -> None:
                 and abs(self._arm_positions[name] - float(position))
                 <= self.arm_parked_tolerance
                 for name, position in expected.items()
+            )
+
+        def _state_stop_reason(self) -> str | None:
+            return base_state_stop_reason(
+                time.monotonic(),
+                self._odom_monotonic,
+                self.odom_timeout,
+                self._arm_state_monotonic,
+                self.arm_state_timeout,
+                self._arm_is_parked(),
             )
 
         def _ensure_initial_arm_parked(self) -> None:
@@ -682,12 +734,16 @@ def main() -> None:
                     return False
                 self._active_goal = True
                 self._cancel_base_motion_requested = False
+                self._nav_command = None
+                self._nav_command_monotonic = None
             return True
 
         def _release_base_action(self) -> None:
             with self._lock:
                 self._active_goal = False
-                self._cancel_base_motion_requested = False
+                # Cancellation stays latched until a new validated goal claims the base.
+                self._nav_command = None
+                self._nav_command_monotonic = None
 
         def _dock_goal(self, request: DockKMR.Goal) -> GoalResponse:
             target = str(request.target_resource)
@@ -759,11 +815,8 @@ def main() -> None:
         def _stop(self) -> None:
             self._last_output = (0.0, 0.0, 0.0)
             if self.context.ok():
-                stopped = Twist()
-                with self._lock:
-                    self._nav_command = stopped
-                    self._nav_command_monotonic = time.monotonic()
-                self.cmd_pub.publish(stopped)
+                # A safety output must not replace or refresh the received command.
+                self.cmd_pub.publish(Twist())
 
         @staticmethod
         def _result(success: bool, final_resource: str, message: str) -> DockKMR.Result:
@@ -803,11 +856,11 @@ def main() -> None:
                         else:
                             goal_handle.abort()
                         return NavigateToPose.Result()
-                    if self._fresh_pose() is None or not self._arm_state_is_fresh():
-                        await nav_handle.cancel_goal_async()
-                        goal_handle.abort()
-                        return NavigateToPose.Result()
-                    if not self._arm_is_parked():
+                    reason = self._state_stop_reason()
+                    if reason is not None:
+                        self.get_logger().error(f"KMR navigation aborted: {reason}")
+                        self._cancel_base_motion_requested = True
+                        self._stop()
                         await nav_handle.cancel_goal_async()
                         goal_handle.abort()
                         return NavigateToPose.Result()
@@ -856,11 +909,11 @@ def main() -> None:
                         else:
                             goal_handle.abort()
                         return FollowPath.Result()
-                    if self._fresh_pose() is None or not self._arm_state_is_fresh():
-                        await nav_handle.cancel_goal_async()
-                        goal_handle.abort()
-                        return FollowPath.Result()
-                    if not self._arm_is_parked():
+                    reason = self._state_stop_reason()
+                    if reason is not None:
+                        self.get_logger().error(f"KMR path execution aborted: {reason}")
+                        self._cancel_base_motion_requested = True
+                        self._stop()
                         await nav_handle.cancel_goal_async()
                         goal_handle.abort()
                         return FollowPath.Result()
@@ -936,9 +989,12 @@ def main() -> None:
                         )
                     nav_result_future = nav_handle.get_result_async()
                     while not nav_result_future.done():
-                        if goal_handle.is_cancel_requested:
+                        if goal_handle.is_cancel_requested or self._cancel_base_motion_requested:
                             await nav_handle.cancel_goal_async()
-                            goal_handle.canceled()
+                            if goal_handle.is_cancel_requested:
+                                goal_handle.canceled()
+                            else:
+                                goal_handle.abort()
                             return self._result(
                                 False,
                                 self._resource_at(self._fresh_pose() or pose) or "",
@@ -971,10 +1027,13 @@ def main() -> None:
                     final_direct_goal = direct_offset == len(direct_goals) - 1
                     docking_started = time.monotonic()
                     while True:
-                        if goal_handle.is_cancel_requested:
+                        if goal_handle.is_cancel_requested or self._cancel_base_motion_requested:
                             self._navigation_active = False
                             self._stop()
-                            goal_handle.canceled()
+                            if goal_handle.is_cancel_requested:
+                                goal_handle.canceled()
+                            else:
+                                goal_handle.abort()
                             return self._result(
                                 False,
                                 self._resource_at(self._fresh_pose() or pose) or "",

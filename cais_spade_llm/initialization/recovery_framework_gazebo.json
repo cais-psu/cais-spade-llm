@@ -619,9 +619,9 @@
     "base_odometry_topic": "/KMR/odom",
     "docking_action": "/KMR/dock",
     "base_control": {
-      "linear_speed_mps": 1.2,
+      "linear_speed_mps": 1.5,
       "angular_speed_radps": 0.5,
-      "linear_acceleration_mps2": 1.0,
+      "linear_acceleration_mps2": 1.5,
       "angular_acceleration_radps2": 1.0,
       "docking_linear_speed_mps": 0.4,
       "docking_slow_distance_m": 0.2,
