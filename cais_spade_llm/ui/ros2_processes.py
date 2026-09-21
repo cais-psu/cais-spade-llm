@@ -1,8 +1,9 @@
-"""Pure ROS2 launch command, domain, and workspace path helpers."""
+"""Pure ROS2 command output, launch command, domain, and workspace path helpers."""
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,44 @@ ROS2_ENV = (
     "source /opt/ros/humble/setup.bash && "
     "source $HOME/ros2_ws/install/setup.bash && "
 )
+
+
+def _topic_publisher_count_from_output(output: str) -> int | None:
+    """Return the reported publisher count or None when unavailable."""
+    match = re.search(r"\bPublisher count:\s*(\d+)\b", str(output or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _controller_states_from_list_controllers_output(output: str) -> dict[str, str]:
+    """Parse controller states returned by ListControllers on ROS2 Humble."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(output or ""))
+    states = {
+        match.group("name"): match.group("state").lower()
+        for match in re.finditer(
+            r"ControllerState\(name='(?P<name>[^']+)',\s*"
+            r"state='(?P<state>[^']+)'",
+            text,
+        )
+    }
+    if states:
+        return states
+
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        state = fields[-1].lower()
+        if state not in {"active", "inactive", "unconfigured", "finalized"}:
+            continue
+        name = fields[0].split("[", 1)[0]
+        if name:
+            states[name] = state
+    return states
 
 
 def teleop_script_path(project_root: Path) -> Path:

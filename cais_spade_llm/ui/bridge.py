@@ -8252,13 +8252,7 @@ class SystemBridge:
 
     @staticmethod
     def _topic_publisher_count_from_output(output: str) -> int | None:
-        match = re.search(r"\bPublisher count:\s*(\d+)\b", str(output or ""))
-        if not match:
-            return None
-        try:
-            return int(match.group(1))
-        except ValueError:
-            return None
+        return ros2_processes._topic_publisher_count_from_output(output)
 
     def _wait_for_ros_topic_publisher(
         self,
@@ -8367,29 +8361,7 @@ class SystemBridge:
     @staticmethod
     def _controller_states_from_list_controllers_output(output: str) -> dict[str, str]:
         """Parse controller states returned by ListControllers on ROS2 Humble."""
-        text = re.sub(r"\x1b\[[0-9;]*m", "", str(output or ""))
-        states = {
-            match.group("name"): match.group("state").lower()
-            for match in re.finditer(
-                r"ControllerState\(name='(?P<name>[^']+)',\s*"
-                r"state='(?P<state>[^']+)'",
-                text,
-            )
-        }
-        if states:
-            return states
-
-        for line in text.splitlines():
-            fields = line.split()
-            if len(fields) < 2:
-                continue
-            state = fields[-1].lower()
-            if state not in {"active", "inactive", "unconfigured", "finalized"}:
-                continue
-            name = fields[0].split("[", 1)[0]
-            if name:
-                states[name] = state
-        return states
+        return ros2_processes._controller_states_from_list_controllers_output(output)
 
     def _xarm6_hardware_feedback_error(
         self,

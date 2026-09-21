@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
+from cais_spade_llm.ui import ros2_processes
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.ros2_processes import ROS2_ENV
 
@@ -468,3 +470,86 @@ def test_dual_robots_monitor_start_explicitly_enables_rviz() -> None:
         if call["launch_name"] == "hardware_dual_robots_moveit"
     )
     assert moveit_call["extra_args"] == "launch_rviz:=true"
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [SystemBridge._topic_publisher_count_from_output, ros2_processes._topic_publisher_count_from_output],
+    ids=["SystemBridge", "ros2_processes"],
+)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("", None),
+        ("Subscription count: 1", None),
+        ("Publisher count: 0", 0),
+        ("Publisher count: 12\nSubscription count: 0", 12),
+        ("Publisher count:\t3", 3),
+        ("Publisher count: unknown", None),
+        ("Publisher count: -1", None),
+        ("Publisher count: 1x", None),
+    ],
+)
+def test_topic_publisher_count_from_output(
+    parser: Callable[[str], int | None],
+    output: str,
+    expected: int | None,
+) -> None:
+    """Preserve the distinction between zero publishers and unavailable counts."""
+    assert parser(output) == expected
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [
+        SystemBridge._controller_states_from_list_controllers_output,
+        ros2_processes._controller_states_from_list_controllers_output,
+    ],
+    ids=["SystemBridge", "ros2_processes"],
+)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("", {}),
+        ("controller name state\nmissing_state", {}),
+        (
+            "ControllerState(name='joint_state_broadcaster', state='active')\n"
+            "ControllerState(name='ur5e_joint_trajectory_controller', state='inactive')",
+            {"joint_state_broadcaster": "active", "ur5e_joint_trajectory_controller": "inactive"},
+        ),
+        (
+            "joint_state_broadcaster joint_state_broadcaster/JointStateBroadcaster active\n"
+            "ur5e_joint_trajectory_controller joint_trajectory_controller/JointTrajectoryController inactive\n"
+            "unconfigured_controller controller/type unconfigured\n"
+            "finalized_controller controller/type finalized",
+            {
+                "joint_state_broadcaster": "active",
+                "ur5e_joint_trajectory_controller": "inactive",
+                "unconfigured_controller": "unconfigured",
+                "finalized_controller": "finalized",
+            },
+        ),
+        (
+            "\x1b[32mur5e_joint_trajectory_controller[controller/type]\x1b[0m \x1b[1;32mACTIVE\x1b[0m",
+            {"ur5e_joint_trajectory_controller": "active"},
+        ),
+        (
+            "ControllerState(name='ur5e_joint_trajectory_controller', state='starting')",
+            {"ur5e_joint_trajectory_controller": "starting"},
+        ),
+        ("ur5e_joint_trajectory_controller controller/type starting", {}),
+        ("ControllerState(name='ur5e_joint_trajectory_controller', state=)", {}),
+        (
+            "ControllerState(name='ur5e_joint_trajectory_controller', state='inactive')\n"
+            "joint_state_broadcaster joint_state_broadcaster/JointStateBroadcaster active",
+            {"ur5e_joint_trajectory_controller": "inactive"},
+        ),
+    ],
+)
+def test_controller_states_from_list_controllers_output(
+    parser: Callable[[str], dict[str, str]],
+    output: str,
+    expected: dict[str, str],
+) -> None:
+    """Retain response-format precedence and existing unknown-state handling."""
+    assert parser(output) == expected
