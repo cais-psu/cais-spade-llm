@@ -15,6 +15,60 @@ This note does not record any runtime change. The only required selector code
 change identified by the review is the strict-expansion correction described
 below.
 
+## KMR delivery handoff (2026-09-21)
+
+The nominal delivery increment registers KMR with participating Storage/M1
+contexts and routes the explicit Storage-to-M1 order through Start System and
+the existing PA/RA/CCA task protocol. It changes no selector ranking or recovery
+admission rules. Compact machine openings and fixed-joint grasp attachment are
+simulation assumptions. Read the dated delivery verification in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) before making execution claims.
+
+Active `lg_slippage` settings and resource bindings are removed; retain the
+historical evidence below without presenting it as an available NIST scenario.
+[Adaptive matching](ADAPTIVE_REQUIREMENT_CAPABILITY_MATCHING.md) remains planned.
+Failure injection and recovery execution remain future increments. The
+strict-expansion correction and its tests below remain outstanding.
+
+The delivery acceptance recorded three acknowledged Gazebo tasks in
+`20260921T194635_5b778116`, with M1 loaded, KMR empty, and no machining or
+assembly completion. Its recorded acknowledgements reproduce the final custody.
+The separate [active Stop check](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/control_verification.json)
+observed the executing arm goal terminate after Stop System, with zero task
+commits, Storage inventory retained, KMR empty, and Gazebo retained. See the
+linked implementation plan for current test results and reach-check scope.
+This adds no selector or recovery-success evidence.
+
+## Historical UI/settings handoff (2026-09-21)
+
+The UI/settings phase is implemented separately from the selector correction.
+**projects → recovery-framework → setup** now saves the selected Product Order,
+permitted resources, Safety, execution mode, existing recovery settings, and
+one optional failure scenario in `recovery_framework_setup.json`. Products,
+Resources, and Safety keep their definition editors/views; **run** displays the
+saved selections and retains **Start System**/**Stop System**.
+
+Part slippage binds exact NIST components to permitted manipulators and their
+capability tasks. It supports `before_execute`, `after_execute_before_commit`,
+once-per-run occurrence, a configured drop pose, and an optional second holder.
+The examples `ur5e-3` / `KET4_Square_4mm` and `ur5e-4` / `gear_large` do not
+assert shared eligibility or prescribe recovery. The existing `lg_slippage` /
+`LG` file is unchanged. All four documented scenarios can be saved as
+**execution not integrated**. Start System rejects unsupported selected failures
+and resource restrictions instead of ignoring them.
+
+These settings establish no failure observations, task completion, PA/RA/CCA
+approval, physical feasibility, or recovery success. Historical recovery artifacts
+are not rewritten when setup changes. Missing run configuration remains `not recorded`.
+
+The following increments are **nominal Start System integration**, **failure
+injection**, then **recovery behavior**. The nominal increment must record the
+actual setup with each run and establish acknowledged KMR Storage-to-M1 handling
+before treating that case as Gazebo execution evidence. The strict-expansion
+correction and its regression tests below remain outstanding and separate from
+these UI changes. Preserve the existing historical verification in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+
 ## Validation Authority at a Glance
 
 | Stage | Authority | Actual responsibility |
@@ -306,8 +360,11 @@ optimal, unbiased, globally nonblocking, or shortest-path recovery policy.
 
 - Selector implementation:
   `cais_spade_llm/agents/intelligent_product/replanner/llm_recovery/modes/multi_turn_outline_generation.py`
-- Selector and validation regression tests:
-  `test/test_neurosymbolic_recovery_selection.py`
+- Existing selector and validation regression coverage:
+  `test/test_case3_recovery_dryrun.py`. Extend this coverage for the outstanding
+  correction; `test/test_neurosymbolic_recovery_selection.py` is not present.
+- UI/settings regression tests:
+  `test/test_recovery_setup.py` and `test/test_project_pages.py`
 - RA physical validators:
   `cais_spade_llm/agents/resource_agent/resource_agent.py`,
   `cais_spade_llm/agents/resource_agent/robot_agent.py`, and
@@ -341,7 +398,7 @@ optional physical or safety hardening work.
 Run the focused selector suite:
 
 ```bash
-poetry run pytest -q test/test_neurosymbolic_recovery_selection.py
+poetry run pytest -q test/test_case3_recovery_dryrun.py
 ```
 
 Run the project-required Python checks:
@@ -358,7 +415,7 @@ git diff --check
 git status --short
 git diff -- \
   cais_spade_llm/agents/intelligent_product/replanner/llm_recovery/modes/multi_turn_outline_generation.py \
-  test/test_neurosymbolic_recovery_selection.py \
+  test/test_case3_recovery_dryrun.py \
   "writing/Journal Paper 2 (recovery framework)/JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md"
 ```
 

@@ -58,7 +58,7 @@ STATIONARY_INSPECTION_UNSUPPORTED_PART_NAMES = (
     "LCP",
 )
 ASSEMBLY_BOARD_V1_GEOMETRY_RELATIVE_PATH = Path(
-    "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
+    "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json"
 )
 UR5E_CALIBRATION_MONITOR_STATUS = Path(
     "/tmp/cais_ur5e_calibration_monitor_status.json"

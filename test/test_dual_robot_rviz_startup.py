@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import socket
+import sys
 import threading
+import time
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +20,54 @@ from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.ros2_processes import ROS2_ENV
 
 _SPEC2PRIMITIVES_GAZEBO = "gazebo_dual_spec2primitives"
+
+
+@pytest.mark.parametrize("bind_errno", [None, errno.EADDRINUSE, errno.EACCES])
+def test_ui_checks_port_before_ros_cleanup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    bind_errno: int | None,
+) -> None:
+    """A duplicate UI must leave the active session and its exit hooks untouched."""
+    from cais_spade_llm import ui_main
+
+    monkeypatch.setattr(ui_main.LOGGER, "propagate", True)
+    events = []
+    ui_socket = MagicMock()
+    ui_socket.__enter__.return_value = ui_socket
+    ui_socket.__exit__.side_effect = lambda *_args: events.append("socket_closed")
+    if bind_errno is not None:
+        ui_socket.bind.side_effect = OSError(bind_errno, "test bind failure")
+    monkeypatch.setattr(ui_main, "socket", SimpleNamespace(
+        socket=lambda *_args: ui_socket, AF_INET=socket.AF_INET,
+        SOCK_STREAM=socket.SOCK_STREAM, SOL_SOCKET=socket.SOL_SOCKET,
+        SO_REUSEADDR=socket.SO_REUSEADDR,
+    ))
+    for name in (
+        "_kill_stale_ros2_processes", "_cleanup_ros2_shm",
+        "_cleanup_cais_runtime_artifacts", "_install_exit_cleanup",
+    ):
+        monkeypatch.setattr(ui_main, name, lambda name=name, **_kwargs: events.append(name))
+    monkeypatch.setitem(sys.modules, "cais_spade_llm.ui.app", SimpleNamespace(
+        create_app=lambda: events.append("create_app"),
+    ))
+
+    if bind_errno == errno.EACCES:
+        with pytest.raises(OSError) as error:
+            ui_main._run_ui()
+        assert error.value.errno == errno.EACCES
+    else:
+        ui_main._run_ui()
+
+    ui_socket.bind.assert_called_once_with(("0.0.0.0", 8080))
+    if bind_errno is None:
+        assert events == [
+            "socket_closed", "_kill_stale_ros2_processes", "_cleanup_ros2_shm",
+            "_cleanup_cais_runtime_artifacts", "_install_exit_cleanup", "create_app",
+        ]
+    else:
+        assert events == ["socket_closed"]
+    if bind_errno == errno.EADDRINUSE:
+        assert "Port 8080 is already in use; no new CAIS UI was started" in caplog.text
 
 
 def test_ros2_environment_removes_opencv_qt_paths_and_preserves_wsl_display() -> None:
@@ -553,3 +607,127 @@ def test_controller_states_from_list_controllers_output(
 ) -> None:
     """Retain response-format precedence and existing unknown-state handling."""
     assert parser(output) == expected
+
+
+def _readiness_bridge() -> SystemBridge:
+    bridge = object.__new__(SystemBridge)
+    bridge._gazebo_prewarm_lock = threading.Lock()
+    bridge._gazebo_prewarm_done = threading.Event()
+    bridge._gazebo_prewarm_thread = None
+    bridge._gazebo_prewarm_pending = set()
+    bridge._sim_ready_probe_inflight = False
+    bridge._sim_ready_probe_lock = threading.Lock()
+    bridge._sim_ready_cache_ts = 0.0
+    bridge._sim_ready_cache = (False, "Simulation startup check pending.")
+    bridge._sim_ready_cache_launch = None
+    bridge._ros2_procs = {"gazebo_dual": SimpleNamespace(pid=100, poll=lambda: None)}
+    bridge.simulation_environment_running = lambda: bool(bridge._simulation_launch_key())
+    return bridge
+
+
+def test_background_readiness_survives_discovery_longer_than_three_seconds() -> None:
+    """The UI remains nonblocking while the worker finishes the ROS query."""
+    bridge = _readiness_bridge()
+    entered = threading.Event()
+    timeouts = []
+
+    def query(timeout_sec):
+        timeouts.append(timeout_sec)
+        entered.set()
+        time.sleep(3.1)
+        return timeout_sec > 3.1, ""
+
+    bridge._probe_sim_services = query
+    assert bridge.simulation_start_ready()[0] is False
+    assert entered.wait(1)
+    start = time.monotonic()
+    for _ in range(20):
+        assert bridge.simulation_start_ready()[0] is False
+    assert time.monotonic() - start < 0.2
+    deadline = time.monotonic() + 5
+    while bridge._sim_ready_probe_inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert bridge.simulation_start_ready() == (True, "")
+    assert timeouts == [10.0]
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_readiness_discards_results_after_launch_stops_or_changes(replace) -> None:
+    bridge = _readiness_bridge()
+    entered, release = threading.Event(), threading.Event()
+
+    def query(timeout_sec):
+        entered.set()
+        assert release.wait(2)
+        return True, ""
+
+    bridge._probe_sim_services = query
+    bridge.simulation_start_ready()
+    assert entered.wait(1)
+    bridge._ros2_procs = (
+        {"gazebo_dual": SimpleNamespace(pid=101, poll=lambda: None)} if replace else {}
+    )
+    assert bridge.simulation_start_ready()[0] is False
+    release.set()
+    deadline = time.monotonic() + 2
+    while bridge._sim_ready_probe_inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert bridge._sim_ready_cache[0] is False
+    if replace:
+        assert bridge.simulation_start_ready(force=True) == (True, "")
+
+
+def test_forced_readiness_joins_the_inflight_probe() -> None:
+    bridge = _readiness_bridge()
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def query(timeout_sec):
+        calls.append(timeout_sec)
+        entered.set()
+        assert release.wait(2)
+        return True, ""
+
+    bridge._probe_sim_services = query
+    bridge.simulation_start_ready()
+    assert entered.wait(1)
+    result = []
+    waiter = threading.Thread(target=lambda: result.append(bridge.simulation_start_ready(force=True)))
+    waiter.start()
+    time.sleep(0.05)
+    release.set()
+    waiter.join(2)
+    assert result == [(True, "")]
+    assert calls == [10.0]
+
+
+def test_readiness_retains_missing_service_and_timeout_reasons() -> None:
+    bridge = _readiness_bridge()
+    bridge._ros2_command_output = lambda *args, **kwargs: (True, "/compute_cartesian_path\n/ATTACHLINK")
+    ready, reason = bridge.simulation_start_ready(force=True)
+    assert not ready and "/DETACHLINK" in reason
+    assert bridge.simulation_start_ready() == (ready, reason)
+    bridge._ros2_command_output = lambda *args, **kwargs: (False, "timeout")
+    ready, reason = bridge.simulation_start_ready(force=True)
+    assert not ready and "timed out after 10 seconds" in reason
+    assert bridge.simulation_start_ready() == (ready, reason)
+
+
+def test_recovery_readiness_skips_unrelated_controller_prewarm() -> None:
+    bridge = _readiness_bridge()
+    bridge._queue_gazebo_prewarm("gazebo_dual")
+    assert bridge._gazebo_prewarm_pending == set()
+    bridge._gazebo_prewarm_pending = {"xarm6", "ur5e"}
+    bridge._probe_sim_services = lambda **kwargs: (True, "")
+    assert bridge.simulation_start_ready(force=True) == (True, "")
+
+
+
+def test_legacy_prewarm_authority_is_scoped_to_its_launch() -> None:
+    bridge = _readiness_bridge()
+    bridge._gazebo_prewarm_done.set()
+    bridge._gazebo_prewarm_launch = bridge._simulation_launch_key()
+    bridge._probe_sim_services = lambda **kwargs: (False, "shell discovery failed")
+    assert bridge.simulation_start_ready(force=True)[0] is True
+    bridge._ros2_procs = {"gazebo_dual": SimpleNamespace(pid=101, poll=lambda: None)}
+    assert bridge.simulation_start_ready(force=True) == (False, "shell discovery failed")

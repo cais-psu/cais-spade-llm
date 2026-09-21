@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
     GazeboPickPlaceController,
 )
@@ -32,6 +33,13 @@ _IDENTITY_POSE = {
     "qz": 0.0,
     "qw": 1.0,
 }
+
+
+@pytest.fixture
+def historical_product_geometry() -> dict[str, Any]:
+    """Load the physical demo's geometry independently of the active NIST catalog."""
+    path = _ROOT / "test/fixtures/case3_recovery/assembly_board-v1.json"
+    return json.loads(path.read_text(encoding="utf-8"))["real"]
 
 
 class _PlaceInsertAgent:
@@ -371,6 +379,7 @@ def test_manifests_enable_exact_physical_boolean() -> None:
 @pytest.mark.parametrize("robot", ["xarm6", "ur5e"])
 def test_release_only_place_targets_do_not_require_move_insert_geometry(
     robot: str,
+    historical_product_geometry: dict[str, Any],
 ) -> None:
     controller = SimpleNamespace(
         wait_for_services=lambda: True,
@@ -406,6 +415,9 @@ def test_release_only_place_targets_do_not_require_move_insert_geometry(
         },
         part_name="MG",
         destination_location="assembly_board-v1",
+        product_geometry=ProductProfile.geometry_for_part_from_geometry(
+            "MG", historical_product_geometry
+        ),
         assembly_board_v1_aruco=frozen_board,
     )
 
@@ -415,7 +427,9 @@ def test_release_only_place_targets_do_not_require_move_insert_geometry(
     assert "move_insert_profile" not in result
 
 
-def test_xarm6_demo_place_targets_do_not_require_board_localization() -> None:
+def test_xarm6_demo_place_targets_do_not_require_board_localization(
+    historical_product_geometry: dict[str, Any],
+) -> None:
     controller = SimpleNamespace(
         wait_for_services=lambda: True,
         execution_mode="physical",
@@ -444,6 +458,9 @@ def test_xarm6_demo_place_targets_do_not_require_board_localization() -> None:
         },
         part_name="SG",
         destination_location="assembly_board-v1",
+        product_geometry=ProductProfile.geometry_for_part_from_geometry(
+            "SG", historical_product_geometry
+        ),
         assembly_board_v1_aruco=None,
     )
 

@@ -159,6 +159,40 @@ def create_resource_agents(
     cca_meta = cca_config.get("cca", cca_config)  # handle {"cca": {...}} or flat
     cca_jid = cca_meta.get("jid")
 
+    from cais_spade_llm.recovery_framework.delivery import prepared_start
+
+    prepared = prepared_start()
+    if prepared is not None and not robot_context_only:
+        from cais_spade_llm.recovery_framework.delivery import check_stopped
+        from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+        from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+
+        check_stopped()
+        if _EXECUTION_MODE_OVERRIDE != "simulation":
+            raise ValueError("KMR delivery execution requires simulation mode")
+        for controller in prewarmed.values():
+            controller.shutdown()
+        ALLOWED_FUNCS['KMR'].update({'pick_part', 'move_to_resource', 'place_release'})
+        return [
+            KMRResourceAgent("KMR@localhost", "none", cca_jid=cca_jid, tool_timeout_s=360),
+            ResourceAgent("Storage@localhost", "none", name="Storage", cca_jid=cca_jid),
+            ResourceAgent("M1@localhost", "none", name="M1", cca_jid=cca_jid),
+        ]
+
+    from cais_spade_llm.recovery_framework.environment_runtime import prepared_environment_start
+
+    environment = prepared_environment_start()
+    if environment is not None and not robot_context_only:
+        from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+        from cais_spade_llm.resources.environment_models import build_environment_models
+
+        for controller in prewarmed.values():
+            controller.shutdown()
+        models = build_environment_models(environment["inputs"]["scene"])
+        return [ResourceAgent(f"recovery-resource-{index}@localhost", "none", name=rid,
+                              cca_jid=cca_jid)
+                for index, rid in enumerate(models, 1)]
+
     agents = []
     for init_file in resource_init_list:
         raw = utils.load_json_data(init_file)
@@ -307,6 +341,11 @@ def create_product_agents(
             else:
                 resource_jids = all_ra_jids[:]  # Use a copy so later mutation is safe.
 
+            from cais_spade_llm.recovery_framework.environment_runtime import prepared_environment_start
+
+            if prepared_environment_start() is not None:
+                resource_jids = all_ra_jids[:]
+
             product_bundle = None
             if bundle_context:
                 b_product_name = str(bundle_context.get("product_name", "")).strip()
@@ -353,6 +392,24 @@ def create_product_agents(
                 camera=_CAMERA,
                 precomputed_bundle=product_bundle,
             )
+
+            from cais_spade_llm.recovery_framework.delivery import DeliveryRuntime, prepared_start
+
+            prepared = prepared_start()
+            if prepared is not None:
+                order = utils.load_json_data(agent.product_order_file)
+                if order != prepared["inputs"]["product_order"]:
+                    raise ValueError("Product Order changed after Start System preparation")
+                agent.delivery_runtime = DeliveryRuntime(agent, prepared, resource_agents)
+
+            from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentRuntime, prepared_environment_start
+
+            environment = prepared_environment_start()
+            if prepared is None and environment is not None:
+                order = utils.load_json_data(agent.product_order_file)
+                if order != environment["inputs"]["product_order"]:
+                    raise ValueError("Product Order changed after environmental matching preparation")
+                agent.environment_runtime = EnvironmentRuntime(agent, environment, resource_agents)
 
             # Seed the inbox with optional canned messages so the user agent can demo interactions.
             if hasattr(agent, "inbox"):

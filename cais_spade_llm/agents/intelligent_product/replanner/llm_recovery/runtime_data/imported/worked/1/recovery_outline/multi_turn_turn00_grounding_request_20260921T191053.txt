@@ -1,0 +1,9 @@
+Structured LLM Request
+Model: (unknown)
+Reasoning effort: (unknown)
+Response source: (unknown)
+Request sent: (unknown)
+
+Messages
+Response Format
+{}

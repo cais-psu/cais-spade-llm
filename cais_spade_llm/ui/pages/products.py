@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from nicegui import events, ui
 
+from cais_spade_llm.product.nominal import NominalProductContext
+from cais_spade_llm.product.environment import EnvironmentProductContext
 from cais_spade_llm.product.order import validate_product_order
+from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
 
@@ -46,39 +50,6 @@ _CONTROLLED_PRODUCT_CONFIG_KEYS = {
     "product_order_file",
     "product_geometry_file",
 }
-
-# Geometry template matching assembly_board-v1 structure.
-_GEO_TEMPLATE = {
-    "gazebo": {
-        "assembly_board": {
-            "center": {"x": 0.0, "y": 0.0, "z": 1.02},
-            "thickness_m": 0.01,
-            "slot_floor_z_m": 1.025,
-            "slots": {
-                "PART_A": [0.0, 0.0],
-            },
-        },
-        "parts": {
-            "model_map": {"PART_A": "model_name"},
-            "heights_m": {"PART_A": 0.01},
-        },
-    },
-    "real": {
-        "assembly_board": {
-            "center": {"x": 0.0, "y": 0.0, "z": 1.02},
-            "thickness_m": 0.01,
-            "slot_floor_z_m": 1.025,
-            "slots": {
-                "PART_A": [0.0, 0.0],
-            },
-        },
-        "parts": {
-            "model_map": {"PART_A": "model_name"},
-            "heights_m": {"PART_A": 0.01},
-        },
-    },
-}
-
 
 def _editable_product_fields() -> list[str]:
     """Fields the user can edit in the product configuration table."""
@@ -299,6 +270,58 @@ def _delete_product_manifest(product_path: str | Path | None) -> bool:
     return True
 
 
+def render_nominal_product_model(bridge: SystemBridge, product_select: Any) -> None:
+    """Display the selected product's nominal requirements without planning a run."""
+    with ui.card().classes("w-full"):
+        ui.label("Product requirements").classes("text-lg font-semibold")
+
+        @ui.refreshable
+        def details() -> None:
+            try:
+                if not product_select.value:
+                    raise ValueError("Select a product to inspect its nominal model")
+                manifest = bridge.load_config(str(product_select.value))
+                if len(manifest) != 1:
+                    raise ValueError("Select a manifest with one product")
+                meta = next(iter(manifest.values()))
+                order = bridge.load_config(str(ROOT / meta["product_order_file"]))
+                geometry = bridge.load_config(str(ROOT / meta["product_geometry_file"]))["gazebo"]
+                scene = bridge.load_config(str(SCENE_PATH))
+                context = (NominalProductContext if "completion_conditions" in order else EnvironmentProductContext)(scene, order, geometry)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                ui.label(f"Nominal product model unavailable: {exc}").classes("text-amber-800")
+                return
+            ui.label(f"{context.product_name}: {context.product_order['objective']}")
+            ui.label(
+                "Configured initial ProductState and requirements; no live observations."
+            ).classes("text-sm text-slate-500")
+            rows = [
+                {
+                    "part_name": part,
+                    **context.part_tracker[part],
+                    "processCompleted": json.dumps(context.part_tracker[part]["processCompleted"]),
+                    "requirement": (
+                        json.dumps(context.product_order.get("processPlan", context.requirements)[part])
+                        if part in context.requirements
+                        else json.dumps({"location": "Exit", "state": "completed"})
+                    ),
+                }
+                for part in [*context.selected_parts, context.product_name]
+            ]
+            fields = ["part_name", "requirement", "location", "state", "processCompleted", "last_task"]
+            ui.table(
+                columns=[{"name": key, "label": key, "field": key} for key in fields],
+                rows=rows,
+                row_key="part_name",
+                pagination=8,
+            ).classes("w-full").props("dense flat bordered wrap-cells")
+            ui.label("ProductAgent requests these results at runtime. ResourceAgents return supported paths.")
+
+        details()
+        ui.button("Refresh configured model", on_click=details.refresh)
+        product_select.on_value_change(lambda _: details.refresh())
+
+
 def render(bridge: SystemBridge) -> None:
     ui.add_head_html(
         """
@@ -310,6 +333,9 @@ def render(bridge: SystemBridge) -> None:
         """
     )
     ui.label("Products").classes("text-2xl font-bold px-6 pt-6")
+    with ui.row().classes("px-6 items-center gap-4"):
+        ui.label("Define products and orders here; select the experiment in project setup.").classes("text-sm text-slate-600")
+        ui.link("recovery-framework setup", "/recovery-framework?tab=setup")
 
     with ui.row().classes("w-full px-6 gap-6 items-start"):
         with ui.column().classes("flex-grow gap-6 min-w-0"):
@@ -620,6 +646,7 @@ def render(bridge: SystemBridge) -> None:
                         product_status_label.text = f"Saved {name}"
                         product_status_label.classes(replace="text-sm text-green-600")
                         _refresh_json_viewer()
+                        _refresh_geometry_browser()
                     except Exception as e:
                         product_status_label.text = f"Save failed: {e}"
                         product_status_label.classes(replace="text-sm text-red-600")
@@ -812,19 +839,29 @@ def render(bridge: SystemBridge) -> None:
                     "text-base font-semibold mb-1"
                 )
                 ui.label(
-                    "Download an assembly_board-v1-style geometry template or upload a validated geometry .json file."
+                    "Download the configured NIST component geometry or upload a validated geometry .json file."
                 ).classes("text-xs text-slate-500 mb-1")
 
                 geo_status = ui.label("").classes("text-sm")
+
+                def _download_geometry_template() -> None:
+                    template_path = _GEO_DIR / _RECOVERY_PRODUCT_FILENAME
+                    try:
+                        document = json.loads(template_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                        geo_status.text = f"NIST geometry unavailable: {exc}"
+                        return
+                    error = _validate_geometry_payload(document)
+                    if error:
+                        geo_status.text = f"NIST geometry unavailable: {error}"
+                        return
+                    ui.download(json.dumps(document, indent=2).encode(), "geometry_template.json")
 
                 with ui.row().classes("gap-2 items-end flex-wrap"):
                     ui.button(
                         "Download Template",
                         icon="download",
-                        on_click=lambda: ui.download(
-                            json.dumps(_GEO_TEMPLATE, indent=2).encode(),
-                            "geometry_template.json",
-                        ),
+                        on_click=_download_geometry_template,
                     ).props("flat")
 
                     geo_upload_widget = None
@@ -967,6 +1004,20 @@ def render(bridge: SystemBridge) -> None:
                     .classes("w-full font-mono")
                     .props("outlined autogrow")
                 )
+                ui.label("Each processPlan step completes before the next begins. Resource capabilities supply the tasks and transport routes.").classes("text-sm text-slate-600")
+                with ui.expansion("Process plan", icon="route", value=True).classes("w-full"):
+                    required_results = ui.code("{}", language="json").classes("w-full")
+
+                def _show_required_results(event) -> None:
+                    try:
+                        payload = json.loads(event.value or "{}")
+                        required_results.content = json.dumps(
+                            payload.get("processPlan", payload.get("requirements", {})), indent=2
+                        )
+                    except (ValueError, AttributeError):
+                        required_results.content = "{}"
+
+                order_editor.on_value_change(_show_required_results)
 
                 def _persist_selected_product_meta() -> None:
                     path_str = str(_product_state.get("path", "") or "").strip()
@@ -1022,12 +1073,20 @@ def render(bridge: SystemBridge) -> None:
                     product_jid = str(_product_state.get("meta", {}).get("jid", "") or "").strip()
                     if not product_jid and product_name:
                         product_jid = f"{product_name}@localhost"
+                    linked_path = _selected_order_path()
+                    linked_order = (
+                        bridge.load_config(linked_path)
+                        if linked_path and Path(linked_path).is_file()
+                        else {}
+                    )
+                    field = "requirements" if "requirements" in linked_order else "processPlan"
                     return {
                         "product": product_name,
                         "product_jid": product_jid,
                         "quantity": 1,
                         "objective": f"assemble {product_name}" if product_name else "",
                         "parts": "all",
+                        field: deepcopy(linked_order.get(field, {})),
                     }
 
                 def _refresh_parts_options() -> None:
@@ -1139,7 +1198,10 @@ def render(bridge: SystemBridge) -> None:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     try:
                         payload = json.loads(str(order_editor.value or "{}"))
-                        validate_product_order(payload, _load_selected_geometry())
+                        validate_product_order(
+                            payload, _load_selected_geometry(),
+                            require_process_requirements="completion_conditions" not in payload,
+                        )
                     except Exception as exc:
                         status_label.text = f"Invalid product order: {exc}"
                         status_label.classes(replace="text-sm text-red-600")
@@ -1207,7 +1269,10 @@ def render(bridge: SystemBridge) -> None:
                     dest = _next_available_upload_path(uploaded_name)
                     try:
                         payload = json.loads(content)
-                        validate_product_order(payload, _load_selected_geometry())
+                        validate_product_order(
+                            payload, _load_selected_geometry(),
+                            require_process_requirements="completion_conditions" not in payload,
+                        )
                     except Exception as exc:
                         status_label.text = f"Invalid product order: {exc}"
                         status_label.classes(replace="text-sm text-red-600")
@@ -1274,6 +1339,8 @@ def render(bridge: SystemBridge) -> None:
                 _load_product()
                 _refresh_order_file_list()
 
+            render_nominal_product_model(bridge, product_select)
+
             # ── Part Tracker ─────────────────────────────────────────
             with ui.card().classes("w-full"):
                 ui.label("Part Tracker").classes("text-lg font-semibold mb-2")
@@ -1308,7 +1375,7 @@ def render(bridge: SystemBridge) -> None:
             with ui.card().classes("w-full"):
                 ui.label("Product Geometry").classes("text-lg font-semibold mb-1")
                 ui.label(
-                    "Expand a geometry file to inspect Gazebo/Real slot coordinates and part metadata, or delete it."
+                    "Geometry linked to the selected product. Expand to inspect slot coordinates, CAD filenames, and part metadata."
                 ).classes("text-xs text-slate-500 mb-2")
                 geometry_browser = ui.column().classes("w-full gap-2")
 
@@ -1345,50 +1412,22 @@ def render(bridge: SystemBridge) -> None:
                 def _refresh_geometry_browser() -> None:
                     geometry_browser.clear()
                     with geometry_browser:
-                        if not _GEO_DIR.exists() or not list(_GEO_DIR.glob("*.json")):
-                            ui.label("No geometry files found.").classes("text-slate-400 italic")
+                        geometry_path = str(
+                            _product_state.get("meta", {}).get("product_geometry_file", "") or ""
+                        )
+                        if not geometry_path:
+                            ui.label("No geometry linked to the selected product.").classes(
+                                "text-slate-400 italic"
+                            )
                             return
-                        for geo_file in sorted(_GEO_DIR.glob("*.json")):
-                            try:
-                                data = json.loads(geo_file.read_text(encoding="utf-8"))
-                            except Exception as exc:
-                                with ui.expansion(geo_file.name, icon="warning").classes("w-full"):
-                                    with ui.row().classes("w-full justify-between items-center"):
-                                        ui.label("Failed to load geometry.").classes(
-                                            "text-red-700 text-sm"
-                                        )
-                                        ui.button(
-                                            "Delete Geometry File",
-                                            icon="delete",
-                                            on_click=lambda _=None,
-                                            path=geo_file: _delete_geometry_file(path),
-                                        ).props("flat color=red")
-                                    ui.label(f"Failed to load geometry: {exc}").classes(
-                                        "text-red-700 text-sm"
-                                    )
-                                continue
-
-                            if not isinstance(data, dict):
-                                with ui.expansion(geo_file.name, icon="warning").classes("w-full"):
-                                    with ui.row().classes("w-full justify-between items-center"):
-                                        ui.label("Invalid geometry format.").classes(
-                                            "text-red-700 text-sm"
-                                        )
-                                        ui.button(
-                                            "Delete Geometry File",
-                                            icon="delete",
-                                            on_click=lambda _=None,
-                                            path=geo_file: _delete_geometry_file(path),
-                                        ).props("flat color=red")
-                                    ui.label("Invalid format: expected JSON object.").classes(
-                                        "text-red-700 text-sm"
-                                    )
-                                continue
-
-                            with ui.expansion(geo_file.name, icon="category").classes("w-full"):
+                        geo_file = Path(geometry_path)
+                        try:
+                            data = json.loads(geo_file.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                            with ui.expansion(geo_file.name, icon="warning").classes("w-full"):
                                 with ui.row().classes("w-full justify-between items-center"):
-                                    ui.label("Geometry file details").classes(
-                                        "text-sm text-slate-500"
+                                    ui.label("Failed to load geometry.").classes(
+                                        "text-red-700 text-sm"
                                     )
                                     ui.button(
                                         "Delete Geometry File",
@@ -1396,137 +1435,179 @@ def render(bridge: SystemBridge) -> None:
                                         on_click=lambda _=None,
                                         path=geo_file: _delete_geometry_file(path),
                                     ).props("flat color=red")
+                                ui.label(f"Failed to load geometry: {exc}").classes(
+                                    "text-red-700 text-sm"
+                                )
+                            return
 
-                                if not data:
-                                    ui.label("No geometry environments found.").classes(
-                                        "text-slate-400 italic"
+                        if not isinstance(data, dict):
+                            with ui.expansion(geo_file.name, icon="warning").classes("w-full"):
+                                with ui.row().classes("w-full justify-between items-center"):
+                                    ui.label("Invalid geometry format.").classes(
+                                        "text-red-700 text-sm"
                                     )
-                                    continue
+                                    ui.button(
+                                        "Delete Geometry File",
+                                        icon="delete",
+                                        on_click=lambda _=None,
+                                        path=geo_file: _delete_geometry_file(path),
+                                    ).props("flat color=red")
+                                ui.label("Invalid format: expected JSON object.").classes(
+                                    "text-red-700 text-sm"
+                                )
+                            return
 
-                                for env_name, env_payload_raw in data.items():
-                                    env_payload = (
-                                        env_payload_raw if isinstance(env_payload_raw, dict) else {}
-                                    )
-                                    board_raw = env_payload.get("assembly_board", {})
-                                    parts_raw = env_payload.get("parts", {})
-                                    board = board_raw if isinstance(board_raw, dict) else {}
-                                    parts = parts_raw if isinstance(parts_raw, dict) else {}
-                                    center_raw = board.get("center", {})
-                                    center = center_raw if isinstance(center_raw, dict) else {}
-                                    slots_raw = board.get("slots", {})
-                                    slots = slots_raw if isinstance(slots_raw, dict) else {}
-                                    model_map_raw = parts.get("model_map", {})
-                                    heights_raw = parts.get("heights_m", {})
-                                    model_map = (
-                                        model_map_raw if isinstance(model_map_raw, dict) else {}
-                                    )
-                                    heights = heights_raw if isinstance(heights_raw, dict) else {}
+                        with ui.expansion(geo_file.name, icon="category").classes("w-full"):
+                            with ui.row().classes("w-full justify-between items-center"):
+                                ui.label("Geometry file details").classes(
+                                    "text-sm text-slate-500"
+                                )
+                                ui.button(
+                                    "Delete Geometry File",
+                                    icon="delete",
+                                    on_click=lambda _=None,
+                                    path=geo_file: _delete_geometry_file(path),
+                                ).props("flat color=red")
 
-                                    with ui.expansion(
-                                        f"{str(env_name).upper()} Details",
-                                        value=str(env_name).lower() == "gazebo",
-                                    ).classes("w-full ml-2"):
-                                        board_rows = [
-                                            {"field": "center_x_m", "value": center.get("x", "")},
-                                            {"field": "center_y_m", "value": center.get("y", "")},
-                                            {"field": "center_z_m", "value": center.get("z", "")},
+                            if not data:
+                                ui.label("No geometry environments found.").classes(
+                                    "text-slate-400 italic"
+                                )
+                                return
+
+                            for env_name, env_payload_raw in data.items():
+                                env_payload = (
+                                    env_payload_raw if isinstance(env_payload_raw, dict) else {}
+                                )
+                                board_raw = env_payload.get("assembly_board", {})
+                                parts_raw = env_payload.get("parts", {})
+                                board = board_raw if isinstance(board_raw, dict) else {}
+                                parts = parts_raw if isinstance(parts_raw, dict) else {}
+                                center_raw = board.get("center", {})
+                                center = center_raw if isinstance(center_raw, dict) else {}
+                                slots_raw = board.get("slots", {})
+                                slots = slots_raw if isinstance(slots_raw, dict) else {}
+                                model_map_raw = parts.get("model_map", {})
+                                heights_raw = parts.get("heights_m", {})
+                                cad_raw = parts.get("cad_filename_map", {})
+                                cad_filenames = cad_raw if isinstance(cad_raw, dict) else {}
+                                model_map = (
+                                    model_map_raw if isinstance(model_map_raw, dict) else {}
+                                )
+                                heights = heights_raw if isinstance(heights_raw, dict) else {}
+
+                                with ui.expansion(
+                                    f"{str(env_name).upper()} Details",
+                                    value=str(env_name).lower() == "gazebo",
+                                ).classes("w-full ml-2"):
+                                    board_rows = [
+                                        {"field": "center_x_m", "value": center.get("x", "")},
+                                        {"field": "center_y_m", "value": center.get("y", "")},
+                                        {"field": "center_z_m", "value": center.get("z", "")},
+                                        {
+                                            "field": "slot_floor_z_m",
+                                            "value": board.get("slot_floor_z_m", ""),
+                                        },
+                                        {
+                                            "field": "thickness_m",
+                                            "value": board.get("thickness_m", ""),
+                                        },
+                                    ]
+                                    ui.label("Board").classes("text-sm font-semibold")
+                                    ui.table(
+                                        columns=[
                                             {
-                                                "field": "slot_floor_z_m",
-                                                "value": board.get("slot_floor_z_m", ""),
+                                                "name": "field",
+                                                "label": "Field",
+                                                "field": "field",
                                             },
                                             {
-                                                "field": "thickness_m",
-                                                "value": board.get("thickness_m", ""),
+                                                "name": "value",
+                                                "label": "Value",
+                                                "field": "value",
                                             },
-                                        ]
-                                        ui.label("Board").classes("text-sm font-semibold")
+                                        ],
+                                        rows=board_rows,
+                                    ).classes("w-full mb-3")
+
+                                    slot_rows = []
+                                    for part_name, xy in sorted(slots.items()):
+                                        if isinstance(xy, (list, tuple)) and len(xy) >= 2:
+                                            slot_rows.append(
+                                                {
+                                                    "part": part_name,
+                                                    "x": xy[0],
+                                                    "y": xy[1],
+                                                }
+                                            )
+                                    ui.label("Slot Coordinates (relative XY)").classes(
+                                        "text-sm font-semibold"
+                                    )
+                                    if slot_rows:
                                         ui.table(
                                             columns=[
                                                 {
-                                                    "name": "field",
-                                                    "label": "Field",
-                                                    "field": "field",
+                                                    "name": "part",
+                                                    "label": "Part",
+                                                    "field": "part",
+                                                },
+                                                {"name": "x", "label": "X", "field": "x"},
+                                                {"name": "y", "label": "Y", "field": "y"},
+                                            ],
+                                            rows=slot_rows,
+                                        ).classes("w-full mb-3")
+                                    else:
+                                        ui.label("No slot coordinates available.").classes(
+                                            "text-slate-400 italic text-sm"
+                                        )
+
+                                    part_rows = []
+                                    part_names = sorted(
+                                        set(model_map.keys()) | set(heights.keys())
+                                    )
+                                    for part_name in part_names:
+                                        part_rows.append(
+                                            {
+                                                "part": part_name,
+                                                "model": model_map.get(part_name, ""),
+                                                "cad_filename": cad_filenames.get(part_name, ""),
+                                                "height_m": heights.get(part_name, ""),
+                                            }
+                                        )
+                                    ui.label("Part Metadata").classes("text-sm font-semibold")
+                                    if part_rows:
+                                        ui.table(
+                                            columns=[
+                                                {
+                                                    "name": "part",
+                                                    "label": "Part",
+                                                    "field": "part",
                                                 },
                                                 {
-                                                    "name": "value",
-                                                    "label": "Value",
-                                                    "field": "value",
+                                                    "name": "model",
+                                                    "label": "Model",
+                                                    "field": "model",
+                                                },
+                                                {
+                                                    "name": "cad_filename",
+                                                    "label": "CAD filename",
+                                                    "field": "cad_filename",
+                                                },
+                                                {
+                                                    "name": "height_m",
+                                                    "label": "Height (m)",
+                                                    "field": "height_m",
                                                 },
                                             ],
-                                            rows=board_rows,
-                                        ).classes("w-full mb-3")
-
-                                        slot_rows = []
-                                        for part_name, xy in sorted(slots.items()):
-                                            if isinstance(xy, (list, tuple)) and len(xy) >= 2:
-                                                slot_rows.append(
-                                                    {
-                                                        "part": part_name,
-                                                        "x": xy[0],
-                                                        "y": xy[1],
-                                                    }
-                                                )
-                                        ui.label("Slot Coordinates (relative XY)").classes(
-                                            "text-sm font-semibold"
+                                            rows=part_rows,
+                                        ).classes("w-full")
+                                    else:
+                                        ui.label("No part metadata available.").classes(
+                                            "text-slate-400 italic text-sm"
                                         )
-                                        if slot_rows:
-                                            ui.table(
-                                                columns=[
-                                                    {
-                                                        "name": "part",
-                                                        "label": "Part",
-                                                        "field": "part",
-                                                    },
-                                                    {"name": "x", "label": "X", "field": "x"},
-                                                    {"name": "y", "label": "Y", "field": "y"},
-                                                ],
-                                                rows=slot_rows,
-                                            ).classes("w-full mb-3")
-                                        else:
-                                            ui.label("No slot coordinates available.").classes(
-                                                "text-slate-400 italic text-sm"
-                                            )
-
-                                        part_rows = []
-                                        part_names = sorted(
-                                            set(model_map.keys()) | set(heights.keys())
-                                        )
-                                        for part_name in part_names:
-                                            part_rows.append(
-                                                {
-                                                    "part": part_name,
-                                                    "model": model_map.get(part_name, ""),
-                                                    "height_m": heights.get(part_name, ""),
-                                                }
-                                            )
-                                        ui.label("Part Metadata").classes("text-sm font-semibold")
-                                        if part_rows:
-                                            ui.table(
-                                                columns=[
-                                                    {
-                                                        "name": "part",
-                                                        "label": "Part",
-                                                        "field": "part",
-                                                    },
-                                                    {
-                                                        "name": "model",
-                                                        "label": "Model",
-                                                        "field": "model",
-                                                    },
-                                                    {
-                                                        "name": "height_m",
-                                                        "label": "Height (m)",
-                                                        "field": "height_m",
-                                                    },
-                                                ],
-                                                rows=part_rows,
-                                            ).classes("w-full")
-                                        else:
-                                            ui.label("No part metadata available.").classes(
-                                                "text-slate-400 italic text-sm"
-                                            )
 
                 _refresh_geometry_browser()
+                product_select.on_value_change(lambda _: _refresh_geometry_browser())
 
         # ── Right column: chat panel ──────────────────────────
         with ui.column().classes("w-96 shrink-0 sticky top-20 self-start"):

@@ -18,21 +18,21 @@
     </gui>
 
     <!-- Machining Station: M1 and M2 are side by side. Both front doors face
-         ur5e-1 and ur5e-2; KMR side access is reserved for later integration. -->
+         ur5e-1 and ur5e-2. The side openings allow KMR loading. -->
     <include>
-      <uri>model://haas_mini_mill</uri>
+      <uri>model://bantam_tools_desktop_cnc</uri>
       <name>M1</name>
-      <pose>-6 2.3 0 0 0 -1.5707963268</pose>
+      <pose>-6.0 1.9 0.0 0.0 0.0 -1.5707963267948966</pose>
     </include>
     <include>
-      <uri>model://haas_mini_mill</uri>
+      <uri>model://bantam_tools_desktop_cnc</uri>
       <name>M2</name>
-      <pose>-2.6 2.3 0 0 0 -1.5707963268</pose>
+      <pose>-2.6 1.9 0.0 0.0 0.0 -1.5707963267948966</pose>
     </include>
 
     <model name="M1_KMR_docking_pose">
       <static>true</static>
-      <pose>-7.25 2.3 0.004 0 0 -1.57079632679</pose>
+      <pose>-6.85 2.15 0.004 0.0 0.0 1.5707963267948966</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
@@ -41,15 +41,15 @@
         </visual>
       </link>
     </model>
-    <!-- Spawn-only KMR occupies the Storage dock. Motion and controllers follow later. -->
+    <!-- The launch replaces this appearance with the articulated KMR at the Storage dock. -->
     <include>
       <uri>model://KMR</uri>
       <name>KMR</name>
-      <pose>-8.15 2.3 0 0 0 -1.57079632679</pose>
+      <pose>-8.24 2.13 0.0 0.0 0.0 1.5707963267948966</pose>
     </include>
     <model name="M2_KMR_docking_pose">
       <static>true</static>
-      <pose>-3.85 2.3 0.004 0 0 -1.57079632679</pose>
+      <pose>-3.45 2.15 0.004 0.0 0.0 1.5707963267948966</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
@@ -58,7 +58,7 @@
         </visual>
       </link>
     </model>
-    <!-- Passive layout fixtures. Conveyor transport and KMR execution are not implemented. -->
+    <!-- Passive layout fixtures. Conveyor transport remains outside this increment. -->
     <model name="ur5e-1 pedestal">
       <static>true</static>
       <pose>-6 1.1 0 0 0 0</pose>
@@ -657,7 +657,7 @@
     </model>
     <model name="Storage_KMR_docking_pose">
       <static>true</static>
-      <pose>-8.15 2.30 0.004 0 0 -1.57079632679</pose>
+      <pose>-8.24 2.13 0.004 0.0 0.0 1.5707963267948966</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>1.19 0.72 0.008</size></box></geometry>

@@ -7,13 +7,7 @@
     "execution_mode": "simulation",
     "instructions": "You are a robot that handles tasks related to printer prusa-mk4-2 and assembly board.",
     "functions": "auto",
-    "failure_scenarios": [
-      {
-        "scenario_id": "lg_slippage",
-        "mode": "off",
-        "scope": "ur5e"
-      }
-    ],
+    "failure_scenarios": [],
     "gazebo": {
       "static_capabilities": {
         "resource_type": "robot",

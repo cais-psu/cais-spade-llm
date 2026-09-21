@@ -1,0 +1,15 @@
+{
+  "executing": {
+    "goal_id": "91c37fb7b7734fab8e5600928612b319",
+    "status": 2
+  },
+  "after_stop": {
+    "goal_id": "91c37fb7b7734fab8e5600928612b319",
+    "status": 6
+  },
+  "outcome": "stopped",
+  "acknowledged_tasks": 0,
+  "Storage_inventory": true,
+  "KMR_held_part": null,
+  "Gazebo_retained": true
+}

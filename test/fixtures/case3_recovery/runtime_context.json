@@ -1,7 +1,7 @@
 {
   "bundle_root": "cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery",
   "failure_scenario_id": "lg_slippage",
-  "product_geometry": "cais_spade_llm/specification/products/geometry/assembly_board-v1.json",
+  "product_geometry": "test/fixtures/case3_recovery/assembly_board-v1.json",
   "goal_state": "assembled",
   "default_resource_state": "idle",
   "task_statuses": {

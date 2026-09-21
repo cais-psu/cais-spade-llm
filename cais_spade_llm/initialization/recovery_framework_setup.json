@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "selected_product": "cais_spade_llm/initialization/products/assembly_board-v1-recovery-framework.json",
+  "selected_product_order_file": "cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json",
+  "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+  "scene_file": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
+  "permitted_resources": [
+    "ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4", "M1", "M2",
+    "Storage", "KMR", "Conveyor", "Buffer For Machined parts", "3D Printing Station", "Exit"
+  ],
+  "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
+  "execution_mode": "simulation",
+  "runtime_recovery_mode": "pre_ran",
+  "runtime_recovery_validation_policy": "validated",
+  "runtime_recovery_archive_path": "",
+  "runtime_recovery_archive_label": "",
+  "recovery_experiment_settings_file": "cais_spade_llm/initialization/recovery_outline_experiment_settings.json",
+  "recovery_experiment_settings": {
+    "enabled": true,
+    "recovery_selection_mode": "neurosymbolic",
+    "action_horizon": 1,
+    "candidate_count": "adaptive",
+    "candidate_proposal_budget": 5
+  },
+  "failure_scenario": null
+}

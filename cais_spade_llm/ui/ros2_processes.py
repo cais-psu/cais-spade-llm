@@ -188,11 +188,17 @@ def build_ros2_launch_cmds(
         ("ur5e", "gripper", "backend"),
         "xmlrpc",
     )
+    gazebo_dual_rendering = (
+        "env MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA LIBGL_ALWAYS_SOFTWARE=0 "
+        if os.environ.get("WSL_DISTRO_NAME") else ""
+    )
     return {
         "gazebo_dual": (
-            "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
+            gazebo_dual_rendering
+            + "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "world_file:=table_recovery_framework.world run_perception:=false "
-            "include_assembly_parts:=true include_loose_parts:=true"
+            "include_assembly_parts:=true include_loose_parts:=true "
+            "rviz_software_rendering:=false"
         ),
         "gazebo_dual_spec2primitives": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "

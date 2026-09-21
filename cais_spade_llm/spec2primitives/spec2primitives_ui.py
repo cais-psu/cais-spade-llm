@@ -3958,7 +3958,10 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
 
 
 def render(runtime: Spec2PrimitivesUIRuntime) -> None:
-    """Render the ICRA-demo-oriented Spec2Primitives grounding page."""
+    """Open run once per page client, with read-only setup and saved results."""
+    from cais_spade_llm.spec2primitives.project_results import render_results
+    from cais_spade_llm.spec2primitives.project_setup import render_setup
+
     with ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-6"):
         with ui.row().classes("w-full items-start justify-between gap-4"):
             with ui.column().classes("gap-1"):
@@ -3971,5 +3974,31 @@ def render(runtime: Spec2PrimitivesUIRuntime) -> None:
                 "text-sm px-3 py-2"
             )
 
-        _render_dual_gazebo(runtime.dual_gazebo)
-        _render_pa_interaction(runtime)
+        with ui.tabs().props("no-caps").classes("w-full") as tabs:
+            for name in ("run", "setup", "results"):
+                ui.tab(name).props("no-caps")
+        with ui.tab_panels(tabs, value="run", animated=False, keep_alive=True).classes("w-full"):
+            panels = {}
+            for name in ("run", "setup", "results"):
+                with ui.tab_panel(name).classes("p-0") as panel:
+                    panels[name] = panel
+        built: set[str] = set()
+
+        def show_tab() -> None:
+            name = tabs.value
+            if name not in panels or (name in built and name != "setup"):
+                return
+            if name == "setup":
+                panels[name].clear()
+            with panels[name]:
+                if name == "setup":
+                    render_setup(runtime)
+                elif name == "run":
+                    _render_dual_gazebo(runtime.dual_gazebo)
+                    _render_pa_interaction(runtime)
+                else:
+                    render_results(runtime.contexts_root)
+            built.add(name)
+
+        tabs.on_value_change(show_tab)
+        show_tab()

@@ -1,15 +1,163 @@
 # Journal Paper 2: Recovery Framework
 
+## Compact M1/M2 and KMR delivery (2026-09-21)
+
+The new order is
+[`assembly_board-v1-kmr-storage-m1.json`](../../cais_spade_llm/specification/products/orders/assembly_board-v1-kmr-storage-m1.json).
+It references the existing `assembly_board-v1` product and geometry, selects only
+`KET4_Square_4mm`, and uses `quantity: 1`. Its `completion_conditions` are a
+conjunction of exact descriptor fields: M1 loaded with that part, its Storage
+inventory false, and KMR idle, empty, and at M1. Orders without these conditions
+retain their assembly goals.
+
+To use it, open **projects → recovery-framework → setup**, select this Product
+Order, retain **Simulation**, all 12 permitted resources, and no failure, then
+click **Save setup**. Open **run** and use the existing **Start System**. Startup
+prepares the scene and controllers, snapshots the saved configuration, and
+rejects changed configuration or inconsistent observed inventory. **Stop System**
+cancels preparation and execution while retaining acknowledged custody and
+leaving Gazebo available. Use **Reset Scope → Reset Gazebo → Reset** before
+repeating a transfer. Restart the UI to load the updated Python code.
+
+ProductAgent plans `pick_part`, `move_to_resource`, and `place_release` through
+the nominal ProcessPlanner. KMR ResourceAgent dispatches through the existing
+CCA protocol. Storage and M1 participate in the same atomic nominal handoffs.
+`move_to_resource` retains the `DockKMR` controller and `/KMR/dock` endpoint.
+Arm/gripper controller results, acknowledged attachment/release, measured part
+poses, and robot withdrawal are required before task completion. Ordinary
+placement records neither machining nor assembly completion.
+
+M1 and M2 now use the compact envelope in
+[MACHINING_STATION_LAYOUT.md](MACHINING_STATION_LAYOUT.md); M1 still handles
+square pegs and M2 circular pegs. Loading openings, interiors, stands, and
+fixed-joint grasp attachment are simulation assumptions. Gazebo evidence is
+saved under
+`cais_spade_llm/monitor/recovery_gazebo_runs/<run>/run.json`, and can be read in
+**results → Gazebo delivery runs**. Saved inputs, descriptors, configuration
+fingerprints, plans, observations, acknowledgements, histories, and outcomes
+remain tied to that run. Rendering and report selection perform reads only.
+
+The active `lg_slippage.json` file and its resource bindings have been removed.
+Historical results and isolated legacy test fixtures are retained; `LG` is not
+an available NIST component. NIST failure settings and resource restrictions
+remain blocked for this delivery until their execution is integrated.
+
+[Adaptive requirement/capability matching](ADAPTIVE_REQUIREMENT_CAPABILITY_MATCHING.md)
+for this Gazebo delivery is **planned, not implemented**. Failure injection, recovery behavior, full
+assembly execution, optional setup plan generation, and the outstanding
+selector correction remain subsequent work. This delivery uses the existing
+`SystemBridge` Start/Stop interface. The concurrent read-only capability accessor
+is preserved; this delivery makes no CCA or Java repository changes.
+
+### Recorded validation (2026-09-21)
+
+**Observed Gazebo transfer:**
+[`20260921T194635_5b778116/run.json`](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T194635_5b778116/run.json)
+records three acknowledged tasks through the real Start System agent path:
+`pick_part`, `move_to_resource`, and `place_release`. M1 finished `loaded` with
+`KET4_Square_4mm`; Storage inventory became false; KMR finished `idle`, empty,
+and at M1. The released part was observed at approximately
+`(-6.080000, 1.820000, 1.059990)` m, and the withdrawn TCP at
+`(-6.845278, 1.927482, 2.271986)` m. `processCompleted` remained empty.
+Reapplying the recorded Gazebo acknowledgements through the shared projector
+reproduced the final resource and ProductState values.
+
+The [control check](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T194635_5b778116/control_verification.json)
+records a harmless duplicate Start, Stop retaining Gazebo, and rejection of a
+repeat transfer without an explicit scene reset. The acceptance harness used
+`SystemBridge.start_system()`/`stop_system()` and the same preparation function
+as the Run page, with headless Gazebo. It was not a physical robot test.
+
+**Observed Stop during motion:** the separate
+[control check](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/control_verification.json)
+records the same active arm goal changing from status `2` to `6` after Stop
+System. Cancellation reaches the KMR arm/gripper controllers before waiting
+for MoveIt cancellation. No task was committed: Storage retained the part,
+KMR remained empty, and Gazebo stayed available. Task IDs include the run ID
+so delayed acknowledgements or CCA messages cannot match a later run.
+
+**Static and focused checks:** the final combined check passed 354 tests;
+three UI assertions changed during the concurrent edits. Re-running the entire
+affected Resources/setup group passed all 47 tests, including those three.
+Coverage includes delivery, nominal agent transitions, resource DES, setup/pages,
+product configuration, Gazebo layout, RViz startup, and `place_insert` release
+regressions. `poetry check`, full
+`compileall` for `cais_spade_llm` and `ros2`, UI `--help`, and `git diff --check`
+passed. `make bootstrap-gazebo` completed all 16 packages. Poetry retains its
+existing metadata deprecation warnings.
+
+Current geometry also passed [collision-aware IK and complete Cartesian
+approach checks](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/machine_paths.json)
+for KMR at M1/M2, `ur5e-1` at M1, and `ur5e-2` at M2. These
+planning checks do not establish executed UR5e handling. The enclosure, robot
+openings, and fixed-joint grasp remain simulation assumptions. Failed
+commissioning attempts are retained with their observations; they are not
+successful delivery evidence.
+
+The completed transfer predates the stand-height correction from 0.98 m to
+1.00 m; its saved snapshot retains that configuration. The later reach and
+active Stop checks use the corrected stand. The retained Gazebo scene is from
+the Stop test, with the arm stopped during pickup; reset it before another run.
+
+`completion_conditions` currently supports one selected part with `quantity: 1`.
+The separately edited Products/Resources views and removal of the offline-run
+UI are preserved; their broader model changes are outside this delivery's
+Gazebo acceptance claim.
+
 ## Current Implementation Roadmap
 
 Follow [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and the
 [M1/M2 layout](MACHINING_STATION_LAYOUT.md) ([drawing](MACHINING_STATION_LAYOUT.svg)).
-**Phase 2 — Gazebo layout is complete as of 2026-09-16.** The accepted static
-layout is the recovery-framework baseline. The dashboard's **Start Dual Gazebo +
-RViz** opens [table_recovery_framework.world](../../ros2/cais_lab_robotics/worlds/table_recovery_framework.world).
+**Phase 2 completed 2026-09-16.** The compact machine increment above
+supersedes its M1/M2 geometry and KMR docking poses. **recovery-framework → run → start simulation**
+opens [table_recovery_framework.world](../../ros2/cais_lab_robotics/worlds/table_recovery_framework.world).
+
+The project tabs are **run → setup → results**, with **run** open by default.
+Opening the page does not start simulation or execution. **setup** selects the
+Product Order, permitted resources, Safety, **Simulation** or **Physical** mode,
+existing recovery settings, and failure scenario. **Save setup** writes
+[`recovery_framework_setup.json`](../../cais_spade_llm/initialization/recovery_framework_setup.json)
+only. **run** displays that saved setup alongside the existing **Start System**,
+**Stop System**, readiness, progress, and recovery controls. Dry Run controls
+are not available in System Control. **results** inspects Gazebo delivery runs
+and recovery sessions, including failed and incomplete attempts,
+with search, artifact inspection, and CSV export. It does not load a proposal into
+the runtime. Missing measurements are `not recorded`; validation, simulation
+execution, and physical outcomes remain separate. Artifacts without a recorded
+session identifier remain individually inspectable and are not counted as trials.
+
+**UI/settings phase (2026-09-21):** edit products and orders in **Products**,
+inspect capability definitions and Live Robot Status in **Resources**, and edit
+and verify requirements in **Safety**. Their setup links return to experiment
+selection. The default experiment uses the current NIST product, `quantity: 1`,
+all 12 resources, and no failure. M1/square and M2/circular assignments remain.
+Raw settings and DES details are expandable. Browsing and saving settings do
+not plan tasks, dispatch commands, inject failures, or change custody.
+
+Setup supports **Conveyor breakdown**, **ur5e-1 breakdown**, **Machining breakdown
+during part processing**, and **Part slippage** as saved future scenarios.
+Part slippage selects an exact permitted manipulator, a NIST component shared by
+the Product Order and that resource's eligible parts, and an applicable task.
+`before_execute` precedes task execution; `after_execute_before_commit` follows
+execution but precedes recording success. Occurrence is once per run. The drop
+position and unit quaternion are a configured `world` target, not an observation.
+An optional condition can require another resource to hold another exact part.
+
+Use **Example: ur5e-3 / KET4_Square_4mm** or **Example: ur5e-4 / gear_large** to
+populate a draft, then enter the drop position. These resources have different
+eligible parts. One parameterized configuration covers all 11 components.
+Active `lg_slippage` settings and resource bindings are removed; legacy `LG`
+records remain historical evidence only. No recovery sequence
+is preselected. A valid saved failure is labelled **execution not integrated**;
+Start System blocks selected failures and resource restrictions until their
+execution is implemented. An excluded resource is unavailable from the start;
+a breakdown happens later.
+
+Historical recovery evidence never borrows the current setup to
+fill missing fields; a configured experiment is not a recorded Gazebo outcome.
 
 **Accepted Gazebo baseline:** Storage is on the left, M1/M2 remain side by
-side with a **1 m horizontal gap to the assembly table**, and both machine robots
+side with a **1.5845 m horizontal gap to the assembly table**, and both machine robots
 share one straight passive Conveyor. `ur5e-1` handles M1 and `ur5e-2` handles M2.
 At Assembly Station, **`ur5e-3` is the top robot** (`y=0.50`) and **`ur5e-4` is
 the bottom robot** (`y=-0.50`). Each has independent arm/gripper controllers,
@@ -32,22 +180,12 @@ active order. `Exit` remains an empty capacity-one tray, assigned to `ur5e-3`
 for the future completed `assembly_board-v1` transfer. The four KET and four
 RGOCG parts remain in the rotated Storage kitting trays.
 
-The accepted source world keeps a static `KMR` on `Storage_KMR_docking_pose` at
-`(-8.15, 2.30, 0)` with clockwise world yaw `-1.57079632679`. Phase 3 motion
-validation moved this dock 0.10 m east because the earlier pose left
-insufficient clearance for the padded Nav2 footprint. Its detailed KMP
-omniMove 400 appearance uses the official scanner-to-scanner envelope, four 250 mm Mecanum
-wheels, safety scanners, ultrasonic sensors, RGB bands, and emergency stops.
-The platform is parked sideways at world yaw `-1.57079632679`; the complete
-LBR iiwa 14 R820, nominal adapter, and open OnRobot RG2 assembly has local yaw
-`1.57079632679` around the unchanged arm mount at `(-0.25, 0, 0.70)`. These
-rotations cancel in the world, so the arm keeps its previous world-facing yaw.
-The machine docking markers are both vertical and closer to their side-access
-faces: M1 is at `(-7.25, 2.30, 0)` and M2 is at
-`(-3.85, 2.30, 0)`, both with yaw `-1.57079632679`. Each leaves approximately
-40 mm between the KMR scanner envelope and the machine enclosure. The
-predefined routes remain Storage–M1/M2 only. `mount_verified: false` records
-that the lab arm and adapter transforms still require measurement.
+The source world keeps one static `KMR` layout reference at
+`Storage_KMR_docking_pose = (-8.24, 2.13, 0)`, with base yaw
+`1.57079632679` and local arm yaw `1.57079632679`. The arm mount remains
+`(-0.25, 0, 0.70)`. M1/M2 docks are `(-6.85, 2.15, 0)` and
+`(-3.45, 2.15, 0)` at the same base yaw. The current enclosure and access poses
+are documented in the machine-layout page; previous poses remain historical.
 
 **Phase 3 has started with KMR simulation control.** The recovery launch removes
 that one static KMR include from a temporary runtime-world copy and spawns one
@@ -136,16 +274,12 @@ Gazebo model, initial source resource, and assembly target without a
 Spec2Primitives recognition dependency. `GMC_Laser_Plate_Virtual`, `Gear_Plate`,
 and `Gear_Shaft_1`–`Gear_Shaft_3` remain targets rather than selectable parts.
 
-**Next:** add station collision geometry to MoveIt and validate KMR manipulation
-reach at Storage, M1, and M2. Resource/attachment bindings, machine behavior,
-Conveyor/buffer transport, printing, perception, and recovery experiments remain
-**planned**. `simulation_control_integrated: true` covers the KMR simulation
-controller; `integrated: false` continues to record that ResourceAgent execution
-is not connected. The old `table.world` and mocked board/pegs have been removed.
-Earlier xArm6 and hardware references below describe the previous framework.
-Historical verification in the implementation plan retains its original robot
-names; it does not establish successful handling or recovery in the expanded
-scene.
+**Next:** integrate NIST failure injection, resource restrictions, and recovery
+behavior with resumption. Optional setup plan generation and full assembly
+execution remain future work. KMR execution is limited to the explicit delivery
+order above. Machining, Conveyor/buffer transport, printing, and recovery trials
+remain planned for observed execution. Earlier xArm6 and hardware references
+below describe the previous framework and preserve their original identifiers.
 
 ## Working Thesis
 

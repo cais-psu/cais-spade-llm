@@ -7,13 +7,7 @@
     "execution_mode": "simulation",
     "instructions": "You are a robot that handles tasks related printer prusa-mk4-1 and to assembly operations.",
     "functions": "auto",
-    "failure_scenarios": [
-      {
-        "scenario_id": "lg_slippage",
-        "mode": "once",
-        "scope": "xarm6"
-      }
-    ],
+    "failure_scenarios": [],
     "gazebo": {
       "static_capabilities": {
         "resource_type": "robot",

@@ -88,6 +88,40 @@ class ProductAgent(LlmAgent):
         "product"  # Registered role so the shared LLM base class can fetch the right prompts.
     )
 
+    def configure_nominal(self, scene: dict, product_order: dict, geometry: dict) -> Any:
+        """Create an explicit nominal product context without starting agent behaviours."""
+        from cais_spade_llm.product.nominal import NominalProductContext
+
+        self.nominal_context = NominalProductContext(scene, product_order, geometry)
+        return self.nominal_context
+
+    def plan_nominal(self, *, max_search_states: int = 50_000) -> dict:
+        """Plan with resource-owned nominal capabilities, without issuing commands."""
+        context = getattr(self, "nominal_context", None)
+        if context is None:
+            raise ValueError("ProductAgent has no configured nominal context")
+        return context.plan(max_search_states=max_search_states)
+
+    def acknowledge_nominal(self, acknowledgement: dict) -> bool:
+        """Apply an explicit simulated acknowledgement to nominal product tracking."""
+        context = getattr(self, "nominal_context", None)
+        if context is None:
+            raise ValueError("ProductAgent has no configured nominal context")
+        committed = context.acknowledge(acknowledgement)
+        self.part_tracker = deepcopy(context.part_tracker)
+        return committed
+
+    async def teardown(self) -> None:
+        """Cancel owned delivery execution when the existing system lifecycle stops."""
+        environment = getattr(self, "environment_runtime", None)
+        if environment is not None:
+            environment.stop()
+            environment.save()
+        runtime = getattr(self, "delivery_runtime", None)
+        if runtime is not None:
+            runtime.stop()
+            await runtime.actor.worker.cancel()
+
     def __init__(
         self,
         jid: str,
@@ -818,6 +852,11 @@ class ProductAgent(LlmAgent):
     async def setup(self):
         await super().setup()
 
+        environment = getattr(self, "environment_runtime", None)
+        if environment is not None:
+            environment.install(self)
+            return
+
         # Kickoff behaviour (runs once) to build the plan.
         # Template ensures _Kickoff only receives plan_safety_result messages
         # and does not steal ACKs or other messages from the queue.
@@ -1043,6 +1082,11 @@ class ProductAgent(LlmAgent):
     ):
         """Build a rolling runtime product-order skeleton from product-order JSON."""
         validate_product_order(product_order, self.product_geometry)
+        if "completion_conditions" in product_order:
+            runtime = getattr(self, "delivery_runtime", None)
+            if runtime is None:
+                raise ValueError("Delivery execution requires prepared recovery-framework Start System")
+            return runtime.build_plan()
         self.process_planner.build_product_order_runtime_skeleton(
             product_order,
             safety_text=safety_text,
@@ -1406,6 +1450,8 @@ class ProductAgent(LlmAgent):
 
                 used_precomputed = agent._load_precomputed_plan_bundle()
                 max_retries = 0 if used_precomputed else 3
+                if getattr(agent, "delivery_runtime", None) is not None:
+                    max_retries = 0
                 if not used_precomputed:
                     if product_order:
                         await agent._build_plan_from_product_order(product_order, safety_text)
@@ -1649,6 +1695,15 @@ class ProductAgent(LlmAgent):
 
             task_id = payload.get("task_id", "?")
             status = payload.get("status", "unknown")
+            delivery_runtime = getattr(agent, "delivery_runtime", None)
+            if delivery_runtime is not None:
+                try:
+                    if not delivery_runtime.accept(str(msg.sender), payload):
+                        return
+                except ValueError as exc:
+                    agent.logger.error("Delivery acknowledgement rejected: %s", exc)
+                    delivery_runtime.stop(str(exc))
+                    return
             content = str(payload.get("content") or "").strip()
             observations = payload.get("observations")
             if not isinstance(observations, dict):
@@ -1711,7 +1766,7 @@ class ProductAgent(LlmAgent):
                 params = task_node.get("params", {})
                 part_name = agent._tracked_part_name_for_task(task_node)
 
-                if part_name:
+                if part_name and delivery_runtime is None:
                     agent._apply_part_tracker_update(
                         part_name=part_name,
                         function_name=function_name,
@@ -1782,6 +1837,21 @@ class ProductAgent(LlmAgent):
                 payload = json.loads(msg.body or "{}")
             except json.JSONDecodeError:
                 agent.logger.warning("[Product] Malformed replan_request body.")
+                return
+
+            delivery_runtime = getattr(agent, "delivery_runtime", None)
+            if delivery_runtime is not None:
+                event = payload.get('event') or {}
+                event_task = event.get('task_id') if isinstance(event, dict) else None
+                task_ids = {node['id'] for node in agent.process_planner.nodes}
+                if event_task and event_task not in task_ids:
+                    agent.logger.info("Ignored CCA request for a previous delivery task: %s", event_task)
+                    return
+                delivery_runtime.stop(f"CCA requested replanning: {payload.get('reason', 'unknown')}")
+                delivery_runtime.outcome['supervisor_request'] = payload
+                delivery_runtime.save()
+                await delivery_runtime.actor.worker.cancel()
+                agent.logger.warning("Delivery stopped; recovery execution is not integrated for this order.")
                 return
 
             reason = payload.get("reason", "unknown")
@@ -1870,6 +1940,12 @@ class ProductAgent(LlmAgent):
                 agent.runtime_repair_state = "idle"
                 agent._clear_plan_safety_alert()
                 await asyncio.to_thread(agent._persist_product_state)
+                return
+
+            delivery_runtime = getattr(agent, "delivery_runtime", None)
+            if delivery_runtime is not None:
+                delivery_runtime.stop("CCA runtime plan validation failed")
+                await delivery_runtime.actor.worker.cancel()
                 return
 
             if agent._runtime_repair_inflight:
@@ -2079,6 +2155,11 @@ class ProductAgent(LlmAgent):
             if not agent.resource_jids:
                 return
 
+            delivery_runtime = getattr(agent, "delivery_runtime", None)
+            if delivery_runtime is not None and delivery_runtime.stopped:
+                await asyncio.sleep(0.1)
+                return
+
             if agent._runtime_recovery_blocks_execution():
                 await asyncio.sleep(0.05)
                 return
@@ -2173,7 +2254,8 @@ class ProductAgent(LlmAgent):
                 # Build the instruction for the RobotAgent from the DAG node.
                 # Recovery macro primitive steps own their destination intent.
                 try:
-                    params = agent._dispatch_params_for_task_node(task_node)
+                    params = (dict(task_node['params']) if delivery_runtime is not None
+                              else agent._dispatch_params_for_task_node(task_node))
                 except RuntimeError as exc:
                     if "Recovery Safety Check dispatch blocked" not in str(exc):
                         raise
@@ -2189,6 +2271,14 @@ class ProductAgent(LlmAgent):
                     "function_name": task_node.get("function_name"),
                     "params": params,
                 }
+
+                if delivery_runtime is not None:
+                    try:
+                        delivery_runtime.prepare_dispatch(task_node)
+                    except ValueError as exc:
+                        agent.logger.error("Delivery dispatch rejected: %s", exc)
+                        delivery_runtime.stop(str(exc))
+                        return False
 
                 msg = agent._compose_task_msg(
                     to=to,

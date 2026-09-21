@@ -9,6 +9,11 @@ import threading
 import time
 from typing import Any
 
+from kmr_base_controller import (
+    occupancy_grid_footprint_is_clear,
+    planar_pose,
+    prepare_base_path,
+)
 
 UR_JOINT_SUFFIXES = (
     "shoulder_pan_joint",
@@ -41,74 +46,6 @@ EXPECTED_CONTROLLED_JOINTS = {
 }
 
 
-def occupancy_grid_footprint_is_clear(
-    data: tuple[int, ...] | list[int],
-    width: int,
-    height: int,
-    resolution: float,
-    origin_x: float,
-    origin_y: float,
-    x: float,
-    y: float,
-    yaw: float,
-    half_length: float = 0.625,
-    half_width: float = 0.39,
-) -> bool:
-    """Return whether the padded KMR footprint is inside known free map cells."""
-
-    if width <= 0 or height <= 0 or resolution <= 0.0:
-        return False
-    if len(data) != width * height:
-        return False
-
-    cosine = math.cos(yaw)
-    sine = math.sin(yaw)
-    corners = tuple(
-        (
-            x + cosine * local_x - sine * local_y,
-            y + sine * local_x + cosine * local_y,
-        )
-        for local_x in (-half_length, half_length)
-        for local_y in (-half_width, half_width)
-    )
-    map_max_x = origin_x + width * resolution
-    map_max_y = origin_y + height * resolution
-    if any(
-        corner_x < origin_x
-        or corner_x > map_max_x
-        or corner_y < origin_y
-        or corner_y > map_max_y
-        for corner_x, corner_y in corners
-    ):
-        return False
-
-    cell_padding = 0.5 * resolution * (abs(cosine) + abs(sine))
-    minimum_x = max(origin_x, min(corner[0] for corner in corners) - resolution / 2.0)
-    maximum_x = min(map_max_x, max(corner[0] for corner in corners) + resolution / 2.0)
-    minimum_y = max(origin_y, min(corner[1] for corner in corners) - resolution / 2.0)
-    maximum_y = min(map_max_y, max(corner[1] for corner in corners) + resolution / 2.0)
-    minimum_column = max(0, int(math.floor((minimum_x - origin_x) / resolution)))
-    maximum_column = min(width - 1, int(math.floor((maximum_x - origin_x) / resolution)))
-    minimum_row = max(0, int(math.floor((minimum_y - origin_y) / resolution)))
-    maximum_row = min(height - 1, int(math.floor((maximum_y - origin_y) / resolution)))
-
-    for row in range(minimum_row, maximum_row + 1):
-        cell_y = origin_y + (row + 0.5) * resolution
-        for column in range(minimum_column, maximum_column + 1):
-            if data[row * width + column] < 0 or data[row * width + column] >= 65:
-                cell_x = origin_x + (column + 0.5) * resolution
-                delta_x = cell_x - x
-                delta_y = cell_y - y
-                local_x = cosine * delta_x + sine * delta_y
-                local_y = -sine * delta_x + cosine * delta_y
-                if (
-                    abs(local_x) <= half_length + cell_padding
-                    and abs(local_y) <= half_width + cell_padding
-                ):
-                    return False
-    return True
-
-
 def main() -> None:
     """Run the recovery-specific RViz marker server."""
 
@@ -117,6 +54,7 @@ def main() -> None:
     from cais_lab_robotics.action import DockKMR
     from geometry_msgs.msg import Pose, Pose2D, PoseStamped
     from interactive_markers.interactive_marker_server import InteractiveMarkerServer
+    from interactive_markers.menu_handler import MenuHandler
     from moveit_msgs.action import ExecuteTrajectory, MoveGroup
     from moveit_msgs.msg import (
         Constraints,
@@ -138,7 +76,6 @@ def main() -> None:
     from std_srvs.srv import Trigger
     from tf2_ros import Buffer, TransformException, TransformListener
     from visualization_msgs.msg import InteractiveMarker, InteractiveMarkerControl, Marker
-    from interactive_markers.menu_handler import MenuHandler
 
     class RecoveryDragMarkers(Node):
         """Expose current-state arm goals and configured KMR docking commands."""
@@ -321,7 +258,7 @@ def main() -> None:
             marker = InteractiveMarker()
             marker.header.frame_id = "world"
             marker.name = "KMR_base"
-            marker.description = "KMR_base: drag blue pad; right-click for actions"
+            marker.description = "KMR_base: drag blue pad to move; drag ring to rotate; right-click for actions"
             marker.scale = 0.7
             marker.pose.position.x = pose.x
             marker.pose.position.y = pose.y
@@ -331,22 +268,27 @@ def main() -> None:
             body = Marker()
             body.type = Marker.CUBE
             body.pose.position.x = 0.25
+            body.pose.orientation.w = 1.0
             body.scale.x, body.scale.y, body.scale.z = 0.35, 0.25, 0.06
             body.color.r, body.color.g, body.color.b, body.color.a = 0.1, 0.45, 1.0, 0.55
             control = InteractiveMarkerControl()
             control.name = "KMR_move_xy"
+            control.description = "Drag blue pad to move KMR_base"
             control.always_visible = True
             control.orientation.w = math.sqrt(0.5)
             control.orientation.y = math.sqrt(0.5)
-            control.orientation_mode = InteractiveMarkerControl.FIXED
+            # The XY plane is unchanged by yaw, and the pad must show the staged heading.
+            control.orientation_mode = InteractiveMarkerControl.INHERIT
             control.interaction_mode = InteractiveMarkerControl.MOVE_PLANE
             control.markers.append(body)
             marker.controls.append(control)
             rotate = InteractiveMarkerControl()
             rotate.name = "KMR_rotate_yaw"
-            rotate.orientation.w = 1.0
-            rotate.orientation.y = 1.0
-            rotate.orientation_mode = InteractiveMarkerControl.FIXED
+            rotate.description = "Drag ring to rotate KMR_base"
+            rotate.always_visible = True
+            rotate.orientation.w = math.sqrt(0.5)
+            rotate.orientation.y = math.sqrt(0.5)
+            rotate.orientation_mode = InteractiveMarkerControl.INHERIT
             rotate.interaction_mode = InteractiveMarkerControl.ROTATE_AXIS
             marker.controls.append(rotate)
             return marker
@@ -417,6 +359,7 @@ def main() -> None:
                 2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
                 1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
             )
+            self._clear_base_path()
             self.base_target = Pose2D(
                 x=pose.position.x,
                 y=pose.position.y,
@@ -501,7 +444,9 @@ def main() -> None:
             if self.base_pose is None:
                 self.get_logger().error("Current KMR base pose is unavailable")
                 return False
+            self._clear_base_path()
             plan_start = copy.deepcopy(self.base_pose)
+            plan_target = copy.deepcopy(self.base_target)
             if self.occupancy_map is None:
                 self.get_logger().error("/KMR/map is unavailable")
                 return False
@@ -513,9 +458,9 @@ def main() -> None:
                 map_info.resolution,
                 map_info.origin.position.x,
                 map_info.origin.position.y,
-                self.base_target.x,
-                self.base_target.y,
-                self.base_target.theta,
+                plan_target.x,
+                plan_target.y,
+                plan_target.theta,
             ):
                 self.get_logger().error(
                     "KMR base target is outside the map or overlaps a fixed obstacle"
@@ -527,25 +472,47 @@ def main() -> None:
             goal = ComputePathToPose.Goal()
             goal.goal.header.frame_id = "world"
             goal.goal.header.stamp = self.get_clock().now().to_msg()
-            goal.goal.pose.position.x = self.base_target.x
-            goal.goal.pose.position.y = self.base_target.y
-            goal.goal.pose.orientation.z = math.sin(self.base_target.theta / 2.0)
-            goal.goal.pose.orientation.w = math.cos(self.base_target.theta / 2.0)
+            goal.goal.pose.position.x = plan_target.x
+            goal.goal.pose.position.y = plan_target.y
+            goal.goal.pose.orientation.z = math.sin(plan_target.theta / 2.0)
+            goal.goal.pose.orientation.w = math.cos(plan_target.theta / 2.0)
             goal.planner_id = "GridBased"
-            goal.use_start = False
-            handle = self._wait_future(self.compute_path_client.send_goal_async(goal), 5.0)
-            self.compute_path_goal_handle = handle
-            if handle is None or not handle.accepted:
-                self.get_logger().error("KMR base target was rejected")
-                return False
-            wrapped = self._wait_future(handle.get_result_async(), 20.0)
-            self.compute_path_goal_handle = None
-            if wrapped is None or wrapped.status != GoalStatus.STATUS_SUCCEEDED:
-                self.get_logger().error("No collision-free KMR base path was found")
-                return False
-            path = wrapped.result.path
+            goal.use_start = True
+            goal.start = copy.deepcopy(goal.goal)
+            goal.start.pose.position.x = plan_start.x
+            goal.start.pose.position.y = plan_start.y
+            goal.start.pose.orientation.z = math.sin(plan_start.theta / 2.0)
+            goal.start.pose.orientation.w = math.cos(plan_start.theta / 2.0)
+            if math.hypot(plan_start.x - plan_target.x, plan_start.y - plan_target.y) < 1e-5:
+                path = Path()
+                path.header = copy.deepcopy(goal.goal.header)
+                path.poses = [goal.start, goal.goal]
+            else:
+                handle = self._wait_future(self.compute_path_client.send_goal_async(goal), 5.0)
+                self.compute_path_goal_handle = handle
+                if handle is None or not handle.accepted:
+                    self.get_logger().error("KMR base target was rejected")
+                    return False
+                wrapped = self._wait_future(handle.get_result_async(), 20.0)
+                self.compute_path_goal_handle = None
+                if wrapped is None or wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+                    self.get_logger().error("No collision-free KMR base path was found")
+                    return False
+                path = wrapped.result.path
             if not path.poses:
                 self.get_logger().error("Nav2 returned an empty KMR base path")
+                return False
+            try:
+                path = prepare_base_path(
+                    path, (plan_start.x, plan_start.y, plan_start.theta),
+                    (plan_target.x, plan_target.y, plan_target.theta),
+                    self.occupancy_map,
+                )
+            except ValueError as exc:
+                self.get_logger().error(str(exc))
+                return False
+            if self.base_target != plan_target:
+                self.get_logger().warning("KMR target changed during planning; plan again")
                 return False
             self.last_base_path = path
             self.last_base_plan_start = plan_start
@@ -573,7 +540,16 @@ def main() -> None:
                 self.get_logger().error("/KMR/validated_follow_path is unavailable")
                 return False
             goal = FollowPath.Goal()
-            goal.path = self.last_base_path
+            try:
+                goal.path = prepare_base_path(
+                    self.last_base_path,
+                    (self.base_pose.x, self.base_pose.y, self.base_pose.theta),
+                    planar_pose(self.last_base_path.poses[-1].pose), self.occupancy_map,
+                )
+            except ValueError as exc:
+                self.get_logger().error(str(exc))
+                self._clear_base_path()
+                return False
             goal.controller_id = "FollowPath"
             goal.goal_checker_id = "precise_goal_checker"
             handle = self._wait_future(self.follow_path_client.send_goal_async(goal), 5.0)

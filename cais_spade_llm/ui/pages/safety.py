@@ -27,6 +27,9 @@ def render(bridge: SystemBridge) -> None:
         """
     )
     ui.label("Safety").classes("text-2xl font-bold px-6 pt-6")
+    with ui.row().classes("px-6 items-center gap-4"):
+        ui.label("Edit and verify Safety requirements here; select the saved requirements in project setup.").classes("text-sm text-slate-600")
+        ui.link("recovery-framework setup", "/recovery-framework?tab=setup")
 
     with ui.row().classes("w-full px-6 gap-6 items-start flex-nowrap"):
         with ui.column().classes("flex-grow gap-6 min-w-0"):

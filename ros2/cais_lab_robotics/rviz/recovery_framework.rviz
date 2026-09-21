@@ -56,7 +56,7 @@ Visualization Manager:
   - Alpha: 0.45
     Class: rviz_default_plugins/Map
     Color Scheme: map
-    Enabled: false
+    Enabled: true
     Name: KMR Fixed Occupancy Map
     Topic:
       Depth: 5
@@ -92,6 +92,12 @@ Visualization Manager:
     Line Style: Lines
     Line Width: 0.04
     Name: KMR Planned Path
+    Pose Style: Arrows
+    Pose Color: 20; 255; 20
+    Shaft Length: 0.10
+    Head Length: 0.05
+    Shaft Diameter: 0.01
+    Head Diameter: 0.03
     Topic:
       Depth: 5
       Durability Policy: Volatile

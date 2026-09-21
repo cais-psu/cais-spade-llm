@@ -1,0 +1,197 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="bantam_tools_desktop_cnc">
+    <static>true</static>
+    <link name="enclosure">
+      <collision name="stand_collision">
+        <pose>0.0 0.0 0.5 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>.503 .531 1.0</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="stand_visual">
+        <pose>0.0 0.0 0.5 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>.503 .531 1.0</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.18 .20 .24 1</ambient>
+          <diffuse>.18 .20 .24 1</diffuse>
+        </material>
+      </visual>
+      <collision name="base_collision">
+        <pose>0.0 0.0 1.015 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.503 0.531 0.03</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="base_visual">
+        <pose>0.0 0.0 1.015 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.503 0.531 0.03</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.75 .78 .80 1</ambient>
+          <diffuse>.75 .78 .80 1</diffuse>
+        </material>
+      </visual>
+      <collision name="roof_collision">
+        <pose>0.0 0.0 1.483 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.503 0.531 0.02</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="roof_visual">
+        <pose>0.0 0.0 1.483 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.503 0.531 0.02</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.75 .78 .80 1</ambient>
+          <diffuse>.75 .78 .80 1</diffuse>
+        </material>
+      </visual>
+      <collision name="rear_collision">
+        <pose>-0.2415 0.0 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.531 0.433</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="rear_visual">
+        <pose>-0.2415 0.0 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.531 0.433</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.75 .78 .80 1</ambient>
+          <diffuse>.75 .78 .80 1</diffuse>
+        </material>
+      </visual>
+      <collision name="left_side_collision">
+        <pose>0.0 0.2555 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.463 0.02 0.433</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="left_side_visual">
+        <pose>0.0 0.2555 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.463 0.02 0.433</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.75 .78 .80 1</ambient>
+          <diffuse>.75 .78 .80 1</diffuse>
+        </material>
+      </visual>
+      <collision name="front_post_collision">
+        <pose>0.2415 0.2455 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.02 0.433</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="front_post_visual">
+        <pose>0.2415 0.2455 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.02 0.433</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.75 .78 .80 1</ambient>
+          <diffuse>.75 .78 .80 1</diffuse>
+        </material>
+      </visual>
+      <collision name="side_post_collision">
+        <pose>-0.2315 -0.2555 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.02 0.433</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="side_post_visual">
+        <pose>-0.2315 -0.2555 1.2465 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.02 0.433</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.75 .78 .80 1</ambient>
+          <diffuse>.75 .78 .80 1</diffuse>
+        </material>
+      </visual>
+      <collision name="spindle_collision">
+        <pose>-0.16 0.13 1.38 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.08 0.08 0.15</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="spindle_visual">
+        <pose>-0.16 0.13 1.38 0.0 0.0 0.0</pose>
+        <geometry>
+          <box>
+            <size>0.08 0.08 0.15</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.15 .17 .19 1</ambient>
+          <diffuse>.15 .17 .19 1</diffuse>
+        </material>
+      </visual>
+    </link>
+    <link name="workholding">
+      <pose>0.08 -0.08 1.06 0.0 0.0 0.0</pose>
+      <collision name="workholding_collision">
+        <pose>0 0 -0.015 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.1 0.1 0.03</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="workholding_visual">
+        <pose>0 0 -0.015 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.1 0.1 0.03</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>.20 .24 .28 1</ambient>
+          <diffuse>.20 .24 .28 1</diffuse>
+        </material>
+      </visual>
+    </link>
+    <link name="front_access">
+      <pose>0.4 -0.08 1.25 0.0 0.0 0.0</pose>
+    </link>
+    <link name="side_access">
+      <pose>0.08 -0.4 1.25 0.0 0.0 0.0</pose>
+    </link>
+  </model>
+</sdf>

@@ -120,6 +120,120 @@
         "RGOCG8-50_8mm": "GMC_Laser_Plate_Virtual/RGOCG8-50_8mm",
         "RGOCG12-50_12mm": "GMC_Laser_Plate_Virtual/RGOCG12-50_12mm",
         "RGOCG16-50_16mm": "GMC_Laser_Plate_Virtual/RGOCG16-50_16mm"
+      },
+      "dimensions_m": {
+        "gear_small": [
+          0.021877609,
+          0.021877594,
+          0.019999992
+        ],
+        "gear_medium": [
+          0.041995926,
+          0.041995926,
+          0.019999992
+        ],
+        "gear_large": [
+          0.0619944,
+          0.0619944,
+          0.019999992
+        ],
+        "KET4_Square_4mm": [
+          0.004,
+          0.004,
+          0.05
+        ],
+        "KET8_Square_8mm": [
+          0.008,
+          0.007,
+          0.05
+        ],
+        "KET12_Square_12mm": [
+          0.012,
+          0.008,
+          0.05
+        ],
+        "KET16_Square_16mm": [
+          0.016,
+          0.01,
+          0.05
+        ],
+        "RGOCG4-50_Round_4mm": [
+          0.004,
+          0.003999021,
+          0.05
+        ],
+        "RGOCG8-50_8mm": [
+          0.008,
+          0.007998042,
+          0.05
+        ],
+        "RGOCG12-50_12mm": [
+          0.012,
+          0.011997064,
+          0.05
+        ],
+        "RGOCG16-50_16mm": [
+          0.016,
+          0.015996084,
+          0.05
+        ]
+      },
+      "dimensions_source": {
+        "gear_small": {
+          "source": "ros2/cais_lab_robotics/cad_models/Gear_Small.STL",
+          "sha256": "ad56322517131ca5eeb2977b1d320f07d5f46b2cb0a0da57396e9c37c07edd21",
+          "scale_to_m": 0.001
+        },
+        "gear_medium": {
+          "source": "ros2/cais_lab_robotics/cad_models/Gear_Medium.STL",
+          "sha256": "73d2c5d06497db2042ec6624a45558398ee47c9e55ccd87d49184c179a501507",
+          "scale_to_m": 0.001
+        },
+        "gear_large": {
+          "source": "ros2/cais_lab_robotics/cad_models/Gear_Large.STL",
+          "sha256": "23653ebb972546a15404b4f945ce745a6c8162e744f37fc4d7cd853a54bd8388",
+          "scale_to_m": 0.001
+        },
+        "KET4_Square_4mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/KET4_Square_4mm.STL",
+          "sha256": "c36d7df967ab5db74f23928b4683605d05a8eca936f5204f2cab207156da5002",
+          "scale_to_m": 0.001
+        },
+        "KET8_Square_8mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/KET8_Square_8mm.STL",
+          "sha256": "55037037a4514deac9c974ad52c50b741c089719afe6edddd49b2653ab56c039",
+          "scale_to_m": 0.001
+        },
+        "KET12_Square_12mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/KET12_Square_12mm.STL",
+          "sha256": "bbd3b89e9986f74c08af5bcc8917318f5ea997d265e9400ea95f22285307b653",
+          "scale_to_m": 0.001
+        },
+        "KET16_Square_16mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/KET16_Square_16mm.STL",
+          "sha256": "6042733fcbe002990d4237d56fb0f9c62ec7f3c45040ad5f49da77450ec3ca15",
+          "scale_to_m": 0.001
+        },
+        "RGOCG4-50_Round_4mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/RGOCG4-50_Round_4mm.STL",
+          "sha256": "f4e19521792d8ebfc9df260abebc633831bad129d33f274fb879de19676c4f89",
+          "scale_to_m": 0.001
+        },
+        "RGOCG8-50_8mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/RGOCG8-50_8mm.STL",
+          "sha256": "35b2e14b3aedf1fd8b6bc98a3ec5ec26dc2ea1894c8cce41f7a9da08719e30b6",
+          "scale_to_m": 0.001
+        },
+        "RGOCG12-50_12mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/RGOCG12-50_12mm.STL",
+          "sha256": "67d0dfc1163241f644975f2bc966d6b6a8143a33b25e17c6a1415d028b554829",
+          "scale_to_m": 0.001
+        },
+        "RGOCG16-50_16mm": {
+          "source": "ros2/cais_lab_robotics/cad_models/RGOCG16-50_16mm.STL",
+          "sha256": "f254ed1c747195f38d322f5872beb30ed82fa332c5b416b59e0bcc0a9ca14e3d",
+          "scale_to_m": 0.001
+        }
       }
     },
     "target_reference": {

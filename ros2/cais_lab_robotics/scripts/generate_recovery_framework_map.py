@@ -4,15 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
 
 
 RESOLUTION_M = 0.05
 ORIGIN_X_M = -10.5
-ORIGIN_Y_M = -1.5
+ORIGIN_Y_M = -4.0
 WIDTH = 240
-HEIGHT = 126
+# Include the empty front aisle below the equipment; preserve the upper edge at 4.8 m.
+HEIGHT = 176
 FREE = 254
 OCCUPIED = 0
 
@@ -20,8 +22,6 @@ OCCUPIED = 0
 # docking markers are intentionally omitted from the occupied geometry.
 OBSTACLE_BOUNDS = {
     "Storage": (-9.65, -8.65, 1.675, 2.925),
-    "M1": (-6.85, -5.15, 1.475, 3.125),
-    "M2": (-3.45, -1.75, 1.475, 3.125),
     "ur5e-1 work area": (-6.80, -5.65, 0.72, 1.47),
     "ur5e-2 work area": (-3.40, -2.25, 0.72, 1.47),
     "Conveyor": (-6.75, -0.74, 0.32, 0.68),
@@ -30,12 +30,30 @@ OBSTACLE_BOUNDS = {
 }
 
 
+def _machine_bounds() -> dict:
+    source = Path(__file__).resolve().parents[3] / 'cais_spade_llm/initialization/recovery_framework_gazebo.json'
+    installed = Path(__file__).resolve().parents[1] / 'config/recovery_framework_gazebo.json'
+    scene = json.loads((source if source.is_file() else installed).read_text())
+    result = {}
+    for machine in scene['machines']:
+        x, y, _, _, _, yaw = machine['world_pose']
+        width, depth, _ = machine['enclosure_dimensions_m']
+        dx = (abs(math.cos(yaw))*width + abs(math.sin(yaw))*depth)/2
+        dy = (abs(math.sin(yaw))*width + abs(math.cos(yaw))*depth)/2
+        result[machine['resource_id']] = (x-dx, x+dx, y-dy, y+dy)
+    return result
+
+
+OBSTACLE_BOUNDS.update(_machine_bounds())
+
+
 def pixel_center(row: int, column: int) -> tuple[float, float]:
     """Return the world position at the center of a PGM pixel."""
 
     x = ORIGIN_X_M + (column + 0.5) * RESOLUTION_M
     y = ORIGIN_Y_M + (HEIGHT - row - 0.5) * RESOLUTION_M
-    return x, y
+    # Preserve cells exactly on obstacle edges when the map origin or size changes.
+    return round(x, 10), round(y, 10)
 
 
 def occupied_at(x: float, y: float) -> bool:

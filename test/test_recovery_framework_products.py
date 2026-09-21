@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import copy
 import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from cais_spade_llm.product import profile
 from cais_spade_llm.product.order import load_product_order_file, validate_product_order
 from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.ui.pages.products import (
@@ -18,21 +21,16 @@ from cais_spade_llm.ui.pages.products import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = (
-    ROOT
-    / "cais_spade_llm/initialization/products/assembly_board-v1-recovery-framework.json"
+    ROOT / "cais_spade_llm/initialization/products/assembly_board-v1-recovery-framework.json"
 )
 GEOMETRY_PATH = (
     ROOT
     / "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json"
 )
 ORDER_PATH = (
-    ROOT
-    / "cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json"
+    ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json"
 )
-LEGACY_MANIFEST_PATH = ROOT / "cais_spade_llm/initialization/products/assembly_board-v1.json"
-LEGACY_GEOMETRY_PATH = (
-    ROOT / "cais_spade_llm/specification/products/geometry/assembly_board-v1.json"
-)
+LEGACY_GEOMETRY_PATH = ROOT / "test/fixtures/case3_recovery/assembly_board-v1.json"
 CAD_DIR = ROOT / "ros2/cais_lab_robotics/cad_models"
 
 COMPONENTS = [
@@ -98,9 +96,9 @@ def test_recovery_manifest_keeps_one_internal_product_agent_symbol() -> None:
     assert product["jid"] == "assembly_board-v1@localhost"
     assert product["product_geometry_file"] == str(GEOMETRY_PATH.relative_to(ROOT))
     assert product["product_order_file"] == str(ORDER_PATH.relative_to(ROOT))
-    assert _preferred_product_file(
-        [str(LEGACY_MANIFEST_PATH), str(MANIFEST_PATH)]
-    ) == str(MANIFEST_PATH)
+    assert _preferred_product_file(["another_product.json", str(MANIFEST_PATH)]) == str(
+        MANIFEST_PATH
+    )
 
 
 def test_catalog_contains_exactly_eleven_selectable_components() -> None:
@@ -143,6 +141,42 @@ def test_catalog_binds_exact_sources_and_targets() -> None:
     }
 
 
+@pytest.mark.parametrize("steps", [
+    [],
+    [{"processesToComplete": []}],
+    [{"processesToComplete": [{"process": "assembly"}], "locationsToComplete": []}],
+    [{"processesToComplete": [{"process": "trim"}]},
+     {"processesToComplete": [{"process": "assembly"}]}],
+    [{"processesToComplete": [{"process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"}]}],
+    [{"processesToComplete": [{"process": "assembly"}, {"process": "assembly"}]}],
+])
+def test_process_plan_rejects_incomplete_or_mixed_contracts(steps) -> None:
+    order = load_product_order_file(ORDER_PATH)
+    order["parts"] = ["gear_small"]
+    order["processPlan"]["gear_small"] = steps
+    with pytest.raises(ValueError):
+        validate_product_order(order, _gazebo_geometry(), require_process_requirements=True)
+
+
+def test_process_plan_requires_geometry_and_preserves_legacy_orders() -> None:
+    geometry = _gazebo_geometry()
+    order = load_product_order_file(ORDER_PATH)
+    order["parts"] = ["gear_small"]
+    legacy = copy.deepcopy(order)
+    legacy.pop("processPlan")
+    legacy["requirements"] = {"gear_small": [
+        {"process": "print_part"}, {"state": "assembled", "target": TARGETS["gear_small"]}
+    ]}
+    assert validate_product_order(legacy, geometry).payload == legacy
+    order["requirements"] = legacy["requirements"]
+    with pytest.raises(ValueError, match="not both"):
+        validate_product_order(order, geometry)
+    order.pop("requirements")
+    del geometry["parts"]["assembly_target_map"]["gear_small"]
+    with pytest.raises(ValueError, match="exact feature"):
+        validate_product_order(order, geometry)
+
+
 def test_all_and_subset_orders_round_trip_with_exact_identifiers(tmp_path: Path) -> None:
     geometry = _gazebo_geometry()
     all_order = load_product_order_file(ORDER_PATH)
@@ -150,6 +184,12 @@ def test_all_and_subset_orders_round_trip_with_exact_identifiers(tmp_path: Path)
     assert validated_all.payload["product"] == "assembly_board-v1"
     assert validated_all.payload["parts"] == "all"
     assert validated_all.selected_parts == COMPONENTS
+    assert "requirements" not in all_order
+    assert all_order["processPlan"]["KET4_Square_4mm"] == [
+        {"processesToComplete": [{"process": "trim", "result": "square"}]},
+        {"processesToComplete": [{"process": "assembly"}]},
+    ]
+    assert "locationsToComplete" not in json.dumps(all_order)
 
     for selected in (
         ["gear_small"],
@@ -193,12 +233,12 @@ def test_incomplete_known_nist_maps_are_rejected() -> None:
         )
 
 
-def test_historical_assembly_board_files_retain_mocked_configuration() -> None:
-    legacy_manifest = json.loads(LEGACY_MANIFEST_PATH.read_text(encoding="utf-8"))
+def test_historical_recovery_fixture_retains_its_original_component_symbols() -> None:
     legacy_geometry = json.loads(LEGACY_GEOMETRY_PATH.read_text(encoding="utf-8"))
-    assert legacy_manifest["assembly_board-v1"]["product_geometry_file"].endswith(
-        "/geometry/assembly_board-v1.json"
+    runtime_context = json.loads(
+        (LEGACY_GEOMETRY_PATH.parent / "runtime_context.json").read_text(encoding="utf-8")
     )
+    assert ROOT / runtime_context["product_geometry"] == LEGACY_GEOMETRY_PATH
     assert legacy_geometry["gazebo"]["parts"]["model_map"] == {
         "SG": "gear_small",
         "MG": "gear_medium",
@@ -210,3 +250,82 @@ def test_historical_assembly_board_files_retain_mocked_configuration() -> None:
         "MCP": "circ_pin_medium",
         "LCP": "circ_pin_large",
     }
+
+
+def test_active_product_files_contain_only_the_configured_nist_setup() -> None:
+    for active_path in (MANIFEST_PATH, GEOMETRY_PATH):
+        assert sorted(active_path.parent.glob("*.json")) == [active_path]
+    assert {path.name for path in ORDER_PATH.parent.glob("*.json")} == {
+        ORDER_PATH.name, "assembly_board-v1-kmr-storage-m1.json"
+    }
+
+
+def test_product_geometry_resolves_the_exact_identifier_from_its_manifest() -> None:
+    profile._load_product_meta.cache_clear()
+    profile._load_geometry_doc_for_destination.cache_clear()
+    assert profile._product_geometry_path_for_token("assembly_board-v1") == GEOMETRY_PATH
+    assert profile._load_product_meta("assembly_board-v1-recovery-framework") == {}
+    for part_name in COMPONENTS:
+        resolved = ProductProfile.resolve_place_geometry(
+            part_name=part_name,
+            destination_location="assembly_board-v1",
+            execution_mode="simulation",
+        )
+        assert resolved["model_name"] == part_name
+        assert resolved["slot_xy"] == _gazebo_geometry()["assembly_board"]["slots"][part_name]
+    assert (
+        ProductProfile.resolve_place_geometry(
+            part_name="MG", destination_location="assembly_board-v1", execution_mode="simulation"
+        )
+        == {}
+    )
+
+
+def test_product_manifest_lookup_rejects_ambiguous_identifiers(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(profile, "_PACKAGE_ROOT", tmp_path)
+    manifests = tmp_path / "initialization/products"
+    manifests.mkdir(parents=True)
+    meta = {"product_geometry_file": str(GEOMETRY_PATH)}
+    first = manifests / "different_filename.json"
+    first.write_text(json.dumps({"assembly_board-v1": meta}))
+    profile._load_product_meta.cache_clear()
+    try:
+        assert profile._load_product_meta("assembly_board-v1") == meta
+        assert profile._load_product_meta("different_filename") == {}
+        (manifests / "duplicate.json").write_text(first.read_text())
+        profile._load_product_meta.cache_clear()
+        assert profile._load_product_meta("assembly_board-v1") == {}
+    finally:
+        profile._load_product_meta.cache_clear()
+
+
+def test_nist_catalog_matches_configured_scene_inventory_and_meshes() -> None:
+    scene = json.loads(
+        (ROOT / "cais_spade_llm/initialization/recovery_framework_gazebo.json").read_text()
+    )
+    world = ET.parse(ROOT / "ros2/cais_lab_robotics/worlds/table_recovery_framework.world")
+    pegs = list(scene["Storage"]["slots"])
+    gears = scene["3D Printing Station"]["supported_products"]
+    assert set(COMPONENTS) == set(pegs + gears)
+    for part_name in pegs:
+        model = world.find(f"./world/model[@name='{part_name}']")
+        assert model is not None
+        assert model.findtext("link/visual/geometry/mesh/uri") == (
+            f"model://cad_models/{CAD_FILENAMES[part_name]}"
+        )
+    for part_name in gears:
+        assert any(
+            include.findtext("name") == part_name
+            and include.findtext("uri") == f"model://{part_name}"
+            for include in world.findall("./world/include")
+        )
+
+
+def test_stationary_registration_does_not_reuse_removed_geometry() -> None:
+    from cais_spade_llm.ui.perception_manager import PerceptionManager
+
+    result = PerceptionManager.stationary_inspection_configuration(
+        SimpleNamespace(project_root=ROOT)
+    )
+    assert Path(result["geometry_path"]) == GEOMETRY_PATH
+    assert result["configured"] is False

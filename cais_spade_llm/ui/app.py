@@ -7,13 +7,14 @@ import base64
 from contextlib import nullcontext, suppress
 from pathlib import Path
 
-from nicegui import app, ui
+from nicegui import app, context, ui
 from nicegui.elements.drawer import Drawer as NiceGUIDrawer
 from nicegui.elements.timer import Timer as NiceGUITimer
 from starlette.responses import Response, StreamingResponse
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
+from cais_spade_llm.ui.refresh import PageRefresh
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _NO_PERCEPTION_FRAME_JPEG = base64.b64decode(
@@ -37,13 +38,16 @@ _NO_PERCEPTION_FRAME_JPEG = base64.b64decode(
 _SIDEBAR_BG = "bg-slate-800"
 _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
-    ("Dashboard", "/", "dashboard"),
-    ("Spec2Primitives", "/spec2primitives", "account_tree"),
-    ("Perception", "/perception", "photo_camera"),
-    ("Control", "/control", "gamepad"),
-    ("Safety", "/safety", "shield"),
-    ("Products", "/products", "inventory_2"),
-    ("Resources", "/resources", "precision_manufacturing"),
+    ("dashboard", "/", "dashboard"),
+    ("products", "/products", "inventory_2"),
+    ("resources", "/resources", "precision_manufacturing"),
+    ("safety", "/safety", "shield"),
+    ("control", "/control", "gamepad"),
+    ("perception", "/perception", "photo_camera"),
+]
+_PROJECT_ITEMS = [
+    ("recovery-framework", "/recovery-framework", "restore"),
+    ("spec2primitives", "/spec2primitives", "account_tree"),
 ]
 
 
@@ -80,6 +84,14 @@ def _patch_nicegui_lifecycle() -> None:
 
 
 def _header(bridge: SystemBridge) -> None:
+    """Render persistent status without polling disconnected or hidden pages."""
+    polling = PageRefresh()
+    client = context.client
+    ui.on("cais_page_visibility", lambda e: setattr(client, "_cais_visible", bool(e.args)))
+    ui.add_body_html("""<script>
+        document.addEventListener('visibilitychange', () =>
+            emitEvent('cais_page_visibility', !document.hidden));
+    </script>""")
     with ui.header().classes(f"{_HEADER_BG} text-white items-center gap-4 px-6"):
         with ui.link(target="/").classes("no-underline flex items-center gap-3"):
             ui.image("/static/favicon.ico").classes("w-8 h-8")
@@ -92,7 +104,14 @@ def _header(bridge: SystemBridge) -> None:
         status_icon = ui.icon("circle").classes("text-sm")
         status_label = ui.label("Stopped").classes("text-sm")
 
+        last_status = None
+
         def _update_status():
+            nonlocal last_status
+            state = (bridge.system_running, bridge._starting)
+            if state == last_status:
+                return
+            last_status = state
             if bridge.system_running:
                 status_icon.props("color=green")
                 status_label.text = "Running"
@@ -103,7 +122,7 @@ def _header(bridge: SystemBridge) -> None:
                 status_icon.props("color=red")
                 status_label.text = "Stopped"
 
-        ui.timer(1.0, _update_status)
+        polling.timer(1.0, _update_status)
 
         # Execution mode badge.
         _MODE_DISPLAY = {"dry_run": "Dry Run", "simulation": "Simulation", "physical": "Physical"}
@@ -112,9 +131,20 @@ def _header(bridge: SystemBridge) -> None:
         ).props("color=blue outline")
 
         def _update_badge():
-            mode_badge.text = _MODE_DISPLAY.get(bridge.execution_mode, bridge.execution_mode)
+            value = _MODE_DISPLAY.get(bridge.execution_mode, bridge.execution_mode)
+            if mode_badge.text != value:
+                mode_badge.text = value
 
-        ui.timer(2.0, _update_badge)
+        polling.timer(2.0, _update_badge)
+
+
+def _sidebar_link(label: str, path: str, icon: str) -> None:
+    with ui.link(target=path).classes("no-underline w-full"):
+        with ui.row().classes(
+            "items-center no-wrap gap-3 px-4 py-2 hover:bg-slate-700 rounded cursor-pointer w-full"
+        ):
+            ui.icon(icon).classes("text-slate-300")
+            ui.label(label).classes("text-slate-200 text-sm leading-5")
 
 
 def _sidebar() -> None:
@@ -125,13 +155,15 @@ def _sidebar() -> None:
         ui.label("Navigation").classes(
             "text-xs text-slate-400 uppercase tracking-wider px-4 pt-4 pb-2"
         )
-        for label, path, icon in _NAV_ITEMS:
-            with ui.link(target=path).classes("no-underline"):
-                with ui.row().classes(
-                    "items-center gap-3 px-4 py-2 hover:bg-slate-700 rounded cursor-pointer w-full"
-                ):
-                    ui.icon(icon).classes("text-slate-300")
-                    ui.label(label).classes("text-slate-200 text-sm leading-5")
+        _sidebar_link(*_NAV_ITEMS[0])
+        with ui.expansion("projects", icon="folder", value=True).classes(
+            "w-full text-slate-200 text-sm"
+        ).props('dense header-class="rounded" expand-icon-class="text-slate-300"'):
+            with ui.column().classes("w-full gap-0 pl-4"):
+                for label, path, icon in _PROJECT_ITEMS:
+                    _sidebar_link(label, path, icon)
+        for label, path, icon in _NAV_ITEMS[1:]:
+            _sidebar_link(label, path, icon)
 
 
 def _page_wrapper(bridge: SystemBridge):
@@ -164,7 +196,15 @@ def create_app() -> None:
     from cais_spade_llm.spec2primitives.adapters.ui_runtime import (
         create_spec2primitives_ui_runtime,
     )
-    from cais_spade_llm.ui.pages import control, dashboard, perception, products, resources, safety
+    from cais_spade_llm.ui.pages import (
+        control,
+        dashboard,
+        perception,
+        products,
+        recovery_framework,
+        resources,
+        safety,
+    )
 
     spec2primitives_runtime = create_spec2primitives_ui_runtime(bridge)
 
@@ -257,6 +297,12 @@ def create_app() -> None:
     def index_page():
         _page_wrapper(bridge)
         dashboard.render(bridge)
+
+    @ui.page("/recovery-framework")
+    def recovery_framework_page() -> None:
+        """Open recovery-framework setup, run, and saved results."""
+        _page_wrapper(bridge)
+        recovery_framework.render(bridge)
 
     @ui.page("/control")
     def control_page():

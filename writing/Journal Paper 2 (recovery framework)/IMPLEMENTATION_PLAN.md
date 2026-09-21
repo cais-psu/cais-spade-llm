@@ -1,5 +1,109 @@
 # Recovery framework journal implementation plan
 
+## Compact M1/M2 and KMR delivery (2026-09-21)
+
+The new order is
+[`assembly_board-v1-kmr-storage-m1.json`](../../cais_spade_llm/specification/products/orders/assembly_board-v1-kmr-storage-m1.json).
+It references the existing `assembly_board-v1` product and geometry, selects only
+`KET4_Square_4mm`, and uses `quantity: 1`. Its `completion_conditions` are a
+conjunction of exact descriptor fields: M1 loaded with that part, its Storage
+inventory false, and KMR idle, empty, and at M1. Orders without these conditions
+retain their assembly goals.
+
+To use it, open **projects → recovery-framework → setup**, select this Product
+Order, retain **Simulation**, all 12 permitted resources, and no failure, then
+click **Save setup**. Open **run** and use the existing **Start System**. Startup
+prepares the scene and controllers, snapshots the saved configuration, and
+rejects changed configuration or inconsistent observed inventory. **Stop System**
+cancels preparation and execution while retaining acknowledged custody and
+leaving Gazebo available. Use **Reset Scope → Reset Gazebo → Reset** before
+repeating a transfer. Restart the UI to load the updated Python code.
+
+ProductAgent plans `pick_part`, `move_to_resource`, and `place_release` through
+the nominal ProcessPlanner. KMR ResourceAgent dispatches through the existing
+CCA protocol. Storage and M1 participate in the same atomic nominal handoffs.
+`move_to_resource` retains the `DockKMR` controller and `/KMR/dock` endpoint.
+Arm/gripper controller results, acknowledged attachment/release, measured part
+poses, and robot withdrawal are required before task completion. Ordinary
+placement records neither machining nor assembly completion.
+
+M1 and M2 now use the compact envelope in
+[MACHINING_STATION_LAYOUT.md](MACHINING_STATION_LAYOUT.md); M1 still handles
+square pegs and M2 circular pegs. Loading openings, interiors, stands, and
+fixed-joint grasp attachment are simulation assumptions. Gazebo evidence is
+saved under
+`cais_spade_llm/monitor/recovery_gazebo_runs/<run>/run.json`, and can be read in
+**results → Gazebo delivery runs**. Saved inputs, descriptors, configuration
+fingerprints, plans, observations, acknowledgements, histories, and outcomes
+remain tied to that run. Rendering and report selection perform reads only.
+
+The active `lg_slippage.json` file and its resource bindings have been removed.
+Historical results and isolated legacy test fixtures are retained; `LG` is not
+an available NIST component. NIST failure settings and resource restrictions
+remain blocked for this delivery until their execution is integrated.
+
+[Adaptive requirement/capability matching](ADAPTIVE_REQUIREMENT_CAPABILITY_MATCHING.md)
+for this Gazebo delivery is **planned, not implemented**. Failure injection, recovery behavior, full
+assembly execution, optional setup plan generation, and the outstanding
+selector correction remain subsequent work. This delivery uses the existing
+`SystemBridge` Start/Stop interface. The concurrent read-only capability accessor
+is preserved; this delivery makes no CCA or Java repository changes.
+
+### Recorded validation (2026-09-21)
+
+**Observed Gazebo transfer:**
+[`20260921T194635_5b778116/run.json`](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T194635_5b778116/run.json)
+records three acknowledged tasks through the real Start System agent path:
+`pick_part`, `move_to_resource`, and `place_release`. M1 finished `loaded` with
+`KET4_Square_4mm`; Storage inventory became false; KMR finished `idle`, empty,
+and at M1. The released part was observed at approximately
+`(-6.080000, 1.820000, 1.059990)` m, and the withdrawn TCP at
+`(-6.845278, 1.927482, 2.271986)` m. `processCompleted` remained empty.
+Reapplying the recorded Gazebo acknowledgements through the shared projector
+reproduced the final resource and ProductState values.
+
+The [control check](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T194635_5b778116/control_verification.json)
+records a harmless duplicate Start, Stop retaining Gazebo, and rejection of a
+repeat transfer without an explicit scene reset. The acceptance harness used
+`SystemBridge.start_system()`/`stop_system()` and the same preparation function
+as the Run page, with headless Gazebo. It was not a physical robot test.
+
+**Observed Stop during motion:** the separate
+[control check](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/control_verification.json)
+records the same active arm goal changing from status `2` to `6` after Stop
+System. Cancellation reaches the KMR arm/gripper controllers before waiting
+for MoveIt cancellation. No task was committed: Storage retained the part,
+KMR remained empty, and Gazebo stayed available. Task IDs include the run ID
+so delayed acknowledgements or CCA messages cannot match a later run.
+
+**Static and focused checks:** the final combined check passed 354 tests;
+three UI assertions changed during the concurrent edits. Re-running the entire
+affected Resources/setup group passed all 47 tests, including those three.
+Coverage includes delivery, nominal agent transitions, resource DES, setup/pages,
+product configuration, Gazebo layout, RViz startup, and `place_insert` release
+regressions. `poetry check`, full
+`compileall` for `cais_spade_llm` and `ros2`, UI `--help`, and `git diff --check`
+passed. `make bootstrap-gazebo` completed all 16 packages. Poetry retains its
+existing metadata deprecation warnings.
+
+Current geometry also passed [collision-aware IK and complete Cartesian
+approach checks](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/machine_paths.json)
+for KMR at M1/M2, `ur5e-1` at M1, and `ur5e-2` at M2. These
+planning checks do not establish executed UR5e handling. The enclosure, robot
+openings, and fixed-joint grasp remain simulation assumptions. Failed
+commissioning attempts are retained with their observations; they are not
+successful delivery evidence.
+
+The completed transfer predates the stand-height correction from 0.98 m to
+1.00 m; its saved snapshot retains that configuration. The later reach and
+active Stop checks use the corrected stand. The retained Gazebo scene is from
+the Stop test, with the arm stopped during pickup; reset it before another run.
+
+`completion_conditions` currently supports one selected part with `quantity: 1`.
+The separately edited Products/Resources views and removal of the offline-run
+UI are preserved; their broader model changes are outside this delivery's
+Gazebo acceptance claim.
+
 ## Purpose and status
 
 This document is the implementation roadmap for `recovery-framework-journal`.
@@ -54,7 +158,112 @@ Implement one phase at a time. Update its status only with the changed paths,
 verification commands, results, and saved execution evidence. An accepted
 recovery proposal does not establish successful execution or assembly.
 
-## Current focus: collision-aware KMR navigation and reach validation
+## Historical UI/settings phase (2026-09-21; superseded by delivery increment)
+
+The **UI/settings phase is implemented**. Products, Resources, and Safety own
+their definitions. **projects → recovery-framework → setup** selects those
+definitions and saves one experiment. The existing tabs remain **run → setup →
+results**, with **run** open by default.
+
+| Page | Current responsibility |
+| --- | --- |
+| Products | Product definitions, Product Orders, all 11 exact NIST components, required processes and completion conditions, linked geometry, and Part Tracker. |
+| Resources | All 12 parameterized capability models, configured assignments/inventory/routes/capacities and execution support; expandable DES details and the existing Live Robot Status polling path. |
+| Safety | Safety requirement editing, generated interpretations, LTLf/DFA, and verification. |
+| recovery-framework → setup | Product/Order, Safety, execution mode, permitted resources, existing recovery settings, and failure scenario settings; explicit **Save setup**, reload, and editor links. |
+| recovery-framework → run | Saved setup, readiness, existing **Start System**/**Stop System**, progress, and recovery controls. No second copy of the experiment selectors. |
+| recovery-framework → results | Saved recovery artifacts and Gazebo delivery runs, with their recorded inputs. Missing historical configuration remains `not recorded`. |
+
+The independent settings file is
+[`recovery_framework_setup.json`](../../cais_spade_llm/initialization/recovery_framework_setup.json).
+Its default selects `assembly_board-v1-recovery-framework`, an order with
+`quantity: 1`, all 12 exact resource IDs, and no failure. M1 retains square
+pegs; M2 retains circular pegs. **Save setup** validates references and exact
+bindings, then writes only this file. Browsing, changing a draft, and inspecting
+results do not rewrite definitions or legacy failure files. The saved recovery
+selector values must still match `recovery_outline_experiment_settings.json`;
+**Reload referenced definitions** updates that draft snapshot explicitly.
+
+All four documented scenarios can be configured: **Conveyor breakdown**,
+**ur5e-1 breakdown**, **Machining breakdown during part processing**, and
+**Part slippage**. Valid settings can be saved with **execution not integrated**.
+Start System blocks a selected failure or resource restriction because the
+current runtime cannot honor it. Exclusion applies from the beginning of an
+experiment; a breakdown describes a later event. Existing unrestricted startup
+and stop dispatch remain unchanged.
+
+Part slippage uses one parameterized configuration for all 11 NIST components:
+
+- The selected resource must be a permitted manipulator. The exact part must
+  belong to both its eligible parts and the selected Product Order. The task
+  comes from that resource's capability alternatives and retains its bindings.
+- `before_execute` means before the selected task executes;
+  `after_execute_before_commit` means after execution and before recording
+  successful completion. Occurrence is once per run.
+- Position and a unit quaternion define a future drop target in `world`.
+  This is configured input, not an observed pose or demonstrated reachability.
+- The optional additional condition names another permitted resource holding
+  another exact selected, eligible part. It changes no custody and chooses no
+  recovery sequence.
+- The draft examples are `ur5e-3` / `KET4_Square_4mm` and `ur5e-4` / `gear_large`.
+  Each requires an explicit drop position before saving. `lg_slippage` and its
+  `LG` binding remain unchanged and are not accepted as NIST aliases.
+
+Historical recovery artifacts keep only their recorded configuration; this phase
+does not retroactively attach the current setup or claim a new Gazebo trial.
+
+### UI/settings verification recorded on 2026-09-21
+
+Implementation paths:
+
+- [`ui/recovery_setup.py`](../../cais_spade_llm/ui/recovery_setup.py): separate
+  persistence, reference validation, exact failure bindings, and startup support checks.
+- [`ui/components/recovery_setup.py`](../../cais_spade_llm/ui/components/recovery_setup.py):
+  the draft editor and explicit save/reload controls.
+- [`ui/pages/recovery_framework.py`](../../cais_spade_llm/ui/pages/recovery_framework.py)
+  and [`ui/pages/recovery_run.py`](../../cais_spade_llm/ui/pages/recovery_run.py):
+  setup links, preserved tabs, saved run summary, and guarded existing controls.
+- [`test/test_recovery_setup.py`](../../test/test_recovery_setup.py): settings,
+  all 11 part bindings, invalid inputs, complete page interaction, and unchanged
+  legacy definitions. Existing project, nominal, and NIST product suites provide
+  the surrounding regressions.
+
+```bash
+poetry run pytest -q test/test_recovery_setup.py test/test_project_pages.py test/test_nominal_agents.py test/test_nominal_resource_des.py test/test_recovery_framework_products.py
+poetry check
+poetry run python -m compileall -q cais_spade_llm ros2
+poetry run python -m cais_spade_llm.ui_main --help
+git diff --check
+```
+
+**Result:** 161 tests passed. Compilation, CLI help, and whitespace checks passed.
+`poetry check` passed with existing package-metadata deprecation warnings.
+Start/Stop dispatch was checked with a mocked bridge; no new Gazebo motion,
+physical execution, failure injection, or recovery trial was performed. The
+earlier dated execution evidence below is preserved separately.
+
+### Following implementation increments
+
+1. **Nominal Start System integration:** bind the saved setup to the nominal
+   agent handlers and existing execution controls; optional plan generation in
+   setup belongs here. Record the setup and input snapshots with each new run.
+   The first Gazebo acceptance case is one square peg transferred by KMR from
+   Storage to M1, with checked docking/manipulation and acknowledged custody.
+   Clicking Start System does not gain that behavior from this UI/settings phase.
+2. **Failure injection:** bind the saved scenario to the named checkpoints,
+   once-per-run occurrence, exact part and resource, and observed Gazebo effects.
+   Preserve the legacy `lg_slippage` path separately. Implement resource
+   restrictions before allowing restricted startup.
+3. **Recovery behavior:** use observed failure state for PA/RA/CCA validation,
+   selection, execution, and nominal resumption or justified infeasibility.
+   Do not preset the `ur5e-3`/`ur5e-4` recovery sequence.
+
+This increment does not change `SystemBridge`, agents, controllers, nominal
+DES definitions, or the selector algorithm. The strict-expansion work in
+[JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md](JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md)
+remains outstanding; UI configuration is not evidence of its completion.
+
+## Phase 3 motion work: collision-aware KMR navigation and reach validation
 
 The known NIST Products increment is complete. The recovery framework's eleven
 loose NIST components form a fixed, configuration-known catalog. Individual
@@ -706,23 +915,21 @@ The nominal material flow is:
 
 ```mermaid
 flowchart LR
-    storage[Storage] --> kmr[KMR]
-    kmr --> m1[M1]
-    kmr --> m2[M2]
-    m1 --> handling1[ur5e-1]
-    m2 --> handling2[ur5e-2]
-    handling1 --> conveyor[Conveyor]
-    handling2 --> conveyor
-    conveyor --> output[Conveyor output nest]
-    output --> buffer[Buffer For Machined parts]
-    buffer --> handling3[ur5e-3]
-    handling3 --> assembly[Assembly Station]
-    printing1[3D Printing Station] --> handling4[ur5e-4]
-    handling4 --> assembly
-    assembly --> board[Assembly Board]
-    board --> exit_handling[ur5e-3]
-    exit_handling --> exit[Exit]
+    S["Storage"] -->|KMR| M1["M1"]
+    S -->|KMR| M2["M2"]
+    M1 -->|ur5e-1| C["Conveyor"]
+    M2 -->|ur5e-2| C
+    C --> B["Buffer For Machined parts"]
+    B -->|ur5e-3| A["assembly_board-v1"]
+    P["3D Printing Station"] -->|ur5e-4| A
+    A -->|ur5e-3| E["Exit"]
 ```
+
+These are configured nominal connections, not evidence of processing eligibility
+or successful execution. Conveyor feeds buffer zone 1 directly through Conveyor
+output nest. Buffer For Machined parts advances the part through its zones, and
+`ur5e-3` picks from zone 4 for assembly. Alternative connections require capability
+and feasibility validation.
 
 KMR's initial model contains no route to Conveyor, Assembly Station, or Buffer
 For Machined parts. Recovery may propose new routes and handling actions, which
@@ -735,6 +942,96 @@ The current Gazebo assembly bindings are `ur5e-3` and `ur5e-4`; `ur5e-1` and
 `ur5e-2` are at M1/M2. Earlier implementation evidence retains its original
 names. Agent resource and attachment integration still requires explicit binding.
 
+### Runtime environmental capability matching
+
+Normal recovery-framework Product Orders use environmental exploration after
+**Start System**. The `requirements` map declares ordered product results. For
+`KET4_Square_4mm`, it contains `trim` with result `square`, followed by `assembled`
+at `GMC_Laser_Plate_Virtual/KET4_Square_4mm`. Resource and task selection happens
+at runtime. Saving an order or rendering Products and Resources does not search
+or execute a plan.
+
+1. ProductAgent sends `capability_request` to the current custodian. The request
+   carries the exact part, desired property, current product/resource state,
+   geometry, request identifier, revisions, and deadline.
+2. ResourceAgents evaluate their own parameterized task transitions and forward
+   reachable searches through neighbors sharing configured handoff states. A
+   machine evaluates its loaded prerequisite against the preceding predicted
+   loading transition. Neighbor relationships describe connected capabilities;
+   they do not imply arbitrary physical access.
+3. `capability_reply` carries returned transitions, bids, or reasons an offer
+   cannot be made. ProductAgent merges them into the environment model.
+   ProcessPlanner prefers resolved paths with execution adapters, then the fewest
+   tasks, with exact resource/event identifiers breaking ties. Model-level paths
+   remain visible when controllers are unavailable and cannot start execution.
+   Searches have deadlines, visit
+   suppression, and a state budget. Stale replies cannot authorize execution.
+4. Before dispatch, resource conditions are rechecked, the existing DAG/FSA plan
+   is checked by CCA, and ResourceAgent requests CCA task permission. Execution
+   requires a bound controller, a start-condition validator, and a completion
+   evidence validator. Missing adapters and missing evidence remain visible.
+5. Only a matching successful `ack` commits product progress and all shared
+   custody effects together. Transport preserves `processCompleted`. The next
+   outstanding property is requested from the new state. Changed conditions
+   trigger another exploration; offers themselves never update actual state.
+
+All twelve runtime resource definitions use part references and indexed
+occupancy templates. `held_part`, machine `part_name`, buffer `zone_1_part`
+through `zone_4_part`, and Exit `part_name` are nullable references to registered
+workpieces. Storage, Conveyor, and printing outputs instantiate occupancy from
+order/inventory context. Resource eligibility does not use `nominal_parts`,
+`supported_products`, or `from_assignment`. Finite control states remain finite.
+The v1 nominal projector remains isolated for the explicit Storage-to-M1 delivery
+integration and historical tests; normal orders do not fall back to it.
+
+Both M1 and M2 declare support for square and circle trimming. Their current
+configuration records tooling, workholding, program, and operating parameters
+separately. The present scene has no machining program/tooling evidence, so
+these fields remain unresolved. The runtime must not interpret a former part
+assignment as proof of a configured machining operation. Future LLM recovery
+can propose supported configuration changes; configuration execution remains
+outside this increment.
+
+Products displays ordered results. Resources displays parameterized capability
+graphs, neighboring handoffs, configuration, occupancy, returned environmental
+paths, and missing-context or rejection reasons through `SystemBridge`.
+Complete task JSON, including guards, updates, product effects, evidence
+requirements, and existing robot program steps, is generated from the runtime
+models under `cais_spade_llm/monitor/environment_runs/<run>/processes/`.
+`machine_part.json`, `advance_conveyor.json`, `advance_part.json`, and
+`place_insert.json` are included. Controller code remains in Python.
+
+Runs use `schema_version: 2` with explicit process result records, for example
+`{"process": "trim", "result": "square"}`. A historical `machine_part` string is
+never relabeled as that result. Part dimensions in the example product geometry
+are derived from the existing STL files, with source hashes and unit scale.
+
+Focused tests exercise actual local SPADE inbox delivery, neighbor propagation,
+new workpiece registration, alternate machines and transport, configuration and
+geometry rejection, timeouts, acknowledgement validation, and Conveyor/buffer
+custody. Those tests use explicit test configurations and simulated controller
+evidence. They do not establish live machining, conveyor, buffer, or complete
+Gazebo execution. The separate Storage-to-M1 delivery execution remains intact.
+
+### Relationship to the semiconductor framework
+
+In the inspected local `SemiconductorSimulation_testing-master` checkout,
+[ProductAgent.java](../../../SemiconductorSimulation_testing-master/Agents/intelligentProduct/ProductAgent.java)
+sends `desiredProperty` and the current state through `getEnviromentCapabilities`.
+[ResourceAgent.java](../../../SemiconductorSimulation_testing-master/Agents/resourceAgent/ResourceAgent.java)
+searches its capability graph, propagates requests through neighboring connections
+when needed, and returns bids through `submitBid`. These are direct Java calls.
+
+This implementation preserves the reference's environmental exploration pattern:
+ResourceAgents search locally and propagate through connected neighbors;
+ProductAgent collects the returned graph and ProcessPlanner selects a path.
+`capability_request` and `capability_reply` use SPADE or the existing local SPADE
+transport. The existing `task` and `ack` message types carry execution. The
+reference's timed PTA optimization is not reproduced: this increment uses a
+bounded deterministic task-count search and the existing resource/CCA checks.
+Legacy local `compute_bid` bidding is not used for these recovery-framework
+orders.
+
 ## Existing implementation and gaps
 
 These observations come from source inspection. They are not results from the
@@ -743,7 +1040,7 @@ proposed environment.
 | Existing source | Reusable behavior or asset | Work still required |
 | --- | --- | --- |
 | [Spec2Primitives world][nist-world], [recovery framework world][recovery-world], and [CAD models][cad-models] | NIST board, gear fixtures, three gear types, eight peg types, four UR5e instances, M1/M2, Storage, Conveyor, buffer, Exit, and parked KMR. The dashboard selects the separate recovery framework world. | No static layout work is planned. Revisit only if measured reach or collision evidence requires a correction. |
-| [Products page][products-ui], [product order][product-order], and [product geometry][product-geometry] | Product choices and order validation read `assembly_board.slots`; geometry supplies target and simulator bindings. | Replace mocked component choices for the journal scenario throughout selection, orders, geometry, and execution. |
+| [Products page][products-ui], [product order][product-order], and [product geometry][product-geometry] | The current editors use the recovery-framework NIST manifest, exact subset orders, and linked geometry; obsolete product setups have been removed. | Connect these exact bindings to observed nominal execution through Start System. |
 | [Gazebo launch][dual-launch], [MoveIt launch][moveit-launch], and [robot controller][robot-controller] | UR5e/RG2 and xarm6 simulation integration and existing command feedback. | Four independent UR5e instances now launch. Complete world-obstacle planning, handling/custody bindings, and reach validation. |
 | [Resource creation][agent-creator], [ResourceAgent][resource-agent], and [ResourceProfile][resource-profile] | Robot/printing construction and resource-owned recovery interfaces. | Implement and register M1/M2, Conveyor, and KMR behavior. Unsupported resources must not appear to execute through an unnoticed `dry_run` fallback. |
 | [Recovery outline][recovery-outline], [primitive generation][primitive-generation], and [CCA safety][cca-safety] | Existing proposal, validation, selection, primitive-generation, and safety paths. | Connect the new resource evidence and exercise complete recovery in the new environment. |
@@ -794,9 +1091,9 @@ separate experiment definitions.
 | Phase | Status | Depends on | Completion requirement |
 | --- | --- | --- | --- |
 | 2 — Gazebo layout | complete (2026-09-16) | Agreed setup and existing NIST assets | Accepted static world, four UR5e instances, M1/M2, Storage, Conveyor/buffer geometry, `3D Printing Station`, Exit, and parked `KMR` are present. Motion and reach validation are Phase 3 work. |
-| 0 — Baseline and contracts | in progress: product contract complete | Phase 2 | The known NIST catalog and exact bindings are recorded; remaining resource responsibilities, WIP evidence, and configuration-change conditions are required before Phase 3. |
+| 0 — Baseline and contracts | in progress: nominal product/resource contracts implemented | Phase 2 | Known NIST identity, requirements, parameterized capabilities, nominal custody, and acknowledged transitions are tested; observed execution and configuration-change evidence remain. |
 | 1 — NIST Products | complete (2026-09-16) | Phase 2 and the Phase 0 product contract | Exact known NIST component selection, subset orders, assembly targets, and configured runtime bindings agree. |
-| 3 — Resource behavior and nominal production | in progress: collision-aware KMR simulation navigation | Phases 0–2 | KMR base/arm/gripper simulation control, current-state RViz integration, and fixed-map Nav2 planning are implemented; resource execution, nominal production, and observed custody remain. |
+| 3 — Resource behavior and nominal production | in progress: nominal planning, delivery integration, and UI/settings phase implemented | Phases 0–2 | KMR simulation navigation and Start System delivery integration exist. Verify resource execution and observed custody. |
 | 4 — Recovery experiments | planned | Phase 3 | All four failures are exercised through validation, execution, observation, and nominal resumption or justified infeasibility. |
 | 5 — Journal evaluation | planned | Phase 4 | Repeatable comparisons and saved evidence support the reported results. |
 
@@ -1800,7 +2097,7 @@ Use these initial failure timings to make the first trials reproducible:
 [products-ui]: ../../cais_spade_llm/ui/pages/products.py
 [product-order]: ../../cais_spade_llm/product/order.py
 [product-profile]: ../../cais_spade_llm/product/profile.py
-[product-geometry]: ../../cais_spade_llm/specification/products/geometry/assembly_board-v1.json
+[product-geometry]: ../../cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json
 [product-manifests]: ../../cais_spade_llm/initialization/products/
 [product-specifications]: ../../cais_spade_llm/specification/products/
 [worlds]: ../../ros2/cais_lab_robotics/worlds/

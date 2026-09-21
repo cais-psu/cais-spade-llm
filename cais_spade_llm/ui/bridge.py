@@ -1033,9 +1033,12 @@ class SystemBridge:
         self._gazebo_prewarm_controllers: dict[str, Any] = {}
         self._gazebo_prewarm_cancel = threading.Event()
         self._gazebo_prewarm_done = threading.Event()  # Set when prewarm completes successfully.
+        self._gazebo_prewarm_launch: tuple | None = None
         self._sim_ready_cache_ts: float = 0.0
         self._sim_ready_cache: tuple[bool, str] = (False, "Simulation startup check pending.")
         self._sim_ready_probe_inflight: bool = False
+        self._sim_ready_probe_lock = threading.Lock()
+        self._sim_ready_cache_launch: tuple | None = None
         self._gazebo_launch_seq: int = 0
         self._gazebo_launch_timing_lock = threading.Lock()
         self._gazebo_launch_timing: dict[str, Any] | None = None
@@ -7733,87 +7736,78 @@ class SystemBridge:
         """Plan every reviewed calibration pose without robot motion."""
         return self.perception_manager.preview_calibration_replay(role)
 
-    def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
-        """Return whether Gazebo simulation startup is ready enough for agent start."""
-        now = time.monotonic()
-        if not self.simulation_environment_running():
-            result = (False, "Gazebo stack is not running. Launch Gazebo + MoveIt first.")
-            self._sim_ready_cache_ts = now
-            self._sim_ready_cache = result
-            return result
+    def _simulation_launch_key(self) -> tuple:
+        """Identify the owned simulation processes without performing cleanup."""
+        return tuple(
+            (name, proc.pid, id(proc))
+            for name, proc in sorted(getattr(self, "_ros2_procs", {}).items())
+            if name in self._BASE_GAZEBO_PROCESS_NAMES and proc.poll() is None
+        )
 
-        # Non-force path is called from a 1s UI timer. Keep it cheap and avoid
-        # repeatedly spawning `ros2 service list`, which can be expensive.
+    def _recovery_framework_gazebo(self) -> bool:
+        """Identify the configured recovery-framework launch that owns its controllers."""
+        return "world_file:=table_recovery_framework.world" in self.ROS2_LAUNCH_CMDS.get(
+            "gazebo_dual", ""
+        ) and any(name == "gazebo_dual" for name, *_ in self._simulation_launch_key())
+
+    def simulation_start_ready(self, force: bool = False) -> tuple[bool, str]:
+        """Read launch-scoped readiness; explicit checks run on a caller's worker."""
+        running = self.simulation_environment_running()
+        launch = self._simulation_launch_key()
         with self._gazebo_prewarm_lock:
-            prewarm_done = self._gazebo_prewarm_done.is_set()
+            if getattr(self, "_sim_ready_cache_launch", None) != launch:
+                self._sim_ready_cache_launch = launch
+                self._sim_ready_cache = (False, "Simulation startup check pending.")
+                self._sim_ready_cache_ts = 0.0
+            if not running:
+                self._sim_ready_cache = (
+                    False,
+                    "Gazebo stack is not running. Launch Gazebo + MoveIt first.",
+                )
+                return self._sim_ready_cache
             prewarm_inflight = bool(
                 (self._gazebo_prewarm_thread and self._gazebo_prewarm_thread.is_alive())
                 or self._gazebo_prewarm_pending
             )
-            probe_inflight = self._sim_ready_probe_inflight
-
-        # If prewarm completed successfully, core services were confirmed ready.
-        # Perception is probed separately so a slow /detect_all does not block
-        # agent startup or the dashboard readiness banner.
-        if prewarm_done:
-            if force:
-                result = self._probe_sim_services(timeout_sec=6.0)
-                if not result[0]:
-                    # Successful controller prewarm is the authoritative core-service
-                    # readiness check. Shell probes for ATTACHLINK/DETACHLINK are
-                    # known to be flaky under WSL even when live ROS clients already
-                    # connected successfully during prewarm.
-                    self._diag_emit(
-                        "simulation_start_ready(force) downgraded shell probe failure "
-                        f"after completed prewarm: {result[1]}"
-                    )
-                    result = (
-                        True,
-                        self._simulation_perception_warning(),
-                    )
-                self._sim_ready_cache_ts = now
-                self._sim_ready_cache = result
-                return result
-            if (not probe_inflight) and (now - self._sim_ready_cache_ts) >= 3.0:
-                self._schedule_sim_ready_probe()
-            if self._sim_ready_cache[0]:
-                return self._sim_ready_cache
-            result = (True, self._simulation_perception_warning())
-            self._sim_ready_cache = result
-            self._sim_ready_cache_ts = now
-            return result
-
-        if prewarm_inflight:
-            result = (
-                False,
-                "Simulation startup is still initializing ROS services and controller prewarm. Please wait...",
-            )
-            self._sim_ready_cache_ts = now
-            self._sim_ready_cache = result
-            return result
-
+            if prewarm_inflight and not self._recovery_framework_gazebo():
+                return (
+                    False,
+                    "Simulation startup is still initializing ROS services and controller prewarm. Please wait...",
+                )
         if force:
-            # `ros2 service list --spin-time 2.0` can take about six seconds on
-            # WSL after sourcing the workspace. Operator-triggered startup needs
-            # a bounded authoritative answer rather than a timeout at that edge.
+            return self._run_sim_ready_probe(launch)
+        if time.monotonic() - self._sim_ready_cache_ts >= 2.0:
+            self._schedule_sim_ready_probe()
+        return self._sim_ready_cache
+
+    def _run_sim_ready_probe(self, launch: tuple) -> tuple[bool, str]:
+        """Serialize discovery and reject results from a replaced or stopped launch."""
+        requested = time.monotonic()
+        if not hasattr(self, "_sim_ready_probe_lock"):
+            self._sim_ready_probe_lock = threading.Lock()
+        with self._sim_ready_probe_lock:
+            if launch != self._simulation_launch_key() or not self.simulation_environment_running():
+                return False, "Simulation launch changed. Waiting for a new readiness check."
+            if self._sim_ready_cache_ts >= requested:
+                return self._sim_ready_cache
             result = self._probe_sim_services(timeout_sec=10.0)
-            self._sim_ready_cache_ts = now
-            self._sim_ready_cache = result
+            running = self.simulation_environment_running()
+            with self._gazebo_prewarm_lock:
+                if launch != self._simulation_launch_key() or not running:
+                    return False, "Simulation launch changed. Waiting for a new readiness check."
+                if (
+                    not result[0]
+                    and self._gazebo_prewarm_done.is_set()
+                    and getattr(self, "_gazebo_prewarm_launch", None) == launch
+                ):
+                    # Legacy controller clients confirmed these services for this launch.
+                    result = (True, self._simulation_perception_warning())
+                self._sim_ready_cache_launch = launch
+                self._sim_ready_cache = result
+                self._sim_ready_cache_ts = time.monotonic()
             return result
 
-        if (not probe_inflight) and (now - self._sim_ready_cache_ts) >= 2.0:
-            self._schedule_sim_ready_probe()
-
-        # If prewarm is not running (e.g., user launched Gazebo outside the UI),
-        # expose the last cached answer but do not shell out on every timer tick.
-        if self._sim_ready_cache[0]:
-            return self._sim_ready_cache
-        return (
-            False,
-            "Simulation startup check pending. Launch Gazebo from Control (to enable prewarm) or wait a moment.",
-        )
-
-    def _probe_sim_services(self, timeout_sec: float = 3.0) -> tuple[bool, str]:
+    def _probe_sim_services(self, timeout_sec: float = 10.0) -> tuple[bool, str]:
         ok, out = self._ros2_command_output(
             "ros2 service list --no-daemon --spin-time 2.0",
             timeout_sec=timeout_sec,
@@ -7821,8 +7815,8 @@ class SystemBridge:
         if not ok:
             return (
                 False,
-                "Simulation startup is still initializing ROS services. "
-                "Please wait a few seconds and try Start again.",
+                "Simulation readiness query failed or timed out after "
+                f"{timeout_sec:g} seconds. Retrying ROS service discovery.",
             )
 
         services = [line.strip() for line in out.splitlines() if line.strip()]
@@ -7846,11 +7840,9 @@ class SystemBridge:
             return (True, self._simulation_perception_warning(missing_perception))
         return (True, "")
 
-    def _probe_sim_services_worker(self) -> None:
+    def _probe_sim_services_worker(self, launch: tuple | None = None) -> None:
         try:
-            result = self._probe_sim_services(timeout_sec=3.0)
-            self._sim_ready_cache = result
-            self._sim_ready_cache_ts = time.monotonic()
+            self._run_sim_ready_probe(self._simulation_launch_key() if launch is None else launch)
         finally:
             with self._gazebo_prewarm_lock:
                 self._sim_ready_probe_inflight = False
@@ -7860,8 +7852,10 @@ class SystemBridge:
             if self._sim_ready_probe_inflight:
                 return
             self._sim_ready_probe_inflight = True
+            launch = self._simulation_launch_key()
         threading.Thread(
             target=self._probe_sim_services_worker,
+            args=(launch,),
             daemon=True,
         ).start()
 
@@ -36893,7 +36887,6 @@ class SystemBridge:
             controllers = dict(self._gazebo_prewarm_controllers)
             self._gazebo_prewarm_controllers.clear()
             self._gazebo_prewarm_pending.clear()
-            self._sim_ready_probe_inflight = False
             prewarm_thread = self._gazebo_prewarm_thread
         # Wait for the prewarm worker to exit (it checks cancel_event).
         if prewarm_thread is not None:
@@ -36924,6 +36917,7 @@ class SystemBridge:
                 if not self._any_running(self._GAZEBO_PROCESS_NAMES):
                     log.info("Gazebo prewarm skipped; no Gazebo stack running.")
                     return
+                launch = self._simulation_launch_key()
 
                 # Phase 1: Wait only for the lightweight, consistently visible
                 # MoveIt service via `ros2 service list`.  Custom Gazebo world
@@ -36946,11 +36940,9 @@ class SystemBridge:
                     return
 
                 self._gazebo_phase1_complete()
-                probe_result = self._probe_sim_services(timeout_sec=3.0)
-                if not probe_result[0]:
-                    probe_result = (True, self._simulation_perception_warning())
-                self._sim_ready_cache = probe_result
-                self._sim_ready_cache_ts = time.monotonic()
+                probe_result = self._run_sim_ready_probe(launch)
+                if launch != self._simulation_launch_key():
+                    return
                 if probe_result[1]:
                     log.info("Gazebo prewarm: %s", probe_result[1])
                 log.info(
@@ -36983,15 +36975,26 @@ class SystemBridge:
 
                 if ready_count == len(targets):
                     # Signal that prewarm is done so simulation_start_ready() unblocks.
-                    self._gazebo_prewarm_done.set()
+                    with self._gazebo_prewarm_lock:
+                        if launch != self._simulation_launch_key():
+                            return
+                        self._gazebo_prewarm_launch = launch
+                        self._gazebo_prewarm_done.set()
+                        self._sim_ready_cache_launch = launch
+                        self._sim_ready_cache = (True, self._simulation_perception_warning())
+                        self._sim_ready_cache_ts = time.monotonic()
                     self._gazebo_launch_complete(ready_count, len(targets))
                     continue
 
-                self._sim_ready_cache = (
-                    False,
-                    self._simulation_prewarm_failure_message(failures),
-                )
-                self._sim_ready_cache_ts = time.monotonic()
+                with self._gazebo_prewarm_lock:
+                    if launch != self._simulation_launch_key():
+                        return
+                    self._sim_ready_cache_launch = launch
+                    self._sim_ready_cache = (
+                        False,
+                        self._simulation_prewarm_failure_message(failures),
+                    )
+                    self._sim_ready_cache_ts = time.monotonic()
                 meta = self._gazebo_launch_timing_snapshot()
                 if meta:
                     self._gazebo_timing_emit(
@@ -37018,6 +37021,12 @@ class SystemBridge:
             "gazebo_xarm6": {"xarm6"},
             "gazebo_ur5e": {"ur5e"},
         }
+        if (
+            launch_key == "gazebo_dual"
+            and "world_file:=table_recovery_framework.world"
+            in self.ROS2_LAUNCH_CMDS.get(launch_key, "")
+        ):
+            return
         targets = targets_by_launch.get(launch_key)
         if not targets:
             return
@@ -39088,6 +39097,22 @@ class SystemBridge:
     # ------------------------------------------------------------------
     # State accessors (called by UI pages via ui.timer)
     # ------------------------------------------------------------------
+    def get_environment_capabilities(self) -> dict[str, Any]:
+        """Read runtime resource graphs and the active product's environmental bids."""
+        for agent in self.product_agents:
+            runtime = getattr(agent, "environment_runtime", None)
+            if runtime is not None:
+                return runtime.snapshot()
+        return {}
+
+    def get_environment_capabilities_revision(self) -> tuple | None:
+        """Read a cheap display revision before requesting the full runtime graph."""
+        for agent in self.product_agents:
+            runtime = getattr(agent, "environment_runtime", None)
+            if runtime is not None:
+                return runtime.snapshot_revision()
+        return None
+
     def get_agent_statuses(self) -> list[dict[str, Any]]:
         statuses = []
         for a in self.resource_agents:

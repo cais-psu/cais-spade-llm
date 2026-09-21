@@ -27,6 +27,56 @@ from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
 )
 
 
+def test_project_tabs_default_to_run_and_construct_controls_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening run starts no work, and inspecting other tabs never remounts it."""
+    from unittest.mock import Mock
+
+    from nicegui import context, ui
+    from nicegui.client import Client
+
+    from cais_spade_llm.spec2primitives import project_setup
+    from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DualGazeboRuntime
+    from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
+
+    runtime = Spec2PrimitivesUIRuntime(
+        contexts_root=tmp_path,
+        product_agent=Mock(),
+        dual_gazebo=Mock(spec=DualGazeboRuntime),
+        primitive_execution_runtime=Mock(),
+    )
+    render_gazebo = Mock(wraps=spec2primitives_ui._render_dual_gazebo)
+    render_interaction = Mock(wraps=spec2primitives_ui._render_pa_interaction)
+    timers = []
+    monkeypatch.setattr(project_setup, "_ROOT", tmp_path)
+    monkeypatch.setattr(spec2primitives_ui, "_render_dual_gazebo", render_gazebo)
+    monkeypatch.setattr(spec2primitives_ui, "_render_pa_interaction", render_interaction)
+    monkeypatch.setattr(
+        ui, "timer", lambda interval, callback, **kwargs: timers.append(callback) or Mock()
+    )
+    client = Client(context.client.page)
+    with client:
+        spec2primitives_ui.render(runtime)
+        tabs = next(element for element in client.elements.values() if isinstance(element, ui.tabs))
+        assert tabs.value == "run"
+        assert [tab._props["name"] for tab in tabs.default_slot.children] == [
+            "run", "setup", "results",
+        ]
+        timer_count = len(timers)
+        assert timer_count > 0
+        for name in ("setup", "results", "run", "setup", "run"):
+            tabs.value = name
+        render_gazebo.assert_called_once_with(runtime.dual_gazebo)
+        render_interaction.assert_called_once_with(runtime)
+        assert len(timers) == timer_count
+        assert runtime.product_agent.mock_calls == []
+        assert runtime.dual_gazebo.mock_calls == []
+        assert runtime.primitive_execution_runtime.mock_calls == []
+        assert list(tmp_path.iterdir()) == []
+    client.delete()
+
+
 def test_connected_ui_starts_one_native_grounding_call(
     tmp_path: Path,
     monkeypatch: Any,

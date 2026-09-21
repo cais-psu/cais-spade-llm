@@ -39,6 +39,26 @@ class ResourceAgent(LlmAgent):
 
     agent_role = "resource"  # Used by LlmAgent to pick prompts and instructions for this class.
 
+    def configure_nominal(self, context: Any) -> None:
+        """Attach an explicit nominal context with this agent's exact resource_id."""
+        if context.resource_id != self.agent_name:
+            raise ValueError("Nominal resource_id must match the ResourceAgent name exactly")
+        self.nominal_context = context
+
+    def nominal_des_model(self) -> dict[str, Any]:
+        """Expose configured nominal capabilities without dispatching a task."""
+        context = getattr(self, "nominal_context", None)
+        if context is None:
+            raise ValueError("ResourceAgent has no configured nominal context")
+        return context.nominal_des_model()
+
+    def validate_nominal_event(self, models: dict, valuation: dict, task: dict) -> dict:
+        """Delegate nominal feasibility to this resource's configured context."""
+        context = getattr(self, "nominal_context", None)
+        if context is None:
+            raise ValueError("ResourceAgent has no configured nominal context")
+        return context.validate_nominal_event(models, valuation, task)
+
     def __init__(
         self,
         jid: str,
@@ -93,6 +113,11 @@ class ResourceAgent(LlmAgent):
     async def setup(self) -> None:
         await super().setup()
 
+        if getattr(self, "environment_context", None) is not None:
+            from cais_spade_llm.agents.shared_information.environment_capabilities import CapabilityRequestInbox
+
+            self.add_behaviour(CapabilityRequestInbox(), Template(metadata={"type": "capability_request"}))
+
         # Tasks from ProductAgent
         t_task = Template()
         t_task.set_metadata("type", "task")
@@ -117,6 +142,10 @@ class ResourceAgent(LlmAgent):
         Best-effort snapshot of resource state for failure context.
         Subclasses can override to provide richer state.
         """
+        context = getattr(self, 'environment_context', None) or getattr(self, 'nominal_context', None)
+        if context is not None:
+            values = context.snapshot()
+            return {'current_state': values.get('resource_state', 'idle'), **values}
         return {}
 
     def recovery_resource_type(self) -> str:
@@ -1426,6 +1455,11 @@ class ResourceAgent(LlmAgent):
                 return
 
             task_id = data.get("task_id")
+            if protocol == "environment":
+                from cais_spade_llm.recovery_framework.environment_runtime import execute_environment_task
+
+                await execute_environment_task(self, msg, data)
+                return
             instruction = data.get("instruction", "")
             phase_id = data.get("phase_id")  # optional multi-phase flow identifier
 
@@ -1818,6 +1852,11 @@ class ResourceAgent(LlmAgent):
 
             msg = await self.receive(timeout=0.05)
             if not msg:
+                return
+
+            if getattr(agent, "environment_context", None) is not None and (
+                str(msg.sender).split("/", 1)[0] != str(agent.cca_jid).split("/", 1)[0]
+            ):
                 return
 
             try:

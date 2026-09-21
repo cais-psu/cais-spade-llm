@@ -37,6 +37,13 @@ class ProcessPlanner(LlmRecoveryReplannerMixin):
     2. requirement nodes → executable task DAG   (expand_requirements_to_tasks)
     """
 
+    @staticmethod
+    def select_environment_path(bids: list[dict]) -> dict:
+        """Select among actual ResourceAgent bids for the outstanding property."""
+        from cais_spade_llm.product.environment import select_environment_path
+
+        return select_environment_path(bids)
+
     def __init__(self, product_agent, resource_agents: Iterable[Any]):
         """Initialize planner state with agent references and empty node graphs."""
         self.product_agent = product_agent
@@ -50,6 +57,12 @@ class ProcessPlanner(LlmRecoveryReplannerMixin):
         self.last_product_order_artifact: dict[str, Any] = {}
         self.recovery_planner = ProcessRecoveryPlanner(self)
         self.recovery_planner.bind_methods()
+
+    def plan_nominal(self, context: Any, *, max_search_states: int = 50_000) -> dict:
+        """Use the transport-independent nominal planner without the tool catalogue."""
+        from cais_spade_llm.product.nominal_planner import plan_nominal_order
+
+        return plan_nominal_order(context, max_search_states=max_search_states)
 
     @staticmethod
     def _primitive_recovery_macro_tasks(proposal: dict[str, Any]) -> list[dict[str, Any]]:

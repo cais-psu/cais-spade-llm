@@ -92,25 +92,25 @@
   "machines": [
     {
       "resource_id": "M1",
-      "gazebo_model": "haas_mini_mill",
+      "gazebo_model": "bantam_tools_desktop_cnc",
       "world_pose": [
         -6.0,
-        2.3,
+        1.9,
         0.0,
         0.0,
         0.0,
-        -1.57079632679
+        -1.5707963267948966
       ],
       "front_access_link": "front_access",
       "side_access_link": "side_access",
       "workholding_link": "workholding",
       "KMR_docking_pose": [
-        -7.25,
-        2.3,
+        -6.85,
+        2.15,
         0.0,
         0.0,
         0.0,
-        -1.57079632679
+        1.5707963267948966
       ],
       "nominal_parts": [
         "KET4_Square_4mm",
@@ -135,29 +135,106 @@
         0.0,
         0.0,
         0.0
-      ]
+      ],
+      "enclosure_dimensions_m": [
+        0.503,
+        0.531,
+        0.493
+      ],
+      "stand_height_m": 1.0,
+      "workholding_pose": [
+        -6.08,
+        1.82,
+        1.06,
+        0.0,
+        0.0,
+        -1.5707963267948966
+      ],
+      "model_reference": "https://bantamtools.com/products/bantam-tools-desktop-cnc-milling-machine",
+      "model_assumptions": "Simplified interior, stand, and open front/side robot-loading access are simulation adaptations.",
+      "KMR_access": {
+        "resource_id": "KMR",
+        "approach_pose": [
+          -6.18,
+          1.82,
+          1.1199999999999999,
+          0.8660254037844386,
+          0.0,
+          0.5,
+          0.0
+        ],
+        "target_pose": [
+          -6.08,
+          1.82,
+          1.085,
+          0.8660254037844386,
+          0.0,
+          0.5,
+          0.0
+        ],
+        "pose_format": "xyz_xyzw",
+        "validation_scope": "Collision-aware IK and Cartesian approach; not executed handling."
+      },
+      "handling_robot_access": {
+        "resource_id": "ur5e-1",
+        "approach_pose": [
+          -6.08,
+          1.6400000000000001,
+          1.085,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "target_pose": [
+          -6.08,
+          1.82,
+          1.085,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "pose_format": "xyz_xyzw",
+        "validation_scope": "Collision-aware IK and Cartesian approach; not executed handling."
+      },
+      "process_capabilities": {
+        "trim": {
+          "supported_results": [
+            "square",
+            "circle"
+          ]
+        }
+      },
+      "current_configuration": {
+        "tool": null,
+        "workholding": null,
+        "program": null,
+        "parameters": {},
+        "evidence": "Machining setup and controller evidence not provided"
+      }
     },
     {
       "resource_id": "M2",
-      "gazebo_model": "haas_mini_mill",
+      "gazebo_model": "bantam_tools_desktop_cnc",
       "world_pose": [
         -2.6,
-        2.3,
+        1.9,
         0.0,
         0.0,
         0.0,
-        -1.57079632679
+        -1.5707963267948966
       ],
       "front_access_link": "front_access",
       "side_access_link": "side_access",
       "workholding_link": "workholding",
       "KMR_docking_pose": [
-        -3.85,
-        2.3,
+        -3.45,
+        2.15,
         0.0,
         0.0,
         0.0,
-        -1.57079632679
+        1.5707963267948966
       ],
       "nominal_parts": [
         "RGOCG4-50_Round_4mm",
@@ -182,7 +259,84 @@
         0.0,
         0.0,
         0.0
-      ]
+      ],
+      "enclosure_dimensions_m": [
+        0.503,
+        0.531,
+        0.493
+      ],
+      "stand_height_m": 1.0,
+      "workholding_pose": [
+        -2.68,
+        1.82,
+        1.06,
+        0.0,
+        0.0,
+        -1.5707963267948966
+      ],
+      "model_reference": "https://bantamtools.com/products/bantam-tools-desktop-cnc-milling-machine",
+      "model_assumptions": "Simplified interior, stand, and open front/side robot-loading access are simulation adaptations.",
+      "KMR_access": {
+        "resource_id": "KMR",
+        "approach_pose": [
+          -2.7800000000000002,
+          1.82,
+          1.1199999999999999,
+          0.8660254037844386,
+          0.0,
+          0.5,
+          0.0
+        ],
+        "target_pose": [
+          -2.68,
+          1.82,
+          1.085,
+          0.8660254037844386,
+          0.0,
+          0.5,
+          0.0
+        ],
+        "pose_format": "xyz_xyzw",
+        "validation_scope": "Collision-aware IK and Cartesian approach; not executed handling."
+      },
+      "handling_robot_access": {
+        "resource_id": "ur5e-2",
+        "approach_pose": [
+          -2.68,
+          1.6400000000000001,
+          1.085,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "target_pose": [
+          -2.68,
+          1.82,
+          1.085,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "pose_format": "xyz_xyzw",
+        "validation_scope": "Collision-aware IK and Cartesian approach; not executed handling."
+      },
+      "process_capabilities": {
+        "trim": {
+          "supported_results": [
+            "square",
+            "circle"
+          ]
+        }
+      },
+      "current_configuration": {
+        "tool": null,
+        "workholding": null,
+        "program": null,
+        "parameters": {},
+        "evidence": "Machining setup and controller evidence not provided"
+      }
     }
   ],
   "minimum_station_gap": 1.0,
@@ -201,12 +355,12 @@
       1.2
     ],
     "KMR_docking_pose": [
-      -8.15,
-      2.3,
+      -8.24,
+      2.13,
       0.0,
       0.0,
       0.0,
-      -1.57079632679
+      1.5707963267948966
     ],
     "slots": {
       "KET4_Square_4mm": [
@@ -409,7 +563,14 @@
     "zones": [
       {
         "zone": 1,
-        "pose": [-0.68, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "pose": [
+          -0.68,
+          0.5,
+          1.017,
+          0.0,
+          0.0,
+          0.0
+        ],
         "capacity": 1,
         "initial_part": null,
         "belt_collision": "zone_1_belt",
@@ -422,7 +583,14 @@
       },
       {
         "zone": 2,
-        "pose": [-0.56, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "pose": [
+          -0.56,
+          0.5,
+          1.017,
+          0.0,
+          0.0,
+          0.0
+        ],
         "capacity": 1,
         "initial_part": null,
         "belt_collision": "zone_2_belt",
@@ -435,7 +603,14 @@
       },
       {
         "zone": 3,
-        "pose": [-0.44, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "pose": [
+          -0.44,
+          0.5,
+          1.017,
+          0.0,
+          0.0,
+          0.0
+        ],
         "capacity": 1,
         "initial_part": null,
         "belt_collision": "zone_3_belt",
@@ -448,7 +623,14 @@
       },
       {
         "zone": 4,
-        "pose": [-0.32, 0.5, 1.017, 0.0, 0.0, 0.0],
+        "pose": [
+          -0.32,
+          0.5,
+          1.017,
+          0.0,
+          0.0,
+          0.0
+        ],
         "capacity": 1,
         "initial_part": null,
         "belt_collision": "zone_4_belt",
@@ -555,14 +737,14 @@
     "spawned": true,
     "gazebo_model": "KMR",
     "initial_pose": [
-      -8.15,
-      2.3,
+      -8.24,
+      2.13,
       0.0,
       0.0,
       0.0,
-      -1.57079632679
+      1.5707963267948966
     ],
-    "integrated": false,
+    "integrated": true,
     "simulation_control_integrated": true,
     "manufacturer": "KUKA",
     "platform_model": "KMR iiwa",
@@ -570,19 +752,19 @@
     "platform_body_dimensions_m": [
       1.08,
       0.63,
-      0.70
+      0.7
     ],
     "platform_overall_dimensions_m": [
       1.19,
       0.72,
-      0.70
+      0.7
     ],
     "wheel_diameter_m": 0.25,
     "arm_model": "LBR iiwa 14 R820",
     "arm_mount_xyz": [
       -0.25,
       0.0,
-      0.70
+      0.7
     ],
     "arm_mount_rpy": [
       0.0,
@@ -656,14 +838,24 @@
         ],
         "poses": [
           [
-            -8.15,
-            2.3,
-            -1.57079632679
+            -8.24,
+            2.13,
+            1.5707963267948966
           ],
           [
-            -7.25,
-            2.3,
-            -1.57079632679
+            -8.24,
+            3.1,
+            1.5707963267948966
+          ],
+          [
+            -6.85,
+            3.1,
+            1.5707963267948966
+          ],
+          [
+            -6.85,
+            2.15,
+            1.5707963267948966
           ]
         ]
       },
@@ -674,32 +866,84 @@
         ],
         "poses": [
           [
-            -8.15,
-            2.3,
-            -1.57079632679
+            -8.24,
+            2.13,
+            1.5707963267948966
           ],
           [
-            -8.15,
-            3.85,
-            -1.57079632679
+            -8.24,
+            3.1,
+            1.5707963267948966
           ],
           [
-            -3.95,
-            3.85,
-            -1.57079632679
+            -3.45,
+            3.1,
+            1.5707963267948966
           ],
           [
-            -3.95,
-            2.3,
-            -1.57079632679
-          ],
-          [
-            -3.85,
-            2.3,
-            -1.57079632679
+            -3.45,
+            2.15,
+            1.5707963267948966
           ]
         ]
       }
-    ]
+    ],
+    "task_execution": {
+      "supported_order": "assembly_board-v1-kmr-storage-m1.json",
+      "part_name": "KET4_Square_4mm",
+      "planning_group": "KMR_iiwa_arm",
+      "tcp_link": "rg2_gripper_tcp",
+      "grasp_height_m": 0.025,
+      "approach_clearance_m": 0.1,
+      "closed_gripper_width_m": 0.015,
+      "part_dimensions_m": [
+        0.004,
+        0.004,
+        0.05
+      ],
+      "position_tolerance_m": 0.006,
+      "velocity_scaling": 0.15,
+      "acceleration_scaling": 0.15,
+      "services": {
+        "motion_plan": "/plan_kinematic_path",
+        "cartesian_path": "/compute_cartesian_path",
+        "apply_scene": "/apply_planning_scene",
+        "get_state": "/get_entity_state",
+        "attach": "/ATTACHLINK",
+        "detach": "/DETACHLINK"
+      },
+      "simulation_assumptions": "Acknowledged Gazebo fixed-joint attachment represents grasp retention; finger contact dynamics are not validated.",
+      "pick_orientation_xyzw": [
+        0.0,
+        -0.8660254037844386,
+        0.0,
+        0.5
+      ],
+      "place_orientation_xyzw": [
+        0.8660254037844386,
+        0.0,
+        0.5,
+        0.0
+      ],
+      "attach_link": "iiwa_link_7",
+      "withdrawal_lift_m": 0.15,
+      "pick_approach_configuration": [
+        0.555805948375561,
+        -0.33010777453275764,
+        2.726036824848298,
+        2.055082972054507,
+        2.572154445699205,
+        0.3850859720732707,
+        -2.641019358885094
+      ],
+      "scene_assets": [
+        "worlds/table_recovery_framework.world",
+        "models/bantam_tools_desktop_cnc/model.sdf",
+        "urdf/KMR_recovery.urdf.xacro",
+        "config/recovery_framework_map.pgm",
+        "config/recovery_framework_nav2.yaml",
+        "scripts/kmr_base_controller.py"
+      ]
+    }
   }
 }

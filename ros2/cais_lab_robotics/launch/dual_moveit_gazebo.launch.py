@@ -470,6 +470,7 @@ def launch_setup(context, *args, **kwargs):
                 name: LaunchConfiguration(name) for name in (
                     'world_file', 'run_perception', 'include_assembly_parts',
                     'include_loose_parts', 'launch_gazebo', 'launch_moveit', 'launch_rviz',
+                    'rviz_software_rendering',
                 )
             }.items(),
         )]
@@ -563,6 +564,11 @@ def generate_launch_description():
             'launch_rviz',
             default_value='true',
             description='Launch RViz alongside Gazebo and MoveIt.',
+        ),
+        DeclareLaunchArgument(
+            'rviz_software_rendering',
+            default_value='true' if os.environ.get('WSL_DISTRO_NAME') else 'false',
+            description='Use software OpenGL for recovery framework RViz; false permits GPU rendering.',
         ),
         DeclareLaunchArgument(
             'launch_gazebo',

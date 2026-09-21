@@ -14,9 +14,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import errno
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 
@@ -242,6 +244,21 @@ def _install_exit_cleanup() -> None:
 
 def _run_ui() -> None:
     """Run the NiceGUI operator console (default mode)."""
+    # A duplicate UI launch must not clean up the existing session's ROS processes.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as ui_socket:
+        ui_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            ui_socket.bind(("0.0.0.0", 8080))
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            LOGGER.warning(
+                "Port 8080 is already in use; no new CAIS UI was started. "
+                "If CAIS is already running, open http://localhost:8080. "
+                "Stop the existing UI before starting a new debug session."
+            )
+            return
+
     # Clean slate: kill any leftover processes from a previous session.
     _kill_stale_ros2_processes(reason="startup")
     _cleanup_ros2_shm()

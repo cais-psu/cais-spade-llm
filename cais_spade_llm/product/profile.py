@@ -486,27 +486,17 @@ def _direct_geometry_path_for_token(token: str) -> Path:
 
 @lru_cache(maxsize=16)
 def _load_product_meta(token: str) -> dict[str, Any]:
-    init_path = _PACKAGE_ROOT / "initialization" / "products" / f"{token}.json"
-    if not init_path.exists():
-        return {}
-
-    try:
-        payload = json.loads(init_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-    if not isinstance(payload, dict):
-        return {}
-
-    raw_meta = payload.get(token)
-    if isinstance(raw_meta, dict):
-        return dict(raw_meta)
-
-    if len(payload) == 1:
-        only_value = next(iter(payload.values()))
-        if isinstance(only_value, dict):
-            return dict(only_value)
-    return {}
+    """Resolve one exact product identifier independently of its manifest filename."""
+    init_dir = _PACKAGE_ROOT / "initialization" / "products"
+    matches = []
+    for init_path in sorted(init_dir.glob("*.json")):
+        try:
+            payload = json.loads(init_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get(token), dict):
+            matches.append(payload[token])
+    return dict(matches[0]) if len(matches) == 1 else {}
 
 
 def _normalize_destination_token(value: Any) -> str:

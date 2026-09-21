@@ -357,6 +357,8 @@ def _moveit_parameters(
     }
     for group in ('KMR_iiwa_arm', 'KMR_rg2_gripper'):
         ompl[group] = {'planner_configs': ['RRTConnectkConfigDefault']}
+    # Resolve Storage divider clearance along the carried-part trajectory.
+    ompl['KMR_iiwa_arm']['longest_valid_segment_fraction'] = 0.001
     for name, action_ns, joints in (
         (
             'KMR/KMR_iiwa_joint_trajectory_controller',
@@ -469,7 +471,10 @@ def _write_kmr_runtime_sdf(urdf_path: Path) -> Path:
 def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     """Create the recovery world with four UR5e arms and articulated KMR."""
     from ament_index_python import get_package_prefix, get_package_share_directory
-    from launch.actions import AppendEnvironmentVariable, IncludeLaunchDescription, RegisterEventHandler, TimerAction
+    from launch.actions import (
+        AppendEnvironmentVariable, IncludeLaunchDescription, LogInfo, OpaqueFunction,
+        RegisterEventHandler, TimerAction,
+    )
     from launch.event_handlers import OnProcessExit, OnProcessIO, OnShutdown
     from launch.launch_description_sources import PythonLaunchDescriptionSource
     from launch.substitutions import LaunchConfiguration
@@ -564,7 +569,12 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
 
             nav2_params = share / 'config/recovery_framework_nav2.yaml'
             map_yaml = share / 'config/recovery_framework_map.yaml'
-            for required in (nav2_params, map_yaml, map_yaml.with_suffix('.pgm')):
+            lattice_filepath = (
+                Path(get_package_share_directory('nav2_smac_planner'))
+                / 'sample_primitives/5cm_resolution/0.5m_turning_radius/omni/output.json'
+            )
+            get_package_share_directory('nav2_mppi_controller')
+            for required in (nav2_params, map_yaml, map_yaml.with_suffix('.pgm'), lattice_filepath):
                 if not required.is_file():
                     raise RuntimeError(f'Recovery KMR navigation asset is missing: {required}')
             configured_nav2 = ParameterFile(
@@ -574,6 +584,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                     param_rewrites={
                         'use_sim_time': 'true',
                         'yaml_filename': str(map_yaml),
+                        'lattice_filepath': str(lattice_filepath),
                         'default_nav_to_pose_bt_xml': str(
                             share / 'config' / 'recovery_framework_navigate_to_pose.xml'
                         ),
@@ -705,11 +716,14 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             TimerAction(period=5.0, actions=[recovery_markers]),
         ]
     if enabled('launch_rviz'):
-        rviz_environment = (
-            {'LIBGL_ALWAYS_SOFTWARE': '1'}
-            if os.environ.get('WSL_DISTRO_NAME')
-            else {}
-        )
+        rviz_environment = {
+            'LIBGL_ALWAYS_SOFTWARE': '1' if enabled('rviz_software_rendering') else '0',
+        }
+        if context.environment.get('WSL_DISTRO_NAME') and not enabled('rviz_software_rendering'):
+            # WSLg otherwise prefers the integrated GPU on hybrid laptops.
+            rviz_environment['MESA_D3D12_DEFAULT_ADAPTER_NAME'] = context.environment.get(
+                'MESA_D3D12_DEFAULT_ADAPTER_NAME', 'NVIDIA',
+            )
         rviz = Node(
             package='rviz2', executable='rviz2', output='log',
             arguments=['-d', str(share / 'rviz/recovery_framework.rviz')],
@@ -723,23 +737,46 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             actions.append(rviz)
         else:
             rviz_started = {'value': False}
+            marker_ready_message = (
+                b'Recovery markers initialized from live joint and KMR odometry state'
+            )
+            marker_output = {True: b'', False: b''}
 
             def start_rviz_from_live_state(event: Any) -> list[Any]:
-                text = event.text.decode(errors='replace')
-                if (
-                    rviz_started['value']
-                    or 'Recovery markers initialized from live joint and KMR odometry state'
-                    not in text
-                ):
+                if context.is_shutdown or rviz_started['value']:
+                    return []
+                # Process output can split the readiness message across reads.
+                text = marker_output[event.from_stdout] + event.text
+                marker_output[event.from_stdout] = text[-len(marker_ready_message):]
+                if marker_ready_message not in text:
                     return []
                 rviz_started['value'] = True
                 return [rviz]
 
-            actions.append(RegisterEventHandler(OnProcessIO(
-                target_action=recovery_markers,
-                on_stdout=start_rviz_from_live_state,
-                on_stderr=start_rviz_from_live_state,
-            )))
+            def start_rviz_without_live_state(launch_context: Any) -> list[Any]:
+                if launch_context.is_shutdown or rviz_started['value']:
+                    return []
+                rviz_started['value'] = True
+                return [LogInfo(msg=(
+                    'Recovery markers are not ready; opening RViz for inspection. '
+                    'Interactive targets still require live joint and KMR odometry state.'
+                )), rviz]
+
+            actions += [
+                RegisterEventHandler(OnProcessIO(
+                    target_action=recovery_markers,
+                    on_stdout=start_rviz_from_live_state,
+                    on_stderr=start_rviz_from_live_state,
+                )),
+                # A failed controller or marker server must not hide the viewer.
+                TimerAction(period=30.0, actions=[OpaqueFunction(
+                    function=start_rviz_without_live_state,
+                )]),
+                RegisterEventHandler(OnProcessExit(
+                    target_action=recovery_markers,
+                    on_exit=[OpaqueFunction(function=start_rviz_without_live_state)],
+                )),
+            ]
 
     def cleanup(event: Any, launch_context: Any) -> None:
         for path in temporary_paths:
@@ -762,6 +799,7 @@ def generate_launch_description() -> Any:
         'run_perception': 'false', 'include_assembly_parts': 'true', 'include_loose_parts': 'true',
         'launch_gazebo': 'true', 'launch_gazebo_gui': 'true',
         'launch_moveit': 'true', 'launch_rviz': 'true',
+        'rviz_software_rendering': 'true' if os.environ.get('WSL_DISTRO_NAME') else 'false',
         'launch_nav2': 'true',
     }
     return LaunchDescription([

@@ -1,15 +1,19 @@
 # Recovery framework: M1 and M2 layout
 
-**Status: accepted static Gazebo layout baseline; Phase 2 completed 2026-09-16.**
+**Current layout: compact M1/M2, 2026-09-21.** The previous 2026-09-16
+static layout remains historical evidence in the implementation plan. Storage
+pickup and machine reach checks required the docking and stand changes below.
 
-The final KMR docking-placement correction closes layout design after the tenth
-implementation and its orientation correction. World geometry, station
-placement, initial inventory, four UR5e bindings, and parked `KMR` are accepted.
-Reopen this layout only when later measured reach or collision evidence requires
-a concrete correction. The first Phase 3 implementation adds simulation control
-without changing these accepted positions. Manipulation reachability,
-ResourceAgent execution, transport, perception, and recovery success remain
-unverified.
+M1 and M2 use a `0.503 × 0.531 × 0.493 m` enclosure, based on the documented
+[503 × 531 × 493 mm Bantam Tools Desktop CNC Milling Machine dimensions](https://bantamtools.com/products/bantam-tools-desktop-cnc-milling-machine).
+The 1.00 m stand, simplified workholding, spindle, and open `front_access` and
+`side_access` are **simulation assumptions**. They are not manufacturer robot
+loading features or a validated model of that machine's interior.
+
+The source scene, docking markers, navigation map, and MoveIt collision objects
+use this geometry. MoveIt retains separate enclosure panels and the openings;
+mesh obstacles use conservative boxes. KMR attachment represents a simulated
+fixed-joint grasp, not demonstrated finger contact on the 4 mm peg.
 
 ![Top view of M1 and M2](MACHINING_STATION_LAYOUT.svg)
 
@@ -19,27 +23,34 @@ unverified.
 | --- | --- |
 | `ur5e-1` | M1, M1 staging tray, and its loading position on Conveyor. |
 | `ur5e-2` | M2, M2 staging tray, and its loading position on Conveyor. |
-| `ur5e-3` | Top of Assembly Station; direct buffer pickup, assembly, and Exit. The part slips from this robot in the Part slippage experiment. |
-| `ur5e-4` | Bottom of Assembly Station; printer pickup and assembly. Receives the slipped part and resumes its interrupted task afterward. |
+| `ur5e-3` | Top of Assembly Station; direct buffer pickup, assembly, and Exit. |
+| `ur5e-4` | Bottom of Assembly Station; printer pickup and assembly of its configured printed gears. |
 | KMR | KUKA KMR iiwa with detailed KMP omniMove 400 appearance, sideways platform, upright LBR iiwa 14 R820, and open OnRobot RG2, parked on `Storage_KMR_docking_pose`. |
 
 The eighth implementation swaps the assembly robots' placement bindings and
 initial configurations together. Prefixes `ur5e_3_` and `ur5e_4_`, controllers,
 frames, and MoveIt groups match their resource identifiers. Historical evidence
-retains its original names. Agent handling and attachment bindings remain later
-work; use the named RViz groups for this environment.
+retains its original names. UR5e task execution remains later work; use the named
+RViz groups for their planning checks. KMR delivery bindings are described below.
 
 The tenth implementation keeps the ninth layout and replaces the simplified
 KMR platform appearance. The KMP omniMove 400 body remains
 `1.08 × 0.63 × 0.70 m`; scanners define the `1.19 × 0.72 × 0.70 m` overall
 envelope. The LBR iiwa
 base is at local `(-0.25, 0, 0.70)`, with clear deck space on the other side.
-The final correction rotates the platform clockwise 90° in the world and the
+The previous correction rotated the platform clockwise 90° in the world and the
 complete iiwa, adapter, and RG2 chain counterclockwise 90° around that mount.
 The arm therefore keeps its world-facing yaw while the platform and both
 machine docking markers stand sideways. The later docking-placement correction
 moves the parked KMR to Storage and brings both empty machine markers closer to
 their side-access faces.
+
+The compact 2026-09-21 configuration supersedes those historical docking poses:
+the platform now uses world yaw `1.57079632679` at Storage, M1, and M2. The local
+arm yaw remains `1.57079632679`; the resulting arm orientation supports the
+configured Storage grasp and machine approaches. Part slippage remains a future
+execution scenario and does not authorize reassignment between `ur5e-3` and
+`ur5e-4`.
 
 Storage remains leftmost, followed by M1 and M2 with front openings facing their
 own handling robots. KMR access remains through the left-facing `side_access`
@@ -51,8 +62,8 @@ separate from that shared buffer.
 
 | Element | Position in metres `(x, y, z)` | Meaning |
 | --- | --- | --- |
-| M1 | `(-6.0, 2.3, 0)` | Machine origin; yaw `-1.57079632679`. |
-| M2 | `(-2.6, 2.3, 0)` | Same yaw as M1. |
+| M1 | `(-6.0, 1.9, 0)` | Machine origin; yaw `-1.57079632679`. |
+| M2 | `(-2.6, 1.9, 0)` | Same yaw as M1. |
 | `ur5e-1` | `(-6.0, 1.1, 0.80)` | M1 pedestal; yaw `1.57079632679`. |
 | `ur5e-2` | `(-2.6, 1.1, 0.80)` | M2 pedestal; same yaw. |
 | `ur5e-3` | `(0, 0.50, 1.021)` | Top assembly robot; yaw `3.142`. |
@@ -65,14 +76,14 @@ separate from that shared buffer.
 | Buffer For Machined parts | `(-0.50, 0.50, 1.015)` | Four direct-part belt zones in `0.48 × 0.24 m`; surface `z=1.017`, capacity four pegs. |
 | Buffer pickup | `(-0.32, 0.50, 1.017)` | Downstream pickup for `ur5e-3`. |
 | Storage | `(-9.15, 2.3, 0)` | Rotated shelves; yaw `1.57079632679`. |
-| `Storage_KMR_docking_pose` | `(-8.15, 2.30, 0)` | East-side vertical dock; moved 0.10 m east after Phase 3 padded-footprint validation. Marker and static `KMR` use clockwise yaw `-1.57079632679`. |
-| M1 KMR docking pose | `(-7.25, 2.30, 0)` | Vertical marker; yaw `-1.57079632679`, approximately 40 mm from M1's enclosure. |
-| M2 KMR docking pose | `(-3.85, 2.30, 0)` | Vertical marker; yaw `-1.57079632679`, approximately 40 mm from M2's enclosure. |
+| `Storage_KMR_docking_pose` | `(-8.24, 2.13, 0)` | East-side dock; base yaw `1.57079632679`, local arm yaw `1.57079632679`. |
+| M1 KMR docking pose | `(-6.85, 2.15, 0)` | Side loading; base yaw `1.57079632679`. |
+| M2 KMR docking pose | `(-3.45, 2.15, 0)` | Side loading; base yaw `1.57079632679`. |
 | `3D Printing Station` | `(0.50, -0.50, 1.04)` | `prusa_mk4_2` beside `ur5e-4`; yaw `-1.57079632679`. |
 | `Exit` | `(0.50, 0.58, 1.04)` | Empty capacity-one tray handled by `ur5e-3`. |
 
-M2's east enclosure edge is `x=-1.75`, and the assembly table's west edge is
-`x=-0.75`, retaining the **1 m horizontal gap**. The main Conveyor is **6 m**
+M2's east enclosure edge is `x=-2.3345`, and the assembly table's west edge is
+`x=-0.75`, leaving a **1.5845 m horizontal gap**. The main Conveyor is **6 m**
 long and **0.30 m** wide. This geometry does not establish reachable or
 collision-free handling paths.
 
@@ -140,14 +151,14 @@ tooling; detachable assemblies and Exit execution remain later work.
 
 ## KMR: predefined model and recovery
 
-KMR starts at `(-8.15, 2.30, 0)` on `Storage_KMR_docking_pose`, with platform
-yaw `-1.57079632679` and upright arm configuration
+KMR starts at `(-8.24, 2.13, 0)` on `Storage_KMR_docking_pose`, with platform
+yaw `1.57079632679` and upright arm configuration
 `[0, 0, 0, 0, 0, 0, 0]`. Its KMP omniMove 400 appearance includes four 250 mm
 Mecanum wheels, front and rear safety scanners, eight ultrasonic sensors, RGB
 bands, and two emergency stops. The iiwa links, nominal 20 mm adapter, and open
 RG2 share the arm mount `(-0.25, 0, 0.70)` and local yaw
 `1.57079632679`. The arm root is therefore at world
-`(-8.15, 2.55, 0.70)`. `mount_verified: false` remains until
+`(-8.24, 1.88, 0.70)`. `mount_verified: false` remains until
 the arm and adapter transforms are measured on the lab hardware. Meshes,
 licenses, KMR poses, and Storage–M1/M2 route contracts remain.
 
@@ -160,9 +171,8 @@ iiwa joints and `KMR_rg2_finger_width` have separate trajectory controllers.
 routes. Direct named M1-to-M2 docking remains rejected. Collision-aware free
 base goals are available through the RViz **Nav2 Goal** arrow and the blue
 `KMR_base` marker, but reaching a nearby pose does not establish semantic
-docking or machine readiness. ResourceAgent
-integration remains disabled, and manipulation at Storage or either machine
-still requires collision-aware reach validation.
+docking or machine readiness. The delivery integration binds KMR, Storage, and M1 resource contexts for the
+explicit Storage-to-M1 order. Other task execution remains outside this increment.
 
 The RViz planning model previews KMR at its configured
 `Storage_KMR_docking_pose` before Gazebo odometry starts. This removes the
@@ -204,23 +214,30 @@ are hypotheses, not compulsory responses to failure names.
 
 ## Layout completion boundary and next project work
 
-This document is the completed static-layout baseline. The known NIST Products
+This document describes the current compact layout; previous dated results remain historical. The known NIST Products
 increment now binds all three gears and eight pegs to explicit CAD filenames,
 Gazebo models, source resources, and assembly targets. Recovery orders may save
 and reload any valid subset of those eleven exact identifiers.
 
-The next work is:
+The current workholding targets are `(-6.08, 1.82, 1.06)` for M1 and
+`(-2.68, 1.82, 1.06)` for M2, each with yaw `-1.57079632679`.
+The [current geometry checks](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/machine_paths.json)
+passed collision-aware IK and Cartesian approaches with fraction `1.0` for
+KMR at M1/M2, `ur5e-1` at M1, and `ur5e-2` at M2. These are planning results;
+no UR5e handling was executed. Storage pickup uses a configured tilted grasp,
+lift, withdrawal, and parked transport pose.
 
-1. Add world collision geometry to MoveIt and validate machine → staging → Conveyor
-   handling, `ur5e-3` buffer pickup and Exit, and `ur5e-4` printer pickup.
-2. Implement Conveyor/buffer transport, occupancy, stopping, and feedback;
-   validate direct peg stability, zone handoffs, sensor fault behavior, and
-   observed custody transfers.
-3. Add station collision geometry to MoveIt and verify KMR manipulation at
-   Storage, M1, and M2; the base/arm/gripper simulation controller is the first
-   Phase 3 implementation.
-4. Connect KMR simulation control to ResourceAgent execution, then implement
-   processing, printing, detachable assemblies, Exit, and recovery.
+The [completed Gazebo transfer](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T194635_5b778116/run.json)
+records Storage pickup, loaded transport, M1 release, and withdrawal. It used
+the earlier 0.98 m stand; the current 1.00 m stand closes its 0.02 m gap.
+The later reach checks and [active Stop test](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/control_verification.json)
+use the corrected stand. These results do not establish physical grasp contact
+or hardware validation.
+
+The remaining work is machine → staging → Conveyor handling, `ur5e-3` buffer
+pickup and Exit, `ur5e-4` printer pickup, Conveyor/buffer actuation and sensing,
+machining/printing, detachable assemblies, and recovery. See the implementation
+plan for the separately recorded KMR delivery acceptance result.
 
 Timed execution must record machining completion, Conveyor arrival, buffer
 zone advancement, robot pickup, assembly completion, queue occupancy, and resource

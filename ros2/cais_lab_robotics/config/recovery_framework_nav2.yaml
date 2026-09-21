@@ -11,18 +11,19 @@ planner_server:
     expected_planner_frequency: 5.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_smac_planner/SmacPlanner2D"
+      plugin: "nav2_smac_planner/SmacPlannerLattice"
+      lattice_filepath: ""
       tolerance: 0.03
-      downsample_costmap: false
       allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
-      cost_travel_multiplier: 20.0
-      use_final_approach_orientation: false
-      smoother:
-        w_data: 0.4
-        w_smooth: 0.1
+      cost_penalty: 3.0
+      rotation_penalty: 5.0
+      allow_reverse_expansion: true
+      reverse_penalty: 1.0
+      # Retain the lattice headings, including sideways travel and in-place turns.
+      smooth_path: false
 
 controller_server:
   ros__parameters:
@@ -46,54 +47,65 @@ controller_server:
       xy_goal_tolerance: 0.06
       yaw_goal_tolerance: 0.05
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: true
-      # Keep fine velocity choices near a goal while predicting the full route ahead.
-      trajectory_generator_name: "dwb_plugins::LimitedAccelGenerator"
-      sim_period: 0.05
-      min_vel_x: -1.50
-      min_vel_y: -1.50
-      max_vel_x: 1.50
-      max_vel_y: 1.50
-      max_vel_theta: 0.50
-      min_speed_xy: 0.0
-      max_speed_xy: 1.50
-      min_speed_theta: 0.10
-      acc_lim_x: 1.50
-      acc_lim_y: 1.50
-      acc_lim_theta: 1.00
-      decel_lim_x: -1.50
-      decel_lim_y: -1.50
-      decel_lim_theta: -1.00
-      # Bound CPU work without coarsening footprint collision checks.
-      vx_samples: 7
-      vy_samples: 7
-      vtheta_samples: 9
-      sim_time: 1.2
-      linear_granularity: 0.02
-      angular_granularity: 0.025
+      plugin: "nav2_mppi_controller::MPPIController"
+      motion_model: "Omni"
+      model_dt: 0.05
+      time_steps: 24
+      batch_size: 1000
+      iteration_count: 1
+      vx_std: 0.2
+      vy_std: 0.2
+      wz_std: 0.4
+      vx_max: 1.50
+      vx_min: -1.50
+      vy_max: 1.50
+      wz_max: 0.50
+      temperature: 0.3
+      gamma: 0.015
+      prune_distance: 2.0
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.06
-      trans_stopped_velocity: 0.02
-      short_circuit_trajectory_evaluation: true
-      stateful: true
-      # Use KMR's rectangle for collision rejection, including side approaches.
-      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "Twirling", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      # Nonzero enables rejection; soft cell costs must not outweigh goal progress.
-      ObstacleFootprint.scale: 0.001
-      Twirling.scale: 20.0
-      # KMP omniMove 400 should strafe along a path while preserving its dock yaw.
-      PathAlign.scale: 0.0
-      PathAlign.forward_point_distance: 0.10
-      GoalAlign.scale: 0.0
-      GoalAlign.forward_point_distance: 0.10
-      # Score the entire trajectory so an endpoint on the path cannot hide a corner cut.
-      PathDist.aggregation_type: "sum"
-      PathDist.scale: 4.0
-      GoalDist.scale: 18.0
-      RotateToGoal.scale: 24.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+      visualize: false
+      reset_period: 1.0
+      retry_attempt_limit: 1
+      # Heading follows the lattice; neither forward travel nor fixed yaw is preferred.
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 0.5
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 1
+        threshold_to_consider: 0.06
+        offset_from_furthest: 5
+        use_path_orientations: true
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
 
 local_costmap:
   local_costmap:
@@ -116,8 +128,8 @@ local_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 8.0
-        inflation_radius: 0.45
+        cost_scaling_factor: 3.0
+        inflation_radius: 1.0
       always_send_full_costmap: true
 
 global_costmap:
@@ -139,7 +151,7 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # SmacPlanner2D plans a centerline; give KMR's long corners room at M1/M2.
+        # Favor clearance around M1/M2; the lattice also checks the full footprint.
         cost_scaling_factor: 3.0
         inflation_radius: 1.0
       always_send_full_costmap: true

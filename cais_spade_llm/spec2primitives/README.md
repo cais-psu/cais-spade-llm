@@ -43,6 +43,17 @@ Current reachability uses approved calibration and MoveIt `GetMotionPlan` for ea
 
 ## Records and UI
 
+The project tabs are **run → setup → results**, with **run** open by default.
+The existing Gazebo, PA, and RA controls are constructed once per page client;
+opening the page does not start simulation or execution. **setup** shows
+configuration, saved requirements, resource/catalog evidence, and the planned paper protocols.
+**results** lists saved interactions, including incomplete and failed attempts,
+with searchable recorded values, artifact inspection, and CSV export. Inspection
+does not resume work or change the active configuration. Missing measurements are
+shown as `not recorded`; validation, simulation execution, and physical outcomes
+remain separate. Revisions are not independent trials. Batch experiments and
+aggregate paper comparisons are deferred.
+
 Each record type has one current format, without version markers or compatibility readers. [Schemas](schemas/README.md) and [artifact paths](contexts/README.md) describe the lineage. The accepted proposal pins its evidence snapshot, source hashes and typed artifacts in `grounding_evidence`.
 
 The UI shows evidence-operation usage, proposal attempts, current activity, elapsed time, validation feedback and stop reasons. It also shows ontology tables/diagram, both states, relationships, source caveats, current images, desired reference images, the selected arm, and validation limits. Its grounding timeline ends with “Product grounding and arm assignment complete”. Operator labels describe RobotAgent context capture and primitive composition; implementation phase numbers remain in development documentation and internal identifiers. Destination images are labeled observed references, not completed manufacturing. Source uncertainty survives persistence and reload.

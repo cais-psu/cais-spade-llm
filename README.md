@@ -479,17 +479,18 @@ source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
 
-## Default Sample Product
+## Default Product
 
-The repo includes a default sample product:
+The active `assembly_board-v1` product uses the 11 NIST CAD components configured
+in the recovery-framework Gazebo scene:
 
-- [cais_spade_llm/initialization/products/assembly_board-v1.json](cais_spade_llm/initialization/products/assembly_board-v1.json)
-- [cais_spade_llm/specification/products/requirements/assembly_board-v1.txt](cais_spade_llm/specification/products/requirements/assembly_board-v1.txt)
-- [cais_spade_llm/specification/products/geometry/assembly_board-v1.json](cais_spade_llm/specification/products/geometry/assembly_board-v1.json)
-- [cais_spade_llm/specification/safety/safety_requirements.txt](cais_spade_llm/specification/safety/safety_requirements.txt)
+- [Product configuration](cais_spade_llm/initialization/products/assembly_board-v1-recovery-framework.json)
+- [Product order](cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json)
+- [Product geometry and CAD mappings](cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json)
 
-That sample is enough to start the UI and exercise planning/safety flows after
-Python dependencies are installed.
+Products shows the selected product's geometry and exact component identifiers.
+The older product, printer geometry, and orders have been removed from the active
+configuration. Historical recovery tests keep their own geometry fixture.
 
 ## Useful Commands
 
