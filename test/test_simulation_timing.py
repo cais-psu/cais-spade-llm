@@ -649,7 +649,7 @@ def test_home_target_avoids_a_full_rotation_within_joint_limits(limit, expected)
     controller = SimpleNamespace(
         arm_joint_names=["shoulder"],
         _simulation_joint_limits=lambda names: {"shoulder": {"lower": -limit, "upper": limit}},
-        _get_joint_position=lambda name: 3.753,
+        _get_arm_joint_positions=lambda **kwargs: ([3.753], []),
     )
     target = GazeboPickPlaceController._nearest_simulation_joint_targets(controller, [nominal])
     assert target == pytest.approx([expected])
@@ -1086,3 +1086,328 @@ def test_cartesian_dispatch_rejects_a_colliding_timed_sample():
     assert controller._cartesian_move(object()) is False
     controller._send_simulation_joint_trajectory.assert_not_called()
     assert controller._last_command_evidence['command_sent'] is False
+
+
+@pytest.mark.parametrize("parts, expected", [
+    ("all", "KET4_Square_4mm"),
+    (["gear_small", "RGOCG4-50_Round_4mm"], "RGOCG4-50_Round_4mm"),
+    (["gear_small"], None),
+])
+def test_launch_selects_storage_part_without_empty_ros_argument(tmp_path, monkeypatch, parts, expected):
+    import json
+    import shlex
+    from cais_spade_llm.recovery_framework import simulation
+
+    monkeypatch.setattr(simulation, "ROOT", tmp_path)
+    (tmp_path / "order.json").write_text(json.dumps({"parts": parts}))
+    (tmp_path / "scene.json").write_text(json.dumps({"Storage": {"slots": {
+        "KET4_Square_4mm": {}, "RGOCG4-50_Round_4mm": {},
+    }}}))
+    setup = tmp_path / "setup.json"
+    setup.write_text(json.dumps({"selected_product_order_file": "order.json", "scene_file": "scene.json"}))
+    arguments = dict(arg.split(":=", 1) for arg in shlex.split(simulation.launch_arguments(setup)))
+    assert arguments.get("kmr_initial_part") == expected
+    assert all(arguments.values())
+
+
+@pytest.mark.parametrize('part', ['gear_small', 'gear_medium', 'gear_large'])
+def test_recovery_gear_collision_mesh_keeps_open_bore_and_fixture_height(part):
+    import json
+    from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.geometry import collision_boxes
+
+    world = ROOT / 'ros2/cais_lab_robotics/worlds/table_recovery_framework.world'
+    models = ROOT / 'ros2/cais_lab_robotics/models'
+    rows = collision_boxes(world, models, {part: [0., 0., 0., 0., 0., 0., 1.]},
+                           exact_models={part, 'Gear_Plate'})
+    gear = next(row for row in rows if row['id'].startswith(part + '/'))
+    assert 'mesh' in gear
+    vertices = gear['mesh']['vertices']
+    for face in gear['mesh']['triangles']:
+        a, b, c = [vertices[i] for i in face]
+        cross = lambda u, v: u[0] * v[1] - u[1] * v[0]
+        area = cross([b[i] - a[i] for i in range(2)], [c[i] - a[i] for i in range(2)])
+        if abs(area) < 1e-15:
+            continue
+        weights = [cross(b, c) / area, cross(c, a) / area, cross(a, b) / area]
+        assert not all(value >= -1e-10 for value in weights), 'Collision triangles fill the bore'
+    shaft = next(row for row in rows if row['id'] == 'Gear_Plate/Gear_Shaft_1/collision')
+    assert shaft['cylinder'] == [.02, .005]
+    plate = next(row for row in rows if row['id'] == 'Gear_Plate/Gear_Plate/collision')
+    top = plate['pose'][2] + plate['size'][2] / 2
+    board = json.loads((ROOT / 'cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json').read_text())['gazebo']['assembly_board']
+    assert board['slot_floor_z_m_by_part'][part] == pytest.approx(top, abs=2e-8)
+    assert board['target_origin_z_m'][part] == pytest.approx(top + .01, abs=2e-8)
+
+
+@pytest.mark.parametrize('change, permitted', [
+    ({}, True), ({'contact_body_2': 'Gear_Plate/Gear_Shaft_2/collision'}, False),
+    ({'contact_body_1': 'ur5e_4_rg2_left_inner_finger'}, False),
+    ({'depth': .0006}, False), ({'depth': float('nan')}, False),
+])
+def test_mating_contact_only_permits_own_part_and_shaft_with_bounded_depth(change, permitted):
+    from cais_spade_llm.recovery_framework.part_collision import mating_contacts_allowed
+
+    authorization = {'model_name': 'gear_small', 'target_collision_object': 'Gear_Plate/Gear_Shaft_1/collision',
+                     'max_contact_depth_m': .0005}
+    contact = SimpleNamespace(**{'contact_body_1': 'gear_small/link/collision',
+                                 'contact_body_2': 'Gear_Plate/Gear_Shaft_1/collision', 'depth': .00001, **change})
+    assert mating_contacts_allowed(authorization, [contact]) is permitted
+    assert not mating_contacts_allowed(authorization, [])
+    assert not mating_contacts_allowed(authorization, [contact, SimpleNamespace(
+        contact_body_1='gear_small/link/collision', contact_body_2='gear_medium/link/collision', depth=0.)])
+
+
+@pytest.mark.parametrize('pose, permitted', [
+    ([0., 0., 1.04, 0., 0., 0., 1.], True),
+    ([.001, 0., 1.04, 0., 0., 0., 1.], False),
+    ([0., 0., 1.02, 0., 0., 0., 1.], False),
+    ([0., 0., 1.04, .1, 0., 0., .995], False),
+])
+def test_mating_corridor_requires_aligned_upright_insertion(pose, permitted):
+    from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
+
+    authorization = {'target_origin_pose': {'x': 0., 'y': 0., 'z': 1.039},
+                     'start_part_z': 1.09, 'axis_tolerance_m': .0005}
+    assert mating_pose_valid(authorization, pose) is permitted
+
+
+@pytest.mark.parametrize('x, code, permitted', [(0., 1, True), (.002, 1, False), (0., -1, False)])
+def test_contacting_trajectory_sample_requires_valid_forward_kinematics(monkeypatch, x, code, permitted):
+    import sys
+
+    request_type = lambda **kwargs: SimpleNamespace(header=SimpleNamespace(), **kwargs)
+    monkeypatch.setitem(sys.modules, 'moveit_msgs.srv', SimpleNamespace(
+        GetPositionFK=SimpleNamespace(Request=request_type)))
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._mating_fk_client = Mock()
+    controller.ee_link = 'ur5e_4_tool0'
+    controller.frame_id = 'world'
+    controller._wait_future = Mock(return_value=SimpleNamespace(
+        error_code=SimpleNamespace(val=code), pose_stamped=[SimpleNamespace(pose=SimpleNamespace(
+            position=SimpleNamespace(x=x, y=0., z=1.04),
+            orientation=SimpleNamespace(x=0., y=0., z=0., w=1.)))]))
+    authorization = {'model_name': 'gear_small', 'target_collision_object': 'Gear_Plate/Gear_Shaft_1/collision',
+                     'axis_tolerance_m': .0005, 'max_contact_depth_m': .0005,
+                     'target_origin_pose': {'x': 0., 'y': 0., 'z': 1.039}, 'start_part_z': 1.09,
+                     'tool_to_part_pose': [0., 0., 0., 0., 0., 0., 1.]}
+    contact = SimpleNamespace(contact_body_1='gear_small/link/collision',
+                              contact_body_2='Gear_Plate/Gear_Shaft_1/collision', depth=.00001)
+    assert controller._validate_simulation_mating_contact(authorization, [contact], object()) is permitted
+
+
+@pytest.mark.parametrize("part", ["gear_small", "gear_medium", "gear_large"])
+def test_gear_pick_uses_configured_cad_width_with_mesh_collision(part):
+    from cais_spade_llm.product.environment import EnvironmentProductContext
+    from cais_spade_llm.ui.recovery_setup import load_setup, validate_setup
+    from cais_spade_llm.recovery_framework.workflow_execution import _pick_geometry
+
+    inputs = validate_setup(load_setup())
+    context = EnvironmentProductContext(inputs["scene"], inputs["product_order"], inputs["geometry"])
+    geometry = _pick_geometry(context, part, "3D Printing Station", "ur5e-4")
+    expected = max(context.geometry[part]["dimensions_m"][:2])
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller.gripper_open = .11
+    controller.gripper_close = 0.
+    assert geometry["grasp_width_m"] == expected
+    assert controller._derive_gripper_close_position(
+        model_name=part, product_geometry=geometry) == pytest.approx(expected)
+
+
+def test_simulation_mating_targets_compensate_measured_grasp_offset():
+    from cais_spade_llm.recovery_framework.geometry import compose, multiply, rotate
+
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._attached_model = 'gear_medium'
+    controller.insertion_depth_m = .0025
+    controller.frame_id = 'world'
+    current = SimpleNamespace(position=SimpleNamespace(x=.4, y=-.5, z=1.4),
+                              orientation=SimpleNamespace(x=0., y=1., z=0., w=0.))
+    part = SimpleNamespace(position=SimpleNamespace(x=.40006, y=-.50005, z=1.177),
+                           orientation=SimpleNamespace(x=0., y=0., z=.001, w=math.sqrt(1-.001**2)))
+    controller._get_ee_pose = lambda: current
+    controller._get_state_client = Mock()
+    controller._GetEntityState = SimpleNamespace(Request=lambda **kw: SimpleNamespace(**kw))
+    controller._wait_future = Mock(return_value=SimpleNamespace(success=True, state=SimpleNamespace(pose=part)))
+    target = {'x': -.0005504, 'y': .1448242, 'z': 1.0389916}
+    result = controller._simulation_mating_poses('gear_medium', target, math.pi/2)
+    q = [part.orientation.x, part.orientation.y, part.orientation.z, part.orientation.w]
+    offset = [*rotate([0., -1., 0., 0.], [.00006, -.00005, -.223]), *multiply([0., -1., 0., 0.], q)]
+    insert = result['insert_pose']
+    achieved = compose([insert[k] for k in ('x','y','z','qx','qy','qz','qw')], offset)
+    assert achieved[:3] == pytest.approx(list(target.values()), abs=1e-12)
+    assert achieved[3:] == pytest.approx([0., 0., math.sqrt(.5), math.sqrt(.5)], abs=1e-12)
+    controller._attached_model = 'gear_small'
+    with pytest.raises(ValueError, match='identified attached part'):
+        controller._simulation_mating_poses('gear_medium', target, math.pi/2)
+
+
+@pytest.mark.parametrize('seated', [True, False])
+def test_mating_snap_preserves_observed_phase_and_cannot_correct_unseated_part(monkeypatch, seated):
+    import sys
+
+    def vector(): return SimpleNamespace(x=0., y=0., z=0.)
+    def state(): return SimpleNamespace(name='', pose=SimpleNamespace(position=vector(), orientation=SimpleNamespace(x=0.,y=0.,z=0.,w=1.)), twist=SimpleNamespace(linear=vector(),angular=vector()))
+    monkeypatch.setitem(sys.modules, 'gazebo_msgs.msg', SimpleNamespace(EntityState=state))
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller.execution_mode = 'simulation'
+    controller.frame_id = 'world'
+    yaw = math.radians(103.2)
+    controller._simulation_mating_context = {'model_name':'gear_small', 'target_yaw_rad':yaw,
+        'axis_tolerance_m':.0005, 'target_origin_pose':{'x':0.,'y':0.,'z':1.039}, 'retain_fixture_attachment': True}
+    observed = state();observed.pose.position.z = 1.039 if seated else 1.05
+    observed.pose.orientation.z = math.sin(yaw/2);observed.pose.orientation.w = math.cos(yaw/2)
+    controller._set_state_client = Mock()
+    controller._get_state_client = Mock()
+    controller._GetEntityState = SimpleNamespace(Request=lambda **kw: SimpleNamespace(**kw))
+    controller._wait_future = Mock(return_value=SimpleNamespace(success=True,state=observed))
+    controller._detach_part = Mock(return_value=True)
+    controller._simulation_release_detach_timeout_sec = lambda: 1.
+    controller._set_entity_state_for_snap = Mock(return_value=True)
+    controller._attach_part_to_assembly_board = Mock(return_value=True)
+    controller._detach_part_from_assembly_board = Mock(return_value=True)
+    controller._verify_snapped_entity_position = Mock(return_value=True)
+    controller._sync_part_collision = Mock(return_value=True)
+    controller._last_command_evidence = {}
+    controller._log = Mock()
+    assert controller._snap_part_to_slot('gear_small',0.,0.,.02,1.029,part_origin_z=1.039,destination_location='assembly_board-v1') is seated
+    if seated:
+        corrected = controller._set_entity_state_for_snap.call_args.args[1]
+        assert corrected.pose.orientation.z == observed.pose.orientation.z
+        assert controller._last_command_evidence['seated_mating_part']['orientation_preserved'] is True
+        assert controller._last_command_evidence['seated_mating_part']['fixture_attachment_retained'] is True
+        controller._detach_part_from_assembly_board.assert_not_called()
+    else:
+        controller._set_entity_state_for_snap.assert_not_called()
+
+
+def test_mating_corridor_rejects_wrong_tooth_phase():
+    from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
+
+    context = {'axis_tolerance_m':.0005, 'target_origin_pose':{'x':0.,'y':0.,'z':1.039},
+               'start_part_z':1.08, 'target_yaw_rad':math.radians(103.2)}
+    assert not mating_pose_valid(context, [0.,0.,1.04,0.,0.,0.,1.])
+    yaw = context['target_yaw_rad']
+    assert mating_pose_valid(context, [0.,0.,1.04,0.,0.,math.sin(yaw/2),math.cos(yaw/2)])
+
+
+def test_simulated_gear_mounting_ignores_only_configured_gear_contacts():
+    from cais_spade_llm.recovery_framework.part_collision import mating_contacts_allowed
+
+    context = {'model_name':'gear_medium', 'target_collision_object':'Gear_Plate/Gear_Shaft_2/collision',
+               'max_contact_depth_m':.0005, 'ignore_tooth_contact_with':['gear_small/link/collision']}
+    contact = lambda other,depth: SimpleNamespace(contact_body_1='gear_medium/link/collision',contact_body_2=other,depth=depth)
+    assert mating_contacts_allowed(context, [contact('gear_small/link/collision', .001)])
+    for other in ['gear_large/link/collision','ur5e_4_rg2_left_finger','Gear_Plate/Gear_Shaft_1/collision']:
+        assert not mating_contacts_allowed(context, [contact(other, .0001)])
+    assert not mating_contacts_allowed(context, [contact('Gear_Plate/Gear_Shaft_2/collision', .001)])
+
+
+def test_home_waits_for_fresh_feedback_and_rejects_missing_feedback():
+    feedback = Mock(side_effect=[([.1], []), (None, ["shoulder"])])
+    controller = SimpleNamespace(arm_joint_names=["shoulder"],
+        _simulation_joint_limits=lambda names: {"shoulder":{"lower":-math.pi,"upper":math.pi}},
+        _get_arm_joint_positions=feedback)
+    assert GazeboPickPlaceController._nearest_simulation_joint_targets(controller,[0.]) == [0.]
+    feedback.assert_called_once_with(timeout_sec=2.0)
+    with pytest.raises(ValueError,match="Missing observed joint position: shoulder"):
+        GazeboPickPlaceController._nearest_simulation_joint_targets(controller,[0.])
+
+
+@pytest.mark.parametrize("name", ["gear_small", "gear_medium", "gear_large"])
+def test_mesh_support_allowance_lifts_lower_face_without_lowering_upper_face(name):
+    from cais_spade_llm.recovery_framework.geometry import compose
+    from cais_spade_llm.recovery_framework.part_collision import observed_part_boxes
+
+    pose = SimpleNamespace(position=SimpleNamespace(x=0., y=0., z=1.11),
+                           orientation=SimpleNamespace(x=0., y=0., z=0., w=1.))
+    def bounds(allowance):
+        row, = observed_part_boxes(name, pose, support_allowance=allowance)
+        zs = [compose(row["pose"], [*v,0.,0.,0.,1.])[2] for v in row["mesh"]["vertices"]]
+        return min(zs), max(zs)
+    full = bounds(0.)
+    carried = bounds(.001)
+    assert carried[0] == pytest.approx(full[0] + .001, abs=1e-9)
+    assert carried[1] == pytest.approx(full[1], abs=1e-9)
+
+
+def test_explicit_waypoints_preserve_downward_orientation_and_seed_continuity():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints
+    from cais_spade_llm.recovery_framework.geometry import rotate
+
+    limits = {'joint': {'lower': -2., 'upper': 2., 'velocity': 1., 'acceleration': 2.}}
+    calls = []
+    def solve(pose, seed):
+        assert rotate(pose[3:], [0., 0., 1.])[2] == pytest.approx(-1.)
+        assert seed == ([calls[-1][0][2]] if calls else [0.])
+        calls.append((pose, seed))
+        return [pose[2]]
+    rows = resolve_waypoints(start_pose=[0., 0., 0., 1., 0., 0., 0.], start_joints=[0.],
+        waypoints=[[0., 0., .2, 1., 0., 0., 0.], [.1, 0., .2, 0., 1., 0., 0.]],
+        names=['joint'], limits=limits, solve_ik=solve)
+    assert rows[0]['positions'] == [0.] and rows[-1]['positions'] == [.2]
+    assert all(b['time_from_start'] > a['time_from_start'] for a, b in zip(rows, rows[1:]))
+    assert all(abs(row['velocities'][0]) <= 1.000001 for row in rows)
+    assert all(abs(row['accelerations'][0]) <= 2.000001 for row in rows)
+    assert rows[0]['velocities'] == rows[-1]['velocities'] == [0.]
+
+
+def test_explicit_waypoints_reject_ik_branch_changes_and_unavailable_poses():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import continuous_joints, resolve_waypoints
+
+    limits = {'joint': {'lower': -2., 'upper': 2., 'velocity': 1., 'acceleration': 2.}}
+    assert continuous_joints([-2 * math.pi + .1], [0.], ['joint'], limits, .35) == pytest.approx([.1])
+    with pytest.raises(ValueError, match='joint branch'):
+        continuous_joints([1.], [0.], ['joint'], limits, .35)
+    solve = Mock(side_effect=ValueError('unreachable waypoint'))
+    with pytest.raises(ValueError, match='unreachable waypoint'):
+        resolve_waypoints(start_pose=[0., 0., 0., 1., 0., 0., 0.], start_joints=[0.],
+            waypoints=[[0., 0., .2, 1., 0., 0., 0.]], names=['joint'], limits=limits, solve_ik=solve)
+    assert solve.call_count == 1
+
+
+def test_waypoint_resource_never_calls_a_motion_planner_on_conversion_failure():
+    controller = SimpleNamespace(
+        execution_mode='simulation', controller_config={'cartesian_motion': {'only': True}},
+        _resolve_cartesian_waypoints=Mock(side_effect=ValueError('unreachable waypoint')),
+        _planning_wall_time_sec=0., _cart_client=Mock(), _execute_simulation_motion_plan=Mock(),
+        _last_command_evidence=None,
+    )
+    assert not GazeboPickPlaceController._cartesian_move(controller, object())
+    controller._cart_client.call_async.assert_not_called()
+    controller._execute_simulation_motion_plan.assert_not_called()
+    assert controller._last_command_evidence['command_sent'] is False
+
+
+def test_KMR_transfer_waypoints_preserve_downward_tilt_without_posture_commands():
+    from cais_spade_llm.recovery_framework.kmr_motion import downward_transfer_waypoints
+    from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
+    from cais_spade_llm.recovery_framework.geometry import rotate
+
+    settings = {'turn_radius_m': .5, 'turn_step_rad': .15, 'minimum_turn_angle_rad': .5}
+    start, target = [-.6, 0., .75, 1., 0., 0., 0.], [.6, 0., 1.15, 0., 1., 0., 0.]
+    waypoints = downward_transfer_waypoints(start, target, [0., 0., .7], settings)
+    assert len(waypoints) > 2
+    for pose in waypoints:
+        assert math.hypot(*pose[:2]) == pytest.approx(.5)
+        assert pose[2] == 1.15
+        assert rotate(pose[3:], [0., 0., 1.])[2] == pytest.approx(-1.)
+    assert not {'move_to_configuration', 'rotate_arm_base'} & {
+        step.op for task in KMR_TASKS.values() for step in task.program.steps}
+    with pytest.raises(ValueError, match='downward'):
+        downward_transfer_waypoints([0., 0., 1., 0., 0., 0., 1.], target, [0., 0., 0.], settings)
+
+
+def test_payload_mesh_evidence_retains_provenance_without_triangle_copies():
+    from cais_spade_llm.recovery_framework.part_collision import collision_geometry_evidence
+
+    rows = [{'id': 'gear/link/collision', 'pose': [0.] * 7, 'size': [.1, .1, .02],
+             'support_contact_allowance_m': .001,
+             'mesh': {'vertices': [[0., 0., 0.]], 'triangles': [[0, 0, 0]],
+                      'source': '/mesh.stl', 'source_sha256': 'recorded CAD hash', 'scale': [1.] * 3}}]
+    result = collision_geometry_evidence(rows)
+    assert result[0]['mesh']['source_sha256'] == rows[0]['mesh']['source_sha256']
+    assert result[0]['mesh']['triangle_count'] == 1
+    assert 'vertices' not in result[0]['mesh']
+    assert 'vertices' in rows[0]['mesh']
+    assert result[0]['support_contact_allowance_m'] == .001

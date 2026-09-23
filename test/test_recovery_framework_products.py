@@ -229,8 +229,8 @@ def test_recovery_assembly_targets_match_gravity_supported_fixture_surfaces() ->
         geometry,
     )
 
-    assert gear["slot_floor_z_m"] == pytest.approx(1.02)
-    assert gear["target_origin_pose"]["z"] == pytest.approx(1.03)
+    assert gear["slot_floor_z_m"] == pytest.approx(1.0289916)
+    assert gear["target_origin_pose"]["z"] == pytest.approx(1.0389916)
     assert gear["place_tool_yaw_offset_rad"] == pytest.approx(math.pi / 2)
     assert machined["slot_floor_z_m"] == pytest.approx(1.0239916)
     assert machined["target_origin_pose"]["z"] == pytest.approx(1.0239916)
@@ -273,7 +273,8 @@ def test_active_product_files_contain_only_the_configured_nist_setup() -> None:
     for active_path in (MANIFEST_PATH, GEOMETRY_PATH):
         assert sorted(active_path.parent.glob("*.json")) == [active_path]
     assert {path.name for path in ORDER_PATH.parent.glob("*.json")} == {
-        ORDER_PATH.name, "assembly_board-v1-kmr-storage-m1.json"
+        ORDER_PATH.name, "assembly_board-v1-kmr-storage-m1.json",
+        "assembly_board-v1-eight-pegs.json", "assembly_board-v1-round-4mm-m1.json"
     }
 
 
@@ -331,11 +332,12 @@ def test_nist_catalog_matches_configured_scene_inventory_and_meshes() -> None:
             f"model://cad_models/{CAD_FILENAMES[part_name]}"
         )
     for part_name in gears:
-        assert any(
-            include.findtext("name") == part_name
-            and include.findtext("uri") == f"model://{part_name}"
-            for include in world.findall("./world/include")
-        )
+        model = world.find(f"./world/model[@name='{part_name}']")
+        assert model is not None
+        collision = model.find("link/collision")
+        visual = model.find("link/visual")
+        assert collision.findtext("geometry/mesh/uri") == visual.findtext("geometry/mesh/uri")
+        assert collision.findtext("pose") == visual.findtext("pose")
 
 
 def test_stationary_registration_does_not_reuse_removed_geometry() -> None:

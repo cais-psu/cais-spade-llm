@@ -30,14 +30,14 @@
       "thickness_m": 0.0089916,
       "slot_floor_z_m": 1.0239916,
       "slot_floor_z_m_by_part": {
-        "gear_small": 1.02,
-        "gear_medium": 1.02,
-        "gear_large": 1.02
+        "gear_small": 1.0289916,
+        "gear_medium": 1.0289916,
+        "gear_large": 1.0289916
       },
       "target_origin_z_m": {
-        "gear_small": 1.03,
-        "gear_medium": 1.03,
-        "gear_large": 1.03,
+        "gear_small": 1.0389916,
+        "gear_medium": 1.0389916,
+        "gear_large": 1.0389916,
         "KET4_Square_4mm": 1.0239916,
         "KET8_Square_8mm": 1.0239916,
         "KET12_Square_12mm": 1.0239916,
@@ -97,6 +97,41 @@
           0.07445,
           0.069824
         ]
+      },
+      "mating_contact_by_part": {
+        "gear_small": {
+          "target_collision_object": "Gear_Plate/Gear_Shaft_1/collision",
+          "axis_tolerance_m": 0.0005,
+          "max_contact_depth_m": 0.0005,
+          "target_yaw_rad": 1.5707963267948966,
+          "ignore_tooth_contact_with": [
+            "gear_medium/link/collision",
+            "gear_large/link/collision"
+          ],
+          "retain_fixture_attachment": true
+        },
+        "gear_medium": {
+          "target_collision_object": "Gear_Plate/Gear_Shaft_2/collision",
+          "axis_tolerance_m": 0.0005,
+          "max_contact_depth_m": 0.0005,
+          "target_yaw_rad": 1.5707963267948966,
+          "ignore_tooth_contact_with": [
+            "gear_small/link/collision",
+            "gear_large/link/collision"
+          ],
+          "retain_fixture_attachment": true
+        },
+        "gear_large": {
+          "target_collision_object": "Gear_Plate/Gear_Shaft_3/collision",
+          "axis_tolerance_m": 0.0005,
+          "max_contact_depth_m": 0.0005,
+          "target_yaw_rad": 1.5707963267948966,
+          "ignore_tooth_contact_with": [
+            "gear_small/link/collision",
+            "gear_medium/link/collision"
+          ],
+          "retain_fixture_attachment": true
+        }
       }
     },
     "parts": {

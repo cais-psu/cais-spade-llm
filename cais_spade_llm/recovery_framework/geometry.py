@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import struct
 import xml.etree.ElementTree as ET
@@ -36,6 +37,32 @@ def _mesh_vertices(path: Path, modified: int, size: int) -> tuple:
         max(v[i] for v in vertices) for i in range(3))
 
 
+@lru_cache(maxsize=16)
+def _mesh_shape(path: Path, modified: int, size: int, scale: tuple) -> dict:
+    """Keep CAD triangles for mating parts whose bore cannot use a solid bound."""
+    data = path.read_bytes()
+    count = struct.unpack_from('<I', data, 80)[0] if len(data) >= 84 else 0
+    if len(data) == 84 + 50 * count:
+        vertices = [struct.unpack_from('<3f', data, 84 + 50 * i + 12 + 12 * j)
+                    for i in range(count) for j in range(3)]
+    else:
+        vertices = [tuple(float(v) for v in fields[1:])
+                    for line in data.decode('ascii').splitlines()
+                    if (fields := line.split()) and fields[0] == 'vertex']
+    low, high = _mesh_vertices(path, modified, size)
+    center = [(low[i] + high[i]) / 2 for i in range(3)]
+    points, indices, lookup = [], [], {}
+    for vertex in vertices:
+        point = tuple((vertex[i] - center[i]) * scale[i] for i in range(3))
+        if point not in lookup:
+            lookup[point] = len(points)
+            points.append(list(point))
+        indices.append(lookup[point])
+    return {'vertices': points, 'triangles': [indices[i:i + 3] for i in range(0, len(indices), 3)],
+            'source': str(path), 'source_sha256': hashlib.sha256(data).hexdigest(),
+            'scale': list(scale), 'center': center}
+
+
 def quaternion(rpy: list[float]) -> list[float]:
     """Convert configured roll, pitch, yaw to an xyzw quaternion."""
     r, p, y = (v / 2 for v in rpy)
@@ -66,7 +93,8 @@ def _pose(element: ET.Element) -> list[float]:
     return [*values[:3], *quaternion(values[3:])]
 
 
-def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None = None) -> list[dict]:
+def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None = None, *,
+                    exact_models: set[str] | None = None) -> list[dict]:
     """Extract static SDF boxes and conservative cylinder bounds in world coordinates.
 
     Open robot-loading windows stay open because their surrounding panels are
@@ -97,11 +125,14 @@ def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None
                 cylinder = geometry.find('cylinder')
                 mesh = geometry.find('mesh')
                 local_pose = _pose(collision)
+                shape = {}
                 if box is not None:
                     size = [float(v) for v in box.findtext('size').split()]
                 elif cylinder is not None:
                     radius = float(cylinder.findtext('radius'))
                     size = [2*radius, 2*radius, float(cylinder.findtext('length'))]
+                    if name in (exact_models or set()):
+                        shape['cylinder'] = [size[2], radius]
                 elif mesh is not None:
                     relative = mesh.findtext('uri').removeprefix('model://')
                     path = models_path / relative
@@ -113,9 +144,11 @@ def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None
                     low = [minimum[i]*scale[i] for i in range(3)]
                     high = [maximum[i]*scale[i] for i in range(3)]
                     size = [high[i]-low[i] for i in range(3)]
+                    if name in (exact_models or set()):
+                        shape['mesh'] = _mesh_shape(path, stamp.st_mtime_ns, stamp.st_size, tuple(scale))
                     local_pose = compose(local_pose, [*((high[i]+low[i])/2 for i in range(3)), 0., 0., 0., 1.])
                 else:
                     raise ValueError(f'Unmodeled fixed collision geometry: {name}/{link.get("name")}')
                 boxes.append({'id': f'{name}/{link.get("name")}/{collision.get("name")}',
-                              'pose': compose(link_pose, local_pose), 'size': size})
+                              'pose': compose(link_pose, local_pose), 'size': size, **shape})
     return boxes

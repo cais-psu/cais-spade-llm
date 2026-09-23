@@ -70,6 +70,7 @@ def _robot_configuration(scene: dict, robot: dict) -> tuple[dict, dict, dict]:
         release_detach_link_candidates=attach_links,
         primary_attach_link=attach_links[0],
     )
+    controller["cartesian_motion"] = deepcopy(robot.get("cartesian_motion", {}))
     controller["motion"]["trajectory_time_scale"] = 1.0
     controller["motion"]["tf_lookup_timeout_sec"] = float(
         robot.get("tf_lookup_timeout_sec", controller["motion"].get("tf_lookup_timeout_sec", 2.0))
@@ -197,6 +198,12 @@ def _part_geometry(context, part_name: str) -> dict:
     raw = context.inputs["geometry"]
     geometry = ProductProfile.geometry_for_part_from_geometry(part_name, raw)
     if geometry:
+        contact = raw["assembly_board"].get("mating_contact_by_part", {}).get(part_name)
+        if contact:
+            expected = raw["parts"]["assembly_target_map"][part_name] + "/collision"
+            if contact["target_collision_object"] != expected:
+                raise ValueError("Mating contact must identify this part's configured assembly target")
+            geometry["simulation_mating_contact"] = deepcopy(contact)
         return geometry
     item = context.geometry[part_name]
     dimensions = item.get("dimensions_m") or [0.05, 0.05, 0.05]
@@ -210,6 +217,12 @@ def _part_geometry(context, part_name: str) -> dict:
 def _pick_geometry(context, part_name: str, origin: str, robot_id: str) -> dict:
     """Add the configured source access contract to a part's pick geometry."""
     geometry = deepcopy(_part_geometry(context, part_name))
+    dimensions = context.geometry[part_name].get("dimensions_m")
+    if dimensions and "grasp_width_m" not in geometry:
+        width = max(float(dimensions[0]), float(dimensions[1]))
+        if not math.isfinite(width) or width <= 0.0:
+            raise ValueError(f"Invalid configured grasp width for {part_name}")
+        geometry["grasp_width_m"] = width
     scene = context.inputs["scene"]
     source = scene.get(origin)
     if source is None:

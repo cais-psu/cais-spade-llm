@@ -81,15 +81,14 @@ _move = (
 _place = (
     _step('grasp', 'observe_custody', previous=_state('previous')),
     _step('place', 'compute_place_targets', transform=_path('grasp')),
-    _step('clearance', 'move_to_configuration', joints=_path('place', 'before_turn'), hold_arm_base=True),
-    _step('turn', 'rotate_arm_base', joint_a1=_path('place', 'joint_a1')),
+    _step('clearance', 'move_to_pose', target=_path('place', 'approach'), waypoints=_path('place', 'transfer_waypoints')),
     _step('descend', 'move_cartesian', target=_path('place', 'target')),
     _step('held', 'custody', transform=_path('grasp')),
     _step('open', 'open_gripper'),
     _step('detach', 'detach_part'),
     _step('released_collision', 'part_collision', attached=False),
     _step('withdraw', 'move_cartesian', target=_path('place', 'retreat')),
-    _step('park', 'move_to_configuration', joints=_path('place', 'parked')),
+    _step('park', 'move_to_pose', target=_path('place', 'transport'), waypoints=_path('place', 'withdraw_waypoints')),
     _step('observations', 'observe_release', destination=_path('place', 'destination')),
 )
 

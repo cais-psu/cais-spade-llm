@@ -73,7 +73,8 @@ class KMRPrimitives:
         """
         return await self._call('move_cartesian', {'target': target})
 
-    async def move_to_pose(self, target: list[float], seed: list[float] | None = None) -> dict:
+    async def move_to_pose(self, target: list[float], seed: list[float] | None = None,
+                           waypoints: list[list[float]] | None = None) -> dict:
         """Enter a Cartesian segment using a collision-checked posture.
 
         ---
@@ -84,7 +85,7 @@ class KMRPrimitives:
             set_from_param: target
         ---
         """
-        return await self._call('move_to_pose', {'target': target, 'seed': seed})
+        return await self._call('move_to_pose', {'target': target, 'seed': seed, 'waypoints': waypoints})
 
     async def move_to_configuration(self, joints: list[float], hold_arm_base: bool = False) -> dict:
         """Move to bounded joint positions with collision checks.

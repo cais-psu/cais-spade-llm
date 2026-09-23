@@ -559,18 +559,61 @@ class EnvironmentProductLoop(CyclicBehaviour):
         ready: dict[str, dict] = {}
         dependencies: dict[str, dict] = {}
         runtime.intake_assignments = {}
+        runtime.admitted_parts = set()
         runtime.waiting_since = {}
         runtime.retained_paths = getattr(runtime, "retained_paths", {})
         self._deferred_acks = []
+        self._plan_decision = None
+        self._awaiting_plan_request = None
+        approval = None
         try:
             await runtime.prepare_execution()
             while not runtime.stopped:
+                if approval is not None:
+                    if time.monotonic() - approval["requested_monotonic"] > 60:
+                        raise TimeoutError("Timed out awaiting plan_safety_result")
+                    if self._plan_decision is not None:
+                        decision = self._plan_decision
+                        self._plan_decision = None
+                        self._awaiting_plan_request = None
+                        context.negotiations.append({
+                            "kind": "CCA", "request_id": approval["request_id"],
+                            "task_ids": [task["task_id"] for task in approval["tasks"]],
+                            "requested_at_unix": approval["requested_at_unix"],
+                            "timestamp": time.time(), "decision": deepcopy(decision),
+                        })
+                        if decision.get("ok") is not True:
+                            runtime.stop("CCA rejected negotiated work")
+                            await runtime.cancel_owned()
+                            runtime.outcome = {"status": "blocked", "reason": "CCA rejected negotiated work", "details": decision}
+                            return
+                        self._report_kickoff(runtime)
+                        for task in approval["tasks"]:
+                            if not context.relevant_revisions_match(task) or not context.allows_task(task):
+                                context.cancel_pending(task["task_id"])
+                                attempted.clear()
+                                continue
+                            await send_agent_message(self, message(runtime.jids[task["resource_id"]], "task", task))
+                            if task["task_id"] in approval["new_admissions"]:
+                                runtime.admitted_parts.add(task["part_name"])
+                        runtime.outcome = {"status": "executing", "tasks": deepcopy(list(context.pending_tasks.values()))}
+                        approval = None
+                        runtime.save()
                 all_goals = self._negotiation_goals(runtime)
                 for key, *_ in all_goals:
                     runtime.waiting_since.setdefault(key, time.monotonic())
                 waiting = [part for key, part, *_ in all_goals
                            if key == part and context.part_tracker[part]["location"] == "Storage"]
-                goals = [goal for goal in all_goals if goal[0] not in waiting]
+                source_waiting = self._source_waiting(context, all_goals, runtime.admitted_parts)
+                deferred = {part for parts in source_waiting.values() for part in parts}
+                goals = [goal for goal in all_goals if goal[0] not in waiting and goal[0] not in deferred]
+                for parts in source_waiting.values():
+                    if any(part in discoveries or part in ready for part in parts):
+                        continue
+                    for part in sorted(parts, key=lambda name: runtime.waiting_since[name]):
+                        if self._intake_ready(context, part):
+                            goals.append(next(goal for goal in all_goals if goal[0] == part))
+                            break
                 if (waiting and not any(part in discoveries or part in ready for part in waiting)
                         and self._intake_ready(context, waiting[0])):
                     goals.append(("intake", waiting[0], None, None))
@@ -625,7 +668,10 @@ class EnvironmentProductLoop(CyclicBehaviour):
                     else:
                         failures[key] = result
                 pending = []
+                new_admissions = set()
                 for key in sorted(ready, key=lambda key: self._ready_priority(runtime, key, ready[key])):
+                    if approval is not None:
+                        break
                     result = ready[key]
                     task = result["tasks"][0]
                     try:
@@ -653,6 +699,8 @@ class EnvironmentProductLoop(CyclicBehaviour):
                     else:
                         ready.pop(key)
                         pending.append(prepared)
+                        if key == task["part_name"]:
+                            new_admissions.add(prepared["task_id"])
                         machine = self._offered_machine(runtime, result)
                         if machine is not None and context.part_tracker[task["part_name"]]["location"] == "Storage":
                             runtime.intake_assignments[task["part_name"]] = machine
@@ -670,29 +718,12 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         skip_revalidation=False, request_id=request_id,
                         validation_scope="active_window", composition_backend="explicit_fsa_dfa",
                     )
+                    self._awaiting_plan_request = request_id
+                    approval = {
+                        "request_id": request_id, "tasks": pending, "new_admissions": new_admissions,
+                        "requested_monotonic": time.monotonic(), "requested_at_unix": time.time(),
+                    }
                     await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
-                    decision = await self.receive_from(
-                        self.agent.cca_jid, "plan_safety_result", timeout=60, request_id=request_id,
-                    )
-                    context.negotiations.append({
-                        "kind": "CCA", "request_id": request_id,
-                        "task_ids": [task["task_id"] for task in pending],
-                        "decision": deepcopy(decision),
-                    })
-                    if decision.get("ok") is not True:
-                        runtime.stop("CCA rejected negotiated work")
-                        await runtime.cancel_owned()
-                        runtime.outcome = {"status": "blocked", "reason": "CCA rejected negotiated work", "details": decision}
-                        return
-                    self._report_kickoff(runtime)
-                    for task in pending:
-                        if not context.relevant_revisions_match(task) or not context.allows_task(task):
-                            context.cancel_pending(task["task_id"])
-                            attempted.clear()
-                            continue
-                        await send_agent_message(self, message(runtime.jids[task["resource_id"]], "task", task))
-                    runtime.outcome = {"status": "executing", "tasks": deepcopy(list(context.pending_tasks.values()))}
-                    runtime.save()
                 if not discoveries and not context.pending_tasks:
                     if context.outstanding() is None and _robots_at_home(context):
                         context.environment_model.update(status="completed", closed=True)
@@ -720,6 +751,19 @@ class EnvironmentProductLoop(CyclicBehaviour):
             await asyncio.gather(*discoveries.values(), return_exceptions=True)
 
     @staticmethod
+    def _source_waiting(context, goals: list[tuple], admitted: set[str]) -> dict[str, list[str]]:
+        """Group untouched initial outputs for incremental resource-owned pickup."""
+        sources: dict[str, list[str]] = {}
+        for key, part, _desired, resource_goal in goals:
+            if resource_goal is not None or key != part or part in admitted:
+                continue
+            source = context.initial_product_states[part]["location"]
+            if (source in context.resources and source != "Storage"
+                    and context.part_tracker[part]["location"] == source):
+                sources.setdefault(source, []).append(part)
+        return sources
+
+    @staticmethod
     def _intake_ready(context, part: str) -> bool:
         """Check an enabled resource-owned handoff from the current source."""
         source = context.contact_resource(part)
@@ -729,7 +773,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
             actor = context.resources[rid]
             for offer in actor.alternatives(context, context.snapshot(), context.part_tracker, part, desired):
                 if (offer["status"] == "FEASIBLE" and offer["executable"]
-                        and offer["products"][part]["location"] != source
+                        and (offer["products"][part]["location"] != source
+                             or (offer["task"]["event_name"] == "pick_approach"
+                                 and offer["task"]["parameters"].get("origin_resource_location") == source))
                         and not context._task_reservations(offer["task"], part).intersection(context.reservations)):
                     return True
         return False
@@ -868,6 +914,12 @@ class EnvironmentProductLoop(CyclicBehaviour):
         if msg.metadata.get("type") == "replan_request" and sender == str(self.agent.cca_jid).split("/", 1)[0]:
             runtime.stop("CCA interrupted execution")
             return False
+        if (msg.metadata.get("type") == "plan_safety_result"
+                and sender == str(self.agent.cca_jid).split("/", 1)[0]):
+            payload = json.loads(msg.body)
+            if payload.get("request_id") == getattr(self, "_awaiting_plan_request", None):
+                self._plan_decision = payload
+            return True
         if msg.metadata.get("type") != "ack":
             return True
         payload = json.loads(msg.body)
@@ -976,6 +1028,10 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
         )
 
     observations = None
+    context.negotiations.append({
+        "kind": "task_received", "task_id": task_id, "resource_id": actor.resource_id,
+        "timestamp": time.time(),
+    })
     try:
         if task_id in actor.validated_completions:
             expected = {**task, "status": "completed"}
@@ -1025,7 +1081,15 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
                 },
             ),
         )
+        context.negotiations.append({
+            "kind": "resource_safety_requested", "task_id": task_id,
+            "resource_id": actor.resource_id, "timestamp": time.time(),
+        })
         decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id), 60)
+        context.negotiations.append({
+            "kind": "resource_safety_decision", "task_id": task_id,
+            "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
+        })
         if (
             decision != "allow"
             or runtime.stopped

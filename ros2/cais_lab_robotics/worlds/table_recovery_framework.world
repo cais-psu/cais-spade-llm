@@ -1386,21 +1386,186 @@
       <name>prusa_mk4_2</name>
       <pose>0.50 -0.50 1.04 0 0 -1.57079632679</pose>
     </include>
-    <include>
-      <uri>model://gear_small</uri>
-      <name>gear_small</name>
+    <model name="gear_small">
       <pose>0.44 -0.58 1.11 0 0 0</pose>
-    </include>
-    <include>
-      <uri>model://gear_medium</uri>
-      <name>gear_medium</name>
+      <link name="link">
+        <inertial>
+          <mass>0.05</mass>
+          <inertia>
+            <ixx>3.1623847563e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.1623847563e-06</iyy>
+            <iyz>0</iyz>
+            <izz>2.9914361793e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <max_contacts>256</max_contacts>
+          <pose>-0.21316049955 0.1518883057 0.0697159157 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://gear_small/meshes/Gear_Small.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.5</mu>
+                <mu2>0.5</mu2>
+              </ode>
+            </friction>
+            <contact>
+              <!-- Simulated gear mounting ignores tooth-to-tooth physics only. -->
+              <category_bitmask>256</category_bitmask>
+              <collide_bitmask>65279</collide_bitmask>
+              <ode>
+                <kp>100000.0</kp>
+                <kd>1000.0</kd>
+                <max_vel>0.001</max_vel>
+                <min_depth>0.0</min_depth>
+              </ode>
+            </contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <pose>-0.21316049955 0.1518883057 0.0697159157 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://gear_small/meshes/Gear_Small.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Green</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="gear_medium">
       <pose>0.44 -0.50 1.11 0 0 0</pose>
-    </include>
-    <include>
-      <uri>model://gear_large</uri>
-      <name>gear_large</name>
+      <link name="link">
+        <inertial>
+          <mass>0.10</mass>
+          <inertia>
+            <ixx>1.4356194535e-05</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>1.4356194535e-05</iyy>
+            <iyz>0</iyz>
+            <izz>2.2045722402e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <max_contacts>256</max_contacts>
+          <pose>-0.21316049955 0.18188829805 0.0697159157 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://gear_medium/meshes/Gear_Medium.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.5</mu>
+                <mu2>0.5</mu2>
+              </ode>
+            </friction>
+            <contact>
+              <!-- Simulated gear mounting ignores tooth-to-tooth physics only. -->
+              <category_bitmask>256</category_bitmask>
+              <collide_bitmask>65279</collide_bitmask>
+              <ode>
+                <kp>100000.0</kp>
+                <kd>1000.0</kd>
+                <max_vel>0.001</max_vel>
+                <min_depth>0.0</min_depth>
+              </ode>
+            </contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <pose>-0.21316049955 0.18188829805 0.0697159157 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://gear_medium/meshes/Gear_Medium.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Green</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="gear_large">
       <pose>0.44 -0.42 1.11 0 0 0</pose>
-    </include>
+      <link name="link">
+        <inertial>
+          <mass>0.15</mass>
+          <inertia>
+            <ixx>4.1030990294e-05</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>4.1030990294e-05</iyy>
+            <iyz>0</iyz>
+            <izz>7.2061980588e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <max_contacts>256</max_contacts>
+          <pose>-0.2131604996 0.231888298 0.0697159157 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://gear_large/meshes/Gear_Large.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.5</mu>
+                <mu2>0.5</mu2>
+              </ode>
+            </friction>
+            <contact>
+              <!-- Simulated gear mounting ignores tooth-to-tooth physics only. -->
+              <category_bitmask>256</category_bitmask>
+              <collide_bitmask>65279</collide_bitmask>
+              <ode>
+                <kp>100000.0</kp>
+                <kd>1000.0</kd>
+                <max_vel>0.001</max_vel>
+                <min_depth>0.0</min_depth>
+              </ode>
+            </contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <pose>-0.2131604996 0.231888298 0.0697159157 3.141592653589793 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>model://gear_large/meshes/Gear_Large.STL</uri>
+              <scale>0.001 0.001 0.001</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Green</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
 
     <!-- Exact NIST KET CAD on the upper Storage shelf. -->
     <model name="KET4_Square_4mm">

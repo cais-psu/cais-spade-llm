@@ -21,7 +21,27 @@
         "elbow_joint": 1.615863605277993,
         "wrist_1_joint": -1.592172956911188,
         "wrist_2_joint": -1.5690505595531368,
-        "wrist_3_joint": 2.232159020791153
+        "wrist_3_joint": -0.9094336327986401
+      },
+      "cartesian_motion": {
+        "only": true,
+        "max_joint_step_rad": 0.35,
+        "transit_waypoints": [
+          [
+            [
+              -5.55,
+              1.55,
+              1.35
+            ],
+            [
+              -5.55,
+              0.7,
+              1.35
+            ]
+          ]
+        ],
+        "linear_step_m": 0.01,
+        "angular_step_rad": 0.05
       }
     },
     {
@@ -45,7 +65,27 @@
         "elbow_joint": 1.615863605277993,
         "wrist_1_joint": -1.592172956911188,
         "wrist_2_joint": -1.5690505595531368,
-        "wrist_3_joint": 2.232159020791153
+        "wrist_3_joint": -0.9094336327986401
+      },
+      "cartesian_motion": {
+        "only": true,
+        "max_joint_step_rad": 0.35,
+        "transit_waypoints": [
+          [
+            [
+              -2.15,
+              1.55,
+              1.35
+            ],
+            [
+              -2.15,
+              0.7,
+              1.35
+            ]
+          ]
+        ],
+        "linear_step_m": 0.01,
+        "angular_step_rad": 0.05
       }
     },
     {
@@ -70,6 +110,13 @@
         "wrist_1_joint": -1.592172956911188,
         "wrist_2_joint": -1.5690505595531368,
         "wrist_3_joint": 2.232159020791153
+      },
+      "cartesian_motion": {
+        "only": true,
+        "max_joint_step_rad": 0.35,
+        "transit_waypoints": [],
+        "linear_step_m": 0.01,
+        "angular_step_rad": 0.05
       }
     },
     {
@@ -95,6 +142,13 @@
         "wrist_1_joint": -1.592172956911188,
         "wrist_2_joint": -1.5690505595531368,
         "wrist_3_joint": 2.232159020791153
+      },
+      "cartesian_motion": {
+        "only": true,
+        "max_joint_step_rad": 0.35,
+        "transit_waypoints": [],
+        "linear_step_m": 0.01,
+        "angular_step_rad": 0.05
       }
     }
   ],
@@ -1431,6 +1485,20 @@
             "radius": 0.24
           }
         ]
+      },
+      "cartesian_motion_only": true,
+      "cartesian_waypoints": {
+        "linear_step_m": 0.01,
+        "angular_step_rad": 0.05,
+        "max_joint_step_rad": 0.35,
+        "transport_tcp_position_in_base_frame_m": [
+          -0.25,
+          0.5,
+          1.1
+        ],
+        "turn_radius_m": 0.5,
+        "turn_step_rad": 0.15,
+        "minimum_turn_angle_rad": 0.5
       }
     }
   }

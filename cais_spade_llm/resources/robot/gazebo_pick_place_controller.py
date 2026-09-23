@@ -3169,7 +3169,7 @@ class GazeboPickPlaceController:
 
         retime_trajectory(trajectory, self._simulation_joint_limits(trajectory.joint_names), 1., 1.)
 
-    def _simulation_trajectory_is_collision_free(self, trajectory) -> bool:
+    def _simulation_trajectory_is_collision_free(self, trajectory, *, mating_contact: dict | None = None) -> bool:
         """Validate timed samples and their connecting motion before dispatch.
 
         Cartesian IK validity precedes time parameterization in MoveIt. Joint
@@ -3184,6 +3184,9 @@ class GazeboPickPlaceController:
         started = time.monotonic()
         evidence = {"checked_states": 0, "collision_free": False}
         self._last_path_validation = evidence
+        if mating_contact:
+            evidence['mating_contact'] = deepcopy(mating_contact)
+            evidence['permitted_contact_states'] = 0
         previous = None
         try:
             for point in trajectory.points:
@@ -3215,7 +3218,13 @@ class GazeboPickPlaceController:
                             label="timed trajectory collision validation", timeout_log_level="debug",
                         )
                     evidence["checked_states"] += 1
-                    if response is None or not response.valid:
+                    permitted_contact = False
+                    if response is not None and not response.valid and mating_contact:
+                        permitted_contact = self._validate_simulation_mating_contact(
+                            mating_contact, response.contacts, request.robot_state)
+                        if permitted_contact:
+                            evidence['permitted_contact_states'] += 1
+                    if response is None or (not response.valid and not permitted_contact):
                         evidence["observation_received"] = response is not None
                         evidence["contacts"] = [] if response is None else [
                             [contact.contact_body_1, contact.contact_body_2]
@@ -6337,6 +6346,16 @@ class GazeboPickPlaceController:
             simulation_assembly_slot=simulation_assembly_slot,
             insertion_depth=float(self.insertion_depth_m),
         )
+        contact = geo.get('simulation_mating_contact') if simulation_assembly_slot else None
+        if contact and self.controller_config.get('payload_collision', {}).get('enabled'):
+            try:
+                poses = self._simulation_mating_poses(
+                    str(geo.get('model_name') or pick_ctx.get('model_name') or ''),
+                    target_origin_pose, float(contact['target_yaw_rad']),
+                )
+            except (ValueError, RuntimeError) as exc:
+                return {'success': False, 'message': str(exc)}
+            place_z = poses['insert_pose']['z']
         insert_pose = poses["insert_pose"]
         pre_insert_pose = poses["pre_insert_pose"]
         approach_pose = poses["approach_pose"]
@@ -6409,6 +6428,18 @@ class GazeboPickPlaceController:
             "target_origin_pose": target_origin_pose,
             "model_name": str(geo.get("model_name") or pick_ctx.get("model_name") or ""),
         }
+        contact = geo.get('simulation_mating_contact') if simulation_assembly_slot else None
+        self._simulation_mating_context = None
+        if contact and self.controller_config.get('payload_collision', {}).get('enabled'):
+            if any(not 0 < float(contact[key]) <= .0005
+                   for key in ('axis_tolerance_m', 'max_contact_depth_m')):
+                return {'success': False, 'message': 'Mating tolerance exceeds configured contact depth'}
+            self._simulation_mating_context = {
+                **deepcopy(contact), 'model_name': result['model_name'],
+                'target_origin_pose': deepcopy(target_origin_pose),
+                'pre_insert_pose': deepcopy(pre_insert_pose), 'insert_pose': deepcopy(insert_pose),
+            }
+            result['simulation_mating_contact'] = deepcopy(self._simulation_mating_context)
         if place_approach_skip_board_localization:
             result["place_approach_skip_board_localization"] = True
         if frozen_board_pose:
@@ -6659,6 +6690,39 @@ class GazeboPickPlaceController:
         }
         return mapping.get(code, f"error_code={code}")
 
+    def _cartesian_motion_only(self) -> bool:
+        """Read this resource's configured Cartesian arm execution policy."""
+        return (self.execution_mode == "simulation" and
+                getattr(self, "controller_config", {}).get("cartesian_motion", {}).get("only") is True)
+
+    def _move_configuration_cartesian(self, positions: list[float]) -> bool:
+        """Resolve the named configuration by FK and execute a continuous TCP path."""
+        from moveit_msgs.msg import RobotState
+        from moveit_msgs.srv import GetPositionFK
+
+        if not hasattr(self, "_home_fk_client"):
+            self._home_fk_client = self._node.create_client(
+                GetPositionFK, "/compute_fk", callback_group=self._cb_group)
+        state = RobotState(is_diff=True)
+        state.joint_state.name = list(self.arm_joint_names)
+        state.joint_state.position = list(positions)
+        request = GetPositionFK.Request(robot_state=state, fk_link_names=[self.ee_link])
+        request.header.frame_id = self.frame_id
+        response = self._wait_future(self._home_fk_client.call_async(request),
+                                     timeout_sec=5., label="resolve Cartesian home")
+        if response is None or response.error_code.val != 1 or len(response.pose_stamped) != 1:
+            self._last_failure_message = "Configured home FK is unavailable"
+            return False
+        target = response.pose_stamped[0].pose
+        if not self._move_xy_direct(target.position.x, target.position.y, target.position.z,
+                                    target.orientation, "Cartesian home"):
+            return False
+        if not self._fresh_stable_joint_target(dict(zip(self.arm_joint_names, positions, strict=True)),
+                                                tolerance=.02):
+            self._last_failure_message = "Cartesian home did not reach the configured joint posture"
+            return False
+        return True
+
     def _move_joints_via_moveit(
         self,
         positions: list[float],
@@ -6673,6 +6737,8 @@ class GazeboPickPlaceController:
             return False
         if self.execution_mode == "simulation" and self.arm_trajectory_topic:
             targets = self._nearest_simulation_joint_targets(positions)
+            if GazeboPickPlaceController._cartesian_motion_only(self):
+                return self._move_configuration_cartesian(targets)
             return self._execute_simulation_motion_plan(
                 joint_positions=targets,
                 label="move_home",
@@ -6727,12 +6793,12 @@ class GazeboPickPlaceController:
     def _nearest_simulation_joint_targets(self, positions: list[float]) -> list[float]:
         """Select equivalent arm angles near feedback within the running limits."""
         limits = self._simulation_joint_limits(self.arm_joint_names)
+        observations, missing = self._get_arm_joint_positions(timeout_sec=2.0)
+        if observations is None or missing:
+            raise ValueError(f"Missing observed joint position: {', '.join(missing)}")
         targets = []
-        for name, nominal in zip(self.arm_joint_names, positions, strict=True):
-            observed = self._get_joint_position(name)
+        for name, nominal, observed in zip(self.arm_joint_names, positions, observations, strict=True):
             bound = limits[name]
-            if observed is None:
-                raise ValueError(f"Missing observed joint position: {name}")
             if not math.isfinite(nominal) or not bound["lower"] <= nominal <= bound["upper"]:
                 raise ValueError(f"Target exceeds joint limits: {name}")
             turns = round((observed - nominal) / (2.0 * math.pi))
@@ -6752,6 +6818,9 @@ class GazeboPickPlaceController:
         time_scale: float = 1.0,
     ) -> bool:
         """Plan collision-free free-space motion and use this robot's controller."""
+        if GazeboPickPlaceController._cartesian_motion_only(self):
+            self._last_failure_message = "Resource requires a complete Cartesian path; joint-space fallback is disabled"
+            return False
         if self.execution_mode != "simulation" or not self.arm_trajectory_topic:
             return False
         from moveit_msgs.msg import (
@@ -7703,7 +7772,7 @@ class GazeboPickPlaceController:
         from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
         from moveit_msgs.msg import PlanningSceneComponents
         from cais_spade_llm.recovery_framework.part_collision import (
-            grasp_point_evidence, observed_part_boxes, part_scene_update,
+            collision_geometry_evidence, grasp_point_evidence, observed_part_boxes, part_scene_update,
         )
 
         evidence = {"model_name": model_name, "attached_link": attached_link,
@@ -7737,7 +7806,7 @@ class GazeboPickPlaceController:
                 raise ValueError(f"Cannot observe payload {model_name}")
             rows = observed_part_boxes(model_name, observed.state.pose, support_allowance=(
                 float(config["support_contact_allowance_m"]) if attached_link else 0.0))
-            evidence["collision_objects"] = rows
+            evidence["collision_objects"] = collision_geometry_evidence(rows)
             if attached_link:
                 try:
                     tcp = self._tf_buffer.lookup_transform(
@@ -7764,7 +7833,7 @@ class GazeboPickPlaceController:
             response = call(self._payload_scene_clients["apply"], ApplyPlanningScene.Request(scene=update), "payload_scene")
             if not response.success:
                 raise RuntimeError(f"MoveIt rejected payload scene for {model_name}")
-            evidence.update(collision_scene_acknowledged=True, collision_objects=rows)
+            evidence["collision_scene_acknowledged"] = True
             return True
         except (OSError, KeyError, TypeError, ValueError, RuntimeError) as exc:
             evidence["error"] = str(exc)
@@ -7944,6 +8013,26 @@ class GazeboPickPlaceController:
             board_top_z + (part_height * 0.5),
         )
         state.pose.orientation.w = 1.0
+        mating_evidence = None
+        mating = getattr(self, '_simulation_mating_context', None)
+        if (self.execution_mode == 'simulation' and mating
+                and mating['model_name'] == model_name):
+            from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
+
+            observed = self._wait_future(self._get_state_client.call_async(self._GetEntityState.Request(
+                name=model_name, reference_frame=self.frame_id)),
+                timeout_sec=5., label='observe seated mating part')
+            if observed is None or not observed.success:
+                return False
+            p, q = observed.state.pose.position, observed.state.pose.orientation
+            actual = [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+            corridor = {**mating, 'start_part_z': mating['target_origin_pose']['z']}
+            if not mating_pose_valid(corridor, actual):
+                self._last_failure_message = 'Released mating part is not seated in its configured pose'
+                self._last_command_evidence = {'seated_mating_part': {'observed_pose': actual, 'valid': False}}
+                return False
+            state.pose.orientation = deepcopy(q)
+            mating_evidence = {'observed_pose': actual, 'valid': True, 'orientation_preserved': True}
         state.twist.linear.x = 0.0
         state.twist.linear.y = 0.0
         state.twist.linear.z = 0.0
@@ -7965,15 +8054,16 @@ class GazeboPickPlaceController:
 
         if not self._set_entity_state_for_snap(model_name, state):
             return False
+        retain_fixture = bool(mating_evidence and mating.get('retain_fixture_attachment'))
         if destination_location in {"", "assembly_board-v1"}:
             if not self._attach_part_to_assembly_board(
                 model_name,
                 destination_location=destination_location,
             ):
                 return False
-            if not self._detach_part_from_assembly_board(model_name, "link"):
+            if not retain_fixture and not self._detach_part_from_assembly_board(model_name, "link"):
                 return False
-        if not self._set_entity_state_for_snap(model_name, state):
+        if not retain_fixture and not self._set_entity_state_for_snap(model_name, state):
             return False
         if not self._verify_snapped_entity_position(
             model_name,
@@ -7983,6 +8073,10 @@ class GazeboPickPlaceController:
 
         if not self._sync_part_collision(model_name):
             return False
+        if mating_evidence is not None:
+            mating_evidence['fixture_attachment_retained'] = retain_fixture
+            mating_evidence['ignored_tooth_contacts'] = list(mating.get('ignore_tooth_contact_with', []))
+            self._last_command_evidence['seated_mating_part'] = mating_evidence
         self._log().info(
             f"snap_to_slot stabilized {model_name} at "
             f"({slot_x:.3f}, {slot_y:.3f}, {state.pose.position.z:.3f})"
@@ -8226,6 +8320,137 @@ class GazeboPickPlaceController:
             evidence = self._observed_cartesian_endpoint_evidence(target)
         return evidence
 
+    def _simulation_mating_poses(self, model_name: str, target_origin: dict, yaw: float) -> dict:
+        """Align the actual held CAD part with its configured shaft and orientation."""
+        from cais_spade_llm.recovery_framework.geometry import multiply, rotate
+
+        if self._attached_model != model_name or not math.isfinite(yaw):
+            raise ValueError('Mating placement requires the identified attached part')
+        current = self._get_ee_pose()
+        observed = self._wait_future(self._get_state_client.call_async(self._GetEntityState.Request(
+            name=model_name, reference_frame=self.frame_id)),
+            timeout_sec=5., label='observe held mating transform')
+        if current is None or observed is None or not observed.success:
+            raise RuntimeError('Cannot observe the held mating transform')
+        p, q = observed.state.pose.position, observed.state.pose.orientation
+        ee = current.orientation
+        inverse = [-ee.x, -ee.y, -ee.z, ee.w]
+        offset = rotate(inverse, [p.x - current.position.x, p.y - current.position.y, p.z - current.position.z])
+        relative = multiply(inverse, [q.x, q.y, q.z, q.w])
+        target_q = [0., 0., math.sin(yaw / 2), math.cos(yaw / 2)]
+        tool_q = multiply(target_q, [-relative[0], -relative[1], -relative[2], relative[3]])
+        world_offset = rotate(tool_q, offset)
+        xyz = [float(target_origin[axis]) - world_offset[i] for i, axis in enumerate(('x', 'y', 'z'))]
+        if not all(math.isfinite(value) for value in [*xyz, *tool_q]):
+            raise ValueError('Observed mating transform is not finite')
+        return placement_poses(*xyz, dict(zip(('qx', 'qy', 'qz', 'qw'), tool_q)),
+                               simulation_assembly_slot=True, insertion_depth=float(self.insertion_depth_m))
+
+    def _simulation_mating_segment(self, target) -> dict | None:
+        """Authorize configured contact only for an aligned vertical insertion."""
+        context = getattr(self, '_simulation_mating_context', None)
+        if (self.execution_mode != 'simulation' or not context
+                or self._attached_model != context['model_name']):
+            return None
+        from cais_spade_llm.recovery_framework.geometry import multiply, rotate
+        from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
+
+        endpoint = context['pre_insert_pose']
+        tolerance = float(context['axis_tolerance_m'])
+        if (math.hypot(target.position.x - endpoint['x'], target.position.y - endpoint['y']) > tolerance
+                or not context['insert_pose']['z'] - tolerance <= target.position.z <= endpoint['z'] + tolerance):
+            return None
+        current = self._get_ee_pose()
+        if current is None or math.hypot(current.position.x - target.position.x,
+                                        current.position.y - target.position.y) > tolerance:
+            return None
+        expected_q = [endpoint[key] for key in ('qx', 'qy', 'qz', 'qw')]
+        for pose in (current, target):
+            q = pose.orientation
+            if abs(sum(a * b for a, b in zip(expected_q, (q.x, q.y, q.z, q.w)))) < math.cos(.01):
+                return None
+        observed = self._wait_future(self._get_state_client.call_async(self._GetEntityState.Request(
+            name=context['model_name'], reference_frame=self.frame_id)),
+            timeout_sec=5., label='observe aligned mating part')
+        if observed is None or not observed.success:
+            return None
+        p, q = observed.state.pose.position, observed.state.pose.orientation
+        authorization = {**deepcopy(context), 'start_part_z': p.z}
+        if not mating_pose_valid(authorization, [p.x, p.y, p.z, q.x, q.y, q.z, q.w]):
+            return None
+        ee = current.orientation
+        inverse = [-ee.x, -ee.y, -ee.z, ee.w]
+        authorization['tool_to_part_pose'] = [
+            *rotate(inverse, [p.x - current.position.x, p.y - current.position.y, p.z - current.position.z]),
+            *multiply(inverse, [q.x, q.y, q.z, q.w]),
+        ]
+        return authorization
+
+    def _validate_simulation_mating_contact(self, authorization: dict, contacts, state) -> bool:
+        """Check each contacting timed sample against the same narrow CAD corridor."""
+        from moveit_msgs.srv import GetPositionFK
+        from cais_spade_llm.recovery_framework.geometry import compose
+        from cais_spade_llm.recovery_framework.part_collision import mating_contacts_allowed, mating_pose_valid
+
+        if not mating_contacts_allowed(authorization, contacts):
+            return False
+        if not hasattr(self, '_mating_fk_client'):
+            self._mating_fk_client = self._node.create_client(
+                GetPositionFK, '/compute_fk', callback_group=self._cb_group)
+        request = GetPositionFK.Request(robot_state=state, fk_link_names=[self.ee_link])
+        request.header.frame_id = self.frame_id
+        result = self._wait_future(self._mating_fk_client.call_async(request),
+                                   timeout_sec=5., label='validate mating axis')
+        if result is None or result.error_code.val != 1 or len(result.pose_stamped) != 1:
+            return False
+        pose = result.pose_stamped[0].pose
+        p, q = pose.position, pose.orientation
+        part = compose([p.x, p.y, p.z, q.x, q.y, q.z, q.w], authorization['tool_to_part_pose'])
+        return mating_pose_valid(authorization, part)
+
+    def _resolve_cartesian_waypoints(self, waypoints: list, *, mating_contact: dict | None):
+        """Convert this primitive's explicit waypoints without a motion planner."""
+        from builtin_interfaces.msg import Duration
+        from moveit_msgs.srv import GetPositionIK
+        from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints, robot_trajectory
+
+        current = self._get_ee_pose()
+        positions, missing = self._get_arm_joint_positions(timeout_sec=2.)
+        if current is None or positions is None:
+            raise ValueError(f"Cartesian waypoint start observation unavailable: {missing}")
+        if not hasattr(self, "_waypoint_ik_client"):
+            self._waypoint_ik_client = self._node.create_client(
+                GetPositionIK, "/compute_ik", callback_group=self._cb_group)
+        def values(pose):
+            p, q = pose.position, pose.orientation
+            return [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+        def solve(target, seed):
+            if self._shutdown_requested:
+                raise InterruptedError("Cartesian waypoint execution cancelled")
+            query = GetPositionIK.Request()
+            request = query.ik_request
+            request.group_name, request.ik_link_name = self.group_name, self.ee_link
+            request.pose_stamped.header.frame_id = self.frame_id
+            request.pose_stamped.pose = self._make_pose(*target[:3], self._make_orientation(*target[3:]))
+            request.robot_state.is_diff = True
+            request.robot_state.joint_state.name = list(self.arm_joint_names)
+            request.robot_state.joint_state.position = seed
+            request.avoid_collisions = not mating_contact
+            request.timeout = Duration(nanosec=200_000_000)
+            response = self._wait_future(self._waypoint_ik_client.call_async(query),
+                                         timeout_sec=5., label="resolve Cartesian waypoint IK")
+            if response is None or response.error_code.val != 1:
+                raise ValueError(f"Cartesian waypoint IK is unavailable at {target}")
+            joints = dict(zip(response.solution.joint_state.name, response.solution.joint_state.position))
+            return [joints[name] for name in self.arm_joint_names]
+        settings = self.controller_config["cartesian_motion"]
+        rows = resolve_waypoints(start_pose=values(current), start_joints=positions,
+            waypoints=[values(pose) for pose in waypoints], names=self.arm_joint_names,
+            limits=self._simulation_joint_limits(self.arm_joint_names), solve_ik=solve,
+            linear_step=settings["linear_step_m"], angular_step=settings["angular_step_rad"],
+            maximum_joint_step=settings["max_joint_step_rad"])
+        return robot_trajectory(self.arm_joint_names, rows)
+
     def _cartesian_move(
         self,
         target,
@@ -8234,11 +8459,24 @@ class GazeboPickPlaceController:
         min_fraction: float = 0.9,
         allow_partial: bool = False,
         time_scale: float | None = None,
+        waypoints: list | None = None,
     ) -> bool:
+        self._last_command_evidence = {"command_sent": False, "motion_method": "Cartesian waypoints"}
+        mating_contact = (self._simulation_mating_segment(target)
+                          if getattr(self, '_simulation_mating_context', None) else None)
         planning_started = time.monotonic()
         solution = None
         preparation_reason = "not eligible"
-        if avoid_collisions and not allow_partial:
+        if GazeboPickPlaceController._cartesian_motion_only(self):
+            try:
+                solution = self._resolve_cartesian_waypoints([*(waypoints or []), target], mating_contact=mating_contact)
+            except (ValueError, RuntimeError) as exc:
+                self._last_failure_message = f"[{label}] {exc}"
+                return False
+            finally:
+                self._planning_wall_time_sec += time.monotonic() - planning_started
+            preparation_reason = "explicit Cartesian waypoints"
+        elif avoid_collisions and not allow_partial and not mating_contact and not waypoints:
             solution, preparation_reason = self._consume_prepared_cartesian(target)
         if solution is None:
             request = self._GetCartesianPath.Request()
@@ -8246,10 +8484,12 @@ class GazeboPickPlaceController:
             request.header.stamp = self._node.get_clock().now().to_msg()
             request.group_name = self.group_name
             request.link_name = self.ee_link
-            request.waypoints = [target]
+            request.waypoints = [*(waypoints or []), target]
             request.max_step = 0.01
             request.jump_threshold = 2.0
-            request.avoid_collisions = avoid_collisions
+            # Kinematic insertion candidates still undergo full timed collision
+            # checks below, including FK and depth bounds for the intended shaft.
+            request.avoid_collisions = avoid_collisions and not mating_contact
             request.start_state.is_diff = True
 
             future = self._cart_client.call_async(request)
@@ -8258,6 +8498,9 @@ class GazeboPickPlaceController:
             if response is None:
                 self._last_failure_message = f"[{label}] planning response timed out"
                 self._log().error(f"[{label}] planning response timed out")
+                return False
+            if hasattr(response, "error_code") and response.error_code.val != 1:
+                self._last_failure_message = f"[{label}] Cartesian planning failed: {response.error_code.val}"
                 return False
             if response.fraction < min_fraction:
                 self._last_failure_message = (
@@ -8274,16 +8517,27 @@ class GazeboPickPlaceController:
                 )
                 return False
             solution = response.solution
-        else:
+        elif not GazeboPickPlaceController._cartesian_motion_only(self):
             self._planning_wall_time_sec += time.monotonic() - planning_started
 
+        if GazeboPickPlaceController._cartesian_motion_only(self):
+            points = solution.joint_trajectory.points
+            maximum_step = float(self.controller_config["cartesian_motion"]["max_joint_step_rad"])
+            if not points or any(abs(b - a) > maximum_step
+                                 for left, right in zip(points, points[1:])
+                                 for a, b in zip(left.positions, right.positions, strict=True)):
+                self._last_failure_message = "Cartesian trajectory has an IK joint discontinuity"
+                return False
         exec_goal = self._ExecuteTrajectory.Goal()
         if time_scale is None:
             scale = self.trajectory_time_scale
         else:
             scale = _as_float(time_scale, self.trajectory_time_scale)
         self._scale_trajectory_timing(solution, scale)
-        if not self._simulation_trajectory_is_collision_free(solution.joint_trajectory):
+        valid = (self._simulation_trajectory_is_collision_free(
+            solution.joint_trajectory, mating_contact=mating_contact) if mating_contact
+            else self._simulation_trajectory_is_collision_free(solution.joint_trajectory))
+        if not valid:
             return False
         endpoint_time = solution.joint_trajectory.points[-1].time_from_start
         self._trajectory_duration_sec += endpoint_time.sec + endpoint_time.nanosec / 1e9
@@ -8320,6 +8574,8 @@ class GazeboPickPlaceController:
             self._last_failure_message = ""
             self._last_command_evidence = {
                 "command_sent": True,
+                "motion_method": "Cartesian waypoints",
+                "waypoint_count": len(waypoints or []) + 1,
                 "controller_endpoint": self.arm_trajectory_topic.removesuffix(
                     "/joint_trajectory"
                 )
@@ -8521,6 +8777,25 @@ class GazeboPickPlaceController:
             time_scale=time_scale,
         ):
             return True
+
+        if GazeboPickPlaceController._cartesian_motion_only(self):
+            if (self._last_command_evidence or {}).get("command_sent"):
+                return False
+            current = self._get_ee_pose()
+            if current is None:
+                return False
+            current_xyz = [current.position.x, current.position.y, current.position.z]
+            target = self._make_pose(target_x, target_y, z, orientation)
+            for route in self.controller_config["cartesian_motion"].get("transit_waypoints", []):
+                ordered = list(route)
+                if math.dist(current_xyz, ordered[-1]) < math.dist(current_xyz, ordered[0]):
+                    ordered.reverse()
+                waypoints = [self._make_pose(*xyz, orientation) for xyz in ordered]
+                if self._cartesian_move(target, label_prefix, time_scale=time_scale, waypoints=waypoints):
+                    return True
+                if (self._last_command_evidence or {}).get("command_sent"):
+                    return False
+            return False
 
         current = self._get_ee_pose()
         if current is None:

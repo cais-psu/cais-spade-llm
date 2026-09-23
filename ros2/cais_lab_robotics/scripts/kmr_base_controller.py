@@ -987,7 +987,14 @@ def main() -> None:
             carrying = bool(custody and custody.get('attached') is True)
             configuration = (self.kmr['task_execution']['carrying_arm_configuration']
                              if carrying else self.kmr['parked_arm_configuration'])
-            if carrying and custody.get('transport_sweep_validated') is True:
+            simulated_empty_waypoints = bool(
+                custody and custody.get('attached') is False
+                and self.get_parameter('use_sim_time').value is True
+                and self.kmr['task_execution'].get('cartesian_motion_only') is True
+                and custody.get('launch_id') == self.get_parameter('launch_id').value
+                and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value
+            )
+            if (carrying or simulated_empty_waypoints) and custody.get('transport_sweep_validated') is True:
                 configuration = custody.get('carrying_arm_configuration')
                 if (not isinstance(configuration, list) or len(configuration) != 7
                         or any(not isinstance(value, (int, float)) or not math.isfinite(value)

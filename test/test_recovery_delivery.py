@@ -88,11 +88,12 @@ def test_delivery_goal_has_three_tasks_and_preserves_assembly_semantics(inputs):
     assert state['processCompleted'] == []
 
 
-def test_saved_setup_selects_eight_pegs_and_preserves_full_order_and_delivery_demo():
+def test_saved_setup_selects_full_order_and_preserves_eight_pegs_and_delivery_demo():
     setup = recovery_setup.load_setup()
     full_order = 'cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json'
     eight_order = 'cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json'
-    assert setup['selected_product_order_file'] == eight_order
+    assert setup['selected_product_order_file'] == full_order
+    assert len(read_json(ROOT / eight_order)['parts']) == 8
     assert recovery_setup.default_setup()['selected_product_order_file'] == full_order
     delivery_setup = {**setup, 'selected_product_order_file': str(delivery.ORDER_PATH.relative_to(delivery.ROOT))}
     assert startup.supports_delivery(delivery_setup)
@@ -103,7 +104,7 @@ def test_saved_setup_selects_eight_pegs_and_preserves_full_order_and_delivery_de
     }).plan()['tasks']
     assert [task['event_name'] for task in tasks] == ['pick_part', 'move_to_resource', 'place_release']
     assert {task['resource_id'] for task in tasks} == {'KMR'}
-    assert recovery_setup.load_setup()['selected_product_order_file'] == eight_order
+    assert recovery_setup.load_setup()['selected_product_order_file'] == full_order
 
 
 @pytest.mark.parametrize('conditions', [
@@ -1274,7 +1275,7 @@ def test_kmr_execution_uses_declared_composition_and_preserves_partial_results(f
     outputs = {'compute_pick_targets': {key: [1, 2, 3] for key in (
                    'approach', 'seed', 'target', 'lift', 'retreat', 'carrying')},
                'compute_place_targets': {key: [1, 2, 3] for key in (
-                   'approach', 'seed', 'target', 'retreat', 'destination', 'parked', 'before_turn', 'joint_a1')},
+                   'approach', 'seed', 'target', 'retreat', 'destination', 'transport', 'transfer_waypoints', 'withdraw_waypoints')},
                'observe_grasp': [0]*7, 'observe_custody': [0]*7}
     calls, records, operations = [], [], []
     failed_step = min(3, len(definition.program.steps)-1)

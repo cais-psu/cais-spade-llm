@@ -105,3 +105,26 @@ def trajectory_cost(trajectories: Sequence[Any]) -> tuple[float, float]:
         for a, b in zip(first.positions, last.positions, strict=True)
     )
     return duration, travel
+
+
+def downward_transfer_waypoints(start: Sequence[float], target: Sequence[float],
+                                center: Sequence[float], settings: dict) -> list[list[float]]:
+    """Construct the configured TCP clearance arc while preserving downward tilt."""
+    from cais_spade_llm.resources.robot.cartesian_waypoints import sample_segment
+    from cais_spade_llm.recovery_framework.geometry import rotate
+
+    if any(rotate(list(pose[3:]), [0., 0., 1.])[2] > -math.cos(.02) for pose in (start, target)):
+        raise ValueError('KMR transfer endpoints must face downward')
+    left = math.atan2(start[1] - center[1], start[0] - center[0])
+    right = math.atan2(target[1] - center[1], target[0] - center[0])
+    angle = math.atan2(math.sin(right - left), math.cos(right - left))
+    if abs(angle) < settings['minimum_turn_angle_rad']:
+        return []
+    count = max(1, math.ceil(abs(angle) / settings['turn_step_rad']))
+    poses = sample_segment(start, target, linear_step=1e6, angular_step=1e6, minimum_samples=count)
+    radius, height = settings['turn_radius_m'], max(start[2], target[2])
+    for index, pose in enumerate(poses):
+        angle_at_sample = left + angle * index / count
+        pose[:3] = [center[0] + radius * math.cos(angle_at_sample),
+                    center[1] + radius * math.sin(angle_at_sample), height]
+    return poses

@@ -442,9 +442,10 @@ def test_single_printing_station_starts_with_three_gears_and_empty_exit() -> Non
     assert 'initial_product' not in printer and 'output_pose' not in printer
     assert list(map(float, includes['prusa_mk4_2'].findtext('pose').split())) == printer['world_pose']
     for name, pose in printer['output_poses'].items():
-        assert includes[name].findtext('uri') == f'model://{name}'
-        assert list(map(float, includes[name].findtext('pose').split())) == pose
-        assert len([item for item in world.findall('./world/include') if item.findtext('name') == name]) == 1
+        assert models[name].find('link/collision/geometry/mesh') is not None
+        assert list(map(float, models[name].findtext('pose').split())) == pose
+        assert len(world.findall(f"./world/model[@name='{name}']")) == 1
+        assert name not in includes
     printer_model = ET.parse(PRINTER_MODEL_PATH).getroot().find('model')
     assert printer_model is not None and printer_model.findtext('static') == 'true'
     components = {item.attrib['name'] for item in printer_model.findall('link/visual')}
@@ -483,6 +484,16 @@ def test_three_gears_rest_on_print_area_without_overlapping_printer_or_each_othe
     printer = json.loads(ROBOTS_PATH.read_text())['3D Printing Station']
     model = ET.parse(PRINTER_MODEL_PATH).find('./model/link')
     bed = model.find("collision[@name='bed']")
+    assert int(bed.findtext("max_contacts")) == 256
+    world = ET.parse(WORLD_PATH).find("world")
+    for name in printer["output_poses"]:
+        collision = world.find(f"model[@name='{name}']/link/collision")
+        assert int(collision.findtext("max_contacts")) == 256
+        assert float(collision.findtext("surface/contact/ode/min_depth")) == 0.0
+        category = int(collision.findtext("surface/contact/category_bitmask"))
+        mask = int(collision.findtext("surface/contact/collide_bitmask"))
+        assert category & mask == 0
+        assert (category & 65535) | (65535 & mask)
     bed_top = float(bed.findtext('pose').split()[2]) + float(bed.findtext('geometry/box/size').split()[2]) / 2
     area = model.find("visual[@name='bed_print_area']")
     ax, ay, *_ = map(float, area.findtext('pose').split())

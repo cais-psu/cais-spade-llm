@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "selected_product": "cais_spade_llm/initialization/products/assembly_board-v1-recovery-framework.json",
-  "selected_product_order_file": "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json",
+  "selected_product_order_file": "cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json",
   "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
   "scene_file": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
   "permitted_resources": [

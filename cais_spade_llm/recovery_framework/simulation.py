@@ -49,13 +49,17 @@ def launch_arguments(path: Path | None = None) -> str:
     if order_path and scene_path:
         order = json.loads((ROOT / order_path).read_text())
         scene = json.loads((ROOT / scene_path).read_text())
-        initial_part = next((part for part in order.get('parts', [])
-                             if part in scene['Storage']['slots']), '')
-    return " ".join((
-        shlex.quote(f"kmr_initial_part:={initial_part}"),
+        parts = order.get('parts', [])
+        if parts == 'all':
+            parts = scene['Storage']['slots']
+        initial_part = next((part for part in parts if part in scene['Storage']['slots']), '')
+    arguments = [
         f"simulation_speed:={settings['speed']}",
         f"ur_controller_rate_hz:={settings['ur_controller_rate_hz']}",
         f"enable_camera_streams:={str(settings['enable_camera_streams']).lower()}",
         f"dynamic_shadows:={str(settings['dynamic_shadows']).lower()}",
         f"gazebo_gui_rate_hz:={settings['gazebo_gui_rate_hz']}",
-    ))
+    ]
+    if initial_part:
+        arguments.insert(0, shlex.quote(f"kmr_initial_part:={initial_part}"))
+    return " ".join(arguments)

@@ -1007,7 +1007,7 @@ def test_shared_handoff_disagreement_cannot_commit(inputs):
     assert context.snapshot() == before and context.pending is None
 
 
-@pytest.mark.parametrize("all_capabilities", [False, True, "eight"])
+@pytest.mark.parametrize("all_capabilities", [False, True, "eight", "eleven"])
 def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, monkeypatch, all_capabilities):
     from cais_spade_llm.recovery_framework import environment_runtime
 
@@ -1015,14 +1015,25 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
     checks = []
     storage_discoveries = []
     active_storage_discoveries = set()
-    if all_capabilities == "eight":
+    multi_part = all_capabilities in ("eight", "eleven")
+    active_source_discoveries = {}
+    if multi_part:
         inputs["product_order"] = read_json(
-            ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json"
+            ROOT / "cais_spade_llm/specification/products/orders" / (
+                "assembly_board-v1-eight-pegs.json" if all_capabilities == "eight"
+                else "assembly_board-v1-recovery-framework.json"
+            )
         )
         negotiate = environment_runtime.EnvironmentProductLoop._negotiate_goal
 
         async def observe_discovery(loop, runtime, key, part, desired, resource_goal):
             intake = resource_goal is None and runtime.context.part_tracker[part]["location"] == "Storage"
+            source = runtime.context.part_tracker[part]["location"]
+            source_intake = (resource_goal is None and source == "3D Printing Station"
+                             and part not in runtime.admitted_parts)
+            if source_intake:
+                active_source_discoveries.setdefault(source, set()).add(part)
+                assert len(active_source_discoveries[source]) == 1
             if intake:
                 active_storage_discoveries.add(part)
                 storage_discoveries.append(part)
@@ -1032,6 +1043,8 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
             finally:
                 if intake:
                     active_storage_discoveries.remove(part)
+                if source_intake:
+                    active_source_discoveries[source].remove(part)
 
         monkeypatch.setattr(environment_runtime.EnvironmentProductLoop, "_negotiate_goal", observe_discovery)
 
@@ -1091,16 +1104,16 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                         rid, name = task["resource_id"], task["event_name"]
                         execution_starts.append((rid, name))
                         if rid == "ur5e-1" and name == "move_home" and context.resources[rid].valuation["resource_state"] == "placed":
-                            if all_capabilities != "eight":
+                            if not multi_part:
                                 assert context.part_tracker[SQUARE]["state"] != "assembled"
                             handling_return_started.set()
-                        if rid == "Conveyor" and all_capabilities != "eight":
+                        if rid == "Conveyor" and not multi_part:
                             await asyncio.wait_for(handling_return_started.wait(), 10)
                         if rid == "ur5e-3" and name == "move_home" and context.resources[rid].valuation["resource_state"] == "placed":
-                            if all_capabilities != "eight":
+                            if not multi_part:
                                 assert context.part_tracker[task["part_name"]]["state"] == "assembled"
                             assert runtime.outcome["status"] != "completed"
-                        if all_capabilities == "eight":
+                        if multi_part:
                             await asyncio.sleep(.1 if name == "machine_part" else .02)
                         return {"task_id": task["task_id"]}
 
@@ -1135,7 +1148,7 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                     assert product.part_tracker[SQUARE]["state"] == "assembled"
                     assert environment_runtime._robots_at_home(runtime.context)
                     assert runtime.outcome["status"] == "completed", runtime.outcome
-                    if all_capabilities == "eight":
+                    if multi_part:
                         assert all(product.part_tracker[part]["state"] == "assembled"
                                    for part in runtime.context.selected_parts)
                         assignments = runtime.intake_assignments
@@ -1144,7 +1157,13 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                                   if row["kind"] == "dispatch" and row["event_name"] == "pick_part"]
                         assert {row["offered_machine"] for row in intake[:2]} == {"M1", "M2"}
                         assert len(intake) == 8
-                        assert set(storage_discoveries) == set(runtime.context.selected_parts)
+                        assert set(storage_discoveries) == set(inputs["scene"]["Storage"]["slots"])
+                        assert not any(active_source_discoveries.values())
+                        if all_capabilities == "eleven":
+                            assert len(runtime.context.selected_parts) == 11
+                            assert sum(rid == "ur5e-4" and event == "place_insert"
+                                       for rid, event in execution_starts) == 3
+                            assert not any(event == "print_part" for _, event in execution_starts)
                         assert not active_storage_discoveries
                         starts = {row["task_id"]: row for row in runtime.context.negotiations
                                   if row["kind"] == "execution_started"}
@@ -1499,3 +1518,102 @@ def test_home_ack_accepts_equivalent_observed_revolute_angles():
     assert _validate_robot_completion(task, evidence)
     evidence["home_observation"]["observed_positions"][0] += 0.1
     assert not _validate_robot_completion(task, evidence)
+
+
+def test_printer_admission_revalidates_available_handler_and_keeps_pick_context(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    inputs["product_order"]["parts"] = ["gear_small", "gear_medium", "gear_large"]
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            loop = EnvironmentProductLoop()
+            for actor in context.resources.values():
+                for name in actor.model["local_event_alphabet"]:
+                    actor.bind_executor(name, AsyncMock(), lambda _task, _evidence: True,
+                                        validate_start=AsyncMock(return_value=True))
+            goals = loop._negotiation_goals(runtime)
+            assert loop._source_waiting(context, goals, set()) == {
+                "3D Printing Station": inputs["product_order"]["parts"]}
+            assert loop._intake_ready(context, "gear_small")
+            discovered = await explore(runtime, driver, part="gear_small",
+                                       desired=context.requirements["gear_small"][-1])
+            task = discovered["tasks"][0]
+            assert task["resource_id"] == "ur5e-4" and task["event_name"] == "pick_approach"
+            actor = context.resources["ur5e-4"]
+            executors = dict(actor.executors)
+            actor.executors.clear()
+            assert not loop._intake_ready(context, "gear_small")
+            with pytest.raises(ValueError, match="Stale capability offer"):
+                context.prepare(task)
+            renewed = await explore(runtime, driver, part="gear_small",
+                                    desired=context.requirements["gear_small"][-1], candidate=task)
+            assert not renewed.get("executable")
+            actor.executors.update(executors)
+            discovered = await explore(runtime, driver, part="gear_small",
+                                       desired=context.requirements["gear_small"][-1])
+            pending = context.prepare(discovered["tasks"][0], simulated=True)
+            assert not loop._intake_ready(context, "gear_medium")
+            context.acknowledge({**pending, "status": "completed"})
+            assert not loop._intake_ready(context, "gear_medium")
+            assert loop._source_waiting(context, loop._negotiation_goals(runtime), {"gear_small"}) == {
+                "3D Printing Station": ["gear_medium", "gear_large"]}
+    asyncio.run(scenario())
+
+
+def test_pa_commits_running_ack_while_another_CCA_approval_is_pending(inputs, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime
+
+    gear = 'gear_small'
+    inputs['product_order']['parts'] = [SQUARE, gear]
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            first = await explore(runtime, driver, part=SQUARE, desired=context.requirements[SQUARE][0])
+            active = context.prepare(first['tasks'][0], simulated=True)
+            for name in context.resources['ur5e-4'].model['local_event_alphabet']:
+                context.resources['ur5e-4'].bind_executor(name, AsyncMock(return_value={}), lambda *_: True)
+            loop = environment_runtime.EnvironmentProductLoop()
+            driver.agent.add_behaviour(loop)
+            loop._negotiation_goals = lambda _: [(gear, gear, context.requirements[gear][1], None)]
+            queue = asyncio.Queue()
+            loop.receive = lambda **_: asyncio.wait_for(queue.get(), .5)
+            runtime.prepare_execution = AsyncMock()
+            runtime.save = Mock()
+            approvals = []
+            async def decide(request_id):
+                packet = message(runtime.product_jid, 'ack', {'task_id': active['task_id'],
+                    'status': 'completed', 'acknowledgement': {**active, 'status': 'completed'}})
+                packet.sender = runtime.jids['KMR']
+                await queue.put(packet)
+                deadline = time.monotonic() + 5
+                while active['task_id'] not in context.acknowledgements:
+                    assert time.monotonic() < deadline, 'PA deferred an unrelated acknowledgement while waiting for CCA'
+                    await asyncio.sleep(.01)
+                packet = message(runtime.product_jid, 'plan_safety_result', {'ok': True, 'request_id': request_id})
+                packet.sender = driver.agent.cca_jid
+                await queue.put(packet)
+            async def send(_behaviour, packet):
+                if packet.metadata['type'] == 'plan_safety_check':
+                    approvals.append(asyncio.create_task(decide(json.loads(packet.body)['request_id'])))
+                elif packet.metadata['type'] == 'task':
+                    assert active['task_id'] in context.acknowledgements
+                    runtime.stopped = True
+            monkeypatch.setattr(environment_runtime, 'send_agent_message', send)
+            async def receive(**_kwargs):
+                try:
+                    return await asyncio.wait_for(queue.get(), .05)
+                except asyncio.TimeoutError:
+                    return None
+            loop.receive = receive
+            try:
+                await asyncio.wait_for(loop.work(runtime), 15)
+                await asyncio.gather(*approvals)
+                assert approvals and active['task_id'] in context.acknowledgements
+                assert runtime.stopped
+            finally:
+                for approval in approvals:
+                    approval.cancel()
+                await asyncio.gather(*approvals, return_exceptions=True)
+    asyncio.run(scenario())
