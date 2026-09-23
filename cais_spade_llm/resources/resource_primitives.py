@@ -6,9 +6,6 @@ import inspect
 from copy import deepcopy
 from typing import Any
 
-from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import (
-    recovery_resource_adapter,
-)
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
     recovery_validation_fingerprint,
 )
@@ -111,6 +108,8 @@ def _resource_type_for_agent(
     *,
     snapshot: dict[str, Any] | None = None,
 ) -> str:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_resource_adapter
+
     static_capabilities = deepcopy(getattr(resource_agent, "static_capabilities", {}) or {})
     return recovery_resource_adapter.resolve_recovery_resource_type(
         resource=resource_agent,
@@ -413,6 +412,8 @@ def _execution_catalog_for_snapshot(resource_agent: Any) -> list[dict[str, Any]]
 
 def get_resource_recovery_snapshot(resource_agent: Any) -> dict[str, Any]:
     """Build the canonical recovery snapshot for a resource without recursion."""
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_resource_adapter
+
     if resource_agent is None:
         return {}
     profile = get_resource_profile_for_agent(resource_agent)

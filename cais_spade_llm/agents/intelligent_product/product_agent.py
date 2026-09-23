@@ -116,6 +116,7 @@ class ProductAgent(LlmAgent):
         environment = getattr(self, "environment_runtime", None)
         if environment is not None:
             environment.stop()
+            await environment.cancel_owned()
             environment.save()
         runtime = getattr(self, "delivery_runtime", None)
         if runtime is not None:

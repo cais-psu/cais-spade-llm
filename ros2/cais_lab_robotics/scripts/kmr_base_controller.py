@@ -20,6 +20,7 @@ BASE_STATE_JOINTS = (
     "KMR_base_yaw_joint",
 )
 ALLOWED_RESOURCES = ("Storage", "M1", "M2")
+STORAGE_PICK_PREFIX = "Storage/"
 
 
 class DockRoute(NamedTuple):
@@ -35,6 +36,14 @@ def normalize_angle(value: float) -> float:
     return (float(value) + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def simulation_elapsed(start: float, current: float) -> float:
+    """Return advancing simulation time and reject a reset during motion."""
+
+    if current + 1e-9 < start:
+        raise RuntimeError("Simulation clock reset during KMR base motion")
+    return max(0.0, current - start)
+
+
 def load_kmr_config(path: str | Path) -> tuple[dict[str, Any], tuple[DockRoute, ...]]:
     """Load and validate the KMR controller and route configuration."""
 
@@ -42,6 +51,9 @@ def load_kmr_config(path: str | Path) -> tuple[dict[str, Any], tuple[DockRoute, 
     kmr = payload.get("KMR")
     if not isinstance(kmr, dict):
         raise ValueError("recovery configuration is missing KMR")
+    position_gain = float(kmr.get('base_control', {}).get('docking_position_gain_per_sec', 1.5))
+    if not math.isfinite(position_gain) or position_gain <= 0:
+        raise ValueError('KMR docking position gain must be finite and positive')
     configured_pairs = {
         tuple(str(value) for value in route)
         for route in kmr.get("predefined_routes", [])
@@ -89,8 +101,25 @@ def docking_poses(
     arbitrary collision-free position, it may only return to Storage.
     """
 
-    if target not in ALLOWED_RESOURCES or source == target:
+    target_is_storage_pick = (
+        target.startswith(STORAGE_PICK_PREFIX) and target in endpoints
+    )
+    source_is_storage_pick = bool(
+        source and source.startswith(STORAGE_PICK_PREFIX) and source in endpoints
+    )
+    if (target not in ALLOWED_RESOURCES and not target_is_storage_pick) or source == target:
         return None
+    if source == "Storage" and target_is_storage_pick:
+        return (endpoints[target],)
+    if source_is_storage_pick and target == "Storage":
+        return (endpoints["Storage"],)
+    if source_is_storage_pick and target in {"M1", "M2"}:
+        route = route_for(routes, "Storage", target)
+        if route is None:
+            return None
+        if target == "M2":
+            return route[1:]
+        return (endpoints["Storage"], *route[1:])
     if source is None:
         storage_m1 = route_for(routes, "Storage", "M1")
         if target != "Storage" or storage_m1 is None:
@@ -165,10 +194,10 @@ def base_state_stop_reason(
     arm_timeout: float,
     arm_parked: bool,
 ) -> str | None:
-    """Explain a failed base feedback gate, using monotonic wall-clock time.
+    """Explain a failed base feedback gate, using simulation time.
 
-    Gazebo may pause or run slowly. Feedback expiry must still stop the base
-    without waiting for simulation time to advance.
+    Gazebo may pause or run slowly. A pause must freeze feedback age, while
+    missing observations during advancing simulation time still stop the base.
     """
 
     if odom_updated is None or now - odom_updated > odom_timeout:
@@ -422,6 +451,8 @@ def docking_velocity(
     max_angular_speed: float,
     position_tolerance: float,
     yaw_tolerance: float,
+    *,
+    position_gain: float = 1.5,
 ) -> tuple[float, float, float, bool]:
     """Return a body-frame command for a straight holonomic final dock."""
 
@@ -435,11 +466,11 @@ def docking_velocity(
     angular = max(
         -max_angular_speed,
         min(max_angular_speed, 1.5 * yaw_error),
-    )
+    ) if abs(yaw_error) > yaw_tolerance else 0.0
     if abs(yaw_error) > 0.10 or distance <= position_tolerance:
         return 0.0, 0.0, angular, False
 
-    speed = min(max_linear_speed, max(0.05, 1.5 * distance))
+    speed = min(max_linear_speed, max(0.05, position_gain * distance))
     world_x = speed * delta_x / distance
     world_y = speed * delta_y / distance
     cosine = math.cos(pose[2])
@@ -447,6 +478,16 @@ def docking_velocity(
     body_x = cosine * world_x + sine * world_y
     body_y = -sine * world_x + cosine * world_y
     return body_x, body_y, angular, False
+
+
+def braking_speed_limit(distance: float, acceleration: float, reaction_time: float) -> float:
+    """Bound speed so latency and braking fit inside the remaining clear distance."""
+    if (not all(math.isfinite(v) for v in (distance, acceleration, reaction_time))
+            or acceleration <= 0.0 or reaction_time < 0.0):
+        raise ValueError('KMR braking requires finite distance, positive deceleration and latency')
+    latency_speed = acceleration * reaction_time
+    return max(0.0, math.sqrt(latency_speed**2 + 2.0 * acceleration * max(0.0, distance))
+               - latency_speed)
 
 
 def main() -> None:
@@ -465,6 +506,7 @@ def main() -> None:
     from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
     from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
     from rclpy.clock import Clock, ClockType
+    from rclpy.duration import Duration as QoSDuration
     from rclpy.executors import MultiThreadedExecutor
     from rclpy.node import Node
     from rclpy.qos import (
@@ -492,6 +534,13 @@ def main() -> None:
                 json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
             ).hexdigest())
             self.declare_parameter("launch_id", uuid.uuid4().hex)
+            self.declare_parameter('performance_settings', '{}')
+            self.declare_parameter('simulation_speed', 1.0)
+            self.declare_parameter('initial_arm_configuration', [0.] * 7)
+            self.initial_arm_configuration = list(self.get_parameter('initial_arm_configuration').value)
+            self.simulation_speed = float(self.get_parameter('simulation_speed').value)
+            if self.simulation_speed not in (1., 2., 5., 10.):
+                raise ValueError('Simulation speed must be 1, 2, 5, or 10')
             asset_root = Path(get_package_share_directory('cais_lab_robotics'))
             asset_hashes = {path: hashlib.sha256((asset_root/path).read_bytes()).hexdigest()
                             for path in payload['KMR'].get('task_execution', {}).get('scene_assets', [])}
@@ -500,6 +549,8 @@ def main() -> None:
             ).hexdigest())
             self._transport_custody = None
             self._transport_custody_monotonic = None
+            self._transport_custody_ack: dict[str, Any] = {}
+            self.storage_parts = frozenset(payload['Storage']['slots'])
             self.kmr, self.routes = load_kmr_config(config_file)
             control = self.kmr["base_control"]
             self.max_linear_speed = float(control["linear_speed_mps"])
@@ -511,6 +562,7 @@ def main() -> None:
                 float(control["docking_linear_speed_mps"]),
             )
             self.docking_slow_distance = float(control["docking_slow_distance_m"])
+            self.docking_position_gain = float(control.get('docking_position_gain_per_sec', 1.5))
             self.arm_parking_duration = float(control["arm_parking_duration_sec"])
             self.arm_hold_duration = float(control["arm_hold_duration_sec"])
             self.arm_parked_tolerance = float(control["arm_parked_tolerance_rad"])
@@ -531,6 +583,7 @@ def main() -> None:
                 float(self.kmr["initial_pose"][5]),
             )
             self._odom_monotonic: float | None = None
+            self._odom_simulation_time: float | None = None
             self._odom_stamp: Time | None = None
             self._odom_velocity = (0.0, 0.0, 0.0)
             self._nav_command: Twist | None = None
@@ -538,14 +591,20 @@ def main() -> None:
             self._navigation_active = False
             self._follow_path_active = False
             self._last_output = (0.0, 0.0, 0.0)
+            self._last_velocity_stamp: float | None = None
             self._last_hold_reason: str | None = None
             self._arm_positions: dict[str, float] = {}
             self._arm_state_monotonic: float | None = None
+            self._arm_state_simulation_time: float | None = None
             self._initial_arm_parked = False
             self._arm_parking_in_progress = False
             self._arm_parking_command_succeeded = False
             self._active_goal = False
             self._cancel_base_motion_requested = False
+            self._base_abort_reason: str | None = None
+            self._motion_status: dict[str, Any] = {}
+            self._docking_braking_status: dict[str, float] = {}
+            self._motion_status_time = 0.0
             self._nav_goal_handle: Any | None = None
             self._occupancy_map: OccupancyGrid | None = None
             self.endpoints = {
@@ -562,12 +621,27 @@ def main() -> None:
                     )
                     for machine in payload["machines"]
                 },
+                **{
+                    f"{STORAGE_PICK_PREFIX}{part_name}": (
+                        float(pose[0]), float(pose[1]), float(pose[2])
+                    )
+                    for part_name, pose in dict(
+                        payload["Storage"].get("KMR_pick_docking_poses") or {}
+                    ).items()
+                },
             }
             callback_group = ReentrantCallbackGroup()
-            self.cmd_pub = self.create_publisher(Twist, "/KMR/cmd_vel", 10)
+            # Velocity samples supersede one another. A reliable backlog can
+            # replay an older, faster command while the dock is braking.
+            command_qos = QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
+                lifespan=QoSDuration(seconds=self.command_timeout),
+            )
+            self.cmd_pub = self.create_publisher(Twist, "/KMR/cmd_vel", command_qos)
             self.joint_pub = self.create_publisher(JointState, "/joint_states", 50)
             self.pose_pub = self.create_publisher(Pose2D, "/KMR/current_pose", 20)
             self.path_pub = self.create_publisher(NavPath, "/KMR/planned_path", 1)
+            self.motion_status_pub = self.create_publisher(String, '/KMR/base_motion_status', 10)
             self.create_subscription(
                 Odometry, "/KMR/odom", self._odom_cb, qos_profile_sensor_data,
                 callback_group=callback_group,
@@ -696,6 +770,9 @@ def main() -> None:
                 self._odom_velocity = (velocity.linear.x, velocity.linear.y, velocity.angular.z)
                 self._odom_monotonic = time.monotonic()
                 self._odom_stamp = message.header.stamp
+                self._odom_simulation_time = (
+                    message.header.stamp.sec + message.header.stamp.nanosec / 1e9
+                )
 
         def _nav_command_cb(self, message: Twist) -> None:
             with self._lock:
@@ -716,7 +793,18 @@ def main() -> None:
                 )
 
         def _control_tick(self) -> None:
+            tick_started = time.monotonic()
             pose, odom_updated, command, command_updated, odom_stamp = self._snapshot()
+            measured_time = (odom_stamp.sec + odom_stamp.nanosec / 1e9
+                             if odom_stamp is not None else None)
+            motion_dt = 0.0
+            if measured_time is not None and self._last_velocity_stamp is not None:
+                motion_dt = max(0.0, measured_time - self._last_velocity_stamp)
+                if measured_time < self._last_velocity_stamp and self._active_goal:
+                    self._abort_base_motion('Simulation clock reset during KMR motion')
+                    self._last_velocity_stamp = measured_time
+                    return
+            self._last_velocity_stamp = measured_time
             if pose is not None:
                 state = JointState()
                 # /clock can advance slower than odometry; preserve measurement time for TF.
@@ -738,6 +826,9 @@ def main() -> None:
             reason = self._state_stop_reason()
             if not self._initial_arm_parked:
                 reason = "KMR arm parking has not completed"
+            if reason is not None:
+                self._abort_base_motion(reason)
+                return
             if reason is None and (
                 command is None or command_updated is None
                 or now - command_updated > self.command_timeout
@@ -765,16 +856,38 @@ def main() -> None:
             x, y, angular = slew_planar_velocity(
                 self._last_output,
                 (x, y, angular),
-                self.max_linear_acceleration * self.control_period,
-                self.max_angular_acceleration * self.control_period,
+                # Motion limits use measured time; feedback expiry still uses
+                # wall time so a slow or paused simulator cannot hide a stop.
+                self.max_linear_acceleration * motion_dt,
+                self.max_angular_acceleration * motion_dt,
             )
             try:
-                reaction_time = self.command_timeout + self.control_period + max(0.0, now - odom_updated)
+                # Wall-clock command/feedback latency spans more physical time
+                # when Gazebo is accelerated. Use the requested upper bound.
+                clock_rate = getattr(self, 'simulation_speed', 1.0)
+                reaction_time = clock_rate * (
+                    self.command_timeout + self.control_period + max(0.0, now - odom_updated))
+                self._motion_status = {
+                    **self._docking_braking_status,
+                    'pose': list(pose),
+                    'requested_velocity': [command.linear.x, command.linear.y, command.angular.z],
+                    'command_velocity': [x, y, angular],
+                    'measured_velocity': list(self._odom_velocity),
+                    'reaction_time_sec': reaction_time,
+                    'simulation_speed_upper_bound': clock_rate,
+                    'motion_dt_sec': motion_dt,
+                    'odometry_stamp_sec': measured_time,
+                    'odometry_age_sec': max(0.0, now - odom_updated),
+                    'command_age_sec': max(0.0, now - command_updated),
+                    'linear_deceleration_mps2': self.max_linear_acceleration,
+                    'map_available': self._occupancy_map is not None,
+                }
                 for velocity in ((x, y, angular), self._odom_velocity):
                     sweep = stopping_base_poses(
                         pose, velocity, self.max_linear_acceleration,
                         self.max_angular_acceleration, reaction_time,
                     )
+                    self._motion_status['stopping_pose'] = list(sweep[-1])
                     if not base_path_is_clear(self._occupancy_map, sweep):
                         self._abort_base_motion("KMR stopping footprint intersects an obstacle or map is unavailable")
                         return
@@ -795,9 +908,22 @@ def main() -> None:
                     return
                 self._last_output = (x, y, angular)
                 self.cmd_pub.publish(gated)
+            self._motion_status['control_computation_wall_time_sec'] = time.monotonic() - tick_started
+            if now - self._motion_status_time >= 0.2:
+                self._publish_motion_status()
+
+        def _publish_motion_status(self) -> None:
+            self._motion_status_time = time.monotonic()
+            self.motion_status_pub.publish(String(data=json.dumps({
+                **self._motion_status, 'abort_reason': self._base_abort_reason,
+                'transport_custody_ack': self._transport_custody_ack,
+            })))
 
         def _abort_base_motion(self, reason: str) -> None:
-            self.get_logger().error(reason)
+            if self._base_abort_reason is None:
+                self._base_abort_reason = reason
+                self.get_logger().error(reason)
+            self._publish_motion_status()
             self._cancel_base_motion_requested = True
             self._navigation_active = False
             self._stop()
@@ -808,6 +934,9 @@ def main() -> None:
             for name, position in zip(message.name, message.position):
                 self._arm_positions[str(name)] = float(position)
             self._arm_state_monotonic = time.monotonic()
+            self._arm_state_simulation_time = (
+                message.header.stamp.sec + message.header.stamp.nanosec / 1e9
+            )
             bridged = JointState()
             bridged.header = message.header
             bridged.name = list(message.name)
@@ -826,8 +955,10 @@ def main() -> None:
                 )
 
         def _fresh_pose(self) -> tuple[float, float, float] | None:
-            pose, updated, _, _, _ = self._snapshot()
-            if pose is None or updated is None or time.monotonic() - updated > self.odom_timeout:
+            pose, _, _, _, _ = self._snapshot()
+            now = self.get_clock().now().nanoseconds / 1e9
+            updated = self._odom_simulation_time
+            if pose is None or updated is None or now - updated > self.odom_timeout:
                 return None
             return pose
 
@@ -843,15 +974,26 @@ def main() -> None:
         def _arm_state_is_fresh(self) -> bool:
             """Return whether KMR arm feedback is recent enough for base motion."""
 
+            now = self.get_clock().now().nanoseconds / 1e9
             return not (
-                self._arm_state_monotonic is None
-                or time.monotonic() - self._arm_state_monotonic > self.arm_state_timeout
+                self._arm_state_simulation_time is None
+                or now - self._arm_state_simulation_time > self.arm_state_timeout
             )
 
         def _arm_is_parked(self) -> bool:
             if not self._arm_state_is_fresh():
                 return False
-            expected = dict(zip(self.kmr["arm_joint_names"], self.kmr["parked_arm_configuration"]))
+            custody = self._transport_custody
+            carrying = bool(custody and custody.get('attached') is True)
+            configuration = (self.kmr['task_execution']['carrying_arm_configuration']
+                             if carrying else self.kmr['parked_arm_configuration'])
+            if carrying and custody.get('transport_sweep_validated') is True:
+                configuration = custody.get('carrying_arm_configuration')
+                if (not isinstance(configuration, list) or len(configuration) != 7
+                        or any(not isinstance(value, (int, float)) or not math.isfinite(value)
+                               for value in configuration)):
+                    return False
+            expected = dict(zip(self.kmr["arm_joint_names"], configuration))
             arm_parked = all(
                 name in self._arm_positions
                 and abs(self._arm_positions[name] - float(position))
@@ -861,14 +1003,13 @@ def main() -> None:
             width = self._arm_positions.get(self.kmr["gripper_joint"])
             if width is None:
                 return False
-            custody = self._transport_custody
             if not custody or custody.get('attached') is not True:
                 return arm_parked and abs(width - float(self.kmr["gripper_stroke_m"])) <= .006
             return bool(arm_parked and custody
                         and self._transport_custody_monotonic is not None
                         and time.monotonic() - self._transport_custody_monotonic < .75
                         and custody.get('attached') is True
-                        and custody.get('part_name') == self.kmr['task_execution']['part_name']
+                        and custody.get('part_name') in self.storage_parts
                         and custody.get('launch_id') == self.get_parameter('launch_id').value
                         and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value
                         and abs(width - self.kmr['task_execution']['closed_gripper_width_m']) <= .006)
@@ -881,22 +1022,41 @@ def main() -> None:
             if isinstance(custody, dict):
                 self._transport_custody = custody
                 self._transport_custody_monotonic = time.monotonic()
+                acknowledgement = {
+                    'custody_id': custody.get('custody_id'),
+                    'arm_parked': self._arm_is_parked(),
+                }
+                if acknowledgement != self._transport_custody_ack:
+                    self._transport_custody_ack = acknowledgement
+                    self._publish_motion_status()
 
         def _state_stop_reason(self) -> str | None:
+            if self._transport_custody and self._transport_custody.get('error'):
+                return 'KMR custody lost: '+str(self._transport_custody['error'])
             return base_state_stop_reason(
-                time.monotonic(),
-                self._odom_monotonic,
+                self.get_clock().now().nanoseconds / 1e9,
+                self._odom_simulation_time,
                 self.odom_timeout,
-                self._arm_state_monotonic,
+                self._arm_state_simulation_time,
                 self.arm_state_timeout,
                 self._arm_is_parked(),
             )
 
         def _ensure_initial_arm_parked(self) -> None:
-            """Command and confirm the configured upright iiwa pose once."""
+            """Observe the spawned pickup posture without an extra startup motion."""
 
             if self._initial_arm_parked:
                 self.arm_parking_timer.cancel()
+                return
+            if any(self.initial_arm_configuration):
+                if self._arm_state_is_fresh() and all(
+                    name in self._arm_positions
+                    and abs(self._arm_positions[name] - value) <= self.arm_parked_tolerance
+                    for name, value in zip(self.kmr['arm_joint_names'], self.initial_arm_configuration)
+                ):
+                    self._initial_arm_parked = True
+                    self.arm_parking_timer.cancel()
+                    self.get_logger().info('KMR initialized at the selected pickup posture')
                 return
             if self._arm_parking_in_progress:
                 if self._arm_is_parked():
@@ -989,6 +1149,9 @@ def main() -> None:
                     return False
                 self._active_goal = True
                 self._cancel_base_motion_requested = False
+                self._base_abort_reason = None
+                self._motion_status = {}
+                self._docking_braking_status = {}
                 self._nav_command = None
                 self._nav_command_monotonic = None
             return True
@@ -1002,7 +1165,7 @@ def main() -> None:
 
         def _dock_goal(self, request: DockKMR.Goal) -> GoalResponse:
             target = str(request.target_resource)
-            if target not in ALLOWED_RESOURCES:
+            if target not in self.endpoints:
                 return GoalResponse.REJECT
             pose = self._fresh_pose()
             if pose is None:
@@ -1089,7 +1252,7 @@ def main() -> None:
 
         def _check_motion(self, goal_handle: Any) -> tuple[float, float, float]:
             if goal_handle.is_cancel_requested or self._cancel_base_motion_requested:
-                raise RuntimeError("KMR base motion canceled")
+                raise RuntimeError(self._base_abort_reason or "KMR base motion canceled")
             reason = self._state_stop_reason()
             if reason is not None:
                 raise RuntimeError(reason)
@@ -1171,7 +1334,7 @@ def main() -> None:
                 finish = planar_pose(segment.poses[-1].pose)
                 points = tuple(planar_pose(p.pose) for p in segment.poses)
                 rotation = all(math.dist(points[0][:2], point[:2]) < 1e-4 for point in points)
-                started = time.monotonic()
+                started = self.get_clock().now().nanoseconds / 1e9
                 if rotation:
                     if not base_path_is_clear(self._occupancy_map, (
                         start, (start[0], start[1], finish[2]),
@@ -1184,7 +1347,9 @@ def main() -> None:
                         error = normalize_angle(finish[2] - pose[2])
                         if abs(error) <= self.yaw_tolerance:
                             break
-                        if time.monotonic() - started > self.waypoint_timeout:
+                        if simulation_elapsed(
+                            started, self.get_clock().now().nanoseconds / 1e9
+                        ) > self.waypoint_timeout:
                             raise TimeoutError("KMR rotation timed out")
                         command = Twist()
                         command.angular.z = max(-self.max_angular_speed, min(self.max_angular_speed, 1.5 * error))
@@ -1201,7 +1366,9 @@ def main() -> None:
                     future = handle.get_result_async()
                     while not future.done():
                         self._check_motion(goal_handle)
-                        if time.monotonic() - started > 180.0:
+                        if simulation_elapsed(
+                            started, self.get_clock().now().nanoseconds / 1e9
+                        ) > 180.0:
                             raise TimeoutError("KMR path execution timed out")
                         self._publish_base_feedback(goal_handle, target)
                         time.sleep(self.control_period)
@@ -1256,6 +1423,26 @@ def main() -> None:
                 self._finish_base_action()
             return FollowPath.Result()
 
+        def _docking_speed_limit(self, remaining_distance: float) -> float:
+            """Reserve the allowed feedback delay before the measured stop guard."""
+            # A currently fresh sample can age while commands are in flight.
+            # Budget the full permitted delay, rather than its age at this tick.
+            latency_budget = getattr(self, 'simulation_speed', 1.0) * (
+                self.command_timeout + self.odom_timeout + 2.0 * self.control_period)
+            # Keep one millimetre inside the configured docking envelope so
+            # discrete velocity updates cannot cross the continuous stop bound.
+            validated_distance = max(0.0, remaining_distance - 0.001)
+            limit = min(self.max_linear_speed, braking_speed_limit(
+                validated_distance, self.max_linear_acceleration, latency_budget,
+            ))
+            self._docking_braking_status = {
+                'remaining_validated_distance_m': remaining_distance,
+                'braking_clearance_distance_m': validated_distance,
+                'braking_speed_limit_mps': limit,
+                'braking_latency_budget_sec': latency_budget,
+            }
+            return limit
+
         async def _execute_dock(self, goal_handle: Any) -> DockKMR.Result:
             pose = self._fresh_pose()
             target = str(goal_handle.request.target_resource)
@@ -1271,6 +1458,12 @@ def main() -> None:
             try:
                 nav_goals = goals[:-1] if source is None else ()
                 direct_goals = goals[-1:] if source is None else goals
+                if source is not None and not base_path_is_clear(
+                    self._occupancy_map, (pose, *direct_goals),
+                ):
+                    self._abort_base_motion('KMR configured route intersects an obstacle or map is unavailable')
+                    goal_handle.abort()
+                    return self._result(False, source, self._base_abort_reason)
                 if nav_goals and not self.nav_client.wait_for_server(timeout_sec=2.0):
                     goal_handle.abort()
                     return self._result(False, source or "", "KMR Nav2 is unavailable")
@@ -1322,7 +1515,7 @@ def main() -> None:
                             return self._result(
                                 False,
                                 self._resource_at(self._fresh_pose() or pose) or "",
-                                "KMR docking canceled",
+                                self._base_abort_reason or "KMR docking canceled",
                             )
                         if self._fresh_pose() is None:
                             await nav_handle.cancel_goal_async()
@@ -1349,7 +1542,7 @@ def main() -> None:
                 for direct_offset, direct_target in enumerate(direct_goals):
                     direct_index = len(nav_goals) + direct_offset
                     final_direct_goal = direct_offset == len(direct_goals) - 1
-                    docking_started = time.monotonic()
+                    docking_started = self.get_clock().now().nanoseconds / 1e9
                     while True:
                         if goal_handle.is_cancel_requested or self._cancel_base_motion_requested:
                             self._navigation_active = False
@@ -1361,7 +1554,7 @@ def main() -> None:
                             return self._result(
                                 False,
                                 self._resource_at(self._fresh_pose() or pose) or "",
-                                "KMR docking canceled",
+                                self._base_abort_reason or "KMR docking canceled",
                             )
                         final_pose = self._fresh_pose()
                         if final_pose is None:
@@ -1375,7 +1568,10 @@ def main() -> None:
                             return self._result(
                                 False, "", "KMR arm left its parked configuration"
                             )
-                        if time.monotonic() - docking_started > self.waypoint_timeout:
+                        if simulation_elapsed(
+                            docking_started,
+                            self.get_clock().now().nanoseconds / 1e9,
+                        ) > self.waypoint_timeout:
                             goal_handle.abort()
                             return self._result(
                                 False, "", "KMR deterministic route motion timed out"
@@ -1397,6 +1593,7 @@ def main() -> None:
                         yaw_tolerance = (
                             self.yaw_tolerance if final_direct_goal else 0.05
                         )
+                        linear_limit = min(linear_limit, self._docking_speed_limit(remaining_distance))
                         x, y, angular, arrived = docking_velocity(
                             final_pose,
                             direct_target,
@@ -1404,6 +1601,7 @@ def main() -> None:
                             self.max_angular_speed,
                             position_tolerance,
                             yaw_tolerance,
+                            position_gain=self.docking_position_gain,
                         )
                         dock_feedback = DockKMR.Feedback()
                         dock_feedback.active_route_from = source_name
@@ -1418,7 +1616,15 @@ def main() -> None:
                         )
                         goal_handle.publish_feedback(dock_feedback)
                         if arrived:
-                            break
+                            # Complete braking before changing route direction or
+                            # acknowledging the dock. Position alone can still
+                            # leave lateral velocity cutting the next corner.
+                            with self._lock:
+                                stopped = all(abs(value) <= 0.001 for value in (
+                                    *self._odom_velocity, *self._last_output,
+                                ))
+                            if stopped:
+                                break
                         command = Twist()
                         command.linear.x = x
                         command.linear.y = y
@@ -1430,8 +1636,15 @@ def main() -> None:
 
                 self._navigation_active = False
                 self._stop()
-                final_resource = self._resource_at(final_pose)
-                if final_resource != target:
+                endpoint = self.endpoints[target]
+                # Different peg identities can share one physical pickup dock.
+                # Confirm the requested endpoint without selecting a competing label.
+                at_requested_endpoint = (
+                    math.dist(final_pose[:2], endpoint[:2]) <= self.position_tolerance
+                    and abs(normalize_angle(final_pose[2] - endpoint[2])) <= self.yaw_tolerance
+                )
+                final_resource = target if at_requested_endpoint else self._resource_at(final_pose)
+                if not at_requested_endpoint:
                     goal_handle.abort()
                     return self._result(
                         False, final_resource or "",

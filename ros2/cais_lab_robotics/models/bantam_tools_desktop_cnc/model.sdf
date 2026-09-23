@@ -43,26 +43,6 @@
           <diffuse>.75 .78 .80 1</diffuse>
         </material>
       </visual>
-      <collision name="roof_collision">
-        <pose>0.0 0.0 1.483 0.0 0.0 0.0</pose>
-        <geometry>
-          <box>
-            <size>0.503 0.531 0.02</size>
-          </box>
-        </geometry>
-      </collision>
-      <visual name="roof_visual">
-        <pose>0.0 0.0 1.483 0.0 0.0 0.0</pose>
-        <geometry>
-          <box>
-            <size>0.503 0.531 0.02</size>
-          </box>
-        </geometry>
-        <material>
-          <ambient>.75 .78 .80 1</ambient>
-          <diffuse>.75 .78 .80 1</diffuse>
-        </material>
-      </visual>
       <collision name="rear_collision">
         <pose>-0.2415 0.0 1.2465 0.0 0.0 0.0</pose>
         <geometry>

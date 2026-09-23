@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +49,8 @@ KMR_SDF_VISUAL_COLORS = (
     ('rg2_right_inner_finger', '0.1 0.1 0.1 1'),
 )
 KMR_SDF_EXPECTED_COLOR_COUNT = 52
-RECOVERY_VELOCITY_SCALING = 0.4
-RECOVERY_ACCELERATION_SCALING = 0.3
+RECOVERY_VELOCITY_SCALING = 1.0
+RECOVERY_ACCELERATION_SCALING = 1.0
 
 
 def _load_robots(path: Path) -> list[dict[str, Any]]:
@@ -81,9 +82,11 @@ def _load_launch_module(filename: str) -> Any:
     return module
 
 
-def _controller_config(robots: list[dict[str, Any]]) -> dict[str, Any]:
+def _controller_config(robots: list[dict[str, Any]], update_rate: int = 1000) -> dict[str, Any]:
+    if update_rate not in (250, 500, 1000):
+        raise ValueError('UR controller rate must be 250, 500, or 1000 Hz')
     manager = {
-        'update_rate': 1000, 'use_sim_time': True,
+        'update_rate': update_rate, 'use_sim_time': True,
         'joint_state_broadcaster': {'type': 'joint_state_broadcaster/JointStateBroadcaster'},
     }
     config = {
@@ -101,7 +104,7 @@ def _controller_config(robots: list[dict[str, Any]]) -> dict[str, Any]:
             config[controller] = {'ros__parameters': {
                 'joints': joints, 'command_interfaces': ['position'],
                 'state_interfaces': ['position', 'velocity'] if len(joints) == 6 else ['position'],
-                'state_publish_rate': 100.0, 'action_monitor_rate': 20.0,
+                'state_publish_rate': 50.0, 'action_monitor_rate': 20.0,
                 'allow_partial_joints_goal': False,
                 'constraints': {'stopped_velocity_tolerance': 0.2, 'goal_time': 0.0},
             }}
@@ -158,7 +161,10 @@ def _build_description(robots: list[dict[str, Any]], controllers_yaml: str) -> s
     return ET.tostring(combined, encoding='unicode')
 
 
-def _build_kmr_description(share: Path, controllers_yaml: Path) -> str:
+def _build_kmr_description(
+    share: Path, controllers_yaml: Path, initial_arm_configuration: list[float] | None = None,
+) -> str:
+    """Initialize the simulated iiwa at a configured pickup posture."""
     description = subprocess.check_output([
         'xacro', str(share / 'urdf' / 'KMR_recovery.urdf.xacro'),
         f'controllers_file:={controllers_yaml}',
@@ -171,7 +177,15 @@ def _build_kmr_description(share: Path, controllers_yaml: Path) -> str:
         *KMR_ARM_JOINTS, 'KMR_rg2_finger_width',
     }:
         raise ValueError('KMR requires seven iiwa joints and one RG2 joint.')
-    return description
+    if initial_arm_configuration is not None:
+        if len(initial_arm_configuration) != len(KMR_ARM_JOINTS):
+            raise ValueError('KMR startup requires seven joint positions')
+        for name, value in zip(KMR_ARM_JOINTS, initial_arm_configuration, strict=True):
+            limit = root.find(f"joint[@name='{name}']/limit")
+            if not math.isfinite(value) or not float(limit.get('lower')) <= value <= float(limit.get('upper')):
+                raise ValueError(f'KMR startup position exceeds {name} limits')
+            root.find(f"ros2_control/joint[@name='{name}']/state_interface[@name='position']/param").text = str(value)
+    return ET.tostring(root, encoding='unicode')
 
 
 def _build_planning_description(
@@ -396,7 +410,13 @@ def _moveit_parameters(
     }
 
 
-def _runtime_world_without_static_kmr(world_path: Path) -> Path:
+def _runtime_world_without_static_kmr(
+    world_path: Path, *, enable_camera_streams: bool = False,
+    simulation_speed: int = 1, dynamic_shadows: bool = False,
+    gui_rate: int = 30,
+) -> Path:
+    if simulation_speed not in (1, 2, 5, 10):
+        raise ValueError('Simulation speed must be 1, 2, 5, or 10')
     tree = ET.parse(world_path)
     root = tree.getroot()
     world = root.find('world')
@@ -409,6 +429,35 @@ def _runtime_world_without_static_kmr(world_path: Path) -> Path:
     if len(matches) != 1:
         raise ValueError('Recovery source world must contain exactly one static KMR include.')
     world.remove(matches[0])
+    physics = world.find('physics')
+    if physics is None or float(physics.findtext('max_step_size', '0')) != .001:
+        raise ValueError('Recovery simulation requires the configured 0.001-second timestep')
+    for tag, value in (('real_time_factor', simulation_speed),
+                       ('real_time_update_rate', simulation_speed * 1000)):
+        element = physics.find(tag)
+        if element is None:
+            element = ET.SubElement(physics, tag)
+        element.text = str(value)
+    scene = world.find('scene')
+    if scene is None:
+        scene = ET.SubElement(world, 'scene')
+    shadows = scene.find('shadows')
+    if shadows is None:
+        shadows = ET.SubElement(scene, 'shadows')
+    shadows.text = str(dynamic_shadows).lower()
+    if gui_rate not in (30, 60):
+        raise ValueError('Gazebo viewer rate must be 30 or 60 Hz')
+    gui = world.find('gui')
+    if gui is None:
+        gui = ET.SubElement(world, 'gui')
+    plugin = ET.SubElement(gui, 'plugin', name='recovery_render_rate',
+                           filename='libcais_recovery_render_rate.so')
+    ET.SubElement(plugin, 'render_rate').text = str(gui_rate)
+    if not enable_camera_streams:
+        for link in world.findall('.//link'):
+            for sensor in list(link.findall('sensor')):
+                if sensor.get('type') in {'camera', 'depth', 'multicamera'}:
+                    link.remove(sensor)
     with tempfile.NamedTemporaryFile(
         mode='w', encoding='utf-8', suffix='.world',
         prefix='cais_recovery_runtime_', delete=False,
@@ -472,10 +521,11 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     """Create the recovery world with four UR5e arms and articulated KMR."""
     from ament_index_python import get_package_prefix, get_package_share_directory
     from launch.actions import (
-        AppendEnvironmentVariable, IncludeLaunchDescription, LogInfo, OpaqueFunction,
+        AppendEnvironmentVariable, EmitEvent, IncludeLaunchDescription, LogInfo, OpaqueFunction,
         RegisterEventHandler, TimerAction,
     )
     from launch.event_handlers import OnProcessExit, OnProcessIO, OnShutdown
+    from launch.events import Shutdown
     from launch.launch_description_sources import PythonLaunchDescriptionSource
     from launch.substitutions import LaunchConfiguration
     from launch_ros.actions import Node
@@ -484,14 +534,27 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     def enabled(name: str) -> bool:
         return LaunchConfiguration(name).perform(context) == 'true'
 
-    if enabled('run_perception'):
-        raise RuntimeError('The recovery framework environment currently requires run_perception:=false.')
     share = Path(get_package_share_directory('cais_lab_robotics'))
     scene_path = Path(LaunchConfiguration('robots_file').perform(context))
     scene_config = _load_scene(scene_path)
     robots = _load_robots(scene_path)
     kmr = scene_config['KMR']
-    controllers = _controller_config(robots)
+    initial_part = LaunchConfiguration('kmr_initial_part', default='').perform(context)
+    initial_part = initial_part or next(iter(scene_config['Storage']['slots']))
+    initial_arm = scene_config['Storage']['KMR_pick_arm_configurations'][initial_part]
+    initial_dock = scene_config['Storage']['KMR_pick_docking_poses'][initial_part]
+    startup_pose = [*initial_dock[:2], 0., 0., 0., initial_dock[2]]
+    speed = int(LaunchConfiguration('simulation_speed').perform(context))
+    controller_rate = int(LaunchConfiguration('ur_controller_rate_hz').perform(context))
+    gui_rate = int(LaunchConfiguration('gazebo_gui_rate_hz', default='30').perform(context))
+    controllers = _controller_config(robots, controller_rate)
+    performance = {
+        'speed': speed, 'ur_controller_rate_hz': controller_rate,
+        'enable_camera_streams': enabled('enable_camera_streams'),
+        'dynamic_shadows': enabled('dynamic_shadows'),
+        'gazebo_gui_rate_hz': gui_rate,
+    }
+    launch_id = uuid4().hex
     temporary_paths: list[Path] = []
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='cais_recovery_controllers_', delete=False) as file:
         yaml.safe_dump(controllers, file, sort_keys=False)
@@ -500,7 +563,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     ur_description = _build_description(robots, controllers_path)
     kmr_controllers_path = share / 'config' / 'recovery_framework_kmr_controllers.yaml'
     _kmr_controller_config(kmr_controllers_path)
-    kmr_description = _build_kmr_description(share, kmr_controllers_path)
+    kmr_description = _build_kmr_description(share, kmr_controllers_path, initial_arm)
     planning_description = _build_planning_description(ur_description, kmr_description)
     ur_urdf_path = _write_temporary_urdf(ur_description, 'cais_recovery_ur5e_')
     kmr_urdf_path = _write_temporary_urdf(kmr_description, 'cais_recovery_KMR_')
@@ -519,9 +582,13 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 include_loose_parts=enabled('include_loose_parts'),
             ))
             temporary_paths.append(world)
-        world = _runtime_world_without_static_kmr(world)
+        world = _runtime_world_without_static_kmr(
+            world, enable_camera_streams=enabled('enable_camera_streams'),
+            simulation_speed=speed, dynamic_shadows=enabled('dynamic_shadows'),
+            gui_rate=gui_rate,
+        )
         temporary_paths.append(world)
-        initial_pose = [str(value) for value in kmr['initial_pose']]
+        initial_pose = [str(value) for value in startup_pose]
         ur_spawn = Node(
             package='gazebo_ros', executable='spawn_entity.py', output='screen',
             arguments=['-file', str(ur_urdf_path), '-entity', 'dual_robot', '-timeout', '120'],
@@ -644,6 +711,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             # so the articulated KMR meshes resolve in the Gazebo client.
             AppendEnvironmentVariable(name='GAZEBO_MODEL_PATH', value=str(share.parent), prepend=True),
             AppendEnvironmentVariable(name='GAZEBO_PLUGIN_PATH', value=str(Path(get_package_prefix('ros2_linkattacher')) / 'lib'), prepend=True),
+            AppendEnvironmentVariable(name='GAZEBO_PLUGIN_PATH', value=str(Path(get_package_prefix('cais_lab_robotics')) / 'lib'), prepend=True),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(Path(get_package_share_directory('gazebo_ros')) / 'launch/gazebo.launch.py')),
                 launch_arguments={
@@ -658,21 +726,23 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 name='robot_state_publisher',
                 parameters=[{
                     'robot_description': planning_description, 'use_sim_time': True,
-                    'publish_frequency': 50.0,
+                    'publish_frequency': 30.0,
                 }],
                 output='screen',
             ),
             Node(
                 package='robot_state_publisher', executable='robot_state_publisher',
                 name='ur_gazebo_robot_state_publisher',
-                parameters=[{'robot_description': ur_description, 'use_sim_time': True}],
+                parameters=[{'robot_description': ur_description, 'use_sim_time': True,
+                             'publish_frequency': 1.0}],
                 remappings=[('/tf', '/ur_gazebo_tf_unused'), ('/tf_static', '/ur_gazebo_tf_static_unused')],
                 output='log',
             ),
             Node(
                 package='robot_state_publisher', executable='robot_state_publisher',
                 namespace='KMR', name='robot_state_publisher',
-                parameters=[{'robot_description': kmr_description, 'use_sim_time': True}],
+                parameters=[{'robot_description': kmr_description, 'use_sim_time': True,
+                             'publish_frequency': 1.0}],
                 remappings=[('/tf', '/KMR/gazebo_tf_unused'), ('/tf_static', '/KMR/gazebo_tf_static_unused')],
                 output='log',
             ),
@@ -698,24 +768,53 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             Node(
                 package='cais_lab_robotics', executable='kmr_base_controller.py',
                 name='KMR_base_controller', output='screen',
-                parameters=[{'config_file': str(scene_path), 'use_sim_time': True}],
+                parameters=[{'config_file': str(scene_path), 'use_sim_time': True,
+                             'launch_id': launch_id, 'simulation_speed': float(speed),
+                             'initial_arm_configuration': initial_arm,
+                             'performance_settings': json.dumps(performance, sort_keys=True)}],
+            ),
+            Node(
+                package='cais_lab_robotics', executable='simulation_performance.py',
+                name='simulation_performance', output='log',
+                parameters=[{'use_sim_time': True, 'launch_id': launch_id,
+                             'settings': json.dumps(performance, sort_keys=True)}],
+            ),
+            Node(
+                package='cais_lab_robotics', executable='gazebo_camera_detector.py',
+                output='log', parameters=[{
+                    'use_sim_time': True,
+                    'part_map': json.dumps({
+                        **{name: name for name in scene_config['Storage']['slots']},
+                        **{
+                            name: name
+                            for name in scene_config['3D Printing Station']['initial_products']
+                        },
+                        scene_config['Exit']['completed_product']: 'assembly_board_v1',
+                    }),
+                }],
             ),
         ]
     recovery_markers = None
     if enabled('launch_moveit'):
-        # Preserve separate parameter services for MoveIt and its controller manager.
+        move_group = Node(
+            package='moveit_ros_move_group', executable='move_group',
+            parameters=[moveit], output='screen',
+        )
+        if enabled('launch_gazebo'):
+            # MoveIt depends on live robot controllers. Start it as soon as the
+            # UR controller group is ready while KMR/Nav2 scene loading continues.
+            actions.append(RegisterEventHandler(OnProcessExit(
+                target_action=ur_spawner,
+                on_exit=[move_group],
+            )))
+        else:
+            actions.append(move_group)
+    if enabled('launch_rviz'):
         recovery_markers = Node(
             package='cais_lab_robotics', executable='recovery_drag_markers.py',
             output='screen', parameters=[{'use_sim_time': True}],
         )
-        actions += [
-            TimerAction(period=4.0, actions=[Node(
-                package='moveit_ros_move_group', executable='move_group',
-                parameters=[moveit], output='screen',
-            )]),
-            TimerAction(period=5.0, actions=[recovery_markers]),
-        ]
-    if enabled('launch_rviz'):
+        actions.append(recovery_markers)
         rviz_environment = {
             'LIBGL_ALWAYS_SOFTWARE': '1' if enabled('rviz_software_rendering') else '0',
         }
@@ -733,6 +832,11 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 ('navigate_to_pose', '/KMR/validated_navigate_to_pose'),
             ],
         )
+        if not enabled('launch_gazebo') and not enabled('launch_moveit'):
+            actions.append(RegisterEventHandler(OnProcessExit(
+                target_action=rviz,
+                on_exit=[EmitEvent(event=Shutdown(reason='RViz viewer closed'))],
+            )))
         if recovery_markers is None:
             actions.append(rviz)
         else:
@@ -796,9 +900,14 @@ def generate_launch_description() -> Any:
     defaults = {
         'world_file': 'table_recovery_framework.world',
         'robots_file': str(share / 'config/recovery_framework_gazebo.json'),
+        'kmr_initial_part': '',
         'run_perception': 'false', 'include_assembly_parts': 'true', 'include_loose_parts': 'true',
+        'enable_camera_streams': 'false',
+        'simulation_speed': '1', 'ur_controller_rate_hz': '1000',
+        'dynamic_shadows': 'false',
+        'gazebo_gui_rate_hz': '30',
         'launch_gazebo': 'true', 'launch_gazebo_gui': 'true',
-        'launch_moveit': 'true', 'launch_rviz': 'true',
+        'launch_moveit': 'true', 'launch_rviz': 'false',
         'rviz_software_rendering': 'true' if os.environ.get('WSL_DISTRO_NAME') else 'false',
         'launch_nav2': 'true',
     }

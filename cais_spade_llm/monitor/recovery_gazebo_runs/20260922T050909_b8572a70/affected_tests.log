@@ -1,0 +1,11 @@
+........................................................................ [ 22%]
+........................................................................ [ 44%]
+........................................................................ [ 66%]
+........................................................................ [ 88%]
+....................................                                     [100%]
+=============================== warnings summary ===============================
+test/test_recovery_framework_gazebo.py::test_recovery_rviz_rendering_defaults_preserve_wsl_behavior[True-true]
+  Warning: private variables, such as '_ConstructUnits__ConstructUnitsValue', will be normal attributes in 3.11
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+324 passed, 1 warning in 106.91s (0:01:46)

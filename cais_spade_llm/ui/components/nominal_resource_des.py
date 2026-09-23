@@ -15,6 +15,10 @@ from nicegui import context, ui
 
 from cais_spade_llm.resources.environment_models import build_environment_models, process_json
 from cais_spade_llm.ui.bridge import SystemBridge
+from cais_spade_llm.ui.components.resource_function_catalog import (
+    render_resource_function_rows,
+    resource_function_rows,
+)
 
 logger = logging.getLogger(__name__)
 SCENE_PATH = Path(__file__).resolve().parents[2] / "initialization/recovery_framework_gazebo.json"
@@ -63,45 +67,9 @@ def _capability_events(model: dict, models: dict) -> list[dict]:
         event
         for event in model["events"]
         if event["updates"]
+        or event.get("collection_effects")
         or event["parameter_bindings"]["resource_id"]["equals"] == model["resource_id"]
     ]
-    endpoints = {
-        (
-            event["parameter_bindings"]["resource_id"]["equals"],
-            field,
-            json.dumps(event["parameter_bindings"][field], sort_keys=True),
-        )
-        for event in events
-        for field in ("origin_resource_location", "destination_location")
-        if field in event["parameter_bindings"]
-    }
-    for event in model["events"]:
-        actor = event["parameter_bindings"]["resource_id"]["equals"]
-        if event not in events and (
-            any(
-                (actor, field, json.dumps(binding, sort_keys=True)) in endpoints
-                for field, binding in event["parameter_bindings"].items()
-            )
-            or any(event["event_name"] == peer["event_name"] for peer in events)
-        ):
-            events.append(event)
-    for actor in {event["parameter_bindings"]["resource_id"]["equals"] for event in events}:
-        origins = {
-            event["parameter_bindings"].get("origin_resource_location", {}).get("equals")
-            for event in events
-            if event["parameter_bindings"]["resource_id"]["equals"] == actor
-        }
-        destinations = {
-            event["parameter_bindings"].get("destination_location", {}).get("equals")
-            for event in events
-            if event["parameter_bindings"]["resource_id"]["equals"] == actor
-        }
-        if (origins & destinations) - {None}:
-            events.extend(
-                event
-                for event in models.get(actor, {}).get("events", [])
-                if event["event_name"] == "move_home" and event not in events
-            )
     return sorted(events, key=lambda event: event["event_id"])
 
 
@@ -109,11 +77,11 @@ def _graph_parameter(event: dict, name: str) -> Any:
     binding = event["parameter_bindings"].get(name, {})
     if "equals" in binding:
         return binding["equals"]
-    return {"reference": "part_name" if name == "delivered_part" else name}
+    return {"reference": name}
 
 
 def _graph_field(resource: str, field: str) -> str:
-    return f"{resource}.{field.replace('{delivered_part}', '{part_name}')}"
+    return f"{resource}.{field}"
 
 
 def _graph_value(event: dict, value: Any) -> Any:
@@ -134,24 +102,7 @@ def _graph_transition(event: dict, models: dict) -> dict:
         for peer in model["events"]
         if peer["event_id"] == event["event_id"]
     }
-    source, updates, guards = {}, {}, {}
-    for endpoint, output in (("source", source), ("target", updates)):
-        for field, value in event["capability_transition"][endpoint].items():
-            if field == "resource_id" or field == "resource_state" and value == "any":
-                continue
-            if field.startswith(("resource_", "task_ctx.", "part_state")):
-                field = _graph_field(actor, field)
-            elif field.startswith("output."):
-                owner = next(
-                    (
-                        rid
-                        for rid, peer in peers.items()
-                        if field in peer["guards"] or field in peer["updates"]
-                    ),
-                    actor,
-                )
-                field = _graph_field(owner, field)
-            output[field] = _graph_value(event, value)
+    updates, guards = {}, {}
     for rid, peer in peers.items():
         for field, guard in peer["guards"].items():
             operator, value = next(iter(guard.items()))
@@ -162,143 +113,81 @@ def _graph_transition(event: dict, models: dict) -> dict:
         for field, update in peer["updates"].items():
             operator, value = next(iter(update.items()))
             if operator == "set_from_param":
-                value = _graph_parameter(event, value)
+                value = _graph_value(event, update)
             updates[_graph_field(rid, field)] = value
-    for field, value in source.items():
-        guards.setdefault(field, {"equals": value})
+        for field, effect in peer.get("collection_effects", {}).items():
+            if field in models[rid]["state_variables"]:
+                updates.setdefault(_graph_field(rid, field), {"collection_effect": effect})
     return {
         "event": event,
         "actor": actor,
-        "source": source,
+        "source": {field: guard["equals"] for field, guard in guards.items() if "equals" in guard},
         "guards": guards,
         "updates": updates,
         "peers": peers,
     }
 
 
+def _graph_equal(actual: Any, expected: Any) -> bool | None:
+    # Collection outcomes and unbound parameters impose edge conditions; they
+    # are not concrete observations or proof that two task bindings are equal.
+    if isinstance(actual, dict) and "collection_effect" in actual:
+        return None
+    if type(actual) is type(expected) and actual == expected:
+        return True
+    if any(isinstance(value, dict) and "reference" in value for value in (actual, expected)):
+        return False if actual is None or expected is None else None
+    return False
+
+
 def _graph_apply(state: dict, transition: dict) -> dict | None:
     after = deepcopy(state)
-    conditions = [(field, {"equals": value}) for field, value in transition["source"].items()]
-    conditions.extend(transition["guards"].items())
-    for field, guard in conditions:
+    for field, guard in transition["guards"].items():
         operator, expected = next(iter(guard.items()))
         if field in after:
-            actual = after[field]
-            # Collection positions are bound by the shared belt displacement,
-            # whose full collection guards remain attached to this edge.
-            unknown = actual == {"reference": "next_locations"}
-            equal = type(actual) is type(expected) and actual == expected
-            if not unknown and (
-                (operator == "equals" and not equal) or (operator == "not_equals" and equal)
+            equal = _graph_equal(after[field], expected)
+            if (operator == "equals" and equal is False) or (
+                operator == "not_equals" and equal is True
             ):
                 return None
         if operator == "equals":
             after[field] = deepcopy(expected)
-    completed = deepcopy(after.get("processCompleted", []))
+    for field, value in transition["updates"].items():
+        if isinstance(value, dict) and "collection_effect" in value:
+            # A shared collection update invalidates earlier indexed facts
+            # without renaming parameters such as delivered_part to part_name.
+            prefix = field.split("{", 1)[0]
+            for indexed in after:
+                if "{" in field and indexed.startswith(prefix):
+                    after[indexed] = deepcopy(value)
     after.update(deepcopy(transition["updates"]))
-    for effect in transition["event"].get("product_effects", {}).get("processCompleted", []):
-        effect = _graph_value(transition["event"], effect)
-        if effect not in completed:
-            completed.append(effect)
-    if completed:
-        after["processCompleted"] = completed
-    if (
-        after.get("part_location") != state.get("part_location")
-        and "zone" not in transition["updates"]
-    ):
-        after.pop("zone", None)
-    if transition["event"]["event_name"] == "advance_conveyor":
-        after["Conveyor.part_location.{part_name}"] = (
-            {"reference": "next_locations"} if after["part_location"] == "Conveyor" else None
-        )
     return after
 
 
 def nominal_capability_graph(model: dict, models: dict | None = None) -> dict:
-    """Build a conditional part/task graph from structured guards and effects.
+    """Build conditional local states and task/handoff edges for one resource.
 
     Args:
-        model: The resource whose handoffs and tasks are displayed.
-        models: Shared descriptors, supplying other participants' task guards.
+        model: The resource whose local guards and updates define the states.
+        models: Other participants' descriptors, used only for edge details.
 
     Returns:
-        Parameterized states and existing event edges. Unknown entry facts are
-        conditions on edges, never evidence that a task can execute now.
+        Local parameterized states and existing event edges. Unknown entry facts
+        and peer guards remain conditions, not evidence of executable tasks.
     """
     models = {**(models or {}), model["resource_id"]: model}
-    transitions = [_graph_transition(event, models) for event in _capability_events(model, models)]
-    sources = {row["source"].get("part_location") for row in transitions} - {None}
-    arrivals = {
-        row["updates"].get("part_location")
-        for row in transitions
-        if row["updates"].get("part_location") != row["source"].get("part_location")
-    }
-    roots = sources - arrivals
-    entries = [row for row in transitions if row["source"].get("part_location") in roots]
-    entries = [
-        row
-        for row in entries
-        if not any(
-            peer is not row
-            and peer["updates"].get("part_location") == row["source"].get("part_location")
-            and _graph_apply(peer["updates"], row) is not None
-            and any(
-                guard.get("equals") == peer["updates"].get(field)
-                and field in peer["updates"]
-                and peer["guards"].get(field) != guard
-                for field, guard in row["guards"].items()
-                if "equals" in guard
-            )
-            for peer in transitions
-        )
-    ]
-    if not entries:
-        entries = [
-            row
-            for row in transitions
-            if row["source"]
-            and not any(
-                all(peer["updates"].get(field) == value for field, value in row["source"].items())
-                for peer in transitions
-                if peer is not row
-            )
-        ]
-    if not entries:
-        entries = transitions[:1]
-    nodes, edges, indices, queue = [], [], {}, deque()
-    actors = {row["actor"] for row in transitions}
-    pickup_locations = {
-        actor: {
-            row["source"].get("part_location")
-            for row in transitions
-            if row["actor"] == actor
-            and "origin_resource_location" in row["event"]["parameter_bindings"]
+    local = {model["resource_id"]: model}
+    transitions = [_graph_transition(event, local) for event in _capability_events(model, models)]
+    for row in transitions:
+        row["peers"] = {
+            rid: peer
+            for rid, descriptor in models.items()
+            for peer in descriptor["events"]
+            if peer["event_id"] == row["event"]["event_id"]
         }
-        for actor in actors
-    }
-    reachable = {location: {location} for location in sources | arrivals if location is not None}
-    for _ in reachable:
-        for row in transitions:
-            origin, destination = (
-                row["source"].get("part_location"),
-                row["updates"].get("part_location"),
-            )
-            if origin in reachable and destination in reachable:
-                reachable[origin].update(reachable[destination])
+    nodes, edges, indices, queue = [], [], {}, deque()
 
     def intern(state: dict) -> int:
-        # A remote actor's task context stops distinguishing this part's flow
-        # after its last applicable handoff. Its guards stay on the event.
-        for actor in actors - {model["resource_id"]}:
-            if not reachable.get(state.get("part_location"), set()) & {
-                actor,
-                *pickup_locations[actor],
-            }:
-                state = {
-                    field: value
-                    for field, value in state.items()
-                    if not field.startswith(actor + ".")
-                }
         key = json.dumps(state, sort_keys=True, separators=(",", ":"))
         if key not in indices:
             indices[key] = len(nodes)
@@ -306,90 +195,79 @@ def nominal_capability_graph(model: dict, models: dict | None = None) -> dict:
             queue.append(len(nodes) - 1)
         return indices[key]
 
-    preparation = {}
-    for actor in actors:
-        first = next(row for row in transitions if row["actor"] == actor)
-        preparation.update(
-            {
-                field: guard["equals"]
-                for field, guard in first["guards"].items()
-                if field.startswith(actor + ".") and "equals" in guard
-            }
-        )
-    for row in entries:
-        intern(
-            {
-                **preparation,
-                **row["source"],
-                **{
-                    field: guard["equals"]
-                    for field, guard in row["guards"].items()
-                    if "equals" in guard
-                },
-            }
-        )
-    while queue:
-        source = queue.popleft()
-        for row in transitions:
-            after = _graph_apply(nodes[source]["state"], row)
-            if after is None:
-                continue
-            target = intern(after)
-            event = row["event"]
-            edges.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "event_id": event["event_id"],
-                    "resource_id": row["actor"],
-                    "event": event,
-                    "guards": {rid: peer["guards"] for rid, peer in row["peers"].items()},
-                    "updates": {rid: peer["updates"] for rid, peer in row["peers"].items()},
-                    **{
-                        field: {
-                            rid: peer[field] for rid, peer in row["peers"].items() if field in peer
-                        }
-                        for field in ("collection_guards", "collection_effects")
-                    },
-                }
-            )
+    represented = set()
+    for entry in transitions:
+        if entry["event"]["event_id"] in represented:
+            continue
+        # Capabilities can start under different conditions; current inventory
+        # must neither seed this graph nor hide an otherwise configured task.
+        intern(entry["source"])
+        while queue:
+            source = queue.popleft()
+            for row in transitions:
+                after = _graph_apply(nodes[source]["state"], row)
+                if after is None:
+                    continue
+                target = intern(after)
+                event = row["event"]
+                represented.add(event["event_id"])
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "event_id": event["event_id"],
+                        "resource_id": row["actor"],
+                        "event": event,
+                        "guards": {rid: peer["guards"] for rid, peer in row["peers"].items()},
+                        "updates": {rid: peer["updates"] for rid, peer in row["peers"].items()},
+                        **{
+                            field: {
+                                rid: peer[field] for rid, peer in row["peers"].items() if field in peer
+                            }
+                            for field in ("collection_guards", "collection_effects")
+                        },
+                    }
+                )
     return {"nodes": nodes, "edges": edges}
 
 
 def nominal_capability_rows(
     model: dict[str, Any], models: dict | None = None
 ) -> list[dict[str, Any]]:
-    """Project task capabilities without expanding their part bindings.
+    """List local task and handoff conditions without expanding part bindings.
 
     Args:
-        model: One resource descriptor with configured capability transitions.
-        models: Other participants' descriptors for shared preparation events.
+        model: One resource descriptor with local guards and updates.
+        models: Shared descriptors; neighbors do not expand this projection.
 
     Returns:
-        Tasks, shared handoffs, and their applicable preparation events.
+        Tasks and shared handoffs with only the selected resource's effects.
     """
-    return [
-        {
-            "id": event["event_id"],
-            "resource_id": event["parameter_bindings"]["resource_id"]["equals"],
-            "event": event["event_name"],
-            "signature": _event_signature(event),
-            "source": _state_text(event["capability_transition"]["source"]),
-            "target": _state_text(event["capability_transition"]["target"]),
-        }
-        for event in _capability_events(model, models or {model["resource_id"]: model})
-    ]
+    rows = []
+    for event in _capability_events(model, models or {}):
+        transition = _graph_transition(event, {model["resource_id"]: model})
+        rows.append(
+            {
+                "id": event["event_id"],
+                "resource_id": event["parameter_bindings"]["resource_id"]["equals"],
+                "event": event["event_name"],
+                "signature": _event_signature(event),
+                "source": _state_text(dict(sorted(transition["guards"].items()))),
+                "target": _state_text(dict(sorted(transition["updates"].items()))),
+            }
+        )
+    return rows
 
 
 def nominal_capability_mermaid(
     model: dict[str, Any], event_id: int | None = None, *, models: dict | None = None
 ) -> str:
-    """Render connected part and task states from descriptor conditions and effects.
+    """Render the selected resource's local states, tasks, and shared handoffs.
 
     Args:
         model: One nominal resource descriptor.
         event_id: An existing event to highlight, if supplied.
-        models: Other participants' descriptors for shared guards and effects.
+        models: Other participants' descriptors for edge details only.
 
     Returns:
         A graph retaining exact resource, location, event, and parameter names.
@@ -398,13 +276,7 @@ def nominal_capability_mermaid(
     lines = ["flowchart TB"]
     graph = nominal_capability_graph(model, models)
     for node in graph["nodes"]:
-        state = {
-            field: node["state"][field]
-            for field in sorted(
-                node["state"],
-                key=lambda field: (field not in {"part_location", "processCompleted"}, field),
-            )
-        }
+        state = dict(sorted(node["state"].items()))
         label = "<br/>".join(_diagram_label(line) for line in _state_text(state).splitlines())
         lines.append(f'    s{node["id"]}["{label}"]')
     for index, edge in enumerate(graph["edges"]):
@@ -690,7 +562,14 @@ def _table(
 
 
 def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[None]]:
-    """Build stable resource controls; return the page's awaited snapshot refresh."""
+    """Build stable resource controls and local capability graphs.
+
+    Args:
+        bridge: Existing public UI-to-runtime surface for read-only snapshots.
+
+    Returns:
+        The page's awaited snapshot refresh callback.
+    """
     client = context.client
     configured: dict = {}
     configured_stamp: tuple | None = None
@@ -711,8 +590,11 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
         loading = ui.label("Loading resource capabilities...")
         body = ui.column().classes("w-full")
 
-    def lazy_section(label: str, builder: Callable, value: Callable, *, icon: str = "data_object"):
-        expansion = ui.expansion(label, icon=icon).classes("w-full")
+    def lazy_section(
+        label: str, builder: Callable, value: Callable, *,
+        icon: str = "data_object", expanded: bool = False,
+    ):
+        expansion = ui.expansion(label, icon=icon, value=expanded).classes("w-full")
         content = ui.column().classes("w-full")
         content.move(expansion)
         previous: Any = object()
@@ -736,6 +618,8 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
 
         expansion.on_value_change(refresh)
         refresh_sections.append(refresh)
+        if expanded:
+            refresh()
         return expansion
 
     def json_section(label: str, value: Callable) -> None:
@@ -768,14 +652,21 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                 ui.label(selected.value).classes("text-lg font-semibold mt-2")
                 occupancy = ui.label().classes("text-sm")
                 neighbors = ui.label().classes("text-sm")
+                lazy_section(
+                    "Functions and composed primitives",
+                    render_resource_function_rows,
+                    lambda: resource_function_rows(model()),
+                    icon="precision_manufacturing",
+                    expanded=True,
+                )
                 ui.label("Capability graph").classes("font-semibold")
                 graph = ui.mermaid(nominal_capability_mermaid(model(), models=models)).classes(
                     "w-full overflow-auto"
                 )
-                last_events = {rid: deepcopy(peer["events"]) for rid, peer in models.items()}
+                last_definition = deepcopy((model()["events"], model()["state_variables"]))
 
                 def refresh_summary() -> None:
-                    nonlocal last_events
+                    nonlocal last_definition
                     current = model()
                     occupancy.text = "Occupancy: " + current.get(
                         "state_evidence", "configured initial assumptions"
@@ -783,15 +674,17 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     neighbors.text = "Connected neighbors: " + ", ".join(
                         current.get("neighbors", [])
                     )
-                    events = {rid: peer["events"] for rid, peer in models.items()}
-                    if events != last_events:
-                        last_events = deepcopy(events)
-                        graph.set_content(nominal_capability_mermaid(current, models=models))
+                    definition = (current["events"], current["state_variables"])
+                    if definition != last_definition:
+                        last_definition = deepcopy(definition)
+                        content = nominal_capability_mermaid(current, models=models)
+                        if content != graph.content:
+                            graph.set_content(content)
 
                 refresh_summary()
                 refresh_sections.append(refresh_summary)
                 ui.label(
-                    "Part and task flow. Each edge retains its event_id, responsible resource, and guards. Tasks bind part parameters; process effects persist across handoffs."
+                    "States belong to the selected resource. Edges show its tasks and shared handoffs, with exact event_id and responsible resource. All participant conditions still apply and are available in event details."
                 ).classes("text-sm text-slate-500")
                 if selected.value == "Conveyor":
                     ui.label(
@@ -807,12 +700,41 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     },
                 )
                 exploration_status = ui.label().classes("text-sm")
+                activity_status = ui.label().classes("text-sm")
+                component_status = ui.label().classes("text-sm")
+                timing_status = ui.label().classes("text-sm text-slate-600")
 
                 def refresh_exploration_status() -> None:
                     outcome = live.get("outcome", {})
                     exploration_status.text = str(
                         outcome.get("status", "No active environmental exploration")
                     ) + (": " + outcome["reason"] if outcome.get("reason") else "")
+                    activity = live.get("resource_activity", {}).get(selected.value, {})
+                    progress = activity.get("progress") or {}
+                    countdown = ""
+                    if "simulation_remaining_sec" in progress:
+                        countdown = (
+                            f" · {float(progress['simulation_remaining_sec']):.1f} simulation s remaining"
+                        )
+                    activity_status.text = (
+                        f"Activity: {activity.get('status', 'idle')}{countdown}"
+                    )
+                    completed = live.get("component_progress", {})
+                    component_status.text = (
+                        f"Completed components: {completed.get('completed', 0)}/"
+                        f"{completed.get('total', 0)}"
+                    )
+                    timings = live.get("timings", {})
+                    timing_status.text = " · ".join(
+                        f"{label} {float(timings.get(field, 0.0)):.2f}s"
+                        for field, label in (
+                            ("planning_sec", "planning"),
+                            ("motion_sec", "motion"),
+                            ("waiting_sec", "waiting"),
+                            ("simulation_sec", "simulation"),
+                            ("wall_clock_sec", "wall"),
+                        )
+                    )
 
                 refresh_sections.append(refresh_exploration_status)
                 refresh_exploration_status()
@@ -866,8 +788,8 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                         [
                             ("resource_id", "Resource performing task"),
                             ("signature", "Task"),
-                            ("source", "Source"),
-                            ("target", "Task effect"),
+                            ("source", "Local conditions"),
+                            ("target", "Local effects"),
                         ],
                         rows,
                         "id",
@@ -876,7 +798,7 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     icon="route",
                 )
                 json_section(
-                    "Part and task flow guards and effects",
+                    "Local capability graph and event details",
                     lambda: nominal_capability_graph(model(), models),
                 )
                 lazy_section(

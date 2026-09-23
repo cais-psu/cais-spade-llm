@@ -1,12 +1,22 @@
 {
   "schema_version": 1,
   "selected_product": "cais_spade_llm/initialization/products/assembly_board-v1-recovery-framework.json",
-  "selected_product_order_file": "cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json",
+  "selected_product_order_file": "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json",
   "product_geometry_file": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
   "scene_file": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
   "permitted_resources": [
-    "ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4", "M1", "M2",
-    "Storage", "KMR", "Conveyor", "Buffer For Machined parts", "3D Printing Station", "Exit"
+    "ur5e-1",
+    "ur5e-2",
+    "ur5e-3",
+    "ur5e-4",
+    "M1",
+    "M2",
+    "Storage",
+    "KMR",
+    "Conveyor",
+    "Buffer For Machined parts",
+    "3D Printing Station",
+    "Exit"
   ],
   "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
   "execution_mode": "simulation",
@@ -22,5 +32,12 @@
     "candidate_count": "adaptive",
     "candidate_proposal_budget": 5
   },
-  "failure_scenario": null
+  "failure_scenario": null,
+  "simulation": {
+    "speed": 1,
+    "ur_controller_rate_hz": 1000,
+    "enable_camera_streams": false,
+    "dynamic_shadows": false,
+    "gazebo_gui_rate_hz": 30
+  }
 }

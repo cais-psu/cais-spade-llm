@@ -152,7 +152,26 @@ def test_dashboard_reads_status_without_controls_or_configuration_writes(monkeyp
         for element in client.elements.values()
     )
     client.delete()
-    timer.cancel.assert_called_once()
+    timer.cancel.assert_called_once_with(with_current_invocation=True)
+
+
+def test_dashboard_deletion_cancels_actual_nicegui_timer_without_callback_error(monkeypatch):
+    handle_exception = Mock()
+    monkeypatch.setattr(core.app, "handle_exception", handle_exception)
+    monkeypatch.setattr(core.app, "on_startup", Mock())
+    client = Client(context.client.page)
+    with client:
+        dashboard.render(_bridge())
+    timer = next(
+        element for element in client.elements.values()
+        if isinstance(element, ui.timer) and element.interval == 2.0
+    )
+    invocation = Mock()
+    timer._current_invocation = invocation
+    client.delete()
+    assert timer._is_canceled
+    invocation.cancel.assert_called_once_with()
+    handle_exception.assert_not_called()
 
 
 def test_recovery_tabs_default_to_run_and_build_run_once(tmp_path, monkeypatch):

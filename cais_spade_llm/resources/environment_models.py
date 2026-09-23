@@ -15,6 +15,7 @@ from dataclasses import asdict
 from itertools import combinations_with_replacement
 from typing import Any
 
+from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
 from cais_spade_llm.resources import nominal_des as tasks
 from cais_spade_llm.resources.nominal_conveyor import (
     CONVEYOR_LOCATIONS,
@@ -23,6 +24,7 @@ from cais_spade_llm.resources.nominal_conveyor import (
     conveyor_parts,
 )
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
+from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
 
 PART_REFERENCE = {"scope": "resource", "type": ["string", "null"], "reference": "part_name"}
 PART_PARAMETER = {"required": True, "type": "string", "reference": "part_name"}
@@ -123,7 +125,8 @@ def build_environment_models(
             model["assignments"].get("process_capabilities", {})
         )
         model["configuration_revision"] = 0
-        model["marked_state_conditions"] = []
+        if "held_part" not in model["state_variables"]:
+            model["marked_state_conditions"] = []
         model["events"] = [
             _parameterized_event(event, rid, registry, schema_version)
             for event in model["events"]
@@ -231,8 +234,24 @@ def _parameterized_event(
         for key, value in event["parameter_bindings"].items()
         if value == {"equals": True}
     }
-    if name in registry:
-        event["program"] = json.loads(json.dumps(asdict(registry[name].program)))
+    actor = event["parameter_bindings"]["resource_id"]["equals"]
+    # place_release is the capability event; the robot executes place_insert.
+    # KMR owns a separate place_release function and keeps its own program.
+    function_name = "place_insert" if actor != "KMR" and name == "place_release" else name
+    if actor == "KMR" and name in KMR_TASKS:
+        event["function_name"] = name
+        event["program"] = json.loads(json.dumps(asdict(KMR_TASKS[name].program)))
+        event["program_status"] = "implemented"
+    elif function_name in registry:
+        event["function_name"] = function_name
+        event["program"] = json.loads(json.dumps(asdict(registry[function_name].program)))
+        event["program_status"] = "implemented"
+    else:
+        program = workflow_task_program(name)
+        if program:
+            event["function_name"] = name
+            event["program_status"] = program.pop("status")
+            event["program"] = program
     if (
         not event["guards"]
         and not event["updates"]
@@ -460,6 +479,8 @@ def _geometry_feasibility(model: dict, geometry: dict) -> tuple[str, list[str]]:
 def feasibility(model: dict, task: dict, geometry: dict) -> tuple[str, list[str]]:
     """Evaluate process and geometry using resource-owned configuration facts."""
     name, params = task["event_name"], task["parameters"]
+    if name == "move_home":
+        return "FEASIBLE", []
     status, reasons = _geometry_feasibility(model, geometry)
     if status == "INFEASIBLE":
         return status, reasons

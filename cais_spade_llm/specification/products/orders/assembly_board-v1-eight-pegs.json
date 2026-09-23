@@ -1,0 +1,154 @@
+{
+  "product": "assembly_board-v1",
+  "product_jid": "assembly_board-v1@localhost",
+  "quantity": 1,
+  "objective": "assemble assembly_board-v1",
+  "parts": [
+    "KET4_Square_4mm",
+    "KET8_Square_8mm",
+    "KET12_Square_12mm",
+    "KET16_Square_16mm",
+    "RGOCG4-50_Round_4mm",
+    "RGOCG8-50_8mm",
+    "RGOCG12-50_12mm",
+    "RGOCG16-50_16mm"
+  ],
+  "processPlan": {
+    "KET4_Square_4mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "KET8_Square_8mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "KET12_Square_12mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "KET16_Square_16mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "RGOCG4-50_Round_4mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "circle"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "RGOCG8-50_8mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "circle"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "RGOCG12-50_12mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "circle"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ],
+    "RGOCG16-50_16mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "circle"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ]
+  }
+}

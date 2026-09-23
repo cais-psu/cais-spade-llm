@@ -81,6 +81,9 @@ def render(bridge: SystemBridge) -> None:
                         "Saved results retain their recorded inputs; the current setup is not applied to historical runs."
                     ).classes("text-sm text-slate-600")
                     render_gazebo_delivery_runs()
+                    render_gazebo_delivery_runs(
+                        _ROOT / 'cais_spade_llm/monitor/environment_runs', environment=True,
+                    )
                     render_results()
             built.add(name)
 

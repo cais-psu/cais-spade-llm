@@ -139,6 +139,34 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                 },
             ),
             RobotTaskStep(
+                id="retreat_from_source",
+                op="move_cartesian",
+                executor="primitive",
+                exposed=True,
+                params={
+                    "x": _state("_task_ctx", "access_retreat_pose", "x"),
+                    "y": _state("_task_ctx", "access_retreat_pose", "y"),
+                    "z": _state("_task_ctx", "access_retreat_pose", "z"),
+                    "qx": _state("_task_ctx", "access_retreat_pose", "qx"),
+                    "qy": _state("_task_ctx", "access_retreat_pose", "qy"),
+                    "qz": _state("_task_ctx", "access_retreat_pose", "qz"),
+                    "qw": _state("_task_ctx", "access_retreat_pose", "qw"),
+                    "speed": 0.45,
+                },
+                public_params={"speed": 0.45},
+                note="Configured collision-aware retreat from enclosed source.",
+                when=(
+                    RobotTaskGuard(
+                        predicate="always",
+                        condition={
+                            "field": "task_ctx.access_retreat_pose",
+                            "operator": "exists",
+                        },
+                    ),
+                ),
+                failure_observations={"part_name": _arg("part_name")},
+            ),
+            RobotTaskStep(
                 id="lift",
                 op="move_relative",
                 executor="primitive",
@@ -156,6 +184,16 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "speed": 0.45,
                 },
                 note="Positive dz lift/retreat after grasp.",
+                when=(
+                    RobotTaskGuard(
+                        predicate="always",
+                        condition={
+                            "field": "task_ctx.access_retreat_pose",
+                            "operator": "equals",
+                            "value": None,
+                        },
+                    ),
+                ),
                 failure_observations={"part_name": _arg("part_name")},
             ),
         ),

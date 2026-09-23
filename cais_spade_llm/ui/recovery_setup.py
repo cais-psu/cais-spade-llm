@@ -82,6 +82,8 @@ def product_inputs(product_file: str, order_file: str, root: Path = ROOT) -> dic
 
 def default_setup(root: Path = ROOT) -> dict[str, Any]:
     """Build unsaved defaults from the current files, without writing them."""
+    from cais_spade_llm.recovery_framework.simulation import DEFAULT_SETTINGS
+
     product_file = str(PRODUCT_PATH.relative_to(ROOT))
     scene_file = str(SCENE_PATH.relative_to(ROOT))
     manifest = read_json(root / product_file)
@@ -98,6 +100,7 @@ def default_setup(root: Path = ROOT) -> dict[str, Any]:
         "permitted_resources": list(models),
         "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
         "execution_mode": "simulation",
+        "simulation": DEFAULT_SETTINGS.copy(),
         "runtime_recovery_mode": "pre_ran",
         "runtime_recovery_validation_policy": "validated",
         "runtime_recovery_archive_path": "",
@@ -301,6 +304,9 @@ def validate_setup(setup: dict, *, root: Path = ROOT) -> dict[str, Any]:
     """Validate settings against their source definitions without projecting events."""
     if setup.get("schema_version") != 1:
         raise ValueError("Unsupported recovery-framework setup schema_version")
+    from cais_spade_llm.recovery_framework.simulation import simulation_settings
+
+    simulation_settings(setup)
     inputs = product_inputs(setup["selected_product"], setup["selected_product_order_file"], root)
     if setup.get("product_geometry_file") != inputs["product_geometry_file"]:
         raise ValueError("Geometry reference does not match the selected product manifest")
@@ -310,8 +316,11 @@ def validate_setup(setup: dict, *, root: Path = ROOT) -> dict[str, Any]:
     else:
         from cais_spade_llm.product.environment import EnvironmentProductContext
 
-        models = EnvironmentProductContext(scene, inputs["product_order"], inputs["geometry"],
-                                           setup.get("permitted_resources")).models
+        context = EnvironmentProductContext(
+            scene, inputs["product_order"], inputs["geometry"], setup.get("permitted_resources")
+        )
+        models = context.models
+        scene = context.inputs["scene"]
     if "completion_conditions" in inputs["product_order"]:
         validate_completion_conditions(inputs["product_order"]["completion_conditions"], models)
     parts = inputs["selected_parts"]
@@ -399,9 +408,15 @@ class StartupValidation:
     """Cache display validation while retaining an unconditional check on Start."""
 
     def __init__(self, *, root: Path = ROOT) -> None:
+        """Initialize the cached setup and selected order description.
+
+        Args:
+            root: Project root used to resolve configuration references.
+        """
         self.root = root
         self._signature: tuple | None = None
         self._result: tuple[dict, str, bool] = ({}, "Checking saved setup...", False)
+        self.order_summary = ""
 
     def _dependencies(self, setup: dict) -> tuple:
         references = [SETUP_PATH]
@@ -434,7 +449,14 @@ class StartupValidation:
         return json.dumps(setup, sort_keys=True), tuple(stamps)
 
     def read(self, *, force: bool = False) -> tuple[dict, str, bool]:
-        """Read the saved setup and validate changed dependencies on a worker thread."""
+        """Read saved setup and its order summary from the same validated inputs.
+
+        Args:
+            force: Revalidate even when configuration signatures are unchanged.
+
+        Returns:
+            The saved setup, a startup blocking reason, and the delivery flag.
+        """
         from cais_spade_llm.recovery_framework.delivery import is_delivery_order
 
         try:
@@ -445,16 +467,27 @@ class StartupValidation:
                 order = read_json(reference_path(setup["selected_product_order_file"], self.root))
                 delivery = setup["execution_mode"] == "simulation" and is_delivery_order(order)
                 if signature != self._dependencies(setup):
+                    self._signature = None
+                    self.order_summary = ""
                     return (
                         setup,
                         "Configuration changed during validation. Checking again...",
                         False,
                     )
                 self._result = (setup, reason, delivery)
+                parts = order.get("parts", "all")
+                parts_text = ", ".join(parts) if isinstance(parts, list) else str(parts)
+                summary = [f"Objective: {order.get('objective', 'Unavailable')}", f"Parts: {parts_text}"]
+                if delivery:
+                    summary.append(
+                        "Destination: " + order["completion_conditions"]["KMR"]["resource_location"]
+                    )
+                self.order_summary = "\n".join(summary)
                 self._signature = signature
             return deepcopy(self._result)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self._signature = None
+            self.order_summary = ""
             return {}, f"Experiment setup could not be loaded: {exc}", False
 
 

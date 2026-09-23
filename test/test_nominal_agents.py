@@ -450,7 +450,7 @@ def test_complete_pages_read_models_and_saved_runs_without_dispatch(
             for item in elements
         )
         assert (
-            "Product requirements" if page_name == "products" else "Live Robot Status"
+            "Product requirements" if page_name == "products" else "Live Resource Status"
         ) in texts
         assert len(polls) == 1
         refreshed = polls[0][1]()
@@ -465,13 +465,9 @@ def test_complete_pages_read_models_and_saved_runs_without_dispatch(
             from cais_spade_llm.product.environment import EnvironmentProductContext
 
             context = EnvironmentProductContext(**inputs)
-            assert [row["part_name"] for row in model.rows] == [
-                *context.selected_parts, context.product_name,
-            ]
+            assert [row["part_name"] for row in model.rows] == context.selected_parts
             for row in model.rows:
-                expected = context.product_order["processPlan"].get(
-                    row["part_name"], {"location": "Exit", "state": "completed"}
-                )
+                expected = context.product_order["processPlan"][row["part_name"]]
                 assert json.loads(row["requirement"]) == expected
                 assert row["location"] == context.part_tracker[row["part_name"]]["location"]
             geometry_label = next(

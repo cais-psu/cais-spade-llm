@@ -15,13 +15,18 @@ from nicegui import context, ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.refresh import PageRefresh
+from cais_spade_llm.ui.resource_status import ResourceStatusReader
 from cais_spade_llm.ui import recovery_setup as settings
 from cais_spade_llm.ui.components.agent_chat import render_chat
+from cais_spade_llm.ui.components.simulation_controls import render_simulation_controls
 from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
-from cais_spade_llm.ui.components.robot_status_card import render_robot_status_card
+from cais_spade_llm.ui.components.robot_status_card import render_environment_outcome, render_robot_status_card
 from cais_spade_llm.recovery_framework.delivery import prepare_start, request_stop, reset_stop
-from cais_spade_llm.recovery_framework.startup import prepare_delivery_start
-from cais_spade_llm.recovery_framework.environment_runtime import prepare_environment_start
+from cais_spade_llm.recovery_framework.startup import prepare_delivery_start, start_delivery_agents
+from cais_spade_llm.recovery_framework.environment_runtime import (
+    prepare_environment_start,
+    record_environment_startup_ready,
+)
 
 # Execution mode labels → internal values.
 _MODE_MAP = {
@@ -58,6 +63,8 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
     select_popup_open = {"value": False}
     select_pause_until = {"value": 0.0}
     polling = PageRefresh(is_active)
+    status_reader = ResourceStatusReader(bridge)
+    status_lock = asyncio.Lock()
     editing_recovery = {"value": False}
 
     def _track_recovery_input(element) -> None:
@@ -123,6 +130,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                 ui.label("Saved experiment setup").classes("font-semibold")
                 ui.link("Edit setup", "/recovery-framework?tab=setup")
                 setup_message = ui.label().classes("text-sm text-slate-600")
+                order_summary = ui.label().classes("text-sm font-semibold whitespace-pre-line")
                 setup_table = ui.table(
                     columns=[
                         {"name": "setting", "field": "setting", "label": "Setting"},
@@ -145,6 +153,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                         setup_table.rows = settings.setup_summary(loaded) if loaded else []
                     setup_error["message"] = reason
                     setup_is_delivery["value"] = delivery
+                    order_summary.text = validation.order_summary
                     setup_message.text = (
                         reason
                         or "Saved settings. Configuration does not establish execution support or observed state."
@@ -158,6 +167,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                 # Prerequisite banner.
                 prereq_banner = ui.column().classes("w-full mt-3")
                 bundle_gate_banner = ui.column().classes("w-full mt-2")
+                execution_status = ui.column().classes("w-full mt-2")
 
                 with ui.column().classes("w-full gap-2 mt-4"):
                     banner_hide_task: asyncio.Task | None = None
@@ -246,6 +256,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                         if bridge._starting:
                             _set_action_banner("warning", "Start already in progress...")
                             return
+                        start_requested_at_unix = time.time()
                         try:
                             start_click_state["locked"] = True
                             start_cancelled["value"] = False
@@ -327,7 +338,10 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                                 )
                                 return
 
-                            status = await asyncio.to_thread(_read_prerequisites, bridge, internal)
+                            status = await asyncio.to_thread(
+                                _read_prerequisites, bridge, internal,
+                                delivery=setup_is_delivery["value"],
+                            )
                             if start_cancelled["value"]:
                                 return
                             if not setup_is_delivery["value"] and not _check_prerequisites(
@@ -353,22 +367,40 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                                     if hasattr(bridge, "_diag_emit"):
                                         bridge._diag_emit("dashboard start background task begin")
                                     try:
+                                        prepared_delivery = None
                                         if setup_is_delivery["value"]:
                                             prepare_environment_start(None)
                                             _set_action_banner(
                                                 "info",
                                                 "Preparing Gazebo and checking Storage, KMR, and M1...",
                                             )
-                                            await prepare_delivery_start(bridge, selected_setup)
+                                            prepared_delivery = await prepare_delivery_start(
+                                                bridge,
+                                                selected_setup,
+                                                requested_at_unix=start_requested_at_unix,
+                                            )
                                         else:
                                             prepare_start(None)
                                             await asyncio.to_thread(
-                                                prepare_environment_start, deepcopy(selected_setup)
+                                                prepare_environment_start,
+                                                deepcopy(selected_setup),
+                                                prewarm_controllers=True,
+                                                launch_identity=bridge._simulation_launch_key(),
+                                                requested_at_unix=start_requested_at_unix,
                                             )
                                         if start_cancelled["value"]:
                                             return
-                                        await bridge.start_system()
+                                        if prepared_delivery is not None:
+                                            await start_delivery_agents(
+                                                bridge, selected_setup, prepared_delivery,
+                                                on_progress=lambda message: _set_action_banner('info', message),
+                                            )
+                                        else:
+                                            await bridge.start_system()
+                                            if bridge.system_running:
+                                                record_environment_startup_ready(bridge)
                                         if bridge.system_running:
+                                            await _refresh_robot_status()
                                             notice = bridge.consume_notice()
                                             if notice:
                                                 _set_action_banner(
@@ -376,8 +408,8 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                                                 )
                                             else:
                                                 _set_action_banner(
-                                                    "success",
-                                                    "System started successfully.",
+                                                    "info",
+                                                    "Agents started.",
                                                     auto_hide_s=5.0,
                                                 )
                                         else:
@@ -458,7 +490,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                         gazebo_launch_state["busy"] = True
                         simulation_btn.set_enabled(False)
                         _set_action_banner(
-                            "info", "Launching no-hardware dual Gazebo + MoveIt/RViz..."
+                            "info", "Launching manufacturing Gazebo + MoveIt..."
                         )
                         try:
                             if await asyncio.to_thread(bridge.simulation_environment_running):
@@ -472,7 +504,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                             else:
                                 _set_action_banner(
                                     "success",
-                                    "No-hardware dual Gazebo + MoveIt/RViz launched. Waiting for ROS services...",
+                                    "Manufacturing Gazebo + MoveIt launched. Waiting for ROS services...",
                                     auto_hide_s=6.0,
                                 )
                         finally:
@@ -587,6 +619,10 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                             "Reset", on_click=_reset_selected, icon="restart_alt"
                         ).props("color=blue")
                     with toolbar:
+                        render_simulation_controls(
+                            bridge, _managed_timer,
+                            lambda: bridge._starting or start_click_state['locked'],
+                        )
                         control_status = ui.label("Checking saved setup...").classes("text-sm")
                         action_banner = ui.row().classes(
                             "w-full mt-2 items-center gap-2 rounded p-3 text-sm text-blue-700 bg-blue-50"
@@ -694,7 +730,9 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                                 _bundle_gate, checked[0], checked[1]
                             )
                             mode = checked[0].get("execution_mode", "")
-                            status = await asyncio.to_thread(_read_prerequisites, bridge, mode)
+                            status = await asyncio.to_thread(
+                                _read_prerequisites, bridge, mode, delivery=checked[2]
+                            )
                     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
                         start_btn.set_enabled(False)
                         control_status.text = f"Startup check failed: {exc}"
@@ -880,27 +918,38 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                 _refresh_dag()
                 _managed_timer(0.5, _refresh_dag)
 
-            # ── Live Robot Status ───────────────────────────────────────
+            # ── Live Resource Status ────────────────────────────────────
             with ui.card().classes("w-full"):
-                ui.label("Live Robot Status").classes("text-lg font-semibold mb-2")
+                ui.label("Live Resource Status").classes("text-lg font-semibold mb-2")
                 robot_status_container = ui.column().classes("w-full gap-4")
 
-                def _refresh_robot_status():
-                    states = bridge.get_robot_states()
-                    if not _changed("robot_status", states):
+                async def _refresh_robot_status():
+                    if status_lock.locked():
                         return
-                    robot_status_container.clear()
-                    if not states:
+                    async with status_lock:
+                        snapshot = await asyncio.to_thread(status_reader.read)
+                        if not polling.active():
+                            return
+                        if _changed("execution_outcome", snapshot["outcome"]):
+                            execution_status.clear()
+                            with execution_status:
+                                if snapshot["outcome"]:
+                                    ui.label("Execution status").classes("font-semibold")
+                                    render_environment_outcome(snapshot["outcome"])
+                        states = snapshot["resources"]
+                        if not _changed("robot_status", (states, snapshot["error"])):
+                            return
+                        robot_status_container.clear()
                         with robot_status_container:
-                            ui.label("No robots available — start the system first").classes(
-                                "text-slate-400 italic"
-                            )
-                        return
-                    with robot_status_container:
-                        for name, state in states.items():
-                            render_robot_status_card(name, state)
+                            if snapshot["error"]:
+                                ui.label(snapshot["error"]).classes("text-amber-700")
+                            if not states:
+                                ui.label("No resources available — start the system first").classes(
+                                    "text-slate-400 italic"
+                                )
+                            for name, state in states.items():
+                                render_robot_status_card(name, **state)
 
-                _refresh_robot_status()
                 _managed_timer(2.0, _refresh_robot_status)
 
             # ── Runtime Safety Rules ────────────────────────────────────
@@ -2944,7 +2993,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
             )
 
 
-def _read_prerequisites(bridge: SystemBridge, mode: str) -> dict:
+def _read_prerequisites(bridge: SystemBridge, mode: str, *, delivery: bool = False) -> dict:
     """Collect potentially blocking startup observations away from the UI loop."""
     if mode == "physical":
         hardware = bridge.hardware_connection_statuses()
@@ -2961,6 +3010,9 @@ def _read_prerequisites(bridge: SystemBridge, mode: str) -> dict:
     )
     if passive:
         reason = "A passive hardware-authoritative Digital Twin is running. Select Physical mode."
+    elif delivery and ready and reason.startswith("Perception is still warming up:"):
+        # Delivery uses observed Gazebo entities; this scene disables /detect_all.
+        reason = ""
     return {
         "gazebo_running": running,
         "passive_digital_twin_running": passive,
@@ -3042,7 +3094,7 @@ def _check_prerequisites(
                 with ui.row().classes("items-center gap-2 text-amber-700 bg-amber-50 p-3 rounded"):
                     ui.icon("info").classes("text-lg")
                     with ui.column().classes("gap-1"):
-                        ui.label("No-hardware dual Gazebo + MoveIt/RViz are ready.").classes(
+                        ui.label("Manufacturing Gazebo + MoveIt are ready.").classes(
                             "text-sm font-semibold"
                         )
                         ui.label(sim_reason).classes("text-xs")
@@ -3050,7 +3102,7 @@ def _check_prerequisites(
                 with ui.row().classes("items-center gap-2 text-green-600"):
                     ui.icon("check_circle").classes("text-sm")
                     ui.label(
-                        "No-hardware dual Gazebo + MoveIt/RViz are ready - safe to start."
+                        "Manufacturing Gazebo + MoveIt are ready - safe to start."
                     ).classes("text-sm")
             elif gazebo_running:
                 with ui.row().classes("items-center gap-2 text-amber-600 bg-amber-50 p-3 rounded"):
@@ -3065,7 +3117,7 @@ def _check_prerequisites(
                     ui.icon("warning").classes("text-lg")
                     with ui.column().classes("gap-2"):
                         ui.label("Gazebo is not running.").classes("text-sm font-semibold")
-                        ui.label("Launch no-hardware dual Gazebo + MoveIt/RViz first.").classes(
+                        ui.label("Launch manufacturing Gazebo + MoveIt first.").classes(
                             "text-sm"
                         )
                         if launch_simulation is not None:

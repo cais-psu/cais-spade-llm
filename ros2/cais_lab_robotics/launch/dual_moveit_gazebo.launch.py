@@ -471,6 +471,9 @@ def launch_setup(context, *args, **kwargs):
                     'world_file', 'run_perception', 'include_assembly_parts',
                     'include_loose_parts', 'launch_gazebo', 'launch_moveit', 'launch_rviz',
                     'rviz_software_rendering',
+                    'enable_camera_streams',
+                    'simulation_speed', 'ur_controller_rate_hz', 'dynamic_shadows',
+                    'gazebo_gui_rate_hz', 'kmr_initial_part',
                 )
             }.items(),
         )]
@@ -562,7 +565,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'launch_rviz',
-            default_value='true',
+            default_value='false',
             description='Launch RViz alongside Gazebo and MoveIt.',
         ),
         DeclareLaunchArgument(
@@ -580,6 +583,16 @@ def generate_launch_description():
             default_value='true',
             description='Launch the combined sim move_group.',
         ),
+        DeclareLaunchArgument(
+            'enable_camera_streams',
+            default_value='false',
+            description='Enable depth-camera streams in the recovery framework scene.',
+        ),
+        DeclareLaunchArgument('kmr_initial_part', default_value=''),
+        DeclareLaunchArgument('simulation_speed', default_value='1'),
+        DeclareLaunchArgument('ur_controller_rate_hz', default_value='1000'),
+        DeclareLaunchArgument('dynamic_shadows', default_value='false'),
+        DeclareLaunchArgument('gazebo_gui_rate_hz', default_value='30'),
         DeclareLaunchArgument(
             'run_perception',
             default_value='false',

@@ -2,101 +2,31 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import signal
-import subprocess
-import tempfile
+import time
 from copy import deepcopy
-from pathlib import Path
 
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
-from cais_spade_llm.recovery_framework import ROOT
-from cais_spade_llm.recovery_framework.delivery import check_stopped, register_worker, validate_execution_evidence, verify_configuration
-
-
-class GazeboExecutionError(RuntimeError):
-    """Carry failed observations without establishing nominal completion."""
-
-    def __init__(self, result: dict) -> None:
-        super().__init__(result.get('error', 'KMR operation failed'))
-        self.result = result
-
-
-class GazeboWorker:
-    """Own one cancellable ROS process without importing ROS into the UI loop."""
-
-    def __init__(self) -> None:
-        self.process = None
-        self.last_result = None
-        self.task_id = None
-        self._result_path = None
-        register_worker(self)
-
-    async def run(self, request: dict) -> dict:
-        """Execute an explicit probe or task and read its acknowledged evidence."""
-        check_stopped()
-        if self.process is not None:
-            raise RuntimeError('KMR already has an active operation')
-        self.last_result = None
-        self.task_id = request.get('pending', {}).get('task_id')
-        with tempfile.TemporaryDirectory(prefix='cais_kmr_') as directory:
-            request_path = Path(directory) / 'request.json'
-            result_path = Path(directory) / 'result.json'
-            self._result_path = result_path
-            request_path.write_text(json.dumps(request), encoding='utf-8')
-            script = 'source /opt/ros/humble/setup.bash\nsource "$1"\nexec /usr/bin/python3 -m cais_spade_llm.recovery_framework.kmr_gazebo "$2" "$3"'
-            with (Path(directory) / 'worker.log').open('w') as log:
-                self.process = subprocess.Popen(
-                    ['bash', '-c', script, 'cais-kmr', str(Path.home() / 'ros2_ws/install/setup.bash'),
-                     str(request_path), str(result_path)], cwd=ROOT,
-                    stdout=log, stderr=log, start_new_session=True,
-                )
-                try:
-                    # SPADE can change the event-loop policy after UI startup;
-                    # a thread-owned wait does not depend on asyncio child watchers.
-                    await asyncio.to_thread(self.process.wait, timeout=360)
-                except (asyncio.CancelledError, subprocess.TimeoutExpired):
-                    await self.cancel()
-                    raise
-                finally:
-                    self.process = None
-                    if result_path.is_file():
-                        self.last_result = json.loads(result_path.read_text())
-                    self._result_path = None
-            if not result_path.is_file():
-                detail = (Path(directory) / 'worker.log').read_text()[-3000:]
-                raise RuntimeError(f'KMR ROS worker returned no evidence: {detail}')
-            result = json.loads(result_path.read_text())
-            if result.get('status') != 'completed':
-                raise GazeboExecutionError(result)
-            return result
-
-    async def cancel(self) -> None:
-        """Cancel controller goals before terminating the owned ROS process."""
-        process = self.process
-        if process is None or process.poll() is not None:
-            return
-        try:
-            os.killpg(process.pid, signal.SIGINT)
-        except ProcessLookupError:
-            return
-        try:
-            await asyncio.to_thread(process.wait, timeout=20)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGTERM)
-            await asyncio.to_thread(process.wait, timeout=5)
-        if self._result_path is not None and self._result_path.is_file():
-            self.last_result = json.loads(self._result_path.read_text())
+from cais_spade_llm.recovery_framework.delivery import check_stopped, validate_execution_evidence, verify_configuration
+from cais_spade_llm.recovery_framework.gazebo_worker import GazeboExecutionError, GazeboWorker
+from cais_spade_llm.recovery_framework.kmr_primitives import (
+    KMRPrimitives, KMR_RECOVERY_PRIMITIVES, KMR_RESOURCE_PROFILE,
+)
 
 
 class KMRResourceAgent(ResourceAgent):
     """Execute only descriptor-bound KMR tasks after the standard CCA check."""
 
-    def __init__(self, jid: str, password: str, **kwargs) -> None:
+    _RESOURCE_PROFILE = KMR_RESOURCE_PROFILE
+    _RECOVERY_PRIMITIVES = KMR_RECOVERY_PRIMITIVES
+
+    def __init__(self, jid: str, password: str, *, worker: GazeboWorker | None = None, **kwargs) -> None:
         super().__init__(jid, password, name='KMR', function_names=[], **kwargs)
-        self.worker = GazeboWorker()
+        self.worker = worker or GazeboWorker()
+        self.workflow_worker = self.worker
+        self.kmr_primitives = KMRPrimitives(self)
+        self._primitive_state = {}
+        self._primitive_evidence = {}
         self.current_state = 'idle'
         for name in ('pick_part', 'move_to_resource', 'place_release'):
             self.executables[name] = getattr(self, name)
@@ -154,25 +84,69 @@ class KMRResourceAgent(ResourceAgent):
             raise ValueError('KMR task bindings disagree with ProductAgent')
         self.validate_nominal_event(runtime.context.models, runtime.context.snapshot(), pending)
         try:
-            result = await self.worker.run({'mode': 'task', 'inputs': runtime.context.inputs,
+            request = {'mode': 'task', 'inputs': runtime.context.inputs,
                                            'pending': pending, 'probe': runtime.prepared['probe'],
+                                           'startup_timing': runtime.prepared.get('startup_timing', {}),
+                                           'dispatch_requested_at_unix': time.time(),
                                            'custody': (runtime.context.transitions[-1]['acknowledgement']['observations']
-                                                       if runtime.context.transitions else None)})
+                                                       if runtime.context.transitions else None)}
+            self._kmr_execution_request = deepcopy(request)
+            result = await self.worker.run(request)
+            self.record_primitive_evidence(result)
         except GazeboExecutionError as exc:
+            self.record_primitive_evidence(exc.result)
             return {'status': 'failed:gazebo', 'content': str(exc), 'observations': exc.result}
         ack = {**pending, 'status': 'completed', 'evidence': 'gazebo', 'observations': result['observations']}
         validate_execution_evidence(ack)
         self.current_state = 'idle' if name == 'place_release' else 'carrying'
         return {'status': 'completed', 'observations': {'nominal_acknowledgement': ack}}
 
+    def record_primitive_evidence(self, result: dict) -> None:
+        """Retain physical partial progress independently of nominal acknowledgements."""
+        self._primitive_evidence = deepcopy(result)
+        records = result.get('primitive_results', result.get('observations', {}).get('primitive_results', []))
+        request = getattr(self, '_kmr_execution_request', {})
+        part = request.get('pending', {}).get('parameters', {}).get('part_name')
+        for record in records:
+            if record.get('status') != 'completed':
+                continue
+            primitive = record['primitive']
+            if primitive in {'open_gripper', 'close_gripper'}:
+                self._primitive_state['gripper_state'] = 'open' if primitive == 'open_gripper' else 'closed'
+            if primitive == 'attach_part':
+                self._primitive_state.update(held_part=part, current_state='carrying')
+            elif primitive == 'detach_part':
+                self._primitive_state.update(held_part=None, current_state='idle')
+            output = record.get('result')
+            if isinstance(output, dict) and output.get('tcp_pose'):
+                self._primitive_state['current_pose'] = deepcopy(output['tcp_pose'])
+        observation = result.get('observations', {})
+        if observation.get('grasp_transform'):
+            self.workflow_custody = deepcopy(observation)
+        self._primitive_state['last_execution_evidence'] = deepcopy(result)
+
     def _snapshot_state(self) -> dict:
-        return {'current_state': self.current_state, **self.nominal_context.snapshot()}
+        snapshot = super()._snapshot_state()
+        snapshot.update(resource_type='kmr', **self._primitive_state)
+        runtime = getattr(self, 'delivery_runtime', None)
+        if runtime is not None:
+            snapshot['execution_outcome'] = deepcopy(runtime.outcome)
+            if runtime.context.transitions:
+                ack = runtime.context.transitions[-1]['acknowledgement']
+                snapshot['state_evidence'] = (
+                    f"Last Gazebo acknowledgement: {ack['event_name']}; "
+                    f"revision {runtime.context.revision}; launch {runtime.prepared['probe']['launch_id']}."
+                )
+        return snapshot
 
     async def teardown(self) -> None:
         """Stop pending execution without dropping or resetting a held part."""
         runtime = getattr(self, 'delivery_runtime', None)
         if runtime is not None:
             runtime.stop()
+        environment = getattr(self, 'environment_runtime', None)
+        if environment is not None:
+            environment.stop()
         await self.worker.cancel()
         if (runtime is not None and runtime.context.pending is not None
                 and self.worker.task_id == runtime.context.pending['task_id']

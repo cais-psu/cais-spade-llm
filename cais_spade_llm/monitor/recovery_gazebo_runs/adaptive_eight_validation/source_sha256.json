@@ -1,0 +1,16 @@
+{
+  "cais_spade_llm/recovery_framework/environment_runtime.py": "1fee2e89014c8635b595257e81c444461f9734d90bbd2f09b60d9292395db944",
+  "cais_spade_llm/agents/shared_information/environment_capabilities.py": "1a7a4eab216aab03a62922abd13dcb1bd9aa76164f2a3201bfe6526f89169abe",
+  "cais_spade_llm/product/environment.py": "ca098fdce60cb837d2fb21f9265ff1cd9d80286c8c1399c9f4f219dfbc701539",
+  "cais_spade_llm/recovery_framework/workflow_execution.py": "f26d83642f8bd36d82e534859b37e49721d33f30e98368962274e88491e89a53",
+  "cais_spade_llm/recovery_framework/workflow_gazebo.py": "84351fe5485fc72162f79a270bef33c5249abf4a7b72aa617ed91f294534d0cb",
+  "cais_spade_llm/resources/workflow_task_programs.py": "91dff3e59892a2942bd6eed3ec9eb30e69b8374b36a8004971c8247ce38743ca",
+  "cais_spade_llm/resources/robot/gazebo_pick_place_controller.py": "96fb24e93f347fbca675dccb185c24fa03c7eeed9ae00fb2f96b8949fa2c911e",
+  "cais_spade_llm/recovery_framework/part_collision.py": "86672054ba2f5ef99d5a53e2a635f12a7f1e8be8f2dd2e6e0087886e8b540e21",
+  "cais_spade_llm/recovery_framework/kmr_gazebo.py": "c70ffbfbe2fb722a2f11234216e0b747bb94eeb87ea0e242ee75b37c5d0ab1f4",
+  "cais_spade_llm/recovery_framework/kmr_tasks.py": "70299cdfaf77d4f54cab4ad065e0d1118191cc6da1551f375cf92761d84ee485",
+  "cais_spade_llm/initialization/recovery_framework_gazebo.json": "9045d06fbc5d1a5e1e55bba6514aa7be37722662c63756024d20528be3f7beb2",
+  "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json": "300c543a0a9e6915d6d4c250ff102cf88c20336041f4b4eaed7446ed7a59ba27",
+  "ros2/cais_lab_robotics/scripts/kmr_base_controller.py": "4163ccf148539482837c7e549a8f83a5f4f709ec2a2bd9b816230a25f033093b",
+  "ros2/cais_lab_robotics/urdf/KMR_recovery.urdf.xacro": "6156f5a4943ddd9be113b964a4fa922d48a536828810d1085340ad8611adcd65"
+}

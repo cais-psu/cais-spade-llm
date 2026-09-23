@@ -646,8 +646,8 @@ def main() -> None:
             goal.request.planner_id = "RRTConnectkConfigDefault"
             goal.request.num_planning_attempts = 5
             goal.request.allowed_planning_time = 5.0
-            goal.request.max_velocity_scaling_factor = 0.4
-            goal.request.max_acceleration_scaling_factor = 0.3
+            goal.request.max_velocity_scaling_factor = 1.0
+            goal.request.max_acceleration_scaling_factor = 1.0
             goal.request.start_state = RobotState(is_diff=True)
             constraints = Constraints()
             for resource in resources:

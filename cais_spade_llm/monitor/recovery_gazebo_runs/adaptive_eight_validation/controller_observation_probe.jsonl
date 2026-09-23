@@ -1,0 +1,8 @@
+{"link": "ur5e_1_tool0", "query_seconds": 1.0195799350040033, "position_error_m": 2.72960622122243e-05, "source": "gazebo_link_state"}
+{"link": "ur5e_1_rg2_gripper_tcp", "query_seconds": 1.0195799350040033, "position_error_m": 1.2583869912067885e-05, "source": "gazebo_link_state"}
+{"link": "ur5e_2_tool0", "query_seconds": 0.003169212010107003, "position_error_m": 2.3810036695455465e-05, "source": "gazebo_link_state"}
+{"link": "ur5e_2_rg2_gripper_tcp", "query_seconds": 0.003169212010107003, "position_error_m": 1.9286783514338087e-05, "source": "gazebo_link_state"}
+{"link": "ur5e_3_tool0", "query_seconds": 0.0019676080119097605, "position_error_m": 2.0142019074116745e-05, "source": "gazebo_link_state"}
+{"link": "ur5e_3_rg2_gripper_tcp", "query_seconds": 0.0019676080119097605, "position_error_m": 3.6719228454445056e-06, "source": "gazebo_link_state"}
+{"link": "ur5e_4_tool0", "query_seconds": 0.002440209995256737, "position_error_m": 2.2002863649841798e-05, "source": "gazebo_link_state"}
+{"link": "ur5e_4_rg2_gripper_tcp", "query_seconds": 0.002440209995256737, "position_error_m": 4.417798352535602e-06, "source": "gazebo_link_state"}

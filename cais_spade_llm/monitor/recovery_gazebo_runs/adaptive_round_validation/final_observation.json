@@ -1,0 +1,33 @@
+{
+  "status": "completed",
+  "observed_at_unix": 1790130771.7362044,
+  "part_pose": [
+    -0.00055,
+    -0.155176,
+    1.0239916,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "expected_slot_origin": [
+    -0.00055,
+    -0.155176,
+    1.0239916
+  ],
+  "position_error_m": 0.0,
+  "KMR_pose": [
+    -8.235186603760154,
+    2.1301286237094654,
+    0.0,
+    0.0,
+    0.0,
+    0.7071080798594737,
+    0.7071054825112364
+  ],
+  "KMR_goal": {
+    "resource_state": "idle",
+    "held_part": null,
+    "resource_location": "Storage"
+  }
+}

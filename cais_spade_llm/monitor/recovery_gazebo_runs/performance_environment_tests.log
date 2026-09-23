@@ -1,0 +1,15 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-9.0.2, pluggy-1.6.0 -- /home/jongh/projects/cais-spade-llm/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/jongh/projects/cais-spade-llm
+configfile: pyproject.toml
+plugins: ament-pep257-0.12.15, ament-copyright-0.12.15, ament-lint-0.12.15, ament-xmllint-0.12.15, launch-testing-ros-0.19.13, ament-flake8-0.12.15, launch-testing-1.0.14, anyio-4.11.0
+collecting ... collected 21 items / 16 deselected / 5 selected
+
+test/test_environment_capabilities.py::test_timeout_closes_late_reply_window PASSED [ 20%]
+test/test_environment_capabilities.py::test_resource_execution_requires_cca_and_validated_ack PASSED [ 40%]
+test/test_environment_capabilities.py::test_runtime_export_and_ui_use_the_evaluated_model PASSED [ 60%]
+test/test_environment_capabilities.py::test_task_ack_and_cca_exchange_uses_real_agent_inboxes PASSED [ 80%]
+test/test_environment_capabilities.py::test_environment_display_revision_tracks_discovery_without_full_model_copy PASSED [100%]
+
+====================== 5 passed, 16 deselected in 26.69s =======================

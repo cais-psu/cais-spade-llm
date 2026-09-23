@@ -1,0 +1,29 @@
+{
+  "product": "assembly_board-v1",
+  "product_jid": "assembly_board-v1@localhost",
+  "quantity": 1,
+  "objective": "assemble RGOCG4-50_Round_4mm on assembly_board-v1 via M1",
+  "parts": [
+    "RGOCG4-50_Round_4mm"
+  ],
+  "machine_resource": "M1",
+  "processPlan": {
+    "RGOCG4-50_Round_4mm": [
+      {
+        "processesToComplete": [
+          {
+            "process": "trim",
+            "result": "circle"
+          }
+        ]
+      },
+      {
+        "processesToComplete": [
+          {
+            "process": "assembly"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,304 @@
+{
+  "observed_at_unix": 1790161486.7468913,
+  "parts": {
+    "KET4_Square_4mm": {
+      "observed_pose": [
+        -0.00055,
+        -0.005176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        -0.00055,
+        -0.005176,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "KET8_Square_8mm": {
+      "observed_pose": [
+        0.07445,
+        -0.080176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        0.07445,
+        -0.080176,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "KET12_Square_12mm": {
+      "observed_pose": [
+        -0.15055,
+        -0.005176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        -0.15055,
+        -0.005176,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "KET16_Square_16mm": {
+      "observed_pose": [
+        -0.15055,
+        -0.155176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        -0.15055,
+        -0.155176,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "RGOCG4-50_Round_4mm": {
+      "observed_pose": [
+        -0.00055,
+        -0.155176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        -0.00055,
+        -0.155176,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "RGOCG8-50_8mm": {
+      "observed_pose": [
+        -0.07555,
+        -0.155176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        -0.07555,
+        -0.155176,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "RGOCG12-50_12mm": {
+      "observed_pose": [
+        -0.15055,
+        0.069824,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        -0.15055,
+        0.069824,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    },
+    "RGOCG16-50_16mm": {
+      "observed_pose": [
+        0.07445,
+        0.069824,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "expected_origin": [
+        0.07445,
+        0.069824,
+        1.0239916
+      ],
+      "position_error_m": 0.0,
+      "upright_tilt_rad": 0.0
+    }
+  },
+  "robots": {
+    "ur5e-1": {
+      "joint_names": [
+        "ur5e_1_shoulder_pan_joint",
+        "ur5e_1_shoulder_lift_joint",
+        "ur5e_1_elbow_joint",
+        "ur5e_1_wrist_1_joint",
+        "ur5e_1_wrist_2_joint",
+        "ur5e_1_wrist_3_joint"
+      ],
+      "observed_positions": [
+        2.228037456112309,
+        -1.5922701890056121,
+        1.6182501812875083,
+        4.691114421829464,
+        4.715609961786846,
+        2.2344004589405038
+      ],
+      "home_positions": [
+        2.232023449619252,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        2.232159020791153
+      ],
+      "max_home_error_rad": 0.003985993506943064,
+      "gripper_width": 0.10999911993516656
+    },
+    "ur5e-2": {
+      "joint_names": [
+        "ur5e_2_shoulder_pan_joint",
+        "ur5e_2_shoulder_lift_joint",
+        "ur5e_2_elbow_joint",
+        "ur5e_2_wrist_1_joint",
+        "ur5e_2_wrist_2_joint",
+        "ur5e_2_wrist_3_joint"
+      ],
+      "observed_positions": [
+        2.2289184786034046,
+        -1.5995814236402373,
+        1.6189966858397762,
+        4.686669661799498,
+        -1.5690491307517727,
+        -4.048879058963653
+      ],
+      "home_positions": [
+        2.232023449619252,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        2.232159020791153
+      ],
+      "max_home_error_rad": 0.004342688468900203,
+      "gripper_width": 0.10999905772688637
+    },
+    "ur5e-3": {
+      "joint_names": [
+        "ur5e_3_shoulder_pan_joint",
+        "ur5e_3_shoulder_lift_joint",
+        "ur5e_3_elbow_joint",
+        "ur5e_3_wrist_1_joint",
+        "ur5e_3_wrist_2_joint",
+        "ur5e_3_wrist_3_joint"
+      ],
+      "observed_positions": [
+        2.2287162745195443,
+        -1.595976780596473,
+        1.6166038388275386,
+        4.694566459189898,
+        -1.5654438960987136,
+        2.2362653952086773
+      ],
+      "home_positions": [
+        2.232023449619252,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        2.232159020791153
+      ],
+      "max_home_error_rad": 0.004106374417524261,
+      "gripper_width": 0.10999908182438085
+    },
+    "ur5e-4": {
+      "joint_names": [
+        "ur5e_4_shoulder_pan_joint",
+        "ur5e_4_shoulder_lift_joint",
+        "ur5e_4_elbow_joint",
+        "ur5e_4_wrist_1_joint",
+        "ur5e_4_wrist_2_joint",
+        "ur5e_4_wrist_3_joint"
+      ],
+      "observed_positions": [
+        -0.27065093890282643,
+        -1.596029286081358,
+        1.6194360442950835,
+        -1.5955157796658268,
+        -1.5688613571603165,
+        2.2320505987874
+      ],
+      "home_positions": [
+        -0.2705423585528064,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        2.232159020791153
+      ],
+      "max_home_error_rad": 0.0035724390170903675,
+      "gripper_width": 0.10999908135745945
+    },
+    "KMR": {
+      "observed_positions": [
+        -0.0008805532345075306,
+        0.9665679892197572,
+        0.0002576869386485825,
+        -1.0272553196105738,
+        -0.001600024419925461,
+        1.141422229154986,
+        -0.0018310398152863172
+      ],
+      "home_positions": [
+        -4.28e-08,
+        0.9684402263,
+        8.86e-08,
+        -1.0292177427,
+        -8.02e-08,
+        1.1439346844,
+        4.06e-08
+      ],
+      "max_home_error_rad": 0.002512455245013978,
+      "gripper_width": 0.11000000000000003,
+      "base_pose": [
+        -8.239742710094594,
+        2.1347321363670915,
+        0.0,
+        0.0,
+        0.0,
+        0.7071080798594737,
+        0.7071054825112364
+      ],
+      "home_xy_error_m": 0.004739125730783519,
+      "tool_z_world_z": -0.9999790817966399
+    }
+  },
+  "run_id": "a386bc59bfbc4a93bb804a15f75fc498",
+  "slot_position_tolerance_m": 0.002,
+  "upright_tilt_tolerance_rad": 0.02,
+  "all_pegs_in_slots": true,
+  "all_robots_home_open": true,
+  "kmr_downward_at_storage": true,
+  "attached_collision_objects": [],
+  "no_robot_payloads": true
+}

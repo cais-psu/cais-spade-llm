@@ -72,6 +72,7 @@
           "ee_link": "ur5e_tool0",
           "tcp_link": "ur5e_rg2_gripper_tcp",
           "position_tolerance_m": 0.005,
+          "orientation_tolerance_rad": 0.02,
           "frame_id": "world"
         },
         "gripper": {
@@ -125,6 +126,10 @@
           "release_descend_time_scale": 1.35,
           "release_detach_retry_count": 1,
           "release_detach_retry_delay_sec": 0.15,
+          "snap_to_slot_position_tolerance_m": 0.001,
+          "snap_to_slot_observation_samples": 3,
+          "snap_to_slot_observation_interval_sec": 0.1,
+          "simulation_insert_start_position_tolerance_m": 0.006,
           "release_retry_lift_m": 0.012,
           "named_pose_duration_sec": 1.0,
           "move_home_duration_sec": 1.0,
@@ -265,6 +270,9 @@
           "release_descend_time_scale": 1.35,
           "release_detach_retry_count": 1,
           "release_detach_retry_delay_sec": 0.15,
+          "snap_to_slot_position_tolerance_m": 0.001,
+          "snap_to_slot_observation_samples": 3,
+          "snap_to_slot_observation_interval_sec": 0.1,
           "release_retry_lift_m": 0.012,
           "named_pose_duration_sec": 1.0,
           "move_home_duration_sec": 1.0,

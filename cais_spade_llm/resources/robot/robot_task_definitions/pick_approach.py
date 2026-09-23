@@ -161,6 +161,7 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "start_x": 0.0,
                     "start_y": 0.0,
                     "start_z": 0.0,
+                    "access_retreat_pose": None,
                 },
                 failure_observations={"part_name": _arg("part_name")},
             ),
@@ -179,6 +180,10 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "x": _step_output("pick_targets", "approach_pose", "x"),
                     "y": _step_output("pick_targets", "approach_pose", "y"),
                     "z": _step_output("pick_targets", "approach_pose", "z"),
+                    "qx": _step_output("pick_targets", "approach_pose", "qx"),
+                    "qy": _step_output("pick_targets", "approach_pose", "qy"),
+                    "qz": _step_output("pick_targets", "approach_pose", "qz"),
+                    "qw": _step_output("pick_targets", "approach_pose", "qw"),
                     "speed": _arg("speed"),
                 },
                 public_params={
@@ -197,6 +202,10 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "x": _step_output("pick_targets", "target_pose", "x"),
                     "y": _step_output("pick_targets", "target_pose", "y"),
                     "z": _step_output("pick_targets", "target_pose", "z"),
+                    "qx": _step_output("pick_targets", "target_pose", "qx"),
+                    "qy": _step_output("pick_targets", "target_pose", "qy"),
+                    "qz": _step_output("pick_targets", "target_pose", "qz"),
+                    "qw": _step_output("pick_targets", "target_pose", "qw"),
                     "speed": _arg("speed"),
                 },
                 public_params={
@@ -287,6 +296,9 @@ ROBOT_TASK_DEFINITION = RobotTaskDefinition(
                     "start_x": _step_output("pick_targets", "start_x"),
                     "start_y": _step_output("pick_targets", "start_y"),
                     "start_z": _step_output("pick_targets", "start_z"),
+                    "access_retreat_pose": _step_output(
+                        "pick_targets", "access_retreat_pose"
+                    ),
                 },
             ),
             RobotTaskEffect(target="current_state", action="set", value="at_pick"),

@@ -1,0 +1,5 @@
+THRESHOLD 2.0 0.7551020408163265 22
+THRESHOLD 5.0 0.7551020408163265 22
+THRESHOLD 10.0 0.7551020408163265 22
+INVALID_TIMED_SAMPLE 27 [('ur5e_2_rg2_onrobot_base_link', 'M2 staging tray/link/rear_edge'), ('ur5e_2_rg2_onrobot_base_link', 'M2 staging tray/link/surface'), ('ur5e_2_rg2_right_outer_knuckle', 'M2 staging tray/link/surface')]
+PATH 1.0 1 points 105

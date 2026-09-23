@@ -107,6 +107,16 @@ def validate_product_order(
         if len(selected_parts) != 1:
             raise ValueError("completion_conditions currently require one selected part")
 
+    if "machine_resource" in out:
+        if (
+            len(selected_parts) != 1
+            or "processPlan" not in out
+            or "completion_conditions" in out
+            or not isinstance(out["machine_resource"], str)
+            or not out["machine_resource"]
+        ):
+            raise ValueError("machine_resource requires a one-part processPlan order")
+
     _validate_order_processes(out, selected_parts, product_geometry, require_process_requirements)
 
     return ProductOrder(payload=out, selected_parts=selected_parts)

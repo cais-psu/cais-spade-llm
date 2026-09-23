@@ -1,0 +1,11 @@
+CURRENT True []
+FK [geometry_msgs.msg.PoseStamped(header=std_msgs.msg.Header(stamp=builtin_interfaces.msg.Time(sec=261, nanosec=900000000), frame_id='world'), pose=geometry_msgs.msg.Pose(position=geometry_msgs.msg.Point(x=-5.998062384332746, y=0.5004131096371705, z=1.308049396117969), orientation=geometry_msgs.msg.Quaternion(x=-0.0010886559240501855, y=0.9999910502348138, z=-0.0009587259128547347, w=0.0039743078865318105))), geometry_msgs.msg.PoseStamped(header=std_msgs.msg.Header(stamp=builtin_interfaces.msg.Time(sec=261, nanosec=900000000), frame_id='world'), pose=geometry_msgs.msg.Pose(position=geometry_msgs.msg.Point(x=-5.996329146539282, y=0.49999699530127545, z=1.0900566835434182), orientation=geometry_msgs.msg.Quaternion(x=0.7078702487314399, y=-0.7063306567623525, z=0.0034881816513634453, w=-0.0021323384628195055)))]
+ATTACHED ur5e_1_wrist_3_link ['ur5e_1_rg2_finger_width_mock_link', 'ur5e_1_rg2_gripper_tcp', 'ur5e_1_rg2_left_finger_tip', 'ur5e_1_rg2_left_inner_finger', 'ur5e_1_rg2_left_inner_knuckle', 'ur5e_1_rg2_left_outer_knuckle', 'ur5e_1_rg2_onrobot_base_link', 'ur5e_1_rg2_right_finger_tip', 'ur5e_1_rg2_right_inner_finger', 'ur5e_1_rg2_right_inner_knuckle', 'ur5e_1_rg2_right_outer_knuckle', 'ur5e_1_tool0', 'ur5e_1_wrist_3_link'] KET8_Square_8mm/link/collision geometry_msgs.msg.Pose(position=geometry_msgs.msg.Point(x=-1.3901683604281985, y=-2.3254509115774638, z=1.2978789331272027), orientation=geometry_msgs.msg.Quaternion(x=-0.2662890480943352, y=0.6550869033889664, z=0.645060574780956, w=0.2895654446520344)) [geometry_msgs.msg.Pose(position=geometry_msgs.msg.Point(x=0.0, y=0.0, z=0.0), orientation=geometry_msgs.msg.Quaternion(x=0.0, y=0.0, z=0.0, w=1.0))]
+KINEMATIC 1.0 points 7
+STEP 0 True []
+STEP 1 True []
+STEP 2 True []
+STEP 3 True []
+STEP 4 False [('ground_plane', 'KET8_Square_8mm/link/collision', 0.019726015543412505)]
+STEP 5 False [('ground_plane', 'KET8_Square_8mm/link/collision', 0.035763863461981724)]
+STEP 6 False [('ground_plane', 'KET8_Square_8mm/link/collision', 0.04019141981991731)]

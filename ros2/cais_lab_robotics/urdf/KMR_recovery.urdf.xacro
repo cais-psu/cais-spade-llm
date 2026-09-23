@@ -286,7 +286,17 @@
       <parameters>$(arg controllers_file)</parameters>
     </plugin>
     <plugin name="KMR_planar_move" filename="libgazebo_ros_planar_move.so">
-      <ros><namespace>/KMR</namespace></ros>
+      <ros>
+        <namespace>/KMR</namespace>
+        <qos>
+          <topic name="cmd_vel">
+            <subscription>
+              <reliability>best_effort</reliability>
+              <history depth="1">keep_last</history>
+            </subscription>
+          </topic>
+        </qos>
+      </ros>
       <update_rate>100</update_rate><publish_rate>50</publish_rate>
       <publish_odom>true</publish_odom><publish_odom_tf>false</publish_odom_tf>
       <odometry_frame>world</odometry_frame><robot_base_frame>KMR_base_link</robot_base_frame>

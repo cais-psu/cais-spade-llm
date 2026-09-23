@@ -19,6 +19,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,7 @@ has_place_geometry_fields = ProductProfile.has_place_geometry_fields
 resolve_place_geometry = ProductProfile.resolve_place_geometry
 
 logger = logging.getLogger(__name__)
+_RCLPY_INIT_LOCK = threading.Lock()
 
 _PHYSICAL_DETECTION_MAX_AGE_SEC = 10.0
 _PHYSICAL_DETECTION_FUTURE_TOLERANCE_SEC = 1.0
@@ -2493,14 +2495,8 @@ def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
 
 
 def _gazebo_timing_scale_from_env(execution_mode: str) -> float:
-    if str(execution_mode or "").strip().lower() != "simulation":
-        return 1.0
-    if str(os.environ.get("ROBOT_ENV", "gazebo") or "").strip().lower() != "gazebo":
-        return 1.0
-    scale = _as_float(os.environ.get("CAIS_GAZEBO_WAIT_SCALE"), 1.0)
-    if scale <= 0.0:
-        return 1.0
-    return float(scale)
+    """Clock acceleration replaces the legacy simulation wait multiplier."""
+    return 1.0
 
 
 class GazeboPickPlaceController:
@@ -2536,6 +2532,23 @@ class GazeboPickPlaceController:
         self.arm_trajectory_topic = arm_trajectory_topic
         self.joint_states_topic = joint_states_topic
         self._last_failure_message = ""
+        self._planning_wall_time_sec = 0.
+        self._trajectory_duration_sec = 0.
+        self._simulation_goal = None
+        self._last_simulation_controller_succeeded = False
+        self._first_motion_at_unix = None
+        self._simulation_joint_clients = {}
+        self._prepared_motion_lock = threading.Lock()
+        self._prepared_cartesian: dict[str, dict[str, Any]] = {}
+        self._queued_motion_preparation: dict[str, Any] | None = None
+        self._planning_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"{node_name}_planning",
+        )
+        self._planning_future = None
+        self._background_preparation_result: dict[str, Any] | None = None
+        self._preparation_generation = 0
+        self._state_validity_client = None
+        self._scene_identity_client = None
         self._config_errors: list[str] = []
 
         move_group = self.controller_config.get("move_group", {})
@@ -2596,6 +2609,14 @@ class GazeboPickPlaceController:
         self.ee_link = need_str(move_group, "ee_link", "controller.move_group.ee_link")
         self.tcp_link = need_str(move_group, "tcp_link", "controller.move_group.tcp_link")
         self.frame_id = need_str(move_group, "frame_id", "controller.move_group.frame_id")
+        self.cartesian_position_tolerance_m = max(
+            0.001,
+            opt_float(move_group, "position_tolerance_m", 0.005),
+        )
+        self.cartesian_orientation_tolerance_rad = max(
+            0.001,
+            opt_float(move_group, "orientation_tolerance_rad", 0.02),
+        )
 
         self.gripper_joint = need_str(gripper, "joint", "controller.gripper.joint")
         self.gripper_topic = need_str(gripper, "topic", "controller.gripper.topic")
@@ -2615,6 +2636,9 @@ class GazeboPickPlaceController:
         )
 
         self.service_detect_all = need_str(services, "detect_all", "controller.services.detect_all")
+        self.service_motion_plan = need_str(
+            services, "motion_plan", "controller.services.motion_plan"
+        )
         self.service_cartesian_path = need_str(
             services, "cartesian_path", "controller.services.cartesian_path"
         )
@@ -2753,6 +2777,26 @@ class GazeboPickPlaceController:
             0.0,
             opt_float(motion, "snap_to_slot_retry_delay_sec", 0.25),
         )
+        self.snap_to_slot_position_tolerance_m = max(
+            0.0005,
+            opt_float(motion, "snap_to_slot_position_tolerance_m", 0.001),
+        )
+        self.snap_to_slot_observation_samples = max(
+            1,
+            opt_int(motion, "snap_to_slot_observation_samples", 3),
+        )
+        self.snap_to_slot_observation_interval_sec = max(
+            0.05,
+            opt_float(motion, "snap_to_slot_observation_interval_sec", 0.1),
+        )
+        self.simulation_insert_start_position_tolerance_m = max(
+            0.003,
+            opt_float(
+                motion,
+                "simulation_insert_start_position_tolerance_m",
+                self.cartesian_position_tolerance_m + 0.001,
+            ),
+        )
         self.release_retry_lift_m = max(
             0.0,
             opt_float(motion, "release_retry_lift_m", 0.005),
@@ -2839,55 +2883,471 @@ class GazeboPickPlaceController:
 
         self._joint_lock = threading.Lock()
         self._joint_positions: dict[str, float] = {}
+        self._joint_received_times: dict[str, float] = {}
+        self._joint_sim_stamps: dict[str, float] = {}
+        self._joint_stable_since: dict[str, float] = {}
+        self._last_joint_sim_time = None
         self._joint_state_received_monotonic = 0.0
+        self._last_command_evidence: dict[str, Any] | None = None
 
         # Remembered start pose for move_home (set externally or by UI recovery).
         self._last_start_pose = None
 
-    def _apply_gazebo_fast_timing_profile(self, scale: float | None = None) -> None:
-        resolved_scale = (
-            _gazebo_timing_scale_from_env(self.execution_mode)
-            if scale is None
-            else _as_float(scale, 1.0)
+    @staticmethod
+    def _prepared_motion_key(params: dict[str, Any]) -> str:
+        payload = json.dumps(params, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def queue_next_motion_preparation(self, primitive: str, params: dict[str, Any]) -> bool:
+        """Queue resolved plan-only work to begin after the current goal is accepted."""
+        if (
+            self.execution_mode != "simulation"
+            or primitive != "move_cartesian"
+            or self.controller_config.get("background_preparation_enabled") is not True
+        ):
+            self._queued_motion_preparation = None
+            return False
+        clean = {key: deepcopy(value) for key, value in params.items() if value is not None}
+        required = ("x", "y", "z")
+        if any(key not in clean for key in required):
+            self._queued_motion_preparation = None
+            return False
+        self._queued_motion_preparation = {
+            "primitive": primitive,
+            "params": clean,
+            "key": self._prepared_motion_key(clean),
+            "attachment": self._attached_model,
+            "generation": self._preparation_generation,
+        }
+        return True
+
+    def clear_motion_preparation(self) -> None:
+        """Invalidate queued and cached plan-only work without touching live motion."""
+        with self._prepared_motion_lock:
+            self._preparation_generation += 1
+            self._queued_motion_preparation = None
+            self._prepared_cartesian.clear()
+            self._background_preparation_result = None
+
+    def _scene_launch_identity(self) -> str:
+        from rcl_interfaces.srv import GetParameters
+
+        if self._scene_identity_client is None:
+            self._scene_identity_client = self._node.create_client(
+                GetParameters,
+                "/KMR_base_controller/get_parameters",
+                callback_group=self._cb_group,
+            )
+        if not self._scene_identity_client.wait_for_service(timeout_sec=0.2):
+            return "recovery_framework"
+        response = self._wait_future(
+            self._scene_identity_client.call_async(
+                GetParameters.Request(names=["launch_id"]),
+            ),
+            timeout_sec=1.,
+            label="background planning scene identity",
+            timeout_log_level="debug",
         )
-        self._gazebo_wait_scale = resolved_scale
-        if resolved_scale <= 0.0 or abs(resolved_scale - 1.0) < 1e-6:
+        if response is None or not response.values:
+            return "recovery_framework"
+        return str(response.values[0].string_value or "recovery_framework")
+
+    def _prepare_queued_cartesian(self, queued: dict[str, Any], start_trajectory, orientation) -> None:
+        from cais_spade_llm.recovery_framework.planning_permit import scene_planning_permit
+
+        started = time.monotonic()
+        launch_id = self._scene_launch_identity()
+        with scene_planning_permit(launch_id) as acquired:
+            if not acquired or self._shutdown_requested:
+                with self._prepared_motion_lock:
+                    self._background_preparation_result = {
+                        "key": queued["key"], "used": False,
+                        "reason": "scene planning permit is busy" if not acquired else "controller stopping",
+                    }
+                return
+            params = queued["params"]
+            quaternion = [params.get(name) for name in ("qx", "qy", "qz", "qw")]
+            if any(value is None for value in quaternion):
+                quaternion = [orientation.x, orientation.y, orientation.z, orientation.w]
+            target = self._make_pose(
+                float(params["x"]), float(params["y"]), float(params["z"]),
+                self._make_orientation(*(float(value) for value in quaternion)),
+            )
+            request = self._GetCartesianPath.Request()
+            request.header.frame_id = self.frame_id
+            request.header.stamp = self._node.get_clock().now().to_msg()
+            request.group_name = self.group_name
+            request.link_name = self.ee_link
+            request.waypoints = [target]
+            request.max_step = 0.01
+            request.jump_threshold = 2.0
+            request.avoid_collisions = True
+            request.start_state.is_diff = True
+            request.start_state.joint_state.name = list(start_trajectory.joint_names)
+            request.start_state.joint_state.position = list(start_trajectory.points[-1].positions)
+            response = self._wait_future(
+                self._cart_client.call_async(request),
+                timeout_sec=10.,
+                label="background plan:move_cartesian",
+                timeout_log_level="debug",
+            )
+            self._planning_wall_time_sec += time.monotonic() - started
+            if response is None or response.fraction < .999 or self._shutdown_requested:
+                with self._prepared_motion_lock:
+                    self._background_preparation_result = {
+                        "key": queued["key"], "used": False,
+                        "reason": "planning did not produce a complete collision-free path",
+                    }
+                return
+            with self._prepared_motion_lock:
+                if queued["generation"] != self._preparation_generation:
+                    self._background_preparation_result = {
+                        "key": queued["key"], "used": False,
+                        "reason": "preparation invalidated before completion",
+                    }
+                    return
+                self._prepared_cartesian[queued["key"]] = {
+                    "solution": response.solution,
+                    "target": {
+                        "x": float(params["x"]), "y": float(params["y"]),
+                        "z": float(params["z"]),
+                        "qx": float(quaternion[0]), "qy": float(quaternion[1]),
+                        "qz": float(quaternion[2]), "qw": float(quaternion[3]),
+                    },
+                    "attachment": queued["attachment"],
+                    "planned_at_unix": time.time(),
+                    "planning_wall_time_sec": time.monotonic() - started,
+                }
+                self._background_preparation_result = {
+                    "key": queued["key"], "used": False, "reason": "prepared",
+                    "planning_wall_time_sec": time.monotonic() - started,
+                }
+
+    def _start_queued_motion_preparation(self, current_solution, orientation) -> None:
+        queued = self._queued_motion_preparation
+        self._queued_motion_preparation = None
+        if queued is None or self._shutdown_requested:
             return
+        if self._planning_future is not None and not self._planning_future.done():
+            return
+        self._planning_future = self._planning_executor.submit(
+            self._prepare_queued_cartesian,
+            deepcopy(queued),
+            deepcopy(current_solution.joint_trajectory),
+            deepcopy(orientation),
+        )
 
-        def scaled_attr(
-            attr_name: str,
-            *,
-            minimum: float = 0.0,
-            scale_override: float | None = None,
-        ) -> None:
-            current = _as_float(getattr(self, attr_name, 0.0), 0.0)
-            scale_value = resolved_scale if scale_override is None else scale_override
-            setattr(self, attr_name, max(float(minimum), current * scale_value))
+    def _consume_prepared_cartesian(self, target):
+        """Return a freshly revalidated matching trajectory, otherwise fall back."""
+        match_key = None
+        expected = (
+            target.position.x, target.position.y, target.position.z,
+            target.orientation.x, target.orientation.y,
+            target.orientation.z, target.orientation.w,
+        )
+        with self._prepared_motion_lock:
+            for key, entry in self._prepared_cartesian.items():
+                values = entry["target"]
+                candidate = tuple(values[name] for name in ("x", "y", "z", "qx", "qy", "qz", "qw"))
+                if all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(expected, candidate)):
+                    match_key = key
+                    break
+            entry = self._prepared_cartesian.pop(match_key, None) if match_key else None
+            preparation_result = deepcopy(self._background_preparation_result)
+        if entry is None:
+            reason = "cache miss"
+            if preparation_result is not None:
+                reason = str(preparation_result.get("reason") or reason)
+            return None, reason
+        if entry["attachment"] != self._attached_model:
+            return None, "attachment changed"
+        trajectory = entry["solution"].joint_trajectory
+        if not trajectory.points:
+            return None, "prepared trajectory is empty"
+        targets = dict(zip(trajectory.joint_names, trajectory.points[0].positions, strict=True))
+        if not self._fresh_stable_joint_target(targets, tolerance=.02, stable_for_sec=0.):
+            return None, "start joints changed"
+        if self._state_validity_client is None:
+            return None, "state validity service is unavailable"
+        from moveit_msgs.srv import GetStateValidity
+        for point in trajectory.points:
+            request = GetStateValidity.Request()
+            request.group_name = self.group_name
+            request.robot_state.is_diff = True
+            request.robot_state.joint_state.name = list(trajectory.joint_names)
+            request.robot_state.joint_state.position = list(point.positions)
+            response = self._wait_future(
+                self._state_validity_client.call_async(request),
+                timeout_sec=3.,
+                label="prepared trajectory revalidation",
+                timeout_log_level="debug",
+            )
+            if response is None or not response.valid:
+                return None, "collision scene changed"
+        with self._prepared_motion_lock:
+            self._background_preparation_result = {
+                "key": match_key, "used": True,
+                "reason": "reused after complete collision validation",
+                "planning_wall_time_sec": entry["planning_wall_time_sec"],
+            }
+        return entry["solution"], "reused after complete collision validation"
 
-        motion_scale = resolved_scale
-        if 0.0 < resolved_scale < 1.0:
-            # Keep Gazebo service waits at the configured scale, but push arm motion
-            # harder. This speeds up motion without shortening attach/detach calls.
-            motion_scale = resolved_scale * (0.25 / 0.35)
-
-        scaled_attr("gripper_move_time_sec", minimum=0.15)
-        scaled_attr("gripper_settle_sec")
-        scaled_attr("release_preopen_settle_sec")
-        scaled_attr("release_postopen_settle_sec")
-        scaled_attr("release_postdetach_settle_sec")
-        scaled_attr("release_detach_retry_delay_sec")
-        scaled_attr("release_detach_verify_timeout_sec", minimum=0.05)
-        scaled_attr("release_detach_verify_poll_sec", minimum=0.01)
-        scaled_attr("snap_to_slot_retry_delay_sec")
-        scaled_attr("trajectory_time_scale", minimum=0.20, scale_override=motion_scale)
-        scaled_attr("named_pose_duration_sec", minimum=0.25, scale_override=motion_scale)
-        scaled_attr("move_home_duration_sec", minimum=0.25, scale_override=motion_scale)
+    def _apply_gazebo_fast_timing_profile(self, scale: float | None = None) -> None:
+        """Use native simulation durations; speed is owned by the scene clock."""
+        self._gazebo_wait_scale = 1.0
+        if self.execution_mode == 'simulation':
+            self.trajectory_time_scale = 1.0
 
     def _scaled_wall_wait_sec(self, seconds: float, *, minimum: float = 0.0) -> float:
-        scale = _as_float(getattr(self, "_gazebo_wait_scale", 1.0), 1.0)
-        if scale <= 0.0:
-            scale = 1.0
-        return max(float(minimum), float(seconds) * scale)
+        return max(float(minimum), float(seconds))
+
+    def _wait_process_time(self, seconds: float) -> None:
+        """Wait for settling in simulation time, keeping Stop responsive."""
+        if self.execution_mode != 'simulation':
+            time.sleep(max(0.0, seconds))
+            return
+        from cais_spade_llm.resources.robot.simulation_timing import wait_for_simulation
+
+        if self._node is None and not self.init():
+            raise RuntimeError('Simulation clock is unavailable')
+        wait_for_simulation(
+            max(0.0, seconds), now=lambda: self._node.get_clock().now().nanoseconds / 1e9,
+            cancelled=lambda: self._shutdown_requested,
+        )
+
+    def _motion_pending(self, seconds: float):
+        if self.execution_mode == 'simulation':
+            from cais_spade_llm.resources.robot.simulation_timing import MotionDeadline
+            return MotionDeadline(
+                seconds, now=lambda: self._node.get_clock().now().nanoseconds / 1e9,
+                cancelled=lambda: self._shutdown_requested,
+            ).pending
+        deadline = time.monotonic() + seconds
+        return lambda: time.monotonic() < deadline
+
+    def _simulation_joint_limits(self, names: list[str]) -> dict:
+        """Read and cache the running robot model's limits, never guessed limits."""
+        from rcl_interfaces.srv import GetParameters
+
+        if getattr(self, '_limits_client', None) is None:
+            self._limits_client = self._node.create_client(
+                GetParameters, '/move_group/get_parameters', callback_group=self._cb_group)
+        cache = getattr(self, '_joint_limits_cache', {})
+        if all(name in cache for name in names):
+            return {name: cache[name] for name in names}
+        parameters = ['robot_description']
+        parameters += [f'robot_description_planning.joint_limits.{name}.{field}'
+                       for name in names for field in ('max_velocity', 'max_acceleration')]
+        if not self._limits_client.wait_for_service(timeout_sec=5.0):
+            raise RuntimeError('Running MoveIt joint limits are unavailable')
+        response = self._wait_future(
+            self._limits_client.call_async(GetParameters.Request(names=parameters)),
+            timeout_sec=10.0, label='joint limits')
+        if response is None or len(response.values) != len(parameters):
+            raise RuntimeError('Running MoveIt joint limits are incomplete')
+        root = ET.fromstring(response.values[0].string_value)
+        for index, name in enumerate(names):
+            element = root.find(f"joint[@name='{name}']/limit")
+            if element is None:
+                raise ValueError(f'Missing running joint limits: {name}')
+            v, a = response.values[1+2*index:3+2*index]
+            velocity = float(element.get('velocity'))
+            if v.type != 0:
+                velocity = min(velocity, v.double_value)
+            if a.type == 0 or a.double_value <= 0:
+                raise ValueError(f'Missing configured acceleration limit: {name}')
+            cache[name] = {'lower': float(element.get('lower', '-inf')),
+                           'upper': float(element.get('upper', 'inf')),
+                           'velocity': velocity, 'acceleration': a.double_value}
+        self._joint_limits_cache = cache
+        return {name: cache[name] for name in names}
+
+    def _validate_simulation_trajectory(self, trajectory) -> None:
+        if self.execution_mode != 'simulation':
+            return
+        from cais_spade_llm.recovery_framework.kmr_motion import retime_trajectory
+
+        retime_trajectory(trajectory, self._simulation_joint_limits(trajectory.joint_names), 1., 1.)
+
+    def _simulation_trajectory_is_collision_free(self, trajectory) -> bool:
+        """Validate timed samples and their connecting motion before dispatch.
+
+        Cartesian IK validity precedes time parameterization in MoveIt. Joint
+        branch changes can create colliding interpolated motion even when the
+        service reports a complete path.
+        """
+        if (self.execution_mode != "simulation" or not getattr(
+            self, "controller_config", {}).get("payload_collision", {}).get("enabled")):
+            return True
+        from moveit_msgs.srv import GetStateValidity
+
+        started = time.monotonic()
+        evidence = {"checked_states": 0, "collision_free": False}
+        self._last_path_validation = evidence
+        previous = None
+        try:
+            for point in trajectory.points:
+                current = list(point.positions)
+                origin = current if previous is None else previous
+                steps = max(1, math.ceil(max(abs(b - a) for a, b in zip(
+                    origin, current, strict=True)) / .05))
+                for index in range(1, steps + 1):
+                    if self._shutdown_requested:
+                        self._last_failure_message = "Motion validation cancelled"
+                        return False
+                    request = GetStateValidity.Request()
+                    request.group_name = self.group_name
+                    request.robot_state.is_diff = True
+                    request.robot_state.joint_state.name = list(trajectory.joint_names)
+                    request.robot_state.joint_state.position = [
+                        a + (b - a) * index / steps for a, b in zip(origin, current, strict=True)
+                    ]
+                    response = None
+                    deadline = time.monotonic() + float(getattr(self, "tf_lookup_timeout_sec", 5.))
+                    while response is None and time.monotonic() < deadline:
+                        if self._shutdown_requested:
+                            self._last_failure_message = "Motion validation cancelled"
+                            return False
+                        evidence["observation_attempts"] = evidence.get("observation_attempts", 0) + 1
+                        response = self._wait_future(
+                            self._state_validity_client.call_async(request),
+                            timeout_sec=min(1., max(.001, deadline - time.monotonic())),
+                            label="timed trajectory collision validation", timeout_log_level="debug",
+                        )
+                    evidence["checked_states"] += 1
+                    if response is None or not response.valid:
+                        evidence["observation_received"] = response is not None
+                        evidence["contacts"] = [] if response is None else [
+                            [contact.contact_body_1, contact.contact_body_2]
+                            for contact in response.contacts
+                        ]
+                        self._last_failure_message = (
+                            "Timed trajectory collision observation unavailable"
+                            if response is None else "Timed trajectory is in collision"
+                        )
+                        self._last_command_evidence = {
+                            "command_sent": False, "motion_path_validation": deepcopy(evidence),
+                        }
+                        return False
+                previous = current
+            evidence["collision_free"] = bool(trajectory.points)
+            return evidence["collision_free"]
+        finally:
+            evidence["wall_time_sec"] = time.monotonic() - started
+            self._planning_wall_time_sec += evidence["wall_time_sec"]
+
+    def _time_joint_target(self, trajectory) -> None:
+        """Bound the complete quintic transition from observed joints to a target."""
+        if self.execution_mode != 'simulation':
+            return
+        limits = self._simulation_joint_limits(trajectory.joint_names)
+        target = trajectory.points[-1]
+        duration = target.time_from_start.sec + target.time_from_start.nanosec / 1e9
+        for name, position in zip(trajectory.joint_names, target.positions, strict=True):
+            deadline = time.monotonic() + max(0.0, float(getattr(self, "tf_lookup_timeout_sec", 2.0)))
+            current = self._get_joint_position(name)
+            while current is None and time.monotonic() < deadline:
+                if getattr(self, "_shutdown_requested", False):
+                    raise InterruptedError("Joint target timing was cancelled")
+                time.sleep(0.01)
+                current = self._get_joint_position(name)
+            if current is None:
+                raise ValueError(f'Missing observed joint position: {name}')
+            bound = limits[name]
+            if not math.isfinite(position) or not bound['lower'] <= position <= bound['upper']:
+                raise ValueError(f'Target exceeds joint limits: {name}')
+            distance = abs(position-current)
+            duration = max(duration, 1.875*distance/bound['velocity'],
+                           math.sqrt(5.78*distance/bound['acceleration']))
+        target.velocities = [0.] * len(trajectory.joint_names)
+        target.accelerations = [0.] * len(trajectory.joint_names)
+        ns = math.ceil(duration * 1e9)
+        target.time_from_start.sec, target.time_from_start.nanosec = divmod(ns, 1_000_000_000)
+        self._trajectory_duration_sec += duration
+        if len(trajectory.joint_names) > 1:
+            self._last_arm_duration_sec = duration
+
+    def _cancel_simulation_goal(self) -> None:
+        goal = self._simulation_goal
+        if self.execution_mode != 'simulation' or goal is None:
+            return
+        future = goal.cancel_goal_async()
+        deadline = time.monotonic() + 3.
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self._simulation_goal = None
+
+    def _note_motion_dispatch(self) -> None:
+        """Record the first controller-accepted motion in this resource session."""
+        if self._first_motion_at_unix is None:
+            self._first_motion_at_unix = time.time()
+
+    def _send_simulation_joint_trajectory(self, topic: str, trajectory) -> bool:
+        from control_msgs.action import FollowJointTrajectory
+
+        self._last_simulation_controller_succeeded = False
+        if not topic.endswith('/joint_trajectory'):
+            raise ValueError(f'No simulation controller action for {topic}')
+        endpoint = topic.removesuffix('/joint_trajectory') + '/follow_joint_trajectory'
+        if endpoint not in self._simulation_joint_clients:
+            self._simulation_joint_clients[endpoint] = self._ActionClient(
+                self._node, FollowJointTrajectory, endpoint, callback_group=self._cb_group)
+        client = self._simulation_joint_clients[endpoint]
+        if not client.wait_for_server(timeout_sec=5.):
+            return False
+        goal = self._wait_future(client.send_goal_async(
+            FollowJointTrajectory.Goal(trajectory=trajectory)), 10., f'send:{endpoint}')
+        if goal is None or not goal.accepted:
+            return False
+        self._note_motion_dispatch()
+        self._simulation_goal = goal
+        try:
+            last = trajectory.points[-1].time_from_start
+            result = self._wait_future(goal.get_result_async(),
+                                       last.sec + last.nanosec/1e9 + 5., f'result:{endpoint}')
+            if not (result and result.status == 4 and result.result.error_code == 0):
+                return False
+            self._last_simulation_controller_succeeded = True
+            pending = self._motion_pending(5.)
+            targets = dict(zip(trajectory.joint_names, trajectory.points[-1].positions, strict=True))
+            last_measured: dict[str, float | None] = {}
+            while pending():
+                measured = {name: self._get_joint_position(name) for name in targets}
+                last_measured = measured
+                if all(
+                    value is not None
+                    and (
+                        self._angular_joint_error(value, targets[name])
+                        if name in self.arm_joint_names
+                        else abs(value - targets[name])
+                    )
+                    <= 0.005
+                    for name, value in measured.items()
+                ):
+                    return True
+                time.sleep(.01)
+            errors = {
+                name: (
+                    None
+                    if last_measured.get(name) is None
+                    else (
+                        self._angular_joint_error(last_measured[name], target)
+                        if name in self.arm_joint_names
+                        else abs(last_measured[name] - target)
+                    )
+                )
+                for name, target in targets.items()
+            }
+            self._last_failure_message = (
+                "Simulation controller completed without observed joint targets: "
+                f"errors={errors}; feedback_stamp={getattr(self, '_last_joint_sim_time', None)}; "
+                f"simulation_time={self._node.get_clock().now().nanoseconds / 1e9}"
+            )
+            return False
+        finally:
+            if not goal.status in (4, 5, 6):
+                self._cancel_simulation_goal()
+            self._simulation_goal = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -2913,6 +3373,11 @@ class GazeboPickPlaceController:
         if self._initialized:
             return True
 
+        if self._planning_executor is None:
+            self._planning_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=f"{self.node_name}_planning",
+            )
+
         if not self._config_valid:
             logger.error("[%s] %s", self.robot_name, self._last_failure_message)
             return False
@@ -2931,10 +3396,11 @@ class GazeboPickPlaceController:
             from gazebo_msgs.srv import GetEntityState, SetEntityState
             from geometry_msgs.msg import Pose
             from moveit_msgs.action import ExecuteTrajectory
-            from moveit_msgs.srv import GetCartesianPath
+            from moveit_msgs.srv import GetCartesianPath, GetMotionPlan, GetStateValidity
             from rclpy.action import ActionClient
             from rclpy.callback_groups import ReentrantCallbackGroup
-            from rclpy.executors import MultiThreadedExecutor
+            from rclpy.executors import SingleThreadedExecutor
+            from rclpy.qos import qos_profile_sensor_data
             from sensor_msgs.msg import JointState
             from std_srvs.srv import Trigger
             from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -2946,16 +3412,18 @@ class GazeboPickPlaceController:
             self._last_failure_message = "ros2 imports failed (environment not sourced?)"
             return False
 
-        if not rclpy.ok():
-            rclpy.init()
+        with _RCLPY_INIT_LOCK:
+            if not rclpy.ok():
+                rclpy.init()
 
         self._rclpy = rclpy
         self._ActionClient = ActionClient
         self._ReentrantCallbackGroup = ReentrantCallbackGroup
-        self._MultiThreadedExecutor = MultiThreadedExecutor
+        self._SingleThreadedExecutor = SingleThreadedExecutor
         self._Trigger = Trigger
         self._ExecuteTrajectory = ExecuteTrajectory
         self._GetCartesianPath = GetCartesianPath
+        self._GetMotionPlan = GetMotionPlan
         self._SetEntityState = SetEntityState
         self._GetEntityState = GetEntityState
         self._Pose = Pose
@@ -2965,14 +3433,35 @@ class GazeboPickPlaceController:
         self._JointState = JointState
         self._tf2_ros = tf2_ros
 
-        self._node = rclpy.create_node(self.node_name)
+        from rclpy.parameter import Parameter
+        self._node = rclpy.create_node(self.node_name, parameter_overrides=[
+            Parameter('use_sim_time', value=self.execution_mode == 'simulation')])
+        self._joint_limits_cache = {}
+        self._limits_client = None
+        from rcl_interfaces.msg import ParameterEvent
+        def parameters_changed(event):
+            if event.node in ('/move_group', '/KMR_base_controller'):
+                self._joint_limits_cache.clear()
+                self.clear_motion_preparation()
+        self._node.create_subscription(ParameterEvent, '/parameter_events', parameters_changed, 10)
         self._cb_group = ReentrantCallbackGroup()
 
         self._tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self._node)
+        self._tf_listener = tf2_ros.TransformListener(
+            self._tf_buffer, self._node,
+            qos=(qos_profile_sensor_data
+                 if self.execution_mode == "simulation"
+                 and self.controller_config.get("payload_collision", {}).get("enabled") else None),
+        )
 
         self._cart_client = self._node.create_client(
             GetCartesianPath, self.service_cartesian_path, callback_group=self._cb_group
+        )
+        self._motion_plan_client = self._node.create_client(
+            GetMotionPlan, self.service_motion_plan, callback_group=self._cb_group
+        )
+        self._state_validity_client = self._node.create_client(
+            GetStateValidity, '/check_state_validity', callback_group=self._cb_group
         )
         self._exec_client = ActionClient(
             self._node,
@@ -2999,7 +3488,8 @@ class GazeboPickPlaceController:
             )
 
         self._node.create_subscription(
-            JointState, self.joint_states_topic, self._on_joint_state, 50
+            JointState, self.joint_states_topic, self._on_joint_state,
+            qos_profile_sensor_data if self.execution_mode == "simulation" else 50,
         )
 
         self._attach_srv, self._detach_srv = _import_linkattacher_srvs()
@@ -3015,7 +3505,7 @@ class GazeboPickPlaceController:
             self._link_attacher_enabled = False
             self._log().warn("linkattacher_msgs.srv not importable; attach/detach disabled")
 
-        self._executor = MultiThreadedExecutor(num_threads=1)
+        self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
         self._shutdown_requested = False
         self._spin_thread = threading.Thread(target=self._spin_executor, daemon=True)
@@ -3034,6 +3524,9 @@ class GazeboPickPlaceController:
 
         self._services_ready = False
         self._shutdown_requested = True
+        self.clear_motion_preparation()
+        if self.execution_mode == 'simulation':
+            self._cancel_simulation_goal()
 
         try:
             if self._executor and self._node:
@@ -3061,6 +3554,8 @@ class GazeboPickPlaceController:
         self._executor = None
         self._node = None
         self._initialized = False
+        self._planning_executor.shutdown(wait=False, cancel_futures=True)
+        self._planning_executor = None
 
     def is_usable(self) -> bool:
         """Whether this controller instance is healthy enough for reuse."""
@@ -3081,6 +3576,8 @@ class GazeboPickPlaceController:
         ):
             return False
         if not self._wait_service(self._cart_client, self.service_cartesian_path, deadline):
+            return False
+        if not self._wait_service(self._motion_plan_client, self.service_motion_plan, deadline):
             return False
         if not self._wait_action_server(self._exec_client, self.service_execute_traj, deadline):
             return False
@@ -3272,10 +3769,10 @@ class GazeboPickPlaceController:
                 "message": "move_insert trial_id is invalid",
                 "trial_id": requested_trial_id,
             }
-        if requested_part not in _MOVE_INSERT_SUPPORTED_PARTS:
+        if not requested_part or requested_part != requested_part.strip():
             return {
                 "success": False,
-                "message": f"move_insert does not support exact part identifier {requested_part!r}",
+                "message": "move_insert requires an exact non-empty part identifier",
             }
         try:
             start = _pose_from_mapping(expected_start_pose)
@@ -3313,13 +3810,33 @@ class GazeboPickPlaceController:
                     "message": f"move_insert current tool pose is invalid: {exc}",
                 }
             translation_error_m, rotation_error_deg = _pose_delta(current, start)
-            if translation_error_m > 0.003 or rotation_error_deg > 3.0:
+            start_position_tolerance_m = max(
+                0.003,
+                _as_float(
+                    getattr(
+                        self,
+                        "simulation_insert_start_position_tolerance_m",
+                        None,
+                    ),
+                    _as_float(
+                        getattr(self, "cartesian_position_tolerance_m", None),
+                        0.005,
+                    )
+                    + 0.001,
+                ),
+            )
+            if (
+                translation_error_m > start_position_tolerance_m
+                or rotation_error_deg > 3.0
+            ):
                 return {
                     "success": False,
                     "message": (
                         "move_insert expected start pose mismatch: "
                         f"translation={translation_error_m:.4f} m, "
-                        f"rotation={rotation_error_deg:.2f} deg"
+                        f"rotation={rotation_error_deg:.2f} deg, "
+                        f"simulation translation tolerance="
+                        f"{start_position_tolerance_m:.4f} m"
                     ),
                 }
             orientation = self._make_orientation(
@@ -3346,6 +3863,12 @@ class GazeboPickPlaceController:
                     }
                 )
             return result
+
+        if requested_part not in _MOVE_INSERT_SUPPORTED_PARTS:
+            return {
+                "success": False,
+                "message": f"move_insert does not support exact part identifier {requested_part!r}",
+            }
 
         if not isinstance(calibration_id, str) or not calibration_id:
             return {"success": False, "message": "move_insert calibration_id is missing"}
@@ -3531,17 +4054,26 @@ class GazeboPickPlaceController:
             and math.isclose(float(dy), 0.0, abs_tol=1e-9)
             and not math.isclose(float(dz), 0.0, abs_tol=1e-9)
         ):
-            self._log().warn(
-                f"move_relative vertical fallback: retrying no-collision move for dz={float(dz):.4f}"
-            )
-            ok = self._cartesian_move(
-                self._make_pose(target_x, target_y, target_z, ee.orientation),
-                f"move_relative(dx={dx}, dy={dy}, dz={dz}) (no-collision)",
-                avoid_collisions=False,
-                min_fraction=0.70,
-                allow_partial=True,
-                time_scale=time_scale,
-            )
+            target = self._make_pose(target_x, target_y, target_z, ee.orientation)
+            if self.execution_mode == "simulation":
+                ok = self._execute_simulation_motion_plan(
+                    label=f"move_relative(dx={dx}, dy={dy}, dz={dz})",
+                    target_pose=target,
+                    time_scale=time_scale,
+                )
+            else:
+                self._log().warn(
+                    "move_relative vertical fallback: retrying no-collision move "
+                    f"for dz={float(dz):.4f}"
+                )
+                ok = self._cartesian_move(
+                    target,
+                    f"move_relative(dx={dx}, dy={dy}, dz={dz}) (no-collision)",
+                    avoid_collisions=False,
+                    min_fraction=0.70,
+                    allow_partial=True,
+                    time_scale=time_scale,
+                )
         if not ok:
             return {"success": False, "message": f"failed relative move ({dx}, {dy}, {dz})"}
         return {"success": True, "message": f"moved relative ({dx}, {dy}, {dz})"}
@@ -3638,17 +4170,68 @@ class GazeboPickPlaceController:
                 "message": f"unknown pose '{pose_name}'; available={available}",
             }
         joint_values = [float(v) for v in positions]
+        if self._fresh_stable_joint_target(
+            dict(zip(self.arm_joint_names, joint_values, strict=True)), tolerance=0.02,
+        ):
+            evidence = {
+                "command_sent": False,
+                "reason": "fresh stable endpoint already observed",
+                "target": dict(zip(self.arm_joint_names, joint_values, strict=True)),
+            }
+            self._last_command_evidence = evidence
+            return {
+                "success": True,
+                "message": f"already at named pose '{pose_name}'",
+                **evidence,
+            }
+        if (
+            self.execution_mode == "simulation"
+            and self.controller_config.get("retain_observed_clear_pose_as_home") is True
+            and self._current_simulation_state_is_collision_free()
+        ):
+            evidence = {
+                "command_sent": False,
+                "reason": "retained fresh collision-free post-task clearance pose",
+                "observed_clear_pose_as_home": True,
+            }
+            self._last_command_evidence = evidence
+            return {
+                "success": True,
+                "message": "retained observed collision-free clearance pose as home",
+                **evidence,
+            }
         duration_sec = self._scaled_joint_duration(self.named_pose_duration_sec, speed)
+        if self.execution_mode == "simulation" and self.arm_trajectory_topic:
+            if self._move_joints_via_moveit(joint_values, duration_sec=duration_sec):
+                self._last_command_evidence = {
+                    **dict(self._last_command_evidence or {}),
+                    "command_sent": True,
+                }
+                return {
+                    "success": True,
+                    "message": f"moved to named pose '{pose_name}'",
+                    "command_sent": True,
+                }
+            return {
+                "success": False,
+                "message": self._with_last_failure(
+                    f"failed to move to named pose '{pose_name}'"
+                ),
+            }
         # Try trajectory publisher first, then MoveIt fallback.
         if self._arm_pub and self._publish_arm_joint_trajectory_and_wait(
             joint_values,
             duration_sec=duration_sec,
         ):
-            return {"success": True, "message": f"moved to named pose '{pose_name}'"}
+            self._last_command_evidence = {"command_sent": True}
+            return {"success": True, "message": f"moved to named pose '{pose_name}'",
+                    "command_sent": True}
         if self._exec_client and self._move_joints_via_moveit(
             joint_values, duration_sec=duration_sec
         ):
-            return {"success": True, "message": f"moved to named pose '{pose_name}' via MoveIt"}
+            self._last_command_evidence = {"command_sent": True}
+            return {"success": True, "message": f"moved to named pose '{pose_name}' via MoveIt",
+                    "command_sent": True}
         return {"success": False, "message": f"failed to move to named pose '{pose_name}'"}
 
     def get_current_pose(self) -> dict[str, Any]:
@@ -3710,9 +4293,11 @@ class GazeboPickPlaceController:
         if not self.wait_for_services():
             return {"success": False, "message": self._unavailable_message("services not ready")}
         ok = self._attach_part(str(model_name))
-        if not ok:
-            return {"success": False, "message": f"failed to attach {model_name}"}
-        return {"success": True, "message": f"attached {model_name}"}
+        return {
+            "success": ok,
+            "message": f"attached {model_name}" if ok else self._with_last_failure(f"failed to attach {model_name}"),
+            "payload_collision": (self._last_command_evidence or {}).get("payload_collision"),
+        }
 
     def detach_part(
         self,
@@ -3854,7 +4439,13 @@ class GazeboPickPlaceController:
                 ),
             }
 
+        attachment_evidence = deepcopy(self._last_command_evidence or {})
         rollback_ok = self.open_gripper()
+        attachment_evidence["rollback"] = {
+            "primitive": "open_gripper", "success": bool(rollback_ok),
+            "command_evidence": deepcopy(self._last_command_evidence or {}),
+        }
+        self._last_command_evidence = attachment_evidence
         rollback_message = (
             "reopened gripper after failed attach"
             if rollback_ok
@@ -3866,6 +4457,8 @@ class GazeboPickPlaceController:
                 f"{str(attached.get('message') or 'failed to attach part')}; "
                 f"rollback: {rollback_message}"
             ),
+            "payload_collision": attached.get("payload_collision"),
+            "rollback": attachment_evidence["rollback"],
         }
 
     def release_part(
@@ -3907,7 +4500,7 @@ class GazeboPickPlaceController:
         ):
             assume_released_if_open = True
 
-        time.sleep(self.release_preopen_settle_sec)
+        self._wait_process_time(self.release_preopen_settle_sec)
         if not self.open_gripper():
             return {
                 "success": False,
@@ -3916,7 +4509,7 @@ class GazeboPickPlaceController:
                     or f"failed to open gripper to release {target_part or target_model or 'part'}"
                 ),
             }
-        time.sleep(self.release_postopen_settle_sec)
+        self._wait_process_time(self.release_postopen_settle_sec)
 
         used_simulation_release_fallback = False
         if self._simulation_release_fallback_enabled(assume_released_if_open):
@@ -3931,7 +4524,7 @@ class GazeboPickPlaceController:
                 assume_released_if_open=assume_released_if_open,
             )
         if detached.get("success"):
-            time.sleep(self.release_postdetach_settle_sec)
+            self._wait_process_time(self.release_postdetach_settle_sec)
             release_mode = str(detached.get("release_mode") or "").strip()
             if release_mode == "verification_unavailable_after_detach_timeout":
                 release_message = str(detached.get("message") or "")
@@ -3958,7 +4551,7 @@ class GazeboPickPlaceController:
             if verified_release is not False:
                 self._attached_model = None
                 self._attached_link = None
-                time.sleep(self.release_postdetach_settle_sec)
+                self._wait_process_time(self.release_postdetach_settle_sec)
                 result = {
                     "success": True,
                     "message": (
@@ -4124,6 +4717,9 @@ class GazeboPickPlaceController:
         nsec = int((duration - sec) * 1_000_000_000)
         point.time_from_start = self._Duration(sec=sec, nanosec=nsec)
         traj.points = [point]
+        self._time_joint_target(traj)
+        if self.execution_mode == 'simulation':
+            return self._send_simulation_joint_trajectory(self.arm_trajectory_topic, traj)
         self._arm_pub.publish(traj)
         return True
 
@@ -4205,7 +4801,7 @@ class GazeboPickPlaceController:
                 "message": "delay duration_sec must be finite and non-negative",
             }
         wait_sec = self._scaled_wall_wait_sec(duration)
-        time.sleep(wait_sec)
+        self._wait_process_time(wait_sec)
         return {
             "success": True,
             "message": f"delay {duration:.3f}s",
@@ -4510,7 +5106,37 @@ class GazeboPickPlaceController:
             ee.orientation,
         )
 
-        ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
+        handling_access = dict(geo.get("handling_robot_access") or {})
+        configured_orientation = handling_access.get("grasp_orientation_xyzw")
+        grasp_quaternion = None
+        if isinstance(configured_orientation, (list, tuple)) and len(configured_orientation) == 4:
+            grasp_quaternion, grasp_orientation_error = _normalized_optional_quaternion(
+                *configured_orientation
+            )
+            if grasp_orientation_error or grasp_quaternion is None:
+                return {
+                    "success": False,
+                    "message": (
+                        "configured handling_robot_access grasp orientation is invalid: "
+                        f"{grasp_orientation_error or 'orientation is unavailable'}"
+                    ),
+                }
+        configured_tcp_offset_z = handling_access.get("tcp_offset_z_m")
+        if configured_tcp_offset_z is None:
+            ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
+        else:
+            try:
+                ee_tcp_offset_z = float(configured_tcp_offset_z)
+            except (TypeError, ValueError, OverflowError):
+                return {
+                    "success": False,
+                    "message": "configured handling_robot_access tcp_offset_z_m is invalid",
+                }
+            if not math.isfinite(ee_tcp_offset_z):
+                return {
+                    "success": False,
+                    "message": "configured handling_robot_access tcp_offset_z_m is invalid",
+                }
         pick_bias = vertical_pick_bias(
             target_height, self.pick_tcp_z_bias_min_m, self.pick_tcp_z_bias_max_m
         )
@@ -4601,11 +5227,92 @@ class GazeboPickPlaceController:
                 ),
             }
 
-        approach_height = _as_float(approach_height_override_m, self.approach_height_m)
+        access_approach_height = handling_access.get("approach_height_m")
+        approach_height = _as_float(
+            approach_height_override_m,
+            _as_float(access_approach_height, self.approach_height_m),
+        )
         travel_z = pick_travel_height(
             tz, board_center_z, pick_z, approach_height,
             None if bool(ignore_current_height_for_travel_z) else ee.position.z,
         )
+        explicit_access_poses = None
+        raw_access_approach = handling_access.get("approach_pose")
+        raw_access_target = handling_access.get("target_pose")
+        if raw_access_approach is not None or raw_access_target is not None:
+            if handling_access.get("pose_format") != "xyz_xyzw":
+                return {
+                    "success": False,
+                    "message": "configured handling_robot_access pose_format must be xyz_xyzw",
+                }
+            if not all(
+                isinstance(value, (list, tuple)) and len(value) == 7
+                for value in (raw_access_approach, raw_access_target)
+            ):
+                return {
+                    "success": False,
+                    "message": "configured handling_robot_access requires approach_pose and target_pose",
+                }
+
+            access_poses = []
+            for label, raw_pose in (
+                ("approach_pose", raw_access_approach),
+                ("target_pose", raw_access_target),
+            ):
+                try:
+                    xyz = [float(value) for value in raw_pose[:3]]
+                except (TypeError, ValueError, OverflowError):
+                    return {
+                        "success": False,
+                        "message": f"configured handling_robot_access {label} is invalid",
+                    }
+                orientation, orientation_error = _normalized_optional_quaternion(
+                    *raw_pose[3:]
+                )
+                if (
+                    not all(math.isfinite(value) for value in xyz)
+                    or orientation_error
+                    or orientation is None
+                ):
+                    return {
+                        "success": False,
+                        "message": f"configured handling_robot_access {label} is invalid",
+                    }
+                if grasp_quaternion is not None and abs(
+                    sum(a * b for a, b in zip(orientation, grasp_quaternion, strict=True))
+                ) < 0.999:
+                    return {
+                        "success": False,
+                        "message": (
+                            f"configured handling_robot_access {label} orientation "
+                            "does not match grasp_orientation_xyzw"
+                        ),
+                    }
+                access_poses.append(
+                    {
+                        "x": xyz[0],
+                        "y": xyz[1],
+                        "z": xyz[2] - ee_tcp_offset_z,
+                        **dict(
+                            zip(
+                                ("qx", "qy", "qz", "qw"),
+                                orientation,
+                                strict=True,
+                            )
+                        ),
+                    }
+                )
+            if math.dist(
+                (access_poses[1]["x"], access_poses[1]["y"]), (tx, ty)
+            ) > 0.08:
+                return {
+                    "success": False,
+                    "message": "configured handling_robot_access target disagrees with the observed part",
+                }
+            explicit_access_poses = tuple(access_poses)
+            pick_tcp_z = access_poses[1]["z"] + ee_tcp_offset_z
+            pick_z = access_poses[1]["z"]
+            travel_z = access_poses[0]["z"]
 
         self._log().info(
             "[ComputePickTargets] "
@@ -4689,6 +5396,27 @@ class GazeboPickPlaceController:
             "start_y": ee.position.y,
             "start_z": ee.position.z,
         }
+        if explicit_access_poses is not None:
+            result["approach_pose"] = explicit_access_poses[0]
+            result["target_pose"] = explicit_access_poses[1]
+            result["access_retreat_pose"] = explicit_access_poses[0]
+            result["handling_robot_access_executed"] = True
+        elif grasp_quaternion is not None:
+            orientation = dict(
+                zip(("qx", "qy", "qz", "qw"), grasp_quaternion, strict=True)
+            )
+            result["approach_pose"] = {
+                "x": tx,
+                "y": ty,
+                "z": travel_z,
+                **orientation,
+            }
+            result["target_pose"] = {
+                "x": tx,
+                "y": ty,
+                "z": pick_z,
+                **orientation,
+            }
         if physical_stl_pick:
             result.update(
                 {
@@ -5135,6 +5863,7 @@ class GazeboPickPlaceController:
               slot_xy: {type: array, minItems: 2, items: {type: number}, description: "XY offsets in metres from board_center."}
               slot_floor_z_m: {type: number, x-frame-source: world, description: "Measured seating/support surface height in world metres."}
               part_height_m: {type: number, exclusiveMinimum: 0, x-binding-role: vertical_part_height, description: "Optional height override; otherwise uses pick_ctx.part_height."}
+              place_tool_yaw_offset_rad: {type: number, description: "Optional simulation assembly tool yaw offset, in radians, applied about world Z relative to the grasp orientation."}
               model_name: {type: string, x-binding-role: controller_identifier}
               target_reference:
                 type: object
@@ -5474,9 +6203,9 @@ class GazeboPickPlaceController:
             grasp_tcp_to_part_origin_z = _as_float(pick_ctx.get("pick_tcp_z"), 0.0) - _as_float(
                 pick_ctx.get("tz"), 0.0
             )
-            tcp_offset_z = _as_float(
-                pick_ctx.get("tcp_offset_z"), self._get_ee_tcp_world_z_offset()
-            )
+            tcp_offset_z = _as_float(pick_ctx.get("tcp_offset_z"), float("nan"))
+            if not math.isfinite(tcp_offset_z):
+                tcp_offset_z = self._get_ee_tcp_world_z_offset()
         else:
             # Recovery insert macros may only know the target geometry, not the earlier pick context.
             grasp_tcp_to_part_origin_z = max(
@@ -5559,6 +6288,50 @@ class GazeboPickPlaceController:
             self.execution_mode == "simulation"
             and str(target_reference.get("surface_role") or "") == "assembly_slot"
         )
+        raw_place_tool_yaw_offset = geo.get("place_tool_yaw_offset_rad")
+        if simulation_assembly_slot and raw_place_tool_yaw_offset is not None:
+            try:
+                place_tool_yaw_offset = float(raw_place_tool_yaw_offset)
+            except (TypeError, ValueError, OverflowError):
+                return {
+                    "success": False,
+                    "message": "place_tool_yaw_offset_rad is invalid",
+                }
+            if not math.isfinite(place_tool_yaw_offset):
+                return {
+                    "success": False,
+                    "message": "place_tool_yaw_offset_rad is invalid",
+                }
+            base_orientation = tuple(
+                pose_orientation.get(field, fallback)
+                for field, fallback in zip(
+                    ("qx", "qy", "qz", "qw"),
+                    (0.0, 0.0, 0.0, 1.0),
+                    strict=True,
+                )
+            )
+            half_yaw = place_tool_yaw_offset * 0.5
+            yaw_orientation = (
+                0.0,
+                0.0,
+                math.sin(half_yaw),
+                math.cos(half_yaw),
+            )
+            rotated_orientation, orientation_error = _normalized_optional_quaternion(
+                *_quaternion_multiply(yaw_orientation, base_orientation)
+            )
+            if orientation_error or rotated_orientation is None:
+                return {
+                    "success": False,
+                    "message": orientation_error or "place tool orientation is invalid",
+                }
+            pose_orientation = dict(
+                zip(
+                    ("qx", "qy", "qz", "qw"),
+                    rotated_orientation,
+                    strict=True,
+                )
+            )
         poses = placement_poses(
             bx, by, place_z, pose_orientation,
             simulation_assembly_slot=simulation_assembly_slot,
@@ -5795,6 +6568,17 @@ class GazeboPickPlaceController:
 
         # Move to the explicit named joint-space home pose.
         duration_sec = self._scaled_joint_duration(self.move_home_duration_sec, speed)
+        if self.execution_mode == "simulation" and self.arm_trajectory_topic:
+            if self._move_joints_via_moveit(
+                target_positions,
+                duration_sec=duration_sec,
+            ):
+                self._last_start_pose = None
+                return {"success": True, "message": "moved to named home pose"}
+            return {
+                "success": False,
+                "message": self._with_last_failure("failed to move to named home pose"),
+            }
         if self._arm_pub and self._publish_arm_joint_trajectory_and_wait(
             target_positions,
             duration_sec=duration_sec,
@@ -5880,13 +6664,19 @@ class GazeboPickPlaceController:
         positions: list[float],
         duration_sec: float = 4.0,
     ) -> bool:
-        """Move to joint positions using the MoveIt execute_trajectory action."""
+        """Move to joint positions through the resource-owned controller."""
         if len(positions) != len(self.arm_joint_names):
             self._log().error(
                 "_move_joints_via_moveit expected "
                 f"{len(self.arm_joint_names)} joints, got {len(positions)}"
             )
             return False
+        if self.execution_mode == "simulation" and self.arm_trajectory_topic:
+            targets = self._nearest_simulation_joint_targets(positions)
+            return self._execute_simulation_motion_plan(
+                joint_positions=targets,
+                label="move_home",
+            )
         try:
             from moveit_msgs.msg import RobotTrajectory
         except ImportError:
@@ -5902,6 +6692,7 @@ class GazeboPickPlaceController:
         nsec = int((duration - sec) * 1_000_000_000)
         point.time_from_start = self._Duration(sec=sec, nanosec=nsec)
         traj.points = [point]
+        self._time_joint_target(traj)
 
         robot_traj = RobotTrajectory()
         robot_traj.joint_trajectory = traj
@@ -5915,13 +6706,192 @@ class GazeboPickPlaceController:
             self._log().error("move_home trajectory goal rejected")
             return False
 
+        self._note_motion_dispatch()
+
+        if self.execution_mode == 'simulation':
+            self._simulation_goal = goal_handle
         result_future = goal_handle.get_result_async()
-        result = self._wait_future(result_future, timeout_sec=30.0, label="result:move_home")
+        try:
+            result = self._wait_future(result_future, timeout_sec=30.0, label="result:move_home")
+        finally:
+            if self.execution_mode == 'simulation':
+                if goal_handle.status not in (4, 5, 6):
+                    self._cancel_simulation_goal()
+                self._simulation_goal = None
         code = result.result.error_code.val if result else None
         if code != 1:
             err_msg = self._format_moveit_error(code)
             self._log().error(f"move_home execute_trajectory failed: {err_msg}")
         return code == 1
+
+    def _nearest_simulation_joint_targets(self, positions: list[float]) -> list[float]:
+        """Select equivalent arm angles near feedback within the running limits."""
+        limits = self._simulation_joint_limits(self.arm_joint_names)
+        targets = []
+        for name, nominal in zip(self.arm_joint_names, positions, strict=True):
+            observed = self._get_joint_position(name)
+            bound = limits[name]
+            if observed is None:
+                raise ValueError(f"Missing observed joint position: {name}")
+            if not math.isfinite(nominal) or not bound["lower"] <= nominal <= bound["upper"]:
+                raise ValueError(f"Target exceeds joint limits: {name}")
+            turns = round((observed - nominal) / (2.0 * math.pi))
+            if math.isfinite(bound["lower"]):
+                turns = max(turns, math.ceil((bound["lower"] - nominal) / (2.0 * math.pi)))
+            if math.isfinite(bound["upper"]):
+                turns = min(turns, math.floor((bound["upper"] - nominal) / (2.0 * math.pi)))
+            targets.append(float(nominal + turns * 2.0 * math.pi))
+        return targets
+
+    def _execute_simulation_motion_plan(
+        self,
+        *,
+        label: str,
+        joint_positions: list[float] | None = None,
+        target_pose=None,
+        time_scale: float = 1.0,
+    ) -> bool:
+        """Plan collision-free free-space motion and use this robot's controller."""
+        if self.execution_mode != "simulation" or not self.arm_trajectory_topic:
+            return False
+        from moveit_msgs.msg import (
+            Constraints,
+            JointConstraint,
+            OrientationConstraint,
+            PositionConstraint,
+        )
+        from shape_msgs.msg import SolidPrimitive
+
+        if (joint_positions is None) == (target_pose is None):
+            raise ValueError("A simulation motion plan requires one target type")
+        request = self._GetMotionPlan.Request()
+        motion = request.motion_plan_request
+        motion.group_name = self.group_name
+        motion.start_state.is_diff = True
+        motion.allowed_planning_time = 5.0
+        motion.num_planning_attempts = 3
+        motion.max_velocity_scaling_factor = 1.0
+        motion.max_acceleration_scaling_factor = 1.0
+        constraints = Constraints()
+        if joint_positions is not None:
+            if len(joint_positions) != len(self.arm_joint_names):
+                raise ValueError("Simulation joint target does not cover every arm joint")
+            constraints.joint_constraints = [
+                JointConstraint(
+                    joint_name=name,
+                    position=float(position),
+                    tolerance_above=0.005,
+                    tolerance_below=0.005,
+                    weight=1.0,
+                )
+                for name, position in zip(
+                    self.arm_joint_names, joint_positions, strict=True
+                )
+            ]
+        else:
+            position = PositionConstraint()
+            position.header.frame_id = self.frame_id
+            position.link_name = self.ee_link
+            position.weight = 1.0
+            position.constraint_region.primitives = [
+                SolidPrimitive(type=SolidPrimitive.SPHERE, dimensions=[0.002])
+            ]
+            position.constraint_region.primitive_poses = [target_pose]
+            orientation = OrientationConstraint()
+            orientation.header.frame_id = self.frame_id
+            orientation.link_name = self.ee_link
+            orientation.orientation = target_pose.orientation
+            orientation.absolute_x_axis_tolerance = 0.01
+            orientation.absolute_y_axis_tolerance = 0.01
+            orientation.absolute_z_axis_tolerance = 0.01
+            orientation.weight = 1.0
+            constraints.position_constraints = [position]
+            constraints.orientation_constraints = [orientation]
+        motion.goal_constraints = [constraints]
+
+        result = None
+        planning_started = time.monotonic()
+        for attempt in range(1, 4):
+            response = self._wait_future(
+                self._motion_plan_client.call_async(request),
+                timeout_sec=60.0,
+                label=f"plan:{label}:free-space:{attempt}",
+            )
+            if response is None:
+                self._last_failure_message = f"[{label}] free-space planning timed out"
+                continue
+            candidate = response.motion_plan_response
+            if (
+                candidate.error_code.val == 1
+                and candidate.trajectory.joint_trajectory.points
+            ):
+                result = candidate
+                break
+            self._last_failure_message = (
+                f"[{label}] collision-free planning attempt {attempt} failed: "
+                f"{self._format_moveit_error(candidate.error_code.val)}"
+            )
+            self._log().warning(self._last_failure_message)
+        self._planning_wall_time_sec += time.monotonic() - planning_started
+        if result is None:
+            self._log().error(self._last_failure_message)
+            return False
+        self._scale_trajectory_timing(result.trajectory, time_scale)
+        trajectory = result.trajectory.joint_trajectory
+        if not self._simulation_trajectory_is_collision_free(trajectory):
+            return False
+        endpoint_time = trajectory.points[-1].time_from_start
+        self._trajectory_duration_sec += (
+            endpoint_time.sec + endpoint_time.nanosec / 1e9
+        )
+        joint_endpoint_observed = self._send_simulation_joint_trajectory(
+            self.arm_trajectory_topic,
+            trajectory,
+        )
+        joint_feedback_detail = self._last_failure_message if not joint_endpoint_observed else ""
+        if joint_positions is not None and not joint_endpoint_observed:
+            detail = joint_feedback_detail or "controller goal failed"
+            self._last_failure_message = f"[{label}] resource trajectory failed: {detail}"
+            self._last_command_evidence = {
+                "command_sent": True, "collision_free_motion_plan": True,
+                "joint_endpoint_observed": False, "joint_feedback_detail": detail,
+            }
+            self._log().error(self._last_failure_message)
+            return False
+        controller_endpoint_observed = None
+        if target_pose is not None:
+            controller_endpoint_observed = self._wait_for_simulation_cartesian_endpoint(
+                target_pose
+            )
+            if not (
+                controller_endpoint_observed
+                and controller_endpoint_observed["within_tolerance"]
+            ):
+                self._last_failure_message = (
+                    f"[{label}] Cartesian endpoint not observed: "
+                    f"{controller_endpoint_observed}"
+                )
+                self._last_command_evidence = {
+                    "command_sent": True,
+                    "collision_free_motion_plan": True,
+                    "controller_endpoint_observed": controller_endpoint_observed,
+                }
+                self._log().error(self._last_failure_message)
+                return False
+        self._last_failure_message = ""
+        self._last_command_evidence = {
+            "command_sent": True,
+            "controller_endpoint": self.arm_trajectory_topic.removesuffix(
+                "/joint_trajectory"
+            )
+            + "/follow_joint_trajectory",
+            "collision_free_motion_plan": True,
+            "motion_path_validation": deepcopy(getattr(self, "_last_path_validation", None)),
+            "controller_endpoint_observed": controller_endpoint_observed,
+            "joint_endpoint_observed": joint_endpoint_observed,
+            "joint_feedback_detail": joint_feedback_detail,
+        }
+        return True
 
     def _scaled_joint_duration(self, base_duration_sec: float, speed: float | None) -> float:
         scale = _as_float(speed, self.trajectory_time_scale)
@@ -6015,6 +6985,11 @@ class GazeboPickPlaceController:
             return f"{default}: {self._last_failure_message}"
         return default
 
+    def _with_last_failure(self, default: str) -> str:
+        """Append the last controller failure to a task-level error."""
+        detail = str(self._last_failure_message or "").strip()
+        return f"{default}: {detail}" if detail else default
+
     def _wait_service(self, client, name: str, deadline: float) -> bool:
         while time.monotonic() < deadline:
             if client and client.wait_for_service(timeout_sec=0.5):
@@ -6031,7 +7006,81 @@ class GazeboPickPlaceController:
         self._last_failure_message = f"timed out waiting for action server: {name}"
         return False
 
+    def _observed_simulation_link_poses(self) -> dict | None:
+        """Read one Gazebo wrist observation and apply its fixed tool transforms."""
+        if getattr(self, "_shutdown_requested", False):
+            self._last_failure_message = "Observed tool pose was cancelled"
+            return None
+        settings = self.controller_config["payload_collision"]
+        source_link = settings["observation_link"]
+        scoped_link = f"{self.robot_model_name}::{source_link}"
+        request = self._GetEntityState.Request(name=scoped_link, reference_frame=self.frame_id)
+        deadline = time.monotonic() + float(getattr(self, "tf_lookup_timeout_sec", 2.0))
+        observation_error = f"Gazebo link observation timed out: {scoped_link}"
+        while True:
+            if getattr(self, "_shutdown_requested", False):
+                self._last_failure_message = "Observed tool pose was cancelled"
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                self._last_failure_message = observation_error
+                return None
+            response = self._wait_future(
+                self._get_state_client.call_async(request), timeout_sec=min(1.0, remaining),
+                label="observe Gazebo wrist pose", timeout_log_level="debug",
+            )
+            if response is None:
+                observation_error = f"Gazebo link observation timed out: {scoped_link}"
+                continue
+            if not response.success:
+                self._last_failure_message = f"Gazebo link observation failed: {scoped_link}"
+                return None
+            stamp = response.header.stamp.sec + response.header.stamp.nanosec / 1e9
+            now = self._node.get_clock().now().nanoseconds / 1e9
+            if now - stamp <= 0.25:
+                break
+            observation_error = f"Gazebo link observation is {now - stamp:.3f}s old"
+        observed = response.state.pose
+        parent = {
+            "x": observed.position.x, "y": observed.position.y, "z": observed.position.z,
+            "qx": observed.orientation.x, "qy": observed.orientation.y,
+            "qz": observed.orientation.z, "qw": observed.orientation.w,
+        }
+        poses = {}
+        try:
+            for link in (self.ee_link, self.tcp_link):
+                # These tool frames are fixed descendants of the configured
+                # wrist link, so delayed world TF cannot alter the observation.
+                transform = self._tf_buffer.lookup_transform(
+                    source_link, link, self._rclpy.time.Time(),
+                ).transform
+                translation, rotation = transform.translation, transform.rotation
+                relative = {
+                    "x": translation.x, "y": translation.y, "z": translation.z,
+                    "qx": rotation.x, "qy": rotation.y, "qz": rotation.z, "qw": rotation.w,
+                }
+                composed = _compose_pose(parent, relative)
+                pose = self._Pose()
+                pose.position.x, pose.position.y, pose.position.z = (composed[k] for k in ("x", "y", "z"))
+                pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = (
+                    composed[k] for k in ("qx", "qy", "qz", "qw")
+                )
+                poses[link] = pose
+        except (self._tf2_ros.LookupException, self._tf2_ros.ConnectivityException,
+                self._tf2_ros.ExtrapolationException, ValueError) as exc:
+            self._last_failure_message = f"Fixed tool transform is unavailable: {exc}"
+            return None
+        self._last_pose_observation = {
+            "source": "gazebo_link_state", "link": scoped_link,
+            "simulation_stamp": stamp, "pose": parent,
+        }
+        return poses
+
     def _get_ee_pose(self):
+        if (self.execution_mode == "simulation"
+                and getattr(self, "controller_config", {}).get("payload_collision", {}).get("enabled")):
+            poses = self._observed_simulation_link_poses()
+            return poses.get(self.ee_link) if poses else None
         timeout_sec = max(
             0.0,
             float(getattr(self, "tf_lookup_timeout_sec", 2.0)),
@@ -6045,6 +7094,11 @@ class GazeboPickPlaceController:
                     self.ee_link,
                     self._rclpy.time.Time(),
                 )
+                if self.execution_mode == "simulation":
+                    observed_at = transform.header.stamp.sec + transform.header.stamp.nanosec / 1e9
+                    current = self._node.get_clock().now().nanoseconds / 1e9
+                    if current - observed_at > 0.25:
+                        raise RuntimeError(f"End-effector feedback is {current - observed_at:.3f}s old")
                 pose = self._Pose()
                 pose.position.x = transform.transform.translation.x
                 pose.position.y = transform.transform.translation.y
@@ -6076,6 +7130,12 @@ class GazeboPickPlaceController:
         return None
 
     def _get_ee_tcp_world_z_offset(self) -> float:
+        if (self.execution_mode == "simulation"
+                and getattr(self, "controller_config", {}).get("payload_collision", {}).get("enabled")):
+            poses = self._observed_simulation_link_poses()
+            if poses is None:
+                raise RuntimeError(self._last_failure_message)
+            return poses[self.tcp_link].position.z - poses[self.ee_link].position.z
         try:
             ee_tf = self._tf_buffer.lookup_transform(
                 self.frame_id, self.ee_link, self._rclpy.time.Time()
@@ -6089,16 +7149,107 @@ class GazeboPickPlaceController:
             return -0.17
 
     def _on_joint_state(self, msg):
+        samples = list(zip(msg.name, msg.position))
+        if self.execution_mode == 'simulation':
+            owned = {*self.arm_joint_names, self.gripper_joint}
+            samples = [(name, position) for name, position in samples if name in owned]
+        if not samples:
+            return
         with self._joint_lock:
-            for name, pos in zip(msg.name, msg.position):
+            received = time.monotonic()
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+            if (self.execution_mode == 'simulation' and self._last_joint_sim_time is not None
+                    and stamp < self._last_joint_sim_time):
+                now = self._node.get_clock().now().nanoseconds / 1e9
+                if now < self._last_joint_sim_time - 1.0:
+                    self._joint_positions.clear()
+                    self._joint_received_times.clear()
+                    self._joint_sim_stamps.clear()
+                    self._joint_stable_since.clear()
+                    self._joint_limits_cache.clear()
+                    self._last_joint_sim_time = None
+            if self.execution_mode == "simulation":
+                # Arm and gripper publishers need not stamp their samples at
+                # the same instant. Order feedback within each joint stream.
+                samples = [(name, position) for name, position in samples
+                           if stamp >= self._joint_sim_stamps.get(name, -math.inf)]
+                if not samples:
+                    return
+            self._last_joint_sim_time = max(stamp, self._last_joint_sim_time or stamp)
+            for name, pos in samples:
+                previous = self._joint_positions.get(name)
+                if previous is None or abs(previous - pos) > 0.001:
+                    self._joint_stable_since[name] = received
                 self._joint_positions[name] = pos
-            self._joint_state_received_monotonic = time.monotonic()
+                self._joint_received_times[name] = received
+                self._joint_sim_stamps[name] = stamp
+            self._joint_state_received_monotonic = received
+
+    def _fresh_stable_joint_target(
+        self,
+        targets: dict[str, float],
+        *,
+        tolerance: float,
+        stable_for_sec: float = 0.05,
+    ) -> bool:
+        """Return true only for a fresh, stable endpoint with no active goal."""
+        if self.execution_mode != 'simulation' or self._simulation_goal is not None:
+            return False
+        now = time.monotonic()
+        with self._joint_lock:
+            for name, target in targets.items():
+                value = self._joint_positions.get(name)
+                received = self._joint_received_times.get(name, 0.)
+                stable_since = self._joint_stable_since.get(name, now)
+                if (
+                    value is None
+                    or now - received > 1.
+                    or now - stable_since < stable_for_sec
+                    or (
+                        self._angular_joint_error(value, target)
+                        if name in self.arm_joint_names else abs(value - target)
+                    ) > tolerance
+                ):
+                    return False
+        return True
+
+    def _current_simulation_state_is_collision_free(self) -> bool:
+        """Validate the current stable arm state before retaining it as workflow home."""
+
+        if self.execution_mode != "simulation" or self._simulation_goal is not None:
+            return False
+        positions, missing = self._get_arm_joint_positions(timeout_sec=0.2)
+        if positions is None or missing or self._state_validity_client is None:
+            return False
+        targets = dict(zip(self.arm_joint_names, positions, strict=True))
+        if not self._fresh_stable_joint_target(
+            targets, tolerance=0.005, stable_for_sec=0.0
+        ):
+            return False
+        from moveit_msgs.srv import GetStateValidity
+
+        request = GetStateValidity.Request()
+        request.group_name = self.group_name
+        request.robot_state.is_diff = True
+        request.robot_state.joint_state.name = list(self.arm_joint_names)
+        request.robot_state.joint_state.position = positions
+        response = self._wait_future(
+            self._state_validity_client.call_async(request),
+            timeout_sec=3.0,
+            label="retain observed clear pose",
+            timeout_log_level="debug",
+        )
+        return bool(response is not None and response.valid)
 
     def _get_joint_position(self, joint_name: str) -> float | None:
         with self._joint_lock:
+            def fresh(name: str) -> bool:
+                return (self.execution_mode != 'simulation'
+                        or time.monotonic() - self._joint_received_times.get(name, 0) <= 1.0)
+
             exact = self._joint_positions.get(joint_name)
             if exact is not None:
-                return exact
+                return exact if fresh(joint_name) else None
 
             prefix = f"{self.robot_name}_"
             prefixed_name = (
@@ -6106,15 +7257,16 @@ class GazeboPickPlaceController:
             )
             prefixed = self._joint_positions.get(prefixed_name)
             if prefixed is not None:
-                return prefixed
+                return prefixed if fresh(prefixed_name) else None
 
             suffix_matches = [
-                value
+                (name, value)
                 for name, value in self._joint_positions.items()
                 if str(name).endswith(str(joint_name))
             ]
             if len(suffix_matches) == 1:
-                return suffix_matches[0]
+                name, value = suffix_matches[0]
+                return value if fresh(name) else None
             return None
 
     def _get_arm_joint_positions(
@@ -6174,12 +7326,14 @@ class GazeboPickPlaceController:
         if len(targets) != len(self.arm_joint_names):
             return False
 
-        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        duration = (max(float(timeout_sec), getattr(self, '_last_arm_duration_sec', 0.)+2.)
+                    if self.execution_mode == 'simulation' else max(0., float(timeout_sec)))
+        pending = self._motion_pending(duration)
         saw_feedback = False
         last_values: list[float] | None = None
         missing: list[str] = []
 
-        while time.monotonic() < deadline:
+        while pending():
             values, missing = self._get_arm_joint_positions(timeout_sec=0.0)
             if values is not None:
                 saw_feedback = True
@@ -6215,10 +7369,10 @@ class GazeboPickPlaceController:
         *,
         log_miss: bool = True,
     ) -> bool:
-        deadline = time.monotonic() + timeout_sec
+        pending = self._motion_pending(timeout_sec)
         saw_feedback = False
         last_pos = None
-        while self._rclpy.ok() and time.monotonic() < deadline:
+        while self._rclpy.ok() and pending():
             pos = self._get_joint_position(self.gripper_joint)
             if pos is not None:
                 saw_feedback = True
@@ -6400,8 +7554,21 @@ class GazeboPickPlaceController:
             self._log().error("Gripper publisher is not configured")
             return False
 
+        if self._fresh_stable_joint_target(
+            {self.gripper_joint: float(position)}, tolerance=self.gripper_position_tol,
+        ):
+            self._last_command_evidence = {
+                "command_sent": False,
+                "reason": "fresh stable endpoint already observed",
+                "target": float(position),
+                "position": self._get_joint_position(self.gripper_joint),
+            }
+            self._last_failure_message = ""
+            return True
+
         move_time_s = self.gripper_move_time_sec if move_time_s is None else float(move_time_s)
         wait_s = self.gripper_settle_sec if wait_s is None else float(wait_s)
+        require_target = require_target or self.execution_mode == 'simulation'
         if log_target_miss is None:
             log_target_miss = bool(require_target)
 
@@ -6415,12 +7582,19 @@ class GazeboPickPlaceController:
         nsec = int((move_time_s - sec) * 1_000_000_000)
         point.time_from_start = self._Duration(sec=sec, nanosec=nsec)
         traj.points = [point]
+        self._time_joint_target(traj)
 
-        self._gripper_pub.publish(traj)
-        time.sleep(self._scaled_wall_wait_sec(0.05))
-        self._gripper_pub.publish(traj)
+        if self.execution_mode == 'simulation':
+            if not self._send_simulation_joint_trajectory(self.gripper_topic, traj):
+                self._last_failure_message = 'Simulation gripper controller did not acknowledge completion'
+                return False
+        else:
+            self._gripper_pub.publish(traj)
+            time.sleep(self._scaled_wall_wait_sec(0.05))
+            self._gripper_pub.publish(traj)
 
-        feedback_timeout = max(move_time_s + self.gripper_feedback_timeout_pad_sec, 1.0)
+        duration = point.time_from_start.sec + point.time_from_start.nanosec / 1e9
+        feedback_timeout = max(duration + self.gripper_feedback_timeout_pad_sec, 1.0)
         reached = self._wait_for_gripper_target(
             position,
             feedback_timeout,
@@ -6436,8 +7610,13 @@ class GazeboPickPlaceController:
                     f"gripper command did not reach required target {position:.3f}"
                 )
             return False
-        time.sleep(max(0.0, wait_s))
+        self._wait_process_time(max(0.0, wait_s))
         self._last_failure_message = ""
+        self._last_command_evidence = {
+            "command_sent": True,
+            "target": float(position),
+            "position": self._get_joint_position(self.gripper_joint),
+        }
         return True
 
     def _wait_future(
@@ -6448,8 +7627,16 @@ class GazeboPickPlaceController:
         timeout_log_level: str = "error",
     ):
         deadline = time.monotonic() + timeout_sec
-        while self._rclpy.ok() and not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        pending = (self._motion_pending(timeout_sec)
+                   if self.execution_mode == 'simulation' and label.startswith('result:')
+                   else lambda: time.monotonic() < deadline)
+        completed = threading.Event()
+        try:
+            future.add_done_callback(lambda _future: completed.set())
+        except AttributeError:
+            pass
+        while self._rclpy.ok() and not future.done() and pending():
+            completed.wait(0.05)
         if not future.done():
             try:
                 future.cancel()
@@ -6490,8 +7677,8 @@ class GazeboPickPlaceController:
             return
         # `scale` multiplies trajectory duration:
         #   >1.0 => slower, <1.0 => faster, ==1.0 => unchanged.
-        if scale <= 0.0 or abs(scale - 1.0) < 1e-6:
-            return
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError('Trajectory timing scale must be positive and finite')
         joint_traj = solution.joint_trajectory
         if not joint_traj.points:
             return
@@ -6506,6 +7693,84 @@ class GazeboPickPlaceController:
                 point.velocities = [v / scale for v in point.velocities]
             if point.accelerations:
                 point.accelerations = [a / (scale * scale) for a in point.accelerations]
+        self._validate_simulation_trajectory(joint_traj)
+
+    def _sync_part_collision(self, model_name: str, *, attached_link: str | None = None) -> bool:
+        """Synchronize this robot's observed payload before acknowledging custody."""
+        config = getattr(self, "controller_config", {}).get("payload_collision", {})
+        if not config.get("enabled") or self.execution_mode != "simulation":
+            return True
+        from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
+        from moveit_msgs.msg import PlanningSceneComponents
+        from cais_spade_llm.recovery_framework.part_collision import (
+            grasp_point_evidence, observed_part_boxes, part_scene_update,
+        )
+
+        evidence = {"model_name": model_name, "attached_link": attached_link,
+                    "physical_attachment_completed": self._attached_model == model_name,
+                    "collision_scene_acknowledged": False}
+        self._last_command_evidence = {"payload_collision": evidence}
+        if not hasattr(self, "_payload_scene_clients"):
+            self._payload_scene_clients = {
+                "get": self._node.create_client(GetPlanningScene, "/get_planning_scene", callback_group=self._cb_group),
+                "apply": self._node.create_client(ApplyPlanningScene, "/apply_planning_scene", callback_group=self._cb_group),
+            }
+        def call(client, query, label):
+            if not client.wait_for_service(timeout_sec=2.0):
+                raise RuntimeError(f"Payload scene service unavailable: {label}")
+            result = self._wait_future(client.call_async(query), timeout_sec=5.0, label=label)
+            if result is None:
+                raise RuntimeError(f"Payload scene observation/acknowledgement missing: {label}")
+            return result
+        try:
+            # Observe the physical attachment transform directly. Converting a
+            # world pose through MoveIt's delayed robot state can put the payload
+            # far from the gripper during concurrent motion.
+            reference_frame = (
+                f"{self.robot_model_name}::{attached_link}" if attached_link else "world"
+            )
+            evidence["collision_frame"] = attached_link or "world"
+            evidence["observed_reference_frame"] = reference_frame
+            observed = call(self._get_state_client, self._GetEntityState.Request(
+                name=model_name, reference_frame=reference_frame), "payload_pose")
+            if not observed.success:
+                raise ValueError(f"Cannot observe payload {model_name}")
+            rows = observed_part_boxes(model_name, observed.state.pose, support_allowance=(
+                float(config["support_contact_allowance_m"]) if attached_link else 0.0))
+            evidence["collision_objects"] = rows
+            if attached_link:
+                try:
+                    tcp = self._tf_buffer.lookup_transform(
+                        attached_link, self.tcp_link, self._rclpy.time.Time(),
+                    ).transform.translation
+                except self._tf2_ros.TransformException as exc:
+                    raise RuntimeError(f"Cannot observe payload grasp frame: {exc}") from exc
+                evidence.update(grasp_point_evidence(
+                    rows, [tcp.x, tcp.y, tcp.z], self.cartesian_position_tolerance_m,
+                ))
+                if not evidence["payload_at_gripper"]:
+                    raise RuntimeError(f"Observed payload {model_name} is outside the gripper: "
+                                       f"{evidence['tcp_to_payload_distance_m']:.4f} m")
+            current = call(self._payload_scene_clients["get"], GetPlanningScene.Request(
+                components=PlanningSceneComponents(components=(PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+                    | PlanningSceneComponents.WORLD_OBJECT_NAMES | PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS))),
+                "payload_scene_observation").scene
+            touch_links = [name for name in current.allowed_collision_matrix.entry_names
+                           if name.startswith(config["robot_prefix"] + "rg2")]
+            touch_links.extend(self.attach_link_candidates)
+            update = part_scene_update(model_name, rows, attached_link=attached_link, touch_links=touch_links,
+                world_ids={obj.id for obj in current.world.collision_objects},
+                attached_ids={obj.object.id for obj in current.robot_state.attached_collision_objects})
+            response = call(self._payload_scene_clients["apply"], ApplyPlanningScene.Request(scene=update), "payload_scene")
+            if not response.success:
+                raise RuntimeError(f"MoveIt rejected payload scene for {model_name}")
+            evidence.update(collision_scene_acknowledged=True, collision_objects=rows)
+            return True
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+            evidence["error"] = str(exc)
+            self._last_failure_message = str(exc)
+            self._log().error(str(exc))
+            return False
 
     def _attach_part(self, model_name: str) -> bool:
         if not self._link_attacher_enabled:
@@ -6531,7 +7796,8 @@ class GazeboPickPlaceController:
             if response and response.success:
                 self._attached_model = model_name
                 self._attached_link = link_name
-                return True
+                self.clear_motion_preparation()
+                return self._sync_part_collision(model_name, attached_link=link_name)
 
             msg = response.message if response else "no response"
             if "already attached to another link" in str(msg).lower():
@@ -6569,7 +7835,10 @@ class GazeboPickPlaceController:
         if detached_any and self._attached_model == target_model:
             self._attached_model = None
             self._attached_link = None
-        return detached_any
+            self.clear_motion_preparation()
+        if detached_any:
+            return self._sync_part_collision(target_model)
+        return False
 
     def _detach_part(
         self,
@@ -6637,7 +7906,7 @@ class GazeboPickPlaceController:
             if response and response.success:
                 self._attached_model = None
                 self._attached_link = None
-                return True
+                return self._sync_part_collision(target_model)
 
             if response is None:
                 if log_failure:
@@ -6696,18 +7965,75 @@ class GazeboPickPlaceController:
 
         if not self._set_entity_state_for_snap(model_name, state):
             return False
-        if not self._attach_part_to_assembly_board(
-            model_name,
-            destination_location=destination_location,
-        ):
-            return False
+        if destination_location in {"", "assembly_board-v1"}:
+            if not self._attach_part_to_assembly_board(
+                model_name,
+                destination_location=destination_location,
+            ):
+                return False
+            if not self._detach_part_from_assembly_board(model_name, "link"):
+                return False
         if not self._set_entity_state_for_snap(model_name, state):
             return False
+        if not self._verify_snapped_entity_position(
+            model_name,
+            (slot_x, slot_y, float(state.pose.position.z)),
+        ):
+            return False
 
+        if not self._sync_part_collision(model_name):
+            return False
         self._log().info(
             f"snap_to_slot stabilized {model_name} at "
             f"({slot_x:.3f}, {slot_y:.3f}, {state.pose.position.z:.3f})"
         )
+        return True
+
+    def _verify_snapped_entity_position(
+        self,
+        model_name: str,
+        expected_position: tuple[float, float, float],
+    ) -> bool:
+        """Require repeated Gazebo observations at the commanded slot position."""
+        samples = max(
+            1,
+            int(getattr(self, "snap_to_slot_observation_samples", 3) or 3),
+        )
+        interval_sec = max(
+            0.05,
+            _as_float(
+                getattr(self, "snap_to_slot_observation_interval_sec", None),
+                0.1,
+            ),
+        )
+        tolerance_m = max(
+            0.0005,
+            _as_float(
+                getattr(self, "snap_to_slot_position_tolerance_m", None),
+                0.001,
+            ),
+        )
+        for _sample_index in range(samples):
+            self._wait_process_time(interval_sec)
+            observed_position = self._get_entity_world_position(
+                model_name,
+                timeout_log_level="warn",
+            )
+            if observed_position is None:
+                self._log().error(
+                    f"snap_to_slot could not observe {model_name} after attachment"
+                )
+                return False
+            position_error_m = self._xyz_distance(
+                observed_position,
+                expected_position,
+            )
+            if position_error_m > tolerance_m:
+                self._log().error(
+                    f"snap_to_slot observed {model_name} {position_error_m:.4f}m "
+                    f"from its target; tolerance={tolerance_m:.4f}m"
+                )
+                return False
         return True
 
     def _set_entity_state_for_snap(self, model_name: str, state) -> bool:
@@ -6756,7 +8082,7 @@ class GazeboPickPlaceController:
         if not self._attach_client.wait_for_service(timeout_sec=0.5):
             return False
 
-        board_links = [f"anchor_{target_model}", "link"]
+        board_links = ["link"]
         for board_link in board_links:
             self._detach_part_from_assembly_board(target_model, board_link)
 
@@ -6828,6 +8154,78 @@ class GazeboPickPlaceController:
         )
         return bool(response and response.success)
 
+    def _observed_cartesian_endpoint_evidence(self, target) -> dict[str, Any] | None:
+        """Compare the observed tool pose with a commanded Cartesian endpoint."""
+        if not getattr(self, "_last_simulation_controller_succeeded", False):
+            return None
+        observed = self._get_ee_pose()
+        if observed is None:
+            return None
+
+        position_error_m = math.dist(
+            (
+                observed.position.x,
+                observed.position.y,
+                observed.position.z,
+            ),
+            (
+                target.position.x,
+                target.position.y,
+                target.position.z,
+            ),
+        )
+        observed_quaternion = (
+            observed.orientation.x,
+            observed.orientation.y,
+            observed.orientation.z,
+            observed.orientation.w,
+        )
+        target_quaternion = (
+            target.orientation.x,
+            target.orientation.y,
+            target.orientation.z,
+            target.orientation.w,
+        )
+        observed_norm = math.sqrt(sum(value * value for value in observed_quaternion))
+        target_norm = math.sqrt(sum(value * value for value in target_quaternion))
+        if observed_norm <= 1e-12 or target_norm <= 1e-12:
+            return None
+        normalized_dot = sum(
+            observed_value * target_value
+            for observed_value, target_value in zip(
+                observed_quaternion,
+                target_quaternion,
+                strict=True,
+            )
+        ) / (observed_norm * target_norm)
+        orientation_error_rad = 2.0 * math.acos(
+            min(1.0, max(-1.0, abs(normalized_dot)))
+        )
+        position_tolerance_m = self.cartesian_position_tolerance_m
+        orientation_tolerance_rad = self.cartesian_orientation_tolerance_rad
+        return {
+            "observed_cartesian_endpoint": True,
+            "position_error_m": position_error_m,
+            "position_tolerance_m": position_tolerance_m,
+            "orientation_error_rad": orientation_error_rad,
+            "orientation_tolerance_rad": orientation_tolerance_rad,
+            "within_tolerance": (
+                position_error_m <= position_tolerance_m
+                and orientation_error_rad <= orientation_tolerance_rad
+            ),
+        }
+
+    def _wait_for_simulation_cartesian_endpoint(self, target) -> dict[str, Any] | None:
+        """Observe the commanded pose before another primitive consumes TF."""
+        if not getattr(self, "_last_simulation_controller_succeeded", False):
+            return None
+        pending = self._motion_pending(2.0)
+        evidence = self._observed_cartesian_endpoint_evidence(target)
+        while not (evidence and evidence["within_tolerance"]) and pending():
+            time.sleep(0.01)
+            evidence = self._observed_cartesian_endpoint_evidence(target)
+        return evidence
+
     def _cartesian_move(
         self,
         target,
@@ -6837,45 +8235,103 @@ class GazeboPickPlaceController:
         allow_partial: bool = False,
         time_scale: float | None = None,
     ) -> bool:
-        request = self._GetCartesianPath.Request()
-        request.header.frame_id = self.frame_id
-        request.header.stamp = self._node.get_clock().now().to_msg()
-        request.group_name = self.group_name
-        request.link_name = self.ee_link
-        request.waypoints = [target]
-        request.max_step = 0.01
-        request.jump_threshold = 0.0
-        request.avoid_collisions = avoid_collisions
-        request.start_state.is_diff = True
+        planning_started = time.monotonic()
+        solution = None
+        preparation_reason = "not eligible"
+        if avoid_collisions and not allow_partial:
+            solution, preparation_reason = self._consume_prepared_cartesian(target)
+        if solution is None:
+            request = self._GetCartesianPath.Request()
+            request.header.frame_id = self.frame_id
+            request.header.stamp = self._node.get_clock().now().to_msg()
+            request.group_name = self.group_name
+            request.link_name = self.ee_link
+            request.waypoints = [target]
+            request.max_step = 0.01
+            request.jump_threshold = 2.0
+            request.avoid_collisions = avoid_collisions
+            request.start_state.is_diff = True
 
-        future = self._cart_client.call_async(request)
-        response = self._wait_future(future, timeout_sec=10.0, label=f"plan:{label}")
-        if response is None:
-            self._last_failure_message = f"[{label}] planning response timed out"
-            self._log().error(f"[{label}] planning response timed out")
-            return False
-        if response.fraction < min_fraction:
-            self._last_failure_message = (
-                f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
-            )
-            self._log().error(
-                f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
-            )
-            return False
-        if response.fraction < 0.999 and not allow_partial:
-            self._last_failure_message = f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
-            self._log().error(
-                f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
-            )
-            return False
+            future = self._cart_client.call_async(request)
+            response = self._wait_future(future, timeout_sec=10.0, label=f"plan:{label}")
+            self._planning_wall_time_sec += time.monotonic() - planning_started
+            if response is None:
+                self._last_failure_message = f"[{label}] planning response timed out"
+                self._log().error(f"[{label}] planning response timed out")
+                return False
+            if response.fraction < min_fraction:
+                self._last_failure_message = (
+                    f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
+                )
+                self._log().error(
+                    f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
+                )
+                return False
+            if response.fraction < 0.999 and not allow_partial:
+                self._last_failure_message = f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
+                self._log().error(
+                    f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
+                )
+                return False
+            solution = response.solution
+        else:
+            self._planning_wall_time_sec += time.monotonic() - planning_started
 
         exec_goal = self._ExecuteTrajectory.Goal()
         if time_scale is None:
             scale = self.trajectory_time_scale
         else:
             scale = _as_float(time_scale, self.trajectory_time_scale)
-        self._scale_trajectory_timing(response.solution, scale)
-        exec_goal.trajectory = response.solution
+        self._scale_trajectory_timing(solution, scale)
+        if not self._simulation_trajectory_is_collision_free(solution.joint_trajectory):
+            return False
+        endpoint_time = solution.joint_trajectory.points[-1].time_from_start
+        self._trajectory_duration_sec += endpoint_time.sec + endpoint_time.nanosec / 1e9
+        if self.execution_mode == "simulation" and self.arm_trajectory_topic:
+            joint_endpoint_observed = self._send_simulation_joint_trajectory(
+                self.arm_trajectory_topic,
+                solution.joint_trajectory,
+            )
+            controller_endpoint_observed = self._wait_for_simulation_cartesian_endpoint(
+                target
+            )
+            if not (
+                controller_endpoint_observed
+                and controller_endpoint_observed["within_tolerance"]
+            ):
+                detail = self._last_failure_message or "Cartesian endpoint not observed"
+                self._last_failure_message = (
+                    f"[{label}] resource trajectory failed: {detail}; "
+                    f"endpoint={controller_endpoint_observed}"
+                )
+                self._last_command_evidence = {
+                    "command_sent": True,
+                    "controller_endpoint_observed": controller_endpoint_observed,
+                }
+                self._log().error(self._last_failure_message)
+                return False
+            if not joint_endpoint_observed:
+                self._log().warning(
+                    f"[{label}] accepted observed Cartesian endpoint after controller "
+                    "joint-target settling mismatch: "
+                    f"position_error={controller_endpoint_observed['position_error_m']:.6f}m, "
+                    f"orientation_error={controller_endpoint_observed['orientation_error_rad']:.6f}rad"
+                )
+            self._last_failure_message = ""
+            self._last_command_evidence = {
+                "command_sent": True,
+                "controller_endpoint": self.arm_trajectory_topic.removesuffix(
+                    "/joint_trajectory"
+                )
+                + "/follow_joint_trajectory",
+                "preparation_reused": preparation_reason.startswith("reused"),
+                "preparation_result": preparation_reason,
+                "motion_path_validation": deepcopy(getattr(self, "_last_path_validation", None)),
+                "controller_endpoint_observed": controller_endpoint_observed,
+            }
+            return True
+
+        exec_goal.trajectory = solution
 
         send_future = self._exec_client.send_goal_async(exec_goal)
         goal_handle = self._wait_future(send_future, timeout_sec=10.0, label=f"send:{label}")
@@ -6884,8 +8340,19 @@ class GazeboPickPlaceController:
             self._log().error(f"[{label}] trajectory goal rejected by execute action")
             return False
 
+        self._note_motion_dispatch()
+
+        if self.execution_mode == 'simulation':
+            self._simulation_goal = goal_handle
+            self._start_queued_motion_preparation(solution, target.orientation)
         result_future = goal_handle.get_result_async()
-        result = self._wait_future(result_future, timeout_sec=30.0, label=f"result:{label}")
+        try:
+            result = self._wait_future(result_future, timeout_sec=30.0, label=f"result:{label}")
+        finally:
+            if self.execution_mode == 'simulation':
+                if goal_handle.status not in (4, 5, 6):
+                    self._cancel_simulation_goal()
+                self._simulation_goal = None
         code = result.result.error_code.val if result else None
         if code != 1:
             err_msg = self._format_moveit_error(code)
@@ -6893,6 +8360,11 @@ class GazeboPickPlaceController:
             self._log().error(self._last_failure_message)
             return False
         self._last_failure_message = ""
+        self._last_command_evidence = {
+            "command_sent": True,
+            "preparation_reused": preparation_reason.startswith("reused"),
+            "preparation_result": preparation_reason,
+        }
         return True
 
     def _move_xy_at_z(
@@ -7012,13 +8484,22 @@ class GazeboPickPlaceController:
             "Lift after place",
         )
         if not lift_ok:
-            lift_ok = self._cartesian_move(
-                self._make_pose(float(slot_x), float(slot_y), float(travel_z), orientation),
-                "Lift after place (no-collision)",
-                avoid_collisions=False,
-                min_fraction=0.70,
-                allow_partial=True,
+            lift_target = self._make_pose(
+                float(slot_x), float(slot_y), float(travel_z), orientation
             )
+            if self.execution_mode == "simulation":
+                lift_ok = self._execute_simulation_motion_plan(
+                    label="Lift after place",
+                    target_pose=lift_target,
+                )
+            else:
+                lift_ok = self._cartesian_move(
+                    lift_target,
+                    "Lift after place (no-collision)",
+                    avoid_collisions=False,
+                    min_fraction=0.70,
+                    allow_partial=True,
+                )
 
         if lift_ok:
             return {"success": True, "message": "released part and lifted clear"}
@@ -7048,6 +8529,12 @@ class GazeboPickPlaceController:
         if math.isclose(float(current.position.x), float(target_x), abs_tol=1e-6) and math.isclose(
             float(current.position.y), float(target_y), abs_tol=1e-6
         ):
+            if self.execution_mode == "simulation":
+                return self._execute_simulation_motion_plan(
+                    label=label_prefix,
+                    target_pose=self._make_pose(target_x, target_y, z, orientation),
+                    time_scale=time_scale or 1.0,
+                )
             self._log().warn(
                 f"[{label_prefix}] direct Cartesian move failed with no XY delta; "
                 "retrying direct no-collision fallback"
@@ -7061,6 +8548,16 @@ class GazeboPickPlaceController:
                 time_scale=time_scale,
             )
 
+        if self.execution_mode == "simulation":
+            self._log().warn(
+                f"[{label_prefix}] direct Cartesian move failed; retrying "
+                "collision-free free-space planning"
+            )
+            return self._execute_simulation_motion_plan(
+                label=label_prefix,
+                target_pose=self._make_pose(target_x, target_y, z, orientation),
+                time_scale=time_scale or 1.0,
+            )
         self._log().warn(
             f"[{label_prefix}] direct Cartesian move failed; retrying staged XY fallback"
         )
@@ -7211,14 +8708,16 @@ class UR5eGazeboController(GazeboPickPlaceController):
         controller_config: dict[str, Any] | None = None,
         named_positions: dict[str, Any] | None = None,
         execution_mode: str = "simulation",
+        arm_joint_names: list[str] | None = None,
+        node_name: str | None = None,
     ) -> None:
         super().__init__(
             robot_name="ur5e",
-            node_name=f"ur5e_controller_{os.getpid()}",
+            node_name=node_name or f"ur5e_controller_{os.getpid()}",
             controller_config=controller_config or {},
             named_positions=named_positions,
             execution_mode=execution_mode,
-            arm_joint_names=UR5E_JOINT_NAMES,
+            arm_joint_names=arm_joint_names or UR5E_JOINT_NAMES,
             arm_trajectory_topic=trajectory_topic,
             joint_states_topic=joint_states_topic,
         )

@@ -1,4 +1,4 @@
-"""Read saved Gazebo delivery evidence without executing or rewriting anything."""
+"""Read recovery evidence and archive only on an explicit operator action."""
 
 from __future__ import annotations
 
@@ -9,14 +9,17 @@ from nicegui import ui
 
 from cais_spade_llm.recovery_framework import read_json
 from cais_spade_llm.recovery_framework.delivery import RUN_DIRECTORY
+from cais_spade_llm.recovery_framework.reports import archive_latest
 
 
-def render_gazebo_delivery_runs(directory: Path = RUN_DIRECTORY) -> None:
+def render_gazebo_delivery_runs(directory: Path = RUN_DIRECTORY, *, environment: bool = False) -> None:
     """Display recorded configuration, acknowledged transitions, and incomplete outcomes."""
-    with ui.expansion('Gazebo delivery runs', icon='precision_manufacturing').classes('w-full'):
-        ui.label('Recorded Gazebo evidence. Selecting a report performs reads only.').classes('text-sm')
+    title = 'Environmental runs' if environment else 'Gazebo delivery runs'
+    with ui.expansion(title, icon='precision_manufacturing').classes('w-full'):
+        ui.label(f'Recorded {"environmental" if environment else "Gazebo"} evidence. Selecting a report performs reads only.').classes('text-sm')
         selector = ui.select({}, label='Saved Gazebo run').classes('w-full')
         content = ui.column().classes('w-full')
+        displayed_run = {'run_id': None}
 
         def display() -> None:
             content.clear()
@@ -25,15 +28,18 @@ def render_gazebo_delivery_runs(directory: Path = RUN_DIRECTORY) -> None:
             with content:
                 try:
                     report = read_json(selector.value)
-                    if report.get('schema_version') != 1 or report.get('evidence') != 'gazebo':
+                    displayed_run['run_id'] = report.get('run_id')
+                    if (not environment and (report.get('schema_version') != 1 or report.get('evidence') != 'gazebo')):
                         raise ValueError('Unsupported Gazebo report format')
+                    if environment and not {'outcome', 'models', 'transitions'} <= report.keys():
+                        raise ValueError('Unsupported environmental report format')
                     ui.label(f"Outcome: {report['outcome']['status']}").classes('font-semibold')
                     if report['outcome'].get('reason'):
                         ui.label(report['outcome']['reason']).classes('text-sm')
                     rows = [{'revision': record['revision'], 'task': record['task']['event_name'],
                              'resource': record['task']['resource_id'],
                              'part': record['acknowledgement']['observations']['part_name']}
-                            for record in report['transitions']]
+                            for record in report['transitions']] if not environment else []
                     ui.table(columns=[{'name': key, 'label': key, 'field': key}
                                       for key in ('revision', 'task', 'resource', 'part')],
                              rows=rows, row_key='revision').classes('w-full')
@@ -43,10 +49,24 @@ def render_gazebo_delivery_runs(directory: Path = RUN_DIRECTORY) -> None:
                     ui.label(f'Gazebo report unavailable: {exc}').classes('text-amber-700')
 
         def refresh() -> None:
-            selector.options = {str(path): path.parent.name for path in sorted(directory.glob('*/run.json'))}
+            paths = sorted(directory.glob('*/run.json')) + sorted(directory.glob('archive/*/run.json'))
+            selector.options = {str(path): path.parent.name for path in paths}
+            if not selector.value and (directory / 'latest/run.json').exists():
+                selector.value = str(directory / 'latest/run.json')
             selector.update()
             display()
 
+        def archive() -> None:
+            try:
+                if selector.value != str(directory / 'latest/run.json') or not displayed_run['run_id']:
+                    raise ValueError('Select the latest run before archiving')
+                path = archive_latest(directory, expected_run_id=displayed_run['run_id'])
+                ui.notify(f'Archived {path.parent.name}')
+                refresh()
+            except (OSError, ValueError) as exc:
+                ui.notify(str(exc), type='warning')
+
         selector.on_value_change(display)
         ui.button('Refresh Gazebo reports', on_click=refresh, icon='refresh')
+        ui.button('Archive this run', on_click=archive, icon='archive')
         refresh()

@@ -29,6 +29,7 @@
 */
 
 #include <gazebo/common/Plugin.hh>
+#include <gazebo/common/Events.hh>
 #include <gazebo/physics/Entity.hh>
 #include <gazebo/physics/Light.hh>
 #include <gazebo/physics/Link.hh>
@@ -39,6 +40,12 @@
 #include <gazebo_ros/node.hpp>
 #include <memory>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <deque>
+#include <functional>
+#include <future>
+#include <mutex>
 
 #include "gazebo_ros/conversions/builtin_interfaces.hpp"
 #include "gazebo_ros/conversions/geometry_msgs.hpp"
@@ -67,6 +74,25 @@ public:
   void Detach(
     linkattacher_msgs::srv::DetachLink::Request::SharedPtr _req,
     linkattacher_msgs::srv::DetachLink::Response::SharedPtr _res);
+
+  void QueueAttach(
+    linkattacher_msgs::srv::AttachLink::Request::SharedPtr request,
+    linkattacher_msgs::srv::AttachLink::Response::SharedPtr response);
+  void QueueDetach(
+    linkattacher_msgs::srv::DetachLink::Request::SharedPtr request,
+    linkattacher_msgs::srv::DetachLink::Response::SharedPtr response);
+  bool RunOnPhysicsThread(std::function<void()> operation);
+  void OnUpdate();
+
+  struct PendingCommand {
+    // 0: pending, 1: running, 2: cancelled. A timed-out pending operation never runs.
+    std::atomic<int> state{0};
+    std::function<void()> operation;
+    std::promise<void> completion;
+  };
+  std::mutex command_mutex_;
+  std::deque<std::shared_ptr<PendingCommand>> commands_;
+  gazebo::event::ConnectionPtr update_connection_;
 
   // World pointer from Gazebo.
   gazebo::physics::WorldPtr world_;
@@ -101,18 +127,93 @@ void GazeboLinkAttacher::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr 
   // ROS2 NODE:
   impl_->ros_node_ = gazebo_ros::Node::Get(_sdf);
 
+  impl_->update_connection_ = gazebo::event::Events::ConnectWorldUpdateBegin(
+    std::bind(&GazeboLinkAttacherPrivate::OnUpdate, impl_.get()));
+
   // ROS2 SERVICE SERVERS:
   impl_->attach_link_service_ =
     impl_->ros_node_->create_service<linkattacher_msgs::srv::AttachLink>(
     "ATTACHLINK", std::bind(
-      &GazeboLinkAttacherPrivate::Attach, impl_.get(),
+      &GazeboLinkAttacherPrivate::QueueAttach, impl_.get(),
       std::placeholders::_1, std::placeholders::_2));
   impl_->detach_link_service_ =
     impl_->ros_node_->create_service<linkattacher_msgs::srv::DetachLink>(
     "DETACHLINK", std::bind(
-      &GazeboLinkAttacherPrivate::Detach, impl_.get(),
+      &GazeboLinkAttacherPrivate::QueueDetach, impl_.get(),
       std::placeholders::_1, std::placeholders::_2));
 
+}
+
+bool GazeboLinkAttacherPrivate::RunOnPhysicsThread(std::function<void()> operation)
+{
+  auto command = std::make_shared<PendingCommand>();
+  command->operation = std::move(operation);
+  auto completed = command->completion.get_future();
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    commands_.push_back(command);
+  }
+  if (completed.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    int pending = 0;
+    if (command->state.compare_exchange_strong(pending, 2)) {
+      return false;
+    }
+    // Already executing: retain the response until the physics mutation completes.
+    completed.wait();
+  }
+  completed.get();
+  return true;
+}
+
+void GazeboLinkAttacherPrivate::OnUpdate()
+{
+  std::deque<std::shared_ptr<PendingCommand>> commands;
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    commands.swap(commands_);
+  }
+  for (const auto &command : commands) {
+    int pending = 0;
+    if (!command->state.compare_exchange_strong(pending, 1)) {
+      continue;
+    }
+    try {
+      command->operation();
+      command->completion.set_value();
+    } catch (...) {
+      command->completion.set_exception(std::current_exception());
+    }
+  }
+}
+
+void GazeboLinkAttacherPrivate::QueueAttach(
+  linkattacher_msgs::srv::AttachLink::Request::SharedPtr request,
+  linkattacher_msgs::srv::AttachLink::Response::SharedPtr response)
+{
+  try {
+    if (!RunOnPhysicsThread([this, request, response]() { Attach(request, response); })) {
+      response->success = false;
+      response->message = "Attachment cancelled: Gazebo physics did not acknowledge the request.";
+    }
+  } catch (const std::exception &error) {
+    response->success = false;
+    response->message = error.what();
+  }
+}
+
+void GazeboLinkAttacherPrivate::QueueDetach(
+  linkattacher_msgs::srv::DetachLink::Request::SharedPtr request,
+  linkattacher_msgs::srv::DetachLink::Response::SharedPtr response)
+{
+  try {
+    if (!RunOnPhysicsThread([this, request, response]() { Detach(request, response); })) {
+      response->success = false;
+      response->message = "Detachment cancelled: Gazebo physics did not acknowledge the request.";
+    }
+  } catch (const std::exception &error) {
+    response->success = false;
+    response->message = error.what();
+  }
 }
 
 void GazeboLinkAttacherPrivate::Attach(
@@ -159,7 +260,11 @@ void GazeboLinkAttacherPrivate::Attach(
     return;
   }
 
-  // Prevent a single link from being attached to multiple links at once.
+  // The assembly carrier is an attachment hub: its one invisible link retains
+  // both fixtures and every assembled component. Other links remain exclusive,
+  // so a gripper or payload cannot hold multiple attachments at once.
+  const bool first_allows_multiple =
+    _req->model1_name == "assembly_board_v1" && _req->link1_name == "link";
   for (const auto &existing : GV_joints) {
     bool first_busy =
       (existing.model1 == _req->model1_name && existing.link1 == _req->link1_name) ||
@@ -167,33 +272,29 @@ void GazeboLinkAttacherPrivate::Attach(
     bool second_busy =
       (existing.model1 == _req->model2_name && existing.link1 == _req->link2_name) ||
       (existing.model2 == _req->model2_name && existing.link2 == _req->link2_name);
-    if (first_busy || second_busy) {
+    if (second_busy || (first_busy && !first_allows_multiple)) {
       _res->success = false;
       _res->message = "One or both links are already attached to another link.";
       return;
     }
   }
 
-  // Create a fixed joint between the two links:
+  // The nominal workflow finishes on this static carrier. Freeze an assembled
+  // component and remove its contact response so conservative demonstration
+  // collision envelopes cannot push the visible mesh off its configured slot.
+  if (first_allows_multiple) {
+    link2->SetCollideMode("none");
+    link2->SetGravityMode(false);
+  }
+
+  // A native fixed joint records the links' current relative position and
+  // rotation when Model::CreateJoint attaches them. This prevents a payload
+  // from being pulled toward a revolute anchor when the constraint starts.
   std::string joint_name = _req->model1_name + "_" + _req->link1_name + "_" + _req->model2_name + "_" + _req->link2_name +
                            "_joint_" + std::to_string(GV_joint_counter++);
-  gazebo::physics::JointPtr joint = model1->CreateJoint(joint_name, "revolute", link1, link2);
-  // Preserve the current grasp geometry instead of snapping link2 to link1 origin.
-  const ignition::math::Pose3d link1_world_pose = link1->WorldPose();
-  const ignition::math::Pose3d link2_world_pose = link2->WorldPose();
-  const ignition::math::Pose3d relative_pose = link1_world_pose.Inverse() * link2_world_pose;
-  joint->Attach(link1, link2);
-  joint->Load(link1, link2, relative_pose);
+  gazebo::physics::JointPtr joint = model1->CreateJoint(joint_name, "fixed", link1, link2);
   joint->SetProvideFeedback(true);
-
-  joint->SetAxis(0, ignition::math::Vector3d(1, 0, 0));
-  joint->SetUpperLimit(0, 0);
-  joint->SetLowerLimit(0, 0);
-  joint->SetEffortLimit(0, 0);
-  joint->SetDamping(1, 1.0);
-
   joint->Init();
-  model1->Update();
 
   JointSTRUCT joint_entry;
   joint_entry.model1 = _req->model1_name;

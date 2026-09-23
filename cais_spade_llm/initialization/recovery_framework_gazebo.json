@@ -3,6 +3,8 @@
     {
       "resource_id": "ur5e-1",
       "prefix": "ur5e_1_",
+      "clearance_observation_link": "wrist_3_link",
+      "tf_lookup_timeout_sec": 5.0,
       "base_xyz": [
         -6.0,
         1.1,
@@ -25,6 +27,8 @@
     {
       "resource_id": "ur5e-2",
       "prefix": "ur5e_2_",
+      "clearance_observation_link": "wrist_3_link",
+      "tf_lookup_timeout_sec": 5.0,
       "base_xyz": [
         -2.6,
         1.1,
@@ -47,6 +51,8 @@
     {
       "resource_id": "ur5e-3",
       "prefix": "ur5e_3_",
+      "clearance_observation_link": "wrist_3_link",
+      "tf_lookup_timeout_sec": 5.0,
       "base_xyz": [
         0.0,
         0.5,
@@ -69,6 +75,9 @@
     {
       "resource_id": "ur5e-4",
       "prefix": "ur5e_4_",
+      "clearance_observation_link": "wrist_3_link",
+      "tf_lookup_timeout_sec": 5.0,
+      "retain_observed_clear_pose_as_home": false,
       "base_xyz": [
         0.0,
         -0.5,
@@ -80,7 +89,7 @@
         0.0
       ],
       "initial_joint_positions": {
-        "shoulder_pan_joint": 2.232023449619252,
+        "shoulder_pan_joint": -0.2705423585528064,
         "shoulder_lift_joint": -1.5960064086763361,
         "elbow_joint": 1.615863605277993,
         "wrist_1_joint": -1.592172956911188,
@@ -105,13 +114,14 @@
       "side_access_link": "side_access",
       "workholding_link": "workholding",
       "KMR_docking_pose": [
-        -6.85,
-        2.15,
-        0.0,
-        0.0,
-        0.0,
+        -6.65,
+        2.2,
+        0,
+        0,
+        0,
         1.5707963267948966
       ],
+      "KMR_departure_clearance_m": 0.35,
       "nominal_parts": [
         "KET4_Square_4mm",
         "KET8_Square_8mm",
@@ -151,7 +161,7 @@
         -1.5707963267948966
       ],
       "model_reference": "https://bantamtools.com/products/bantam-tools-desktop-cnc-milling-machine",
-      "model_assumptions": "Simplified interior, stand, and open front/side robot-loading access are simulation adaptations.",
+      "model_assumptions": "Simplified interior, stand, and open front/side/top robot-loading access are simulation adaptations.",
       "KMR_access": {
         "resource_id": "KMR",
         "approach_pose": [
@@ -177,6 +187,13 @@
       },
       "handling_robot_access": {
         "resource_id": "ur5e-1",
+        "grasp_orientation_xyzw": [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "tcp_offset_z_m": -0.218,
         "approach_pose": [
           -6.08,
           1.6400000000000001,
@@ -196,7 +213,7 @@
           0.0
         ],
         "pose_format": "xyz_xyzw",
-        "validation_scope": "Collision-aware IK and Cartesian approach; not executed handling."
+        "validation_scope": "Executed collision-aware Cartesian approach and retreat."
       },
       "process_capabilities": {
         "trim": {
@@ -207,12 +224,60 @@
         }
       },
       "current_configuration": {
-        "tool": null,
-        "workholding": null,
-        "program": null,
+        "tool": "simulation_trim_tool",
+        "workholding": "simulation_peg_fixture",
+        "program": {
+          "validated": true,
+          "effects": [
+            {
+              "process": "trim",
+              "result": "square"
+            }
+          ],
+          "required_configuration": {
+            "tool": "simulation_trim_tool",
+            "workholding": "simulation_peg_fixture"
+          }
+        },
         "parameters": {},
-        "evidence": "Machining setup and controller evidence not provided"
-      }
+        "evidence": "Validated nominal Gazebo demonstration program"
+      },
+      "program_options": {
+        "circle": {
+          "tool": "simulation_trim_tool",
+          "workholding": "simulation_peg_fixture",
+          "program": {
+            "validated": true,
+            "effects": [
+              {
+                "process": "trim",
+                "result": "circle"
+              }
+            ],
+            "required_configuration": {
+              "tool": "simulation_trim_tool",
+              "workholding": "simulation_peg_fixture"
+            }
+          },
+          "parameters": {},
+          "evidence": "Validated nominal Gazebo demonstration program"
+        }
+      },
+      "simulation_process": {
+        "processing_time_sec": 5.0,
+        "observation_interval_sec": 0.25,
+        "clock_topic": "/clock",
+        "completion_requires": [
+          "correct part remains at workholding",
+          "handling robot access is clear",
+          "configured simulation time has elapsed"
+        ]
+      },
+      "physical_process": {
+        "configured": false,
+        "processing_time_sec": null
+      },
+      "KMR_process_clearance_m": 0.12
     },
     {
       "resource_id": "M2",
@@ -229,13 +294,14 @@
       "side_access_link": "side_access",
       "workholding_link": "workholding",
       "KMR_docking_pose": [
-        -3.45,
-        2.15,
+        -3.25,
+        2.2,
         0.0,
         0.0,
         0.0,
         1.5707963267948966
       ],
+      "KMR_departure_clearance_m": 0.35,
       "nominal_parts": [
         "RGOCG4-50_Round_4mm",
         "RGOCG8-50_8mm",
@@ -275,7 +341,7 @@
         -1.5707963267948966
       ],
       "model_reference": "https://bantamtools.com/products/bantam-tools-desktop-cnc-milling-machine",
-      "model_assumptions": "Simplified interior, stand, and open front/side robot-loading access are simulation adaptations.",
+      "model_assumptions": "Simplified interior, stand, and open front/side/top robot-loading access are simulation adaptations.",
       "KMR_access": {
         "resource_id": "KMR",
         "approach_pose": [
@@ -301,6 +367,13 @@
       },
       "handling_robot_access": {
         "resource_id": "ur5e-2",
+        "grasp_orientation_xyzw": [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "tcp_offset_z_m": -0.218,
         "approach_pose": [
           -2.68,
           1.6400000000000001,
@@ -320,7 +393,7 @@
           0.0
         ],
         "pose_format": "xyz_xyzw",
-        "validation_scope": "Collision-aware IK and Cartesian approach; not executed handling."
+        "validation_scope": "Executed collision-aware Cartesian approach and retreat."
       },
       "process_capabilities": {
         "trim": {
@@ -331,12 +404,39 @@
         }
       },
       "current_configuration": {
-        "tool": null,
-        "workholding": null,
-        "program": null,
+        "tool": "simulation_trim_tool",
+        "workholding": "simulation_peg_fixture",
+        "program": {
+          "validated": true,
+          "effects": [
+            {
+              "process": "trim",
+              "result": "circle"
+            }
+          ],
+          "required_configuration": {
+            "tool": "simulation_trim_tool",
+            "workholding": "simulation_peg_fixture"
+          }
+        },
         "parameters": {},
-        "evidence": "Machining setup and controller evidence not provided"
-      }
+        "evidence": "Validated nominal Gazebo demonstration program"
+      },
+      "simulation_process": {
+        "processing_time_sec": 5.0,
+        "observation_interval_sec": 0.25,
+        "clock_topic": "/clock",
+        "completion_requires": [
+          "correct part remains at workholding",
+          "handling robot access is clear",
+          "configured simulation time has elapsed"
+        ]
+      },
+      "physical_process": {
+        "configured": false,
+        "processing_time_sec": null
+      },
+      "KMR_process_clearance_m": 0.12
     }
   ],
   "minimum_station_gap": 1.0,
@@ -352,7 +452,7 @@
     "size": [
       1.25,
       1.0,
-      1.2
+      0.67
     ],
     "KMR_docking_pose": [
       -8.24,
@@ -362,11 +462,155 @@
       0.0,
       1.5707963267948966
     ],
+    "KMR_pick_docking_poses": {
+      "KET4_Square_4mm": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "KET8_Square_8mm": [
+        -8.24,
+        2.41,
+        1.5707963267948966
+      ],
+      "KET12_Square_12mm": [
+        -8.24,
+        2.69,
+        1.5707963267948966
+      ],
+      "KET16_Square_16mm": [
+        -8.24,
+        2.97,
+        1.5707963267948966
+      ],
+      "RGOCG4-50_Round_4mm": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "RGOCG8-50_8mm": [
+        -8.24,
+        2.41,
+        1.5707963267948966
+      ],
+      "RGOCG12-50_12mm": [
+        -8.24,
+        2.69,
+        1.5707963267948966
+      ],
+      "RGOCG16-50_16mm": [
+        -8.24,
+        2.97,
+        1.5707963267948966
+      ]
+    },
+    "KMR_pick_orientations_xyzw": {
+      "KET4_Square_4mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "KET8_Square_8mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "KET12_Square_12mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "KET16_Square_16mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "RGOCG4-50_Round_4mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "RGOCG8-50_8mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "RGOCG12-50_12mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "RGOCG16-50_16mm": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ]
+    },
+    "KMR_pick_approach_axes": {
+      "KET4_Square_4mm": [
+        2
+      ],
+      "KET8_Square_8mm": [
+        2
+      ],
+      "KET12_Square_12mm": [
+        2
+      ],
+      "KET16_Square_16mm": [
+        2
+      ],
+      "RGOCG4-50_Round_4mm": [
+        2
+      ],
+      "RGOCG8-50_8mm": [
+        2
+      ],
+      "RGOCG12-50_12mm": [
+        2
+      ],
+      "RGOCG16-50_16mm": [
+        2
+      ]
+    },
+    "KMR_pick_approach_clearance_m": {
+      "KET4_Square_4mm": 0.07,
+      "KET8_Square_8mm": 0.07,
+      "KET12_Square_12mm": 0.07,
+      "KET16_Square_16mm": 0.07,
+      "RGOCG4-50_Round_4mm": 0.07,
+      "RGOCG8-50_8mm": 0.07,
+      "RGOCG12-50_12mm": 0.07,
+      "RGOCG16-50_16mm": 0.07
+    },
     "slots": {
       "KET4_Square_4mm": [
         -8.95,
         1.88,
-        1.165,
+        0.645,
         0.0,
         0.0,
         1.57079632679
@@ -374,7 +618,7 @@
       "KET8_Square_8mm": [
         -8.95,
         2.16,
-        1.165,
+        0.645,
         0.0,
         0.0,
         1.57079632679
@@ -382,7 +626,7 @@
       "KET12_Square_12mm": [
         -8.95,
         2.44,
-        1.165,
+        0.645,
         0.0,
         0.0,
         1.57079632679
@@ -390,13 +634,13 @@
       "KET16_Square_16mm": [
         -8.95,
         2.72,
-        1.165,
+        0.645,
         0.0,
         0.0,
         1.57079632679
       ],
       "RGOCG4-50_Round_4mm": [
-        -8.95,
+        -8.77,
         1.88,
         0.645,
         0.0,
@@ -404,7 +648,7 @@
         1.57079632679
       ],
       "RGOCG8-50_8mm": [
-        -8.95,
+        -8.77,
         2.16,
         0.645,
         0.0,
@@ -412,7 +656,7 @@
         1.57079632679
       ],
       "RGOCG12-50_12mm": [
-        -8.95,
+        -8.77,
         2.44,
         0.645,
         0.0,
@@ -420,7 +664,7 @@
         1.57079632679
       ],
       "RGOCG16-50_16mm": [
-        -8.95,
+        -8.77,
         2.72,
         0.645,
         0.0,
@@ -431,7 +675,7 @@
     "kitting_trays": [
       {
         "parts": "KET",
-        "surface_z": 1.165,
+        "surface_z": 0.645,
         "capacity": 4
       },
       {
@@ -439,7 +683,81 @@
         "surface_z": 0.645,
         "capacity": 4
       }
-    ]
+    ],
+    "KMR_pick_arm_configurations": {
+      "KET4_Square_4mm": [
+        -4.28e-08,
+        0.9684402263,
+        8.86e-08,
+        -1.0292177427,
+        -8.02e-08,
+        1.1439346844,
+        4.06e-08
+      ],
+      "KET8_Square_8mm": [
+        -3.86e-08,
+        0.9684402263,
+        7.98e-08,
+        -1.0292177427,
+        -7.22e-08,
+        1.1439346844,
+        3.65e-08
+      ],
+      "KET12_Square_12mm": [
+        -3.86e-08,
+        0.9684402263,
+        7.98e-08,
+        -1.0292177427,
+        -7.22e-08,
+        1.1439346844,
+        3.65e-08
+      ],
+      "KET16_Square_16mm": [
+        -3.86e-08,
+        0.9684402263,
+        7.98e-08,
+        -1.0292177427,
+        -7.22e-08,
+        1.1439346844,
+        3.65e-08
+      ],
+      "RGOCG4-50_Round_4mm": [
+        6e-10,
+        0.6033002789,
+        -9e-10,
+        -1.7207585463,
+        7e-10,
+        0.8175338284,
+        -5e-10
+      ],
+      "RGOCG8-50_8mm": [
+        1e-09,
+        0.6033002789,
+        -1.4e-09,
+        -1.7207585463,
+        1.1e-09,
+        0.8175338284,
+        -8e-10
+      ],
+      "RGOCG12-50_12mm": [
+        1e-09,
+        0.6033002789,
+        -1.4e-09,
+        -1.7207585463,
+        1.1e-09,
+        0.8175338284,
+        -8e-10
+      ],
+      "RGOCG16-50_16mm": [
+        1e-09,
+        0.6033002789,
+        -1.4e-09,
+        -1.7207585463,
+        1.1e-09,
+        0.8175338284,
+        -8e-10
+      ]
+    }
   },
   "Conveyor": {
     "world_pose": [
@@ -453,7 +771,19 @@
     "length": 6.0,
     "width": 0.3,
     "surface_height": 1.015,
-    "transport_enabled": false,
+    "transport_enabled": true,
+    "simulation_transport": {
+      "profile": "fastest_measured_passing",
+      "speed_mps": 2.0,
+      "acceleration_mps2": 1.0,
+      "benchmarked_speed_mps": [
+        0.5,
+        1.0,
+        2.0
+      ],
+      "clock_topic": "/clock",
+      "control": "continuous observed entity transport"
+    },
     "output_nest_pose": [
       -0.78,
       0.5,
@@ -531,7 +861,19 @@
     ],
     "capacity": 4,
     "initial_state": "empty",
-    "transport_enabled": false,
+    "transport_enabled": true,
+    "simulation_transport": {
+      "profile": "fastest_measured_passing",
+      "speed_mps": 0.5,
+      "acceleration_mps2": 1.0,
+      "benchmarked_speed_mps": [
+        0.1,
+        0.25,
+        0.5
+      ],
+      "clock_topic": "/clock",
+      "control": "continuous observed zone transport"
+    },
     "handling_robot": "ur5e-3",
     "normal_input_resource": "Conveyor",
     "nominal_grasps_per_machined_part": 1,
@@ -558,8 +900,8 @@
     "guide_clear_width_m": 0.026,
     "zone_pitch": 0.12,
     "zone_capacity": 1,
-    "control_implemented": false,
-    "sensor_feedback_enabled": false,
+    "control_implemented": true,
+    "sensor_feedback_enabled": true,
     "zones": [
       {
         "zone": 1,
@@ -578,7 +920,7 @@
         "sensor_visual": "zone_1_photoeye",
         "stop_collision": "zone_1_stop",
         "initial_stop_state": "retracted",
-        "control_implemented": false,
+        "control_implemented": true,
         "downstream_zone": 2
       },
       {
@@ -598,7 +940,7 @@
         "sensor_visual": "zone_2_photoeye",
         "stop_collision": "zone_2_stop",
         "initial_stop_state": "retracted",
-        "control_implemented": false,
+        "control_implemented": true,
         "downstream_zone": 3
       },
       {
@@ -618,7 +960,7 @@
         "sensor_visual": "zone_3_photoeye",
         "stop_collision": "zone_3_stop",
         "initial_stop_state": "retracted",
-        "control_implemented": false,
+        "control_implemented": true,
         "downstream_zone": 4
       },
       {
@@ -638,7 +980,7 @@
         "sensor_visual": "zone_4_photoeye",
         "stop_collision": "zone_4_stop",
         "initial_stop_state": "retracted",
-        "control_implemented": false,
+        "control_implemented": true,
         "downstream_zone": null
       }
     ],
@@ -709,7 +1051,20 @@
         0.0
       ]
     },
-    "handling_robot": "ur5e-4"
+    "handling_robot": "ur5e-4",
+    "handling_robot_access": {
+      "resource_id": "ur5e-4",
+      "grasp_orientation_xyzw": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "tcp_offset_z_m": -0.218,
+      "approach_height_m": 0.12,
+      "pose_format": "xyz_xyzw",
+      "validation_scope": "Collision-aware free-space approach followed by a vertical Cartesian grasp."
+    }
   },
   "Exit": {
     "world_pose": [
@@ -777,14 +1132,15 @@
     "gripper_stroke_m": 0.11,
     "mount_verified": false,
     "parked_arm_configuration": [
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0
+      0.0,
+      -0.07,
+      0.0,
+      -1.62,
+      0.0,
+      0.54,
+      0.0
     ],
+    "parked_pose_role": "Storage pick-ready and base-safe home",
     "arm_joint_names": [
       "joint_a1",
       "joint_a2",
@@ -807,17 +1163,18 @@
       "angular_acceleration_radps2": 1.0,
       "docking_linear_speed_mps": 0.4,
       "docking_slow_distance_m": 0.2,
+      "docking_position_gain_per_sec": 4.0,
       "simulation_speed_override": true,
       "arm_parking_duration_sec": 1.0,
       "arm_hold_duration_sec": 3600.0,
       "arm_parked_tolerance_rad": 0.075,
       "minimum_in_place_angular_speed_radps": 0.1,
-      "position_tolerance_m": 0.03,
+      "position_tolerance_m": 0.005,
       "yaw_tolerance_rad": 0.035,
       "control_rate_hz": 20.0,
-      "odometry_timeout_sec": 0.5,
+      "odometry_timeout_sec": 0.4,
       "arm_state_timeout_sec": 2.0,
-      "command_timeout_sec": 0.25,
+      "command_timeout_sec": 0.1,
       "waypoint_timeout_sec": 60.0
     },
     "predefined_routes": [
@@ -843,18 +1200,13 @@
             1.5707963267948966
           ],
           [
-            -8.24,
-            3.1,
-            1.5707963267948966
-          ],
-          [
-            -6.85,
-            3.1,
-            1.5707963267948966
-          ],
-          [
-            -6.85,
+            -7.45,
             2.15,
+            1.5707963267948966
+          ],
+          [
+            -6.65,
+            2.2,
             1.5707963267948966
           ]
         ]
@@ -876,13 +1228,13 @@
             1.5707963267948966
           ],
           [
-            -3.45,
+            -3.25,
             3.1,
             1.5707963267948966
           ],
           [
-            -3.45,
-            2.15,
+            -3.25,
+            2.2,
             1.5707963267948966
           ]
         ]
@@ -902,8 +1254,37 @@
         0.05
       ],
       "position_tolerance_m": 0.006,
-      "velocity_scaling": 0.15,
-      "acceleration_scaling": 0.15,
+      "velocity_scaling": 1.0,
+      "acceleration_scaling": 1.0,
+      "joint_acceleration_limits": [
+        3.75,
+        1.875,
+        2.5,
+        3.125,
+        3.75,
+        5.0,
+        5.0
+      ],
+      "minimum_pick_lift_m": 0.07,
+      "attachment_support_contact_allowance_m": 0.001,
+      "release_offsets_m": [
+        [
+          0.0,
+          0.0,
+          0.07
+        ]
+      ],
+      "transport_sample_step_m": 0.02,
+      "background_preparation_enabled": false,
+      "carrying_arm_configuration": [
+        0.00328154,
+        -0.76073215,
+        -0.00070832,
+        -1.94313693,
+        -0.00334093,
+        0.91199349,
+        0.00300654
+      ],
       "services": {
         "motion_plan": "/plan_kinematic_path",
         "cartesian_path": "/compute_cartesian_path",
@@ -914,10 +1295,10 @@
       },
       "simulation_assumptions": "Acknowledged Gazebo fixed-joint attachment represents grasp retention; finger contact dynamics are not validated.",
       "pick_orientation_xyzw": [
+        1.0,
         0.0,
-        -0.8660254037844386,
         0.0,
-        0.5
+        0.0
       ],
       "place_orientation_xyzw": [
         0.8660254037844386,
@@ -926,15 +1307,36 @@
         0.0
       ],
       "attach_link": "iiwa_link_7",
-      "withdrawal_lift_m": 0.15,
-      "pick_approach_configuration": [
-        0.555805948375561,
-        -0.33010777453275764,
-        2.726036824848298,
-        2.055082972054507,
-        2.572154445699205,
-        0.3850859720732707,
-        -2.641019358885094
+      "ik_seed_configurations": [
+        [
+          0.0,
+          -0.07,
+          0.0,
+          -1.62,
+          0.0,
+          0.54,
+          0.0
+        ],
+        [
+          0.0,
+          1.2,
+          0.0,
+          1.62,
+          0.0,
+          1.2,
+          0.0
+        ]
+      ],
+      "placement_ik_seed_configurations": [
+        [
+          2.9,
+          0.3,
+          0,
+          -0.9,
+          0,
+          1.94,
+          0.24
+        ]
       ],
       "scene_assets": [
         "worlds/table_recovery_framework.world",
@@ -942,8 +1344,94 @@
         "urdf/KMR_recovery.urdf.xacro",
         "config/recovery_framework_map.pgm",
         "config/recovery_framework_nav2.yaml",
-        "scripts/kmr_base_controller.py"
-      ]
+        "scripts/kmr_base_controller.py",
+        "launch/recovery_framework_gazebo.launch.py",
+        "launch/dual_moveit_gazebo.launch.py",
+        "scripts/simulation_performance.py",
+        "sensor/gazebo_camera_detector.py",
+        "src/recovery_render_rate.cpp"
+      ],
+      "orientation_tolerance_rad": 0.02,
+      "clearance_link_bounds": {
+        "iiwa_link_1": [
+          {
+            "center": [
+              -0.00010029971599578857,
+              -0.014686256647109985,
+              0.2962070479989052
+            ],
+            "radius": 0.19929533161479454
+          }
+        ],
+        "iiwa_link_2": [
+          {
+            "center": [
+              -2.7608126401901245e-05,
+              0.03219426050782204,
+              0.05971387401223183
+            ],
+            "radius": 0.19560881330020452
+          }
+        ],
+        "iiwa_link_3": [
+          {
+            "center": [
+              -8.333474397659302e-06,
+              0.023336205631494522,
+              0.3410690203309059
+            ],
+            "radius": 0.18566308057848957
+          }
+        ],
+        "iiwa_link_4": [
+          {
+            "center": [
+              0.00026934221386909485,
+              -0.023503154516220093,
+              0.058414410799741745
+            ],
+            "radius": 0.170172069433728
+          }
+        ],
+        "iiwa_link_5": [
+          {
+            "center": [
+              -0.00012120604515075684,
+              -0.01550300046801567,
+              0.3130872845649719
+            ],
+            "radius": 0.17556811286408827
+          }
+        ],
+        "iiwa_link_6": [
+          {
+            "center": [
+              -6.629526615142822e-05,
+              -0.0018618665635585785,
+              -0.002791319042444229
+            ],
+            "radius": 0.1270402937185747
+          }
+        ],
+        "iiwa_link_7": [
+          {
+            "center": [
+              0.004666738510131836,
+              0.005286745071411133,
+              0.11045000076293945
+            ],
+            "radius": 0.09248478399080795
+          },
+          {
+            "center": [
+              0,
+              0,
+              0.292
+            ],
+            "radius": 0.24
+          }
+        ]
+      }
     }
   }
 }

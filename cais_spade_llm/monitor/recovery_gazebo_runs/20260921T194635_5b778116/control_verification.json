@@ -1,6 +1,0 @@
-{
-  "duplicate_start": "no second launch",
-  "stop_system": "agents stopped; Gazebo retained",
-  "repeat_without_reset": "Part is not in its initial Storage slot; explicitly reset Gazebo before repeating",
-  "interface": "SystemBridge Start System / Stop System"
-}

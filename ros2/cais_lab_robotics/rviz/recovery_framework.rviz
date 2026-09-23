@@ -26,13 +26,13 @@ Visualization Manager:
     Update Interval: 0
     Visual Enabled: true
   - Class: moveit_rviz_plugin/MotionPlanning
-    Acceleration_Scaling_Factor: 0.3
+    Acceleration_Scaling_Factor: 1.0
     Enabled: true
     Name: MotionPlanning
     Move Group Namespace: ''
     Planning Scene Topic: /monitored_planning_scene
     Robot Description: robot_description
-    Velocity_Scaling_Factor: 0.4
+    Velocity_Scaling_Factor: 1.0
     Scene Geometry:
       Scene Alpha: 0.8999999761581421
     Scene Robot:

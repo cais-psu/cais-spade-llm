@@ -346,6 +346,91 @@ def test_simulation_keeps_simulation_direct_move_insert_path() -> None:
         "move_relative",
     ]
     assert "place_insert.move_insert" in agent.progress
+    evidence = result['observations']['simulation_execution']
+    completed = [step for step in evidence['primitive_results'] if step['status'] == 'completed']
+    assert [step['primitive'] for step in completed] == [name for name, _ in agent.calls]
+    assert evidence['timing']['simulation_time_sec'] is None
+    assert all(step['timing']['wall_time_sec'] >= 0 for step in completed)
+
+
+@pytest.mark.parametrize(
+    "part_name",
+    [
+        "gear_small",
+        "gear_medium",
+        "gear_large",
+        "KET4_Square_4mm",
+        "KET4_Rectangular_4mm",
+        "KET4_Circular_4mm",
+        "KET4_Square_8mm",
+        "KET4_Rectangular_8mm",
+        "KET4_Circular_8mm",
+        "KET4_Square_16mm",
+        "KET4_Circular_16mm",
+    ],
+)
+def test_simulation_direct_move_insert_accepts_full_order_part_identifiers_with_controller_tolerance(
+    part_name: str,
+) -> None:
+    controller = object.__new__(GazeboPickPlaceController)
+    controller.execution_mode = "simulation"
+    controller.cartesian_position_tolerance_m = 0.005
+    controller.simulation_insert_start_position_tolerance_m = 0.006
+    controller.wait_for_services = lambda: True
+    controller._get_ee_pose = lambda: SimpleNamespace(
+        position=SimpleNamespace(x=0.0052, y=0.0, z=0.0),
+        orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+    )
+    controller._make_orientation = lambda *_args: object()
+    controller._move_pose_direct = lambda *_args, **_kwargs: {"success": True}
+
+    result = controller.move_insert(
+        part_name=part_name,
+        calibration_id="",
+        profile_sha256="",
+        hard_caps_sha256="",
+        expected_start_pose=dict(_IDENTITY_POSE),
+        target_pose=dict(_IDENTITY_POSE),
+        insertion_axis_world={"x": 0.0, "y": 0.0, "z": -1.0},
+        contact_speed_m_s=0.0,
+        contact_force_delta_n=0.0,
+        engagement_progress_m=0.0,
+        insertion_force_n=0.0,
+        spiral_radius_m=0.0,
+        spiral_pitch_m=0.0,
+        spiral_speed_m_s=0.0,
+        spiral_acceleration_m_s2=0.0,
+        max_axial_force_n=0.0,
+        max_lateral_force_n=0.0,
+        max_torque_nm=0.0,
+        force_depth_profile={},
+        baseline_force_uncertainty_n=0.0,
+        baseline_torque_uncertainty_nm=0.0,
+        tilt_tolerance_rad=0.0,
+        seated_depth_tolerance_m=0.0,
+        settle_time_sec=0.0,
+        timeout_sec=1.0,
+    )
+
+    assert result["success"] is True
+    assert result["move_insert_mode"] == "simulation_direct"
+
+
+def test_failed_simulation_primitive_keeps_completed_observations_and_authored_metadata():
+    from cais_spade_llm.resources.robot.robot_task_registry import robot_task_capability_decompositions
+
+    before = robot_task_capability_decompositions()
+    agent = _PlaceInsertAgent('ur5e', execution_mode='simulation', primitive_failures={'release_part'})
+    result = _run_place_insert(agent)
+    assert result['status'].startswith('failed')
+    records = result['observations']['simulation_execution']['primitive_results']
+    executed = [row for row in records if row['status'] != 'skipped']
+    assert [(row['primitive'], row['status']) for row in executed] == [
+        ('move_insert', 'completed'), ('release_part', 'failed'),
+    ]
+    assert executed[0]['result']['raw']['success'] is True
+    assert executed[1]['result']['raw']['message'] == 'release_part failed for test'
+    assert before == robot_task_capability_decompositions()
 
 
 def test_manifests_enable_exact_physical_boolean() -> None:
@@ -1181,3 +1266,36 @@ def test_control_page_exposes_fixed_dual_assembly_demo_button() -> None:
     assert "digital_twin_execute_dual_assembly" in source
     assert 'preferred_origin = (\n                "prusa-mk4-1"' in source
     assert 'preferred_part = "SG" if robot == "xarm6" else "MG"' in source
+
+
+@pytest.mark.parametrize('destination', ['Conveyor', 'assembly_board-v1'])
+def test_gazebo_deposit_uses_board_attachment_only_at_assembly(monkeypatch, destination):
+    import sys
+    from unittest.mock import Mock
+
+    def entity_state():
+        return SimpleNamespace(
+            pose=SimpleNamespace(position=SimpleNamespace(), orientation=SimpleNamespace()),
+            twist=SimpleNamespace(linear=SimpleNamespace(), angular=SimpleNamespace()),
+        )
+
+    monkeypatch.setitem(sys.modules, 'gazebo_msgs.msg', SimpleNamespace(EntityState=entity_state))
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._set_state_client = SimpleNamespace(wait_for_service=lambda **_: True)
+    controller._simulation_release_detach_timeout_sec = lambda: .5
+    controller._detach_part = Mock(return_value=True)
+    controller._set_entity_state_for_snap = Mock(return_value=True)
+    controller._attach_part_to_assembly_board = Mock(return_value=True)
+    controller._detach_part_from_assembly_board = Mock(return_value=True)
+    controller._verify_snapped_entity_position = Mock(return_value=True)
+    controller._log = lambda: Mock()
+    assert controller._snap_part_to_slot('peg', -6., .5, .05, .99, 1.015, destination)
+    controller._verify_snapped_entity_position.assert_called_once_with('peg', (-6., .5, 1.015))
+    if destination == 'Conveyor':
+        controller._attach_part_to_assembly_board.assert_not_called()
+        controller._detach_part_from_assembly_board.assert_not_called()
+    else:
+        controller._attach_part_to_assembly_board.assert_called_once_with('peg', destination_location=destination)
+        controller._detach_part_from_assembly_board.assert_called_once_with('peg', 'link')
+        controller._detach_part_from_assembly_board.return_value = False
+        assert not controller._snap_part_to_slot('peg', -6., .5, .05, .99, 1.015, destination)

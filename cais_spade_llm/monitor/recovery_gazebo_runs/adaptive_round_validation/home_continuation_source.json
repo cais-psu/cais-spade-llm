@@ -1,0 +1,163 @@
+{
+  "source_report": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/adaptive_round_validation/run.json",
+  "source_run_id": "1b875cb1dbec4316abd98d45e98ef4d8",
+  "source_revision": 18,
+  "observed_before_home": {
+    "status": "completed",
+    "observed_at_unix": 1790133023.831839,
+    "part_pose": [
+      -0.00055,
+      -0.155176,
+      1.0239916,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "expected_slot_origin": [
+      -0.00055,
+      -0.155176,
+      1.0239916
+    ],
+    "position_error_m": 0.0,
+    "KMR_pose": [
+      -8.235186603760154,
+      2.1301286237094654,
+      0.0,
+      0.0,
+      0.0,
+      0.7071080798594737,
+      0.7071054825112364
+    ],
+    "KMR_goal": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "Storage"
+    }
+  },
+  "initial_valuation": {
+    "ur5e-1": {
+      "resource_state": "placed",
+      "held_part": null,
+      "resource_location": "Conveyor",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": "in_transit",
+      "part_location": "Conveyor"
+    },
+    "ur5e-2": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": null,
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": null,
+      "part_location": null
+    },
+    "ur5e-3": {
+      "resource_state": "placed",
+      "held_part": null,
+      "resource_location": "assembly_board-v1",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": "assembled",
+      "part_location": "assembly_board-v1"
+    },
+    "ur5e-4": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": null,
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": null,
+      "part_location": null
+    },
+    "M1": {
+      "resource_state": "idle",
+      "part_name": null,
+      "staging_part": null
+    },
+    "M2": {
+      "resource_state": "idle",
+      "part_name": null,
+      "staging_part": null
+    },
+    "Storage": {
+      "inventory.gear_small": false,
+      "inventory.gear_medium": false,
+      "inventory.gear_large": false,
+      "inventory.KET4_Square_4mm": true,
+      "inventory.KET8_Square_8mm": true,
+      "inventory.KET12_Square_12mm": true,
+      "inventory.KET16_Square_16mm": true,
+      "inventory.RGOCG4-50_Round_4mm": false,
+      "inventory.RGOCG8-50_8mm": true,
+      "inventory.RGOCG12-50_12mm": true,
+      "inventory.RGOCG16-50_16mm": true,
+      "inventory.assembly_board-v1": false
+    },
+    "KMR": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "Storage"
+    },
+    "Conveyor": {
+      "belt_stopped": true,
+      "loading_reserved_by": null,
+      "part_location.gear_small": null,
+      "part_location.gear_medium": null,
+      "part_location.gear_large": null,
+      "part_location.KET4_Square_4mm": null,
+      "part_location.KET8_Square_8mm": null,
+      "part_location.KET12_Square_12mm": null,
+      "part_location.KET16_Square_16mm": null,
+      "part_location.RGOCG4-50_Round_4mm": null,
+      "part_location.RGOCG8-50_8mm": null,
+      "part_location.RGOCG12-50_12mm": null,
+      "part_location.RGOCG16-50_16mm": null,
+      "part_location.assembly_board-v1": null,
+      "part_order.gear_small": null,
+      "part_order.gear_medium": null,
+      "part_order.gear_large": null,
+      "part_order.KET4_Square_4mm": null,
+      "part_order.KET8_Square_8mm": null,
+      "part_order.KET12_Square_12mm": null,
+      "part_order.KET16_Square_16mm": null,
+      "part_order.RGOCG4-50_Round_4mm": null,
+      "part_order.RGOCG8-50_8mm": null,
+      "part_order.RGOCG12-50_12mm": null,
+      "part_order.RGOCG16-50_16mm": null,
+      "part_order.assembly_board-v1": null
+    },
+    "Buffer For Machined parts": {
+      "zone_1_part": null,
+      "zone_2_part": null,
+      "zone_3_part": null,
+      "zone_4_part": null
+    },
+    "3D Printing Station": {
+      "output.gear_small": true,
+      "output.gear_medium": true,
+      "output.gear_large": true,
+      "output.KET4_Square_4mm": false,
+      "output.KET8_Square_8mm": false,
+      "output.KET12_Square_12mm": false,
+      "output.KET16_Square_16mm": false,
+      "output.RGOCG4-50_Round_4mm": false,
+      "output.RGOCG8-50_8mm": false,
+      "output.RGOCG12-50_12mm": false,
+      "output.RGOCG16-50_16mm": false,
+      "output.assembly_board-v1": false
+    },
+    "Exit": {
+      "resource_state": "empty",
+      "part_name": null,
+      "product_location": "assembly_board-v1"
+    }
+  },
+  "scope": "Live negotiated home continuation of the acknowledged completed production; production was not replayed."
+}

@@ -2,30 +2,75 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
 import os
 import signal
 import threading
+import time
 import weakref
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from cais_spade_llm.product.nominal import NominalProductContext
 from cais_spade_llm.recovery_framework import ROOT, fingerprint
+from cais_spade_llm.recovery_framework.reports import LatestReport
 
 ORDER_PATH = ROOT / 'cais_spade_llm/specification/products/orders/assembly_board-v1-kmr-storage-m1.json'
 RUN_DIRECTORY = ROOT / 'cais_spade_llm/monitor/recovery_gazebo_runs'
 _prepared: dict | None = None
 _cancelled = threading.Event()
 _workers = weakref.WeakSet()
+_prepared_workers: dict[str, dict] = {}
+_prepared_workers_lock = threading.Lock()
 
 
 def register_worker(worker) -> None:
     """Track owned processes so Stop System can interrupt active controller goals."""
     _workers.add(worker)
+
+
+def retain_prepared_worker(worker, snapshot: dict) -> str:
+    """Retain a probed worker outside the serializable preparation snapshot."""
+    token = uuid4().hex
+    binding = {
+        'worker': worker,
+        'source_fingerprints': deepcopy(snapshot.get('source_fingerprints', {})),
+        'launch_id': snapshot.get('probe', {}).get('launch_id'),
+        'scene_fingerprint': snapshot.get('probe', {}).get('scene_fingerprint'),
+        'scene_asset_fingerprint': snapshot.get('probe', {}).get('scene_asset_fingerprint'),
+    }
+    with _prepared_workers_lock:
+        _prepared_workers[token] = binding
+    return token
+
+
+def claim_prepared_worker(snapshot: dict):
+    """Transfer one exactly-bound preparation worker to its resource agent."""
+    token = str(snapshot.get('prepared_resource_token') or '')
+    if not token:
+        return None
+    with _prepared_workers_lock:
+        binding = _prepared_workers.pop(token, None)
+    if binding is None:
+        return None
+    expected = {
+        'source_fingerprints': snapshot.get('source_fingerprints', {}),
+        'launch_id': snapshot.get('probe', {}).get('launch_id'),
+        'scene_fingerprint': snapshot.get('probe', {}).get('scene_fingerprint'),
+        'scene_asset_fingerprint': snapshot.get('probe', {}).get('scene_asset_fingerprint'),
+    }
+    if any(binding[key] != expected[key] for key in expected):
+        raise ValueError('Prepared KMR worker does not match this Start request')
+    return binding['worker']
+
+
+def take_unclaimed_prepared_workers() -> list:
+    """Remove and return preparation workers which no resource agent claimed."""
+    with _prepared_workers_lock:
+        workers = [entry['worker'] for entry in _prepared_workers.values()]
+        _prepared_workers.clear()
+    return workers
 
 
 def request_stop() -> None:
@@ -91,7 +136,7 @@ def prepared_start() -> dict | None:
 def record_preparation_failure(snapshot: dict, failure: BaseException) -> Path:
     """Retain a failed explicit Start request without inventing task execution."""
     context = NominalProductContext(**snapshot['inputs'])
-    path = RUN_DIRECTORY / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '_' + uuid4().hex[:8])
+    store = LatestReport(RUN_DIRECTORY)
     report = {'schema_version': 1, 'evidence': 'gazebo', 'setup': snapshot['setup'],
               'source_fingerprints': snapshot['source_fingerprints'],
               'source_snapshots': snapshot['source_snapshots'], 'inputs': context.inputs,
@@ -103,9 +148,8 @@ def record_preparation_failure(snapshot: dict, failure: BaseException) -> Path:
               'outcome': {'status': 'stopped' if _cancelled.is_set() else 'preparation_failed',
                           'acknowledged_tasks': 0, 'reason': str(failure),
                           'valuation_source': 'configured initial values; no task was acknowledged'}}
-    path.mkdir(parents=True)
-    (path/'run.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    return path/'run.json'
+    store.save(report)
+    return store.path/'run.json'
 
 
 def validate_execution_evidence(ack: dict) -> None:
@@ -131,6 +175,18 @@ def validate_execution_evidence(ack: dict) -> None:
     operations = observation.get('operations')
     if not isinstance(operations, list) or not operations or any(row.get('success') is not True for row in operations):
         raise ValueError('Missing or failed controller/observation evidence')
+    primitives = observation.get('primitive_results')
+    if primitives is not None:
+        from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
+
+        expected = KMR_TASKS[name].program.steps
+        if (not isinstance(primitives, list)
+                or not all(isinstance(row, dict) for row in primitives)
+                or [(row.get('step_id'), row.get('primitive')) for row in primitives]
+                != [(step.id, step.op) for step in expected]
+                or any(row.get('status') != 'completed' or row.get('task_id') != ack.get('task_id')
+                       for row in primitives)):
+            raise ValueError('Gazebo primitives do not match the declared task composition')
 
 
 class DeliveryRuntime:
@@ -149,9 +205,12 @@ class DeliveryRuntime:
         self.actor.delivery_runtime = self
         self.agent.nominal_context = self.context
         self.agent.part_tracker = deepcopy(self.context.part_tracker)
-        self.path = RUN_DIRECTORY / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '_' + uuid4().hex[:8])
+        self.reports = LatestReport(RUN_DIRECTORY)
+        self.run_id = self.reports.run_id
+        self.path = self.reports.path
         self.outcome = {'status': 'prepared', 'acknowledged_tasks': 0}
         self.stopped = False
+        self.dispatch_timing: dict[str, dict] = {}
 
     def build_plan(self) -> tuple:
         """Build the existing task DAG/FSA from nominal resource capabilities."""
@@ -163,7 +222,7 @@ class DeliveryRuntime:
         for index, task in enumerate(plan['tasks'], 1):
             if task['resource_id'] != 'KMR':
                 raise ValueError('Delivery plan contains unsupported execution')
-            node = {'id': f'nominal_{self.path.name}_{index}', 'type': 'task', 'requirement_id': 'delivery',
+            node = {'id': f'nominal_{self.run_id}_{index}', 'type': 'task', 'requirement_id': 'delivery',
                     'function_name': task['event_name'], 'params': deepcopy(task['parameters']),
                     'resource_jid': str(self.actor.jid), 'sequence_index': index-1,
                     'status': 'pending', 'predecessors': [nodes[-1]['id']] if nodes else [],
@@ -190,6 +249,7 @@ class DeliveryRuntime:
         if pending['task_id'] != node['id']:
             raise ValueError('Delivery task identity mismatch')
         self.outcome['status'] = 'running'
+        self.dispatch_timing[node['id']] = {'dispatched_at_unix': time.time()}
         self.save()
 
     def accept(self, sender: str, payload: dict) -> bool:
@@ -220,6 +280,12 @@ class DeliveryRuntime:
         if not committed:
             return False
         self.agent.part_tracker = deepcopy(self.context.part_tracker)
+        timing = self.dispatch_timing.setdefault(payload.get('task_id', ''), {})
+        timing['acknowledged_at_unix'] = time.time()
+        if timing.get('dispatched_at_unix') is not None:
+            timing['dispatch_to_acknowledgement_wall_time_sec'] = (
+                timing['acknowledged_at_unix'] - timing['dispatched_at_unix']
+            )
         self.outcome = {'status': 'completed' if self.context.plan()['status'] == 'completed' else 'running',
                         'acknowledged_tasks': self.context.revision}
         self.save()
@@ -235,11 +301,9 @@ class DeliveryRuntime:
                   'initial_observations': self.prepared['probe'], 'plans': self.context.plans,
                   'pending': self.context.pending, 'transitions': self.context.transitions,
                   'history': self.context.history, 'final_valuation': self.context.snapshot(),
-                  'final_product_states': self.context.part_tracker, 'outcome': self.outcome}
-        self.path.mkdir(parents=True, exist_ok=True)
-        temporary = self.path / 'run.json.tmp'
-        temporary.write_text(json.dumps(report, indent=2), encoding='utf-8')
-        temporary.replace(self.path / 'run.json')
+                  'final_product_states': self.context.part_tracker,
+                  'dispatch_timing': deepcopy(self.dispatch_timing), 'outcome': self.outcome}
+        self.reports.save(report)
 
     def stop(self, reason: str | None = None) -> None:
         """Suppress later dispatch while retaining all acknowledged custody."""

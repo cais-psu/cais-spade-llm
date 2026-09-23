@@ -4,6 +4,14 @@ project(cais_lab_robotics)
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(gazebo REQUIRED)
+find_package(Qt5 REQUIRED COMPONENTS Widgets)
+
+add_library(cais_recovery_render_rate SHARED src/recovery_render_rate.cpp)
+target_include_directories(cais_recovery_render_rate PRIVATE ${GAZEBO_INCLUDE_DIRS})
+target_link_libraries(cais_recovery_render_rate ${GAZEBO_LIBRARIES} Qt5::Widgets)
+target_compile_features(cais_recovery_render_rate PRIVATE cxx_std_17)
+install(TARGETS cais_recovery_render_rate LIBRARY DESTINATION lib)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/DockKMR.action"
@@ -25,6 +33,7 @@ install(
     models
     rviz
     scripts
+    src
     sensor
     urdf
     worlds
@@ -52,6 +61,7 @@ install(
     scripts/kmr_base_controller.py
     scripts/physical_part_twin_sync.py
     scripts/recovery_drag_markers.py
+    scripts/simulation_performance.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

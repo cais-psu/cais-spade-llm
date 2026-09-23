@@ -1,0 +1,166 @@
+{
+  "run_id": "a386bc59bfbc4a93bb804a15f75fc498",
+  "validated_event_count": 164,
+  "all_acknowledgements_have_CCA_approval": true,
+  "all_resource_completion_validators_pass": true,
+  "exact_function_sequences_confirmed": true,
+  "routes": {
+    "KET4_Square_4mm": [
+      "Storage",
+      "KMR",
+      "M1",
+      "ur5e-1",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "KET8_Square_8mm": [
+      "Storage",
+      "KMR",
+      "M1",
+      "ur5e-1",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "KET12_Square_12mm": [
+      "Storage",
+      "KMR",
+      "M1",
+      "ur5e-1",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "KET16_Square_16mm": [
+      "Storage",
+      "KMR",
+      "M1",
+      "ur5e-1",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "RGOCG4-50_Round_4mm": [
+      "Storage",
+      "KMR",
+      "M2",
+      "ur5e-2",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "RGOCG8-50_8mm": [
+      "Storage",
+      "KMR",
+      "M2",
+      "ur5e-2",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "RGOCG12-50_12mm": [
+      "Storage",
+      "KMR",
+      "M2",
+      "ur5e-2",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ],
+    "RGOCG16-50_16mm": [
+      "Storage",
+      "KMR",
+      "M2",
+      "ur5e-2",
+      "Conveyor",
+      "Buffer For Machined parts",
+      "ur5e-3",
+      "assembly_board-v1"
+    ]
+  },
+  "insertion_and_release": {
+    "KET4_Square_4mm": {
+      "task_id": "environment_28",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "RGOCG4-50_Round_4mm": {
+      "task_id": "environment_51",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "RGOCG8-50_8mm": {
+      "task_id": "environment_88",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "KET8_Square_8mm": {
+      "task_id": "environment_93",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "RGOCG12-50_12mm": {
+      "task_id": "environment_125",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "KET12_Square_12mm": {
+      "task_id": "environment_133",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "RGOCG16-50_16mm": {
+      "task_id": "environment_158",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    },
+    "KET16_Square_16mm": {
+      "task_id": "environment_163",
+      "completed_steps": [
+        "move_insert",
+        "release_part",
+        "snap_part_to_slot",
+        "move_relative"
+      ]
+    }
+  },
+  "cleared_transport_staging_and_selected_inventory": true,
+  "empty_robots": true,
+  "no_pending_work": true
+}

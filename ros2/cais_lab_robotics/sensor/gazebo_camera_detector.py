@@ -15,7 +15,7 @@ import time
 import rclpy
 from gazebo_msgs.srv import GetEntityState
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
@@ -38,6 +38,12 @@ class PerceptionNode(Node):
 
         # Retained for legacy Trigger compatibility.
         self.declare_parameter("target_part", "")
+        self.declare_parameter('part_map', json.dumps(PART_MAP))
+        self.part_map = json.loads(self.get_parameter('part_map').value)
+        if not isinstance(self.part_map, dict) or not all(
+            isinstance(name, str) and isinstance(model, str) for name, model in self.part_map.items()
+        ):
+            raise ValueError('part_map must bind exact part names to Gazebo model names')
 
         self._gazebo_cb_group = MutuallyExclusiveCallbackGroup()
         self._service_cb_group = MutuallyExclusiveCallbackGroup()
@@ -133,7 +139,7 @@ class PerceptionNode(Node):
 
     def _all_detections(self) -> list[dict]:
         detections: list[dict] = []
-        for part_id, model_name in PART_MAP.items():
+        for part_id, model_name in self.part_map.items():
             pose = self._get_part_pose(model_name)
             if pose is not None:
                 detections.append(self._detection_dict(part_id, model_name, pose))
@@ -144,20 +150,20 @@ class PerceptionNode(Node):
     # ------------------------------------------------------------------ #
     def _detect_part_legacy_callback(self, request, response):  # noqa: ARG002
         target = self.get_parameter("target_part").get_parameter_value().string_value
-        target = str(target or "").strip().upper()
+        target = str(target or "").strip()
 
-        if target not in PART_MAP:
+        if target not in self.part_map:
             response.success = False
             response.message = json.dumps(
                 {
                     "part_name": target,
                     "detected": False,
-                    "error": f"Unknown part '{target}'. Valid: {list(PART_MAP.keys())}",
+                    "error": f"Unknown part '{target}'. Valid: {list(self.part_map.keys())}",
                 }
             )
             return response
 
-        model_name = PART_MAP[target]
+        model_name = self.part_map[target]
         pose = self._get_part_pose(model_name)
 
         if pose is not None:
@@ -191,17 +197,20 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
+    """Serve ground-truth observations until the owning scene stops."""
     rclpy.init(args=args)
     node = PerceptionNode()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

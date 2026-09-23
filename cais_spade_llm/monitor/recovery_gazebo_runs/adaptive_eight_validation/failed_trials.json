@@ -1,0 +1,298 @@
+[
+  {
+    "attempt": "attempt-1",
+    "run_id": "856053c9d2d84ed3b4353bcae2c37bf7",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 26,
+    "assembled": [],
+    "failed_task_id": "environment_28",
+    "error": "move_insert expected start pose mismatch: translation=0.0168 m, rotation=0.00 deg, simulation translation tolerance=0.0060 m move_insert did not complete; release_part and lift were not commanded. The robot remains positioned with the part held and the gripper closed.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-1"
+  },
+  {
+    "attempt": "attempt-2",
+    "run_id": "b20b06107aa24dd388ec92f79be5726c",
+    "status": "stopped",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 5,
+    "assembled": [],
+    "failed_task_id": null,
+    "error": null,
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-2"
+  },
+  {
+    "attempt": "attempt-4",
+    "run_id": "58c38140164d452fbdc18489b9e177c6",
+    "status": "stopped",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 15,
+    "assembled": [],
+    "failed_task_id": null,
+    "error": null,
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-4"
+  },
+  {
+    "attempt": "attempt-5",
+    "run_id": "55461dd423d34b48adfada2849a53f65",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 33,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_34",
+    "error": "Collision-aware Cartesian path incomplete: 0.21428571428571427",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-5"
+  },
+  {
+    "attempt": "attempt-6",
+    "run_id": "c30aba490f534c3990e3d6a2767ebebf",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 33,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_34",
+    "error": "failed to move above target (-2.6, 0.5, 1.2579999999999998): [move_cartesian] collision-free planning attempt 3 failed: error_code=99999 Completed motion steps: move_above_destination. descend was requested but did not complete.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-6"
+  },
+  {
+    "attempt": "attempt-7",
+    "run_id": "8f1da5c0d3294685b38a1654febff536",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 34,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_35",
+    "error": "failed to move above target (-2.6, 0.5, 1.2579999999999998): [move_cartesian] collision-free planning attempt 3 failed: INVALID_MOTION_PLAN Completed motion steps: move_above_destination. descend was requested but did not complete.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-7"
+  },
+  {
+    "attempt": "attempt-8",
+    "run_id": "ed4178cabf2a4e3f91320b83d067bdba",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 9,
+    "assembled": [],
+    "failed_task_id": "environment_10",
+    "error": "cannot read current ee pose: tf lookup failed for world -> ur5e_1_tool0 after 2.0s: End-effector feedback is 0.777s old",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-8"
+  },
+  {
+    "attempt": "attempt-9",
+    "run_id": "d1877fda3cd3490caac9bf5bd8a03352",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 43,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_43",
+    "error": "/KMR/dock ended with action status 6: KMR stopped outside the requested docking tolerance",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-9",
+    "diagnosis": "Round8 and Square8 share a physical Storage dock. Completion compared the first matching endpoint label instead of the requested endpoint pose."
+  },
+  {
+    "attempt": "attempt-10",
+    "run_id": "bc6ef9f638a34795bee4958ba59e0caa",
+    "status": "blocked",
+    "reason": "No validated RA offer establishes remaining requirements",
+    "acknowledged_events": 50,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": null,
+    "error": null,
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-10",
+    "diagnosis": "The round route repeated a cached UR3 home already acknowledged by the square cycle, then suppressed further discovery because no resource state changed."
+  },
+  {
+    "attempt": "attempt-11",
+    "run_id": "19979f8413b240008ce183e2466ea208",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 31,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_33",
+    "diagnosis": "A transient stale UR2 joint sample rejected compute_place_targets immediately. The observation now waits within its existing timeout for a sample within the unchanged freshness limit.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-11"
+  },
+  {
+    "attempt": "attempt-12",
+    "run_id": "49a53f11f3704d24ac062c51c6159f8d",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 46,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_48",
+    "diagnosis": "The UR3 round pick reached the grasp, then lacked fresh gripper feedback. Out-of-order rejection now tracks each joint stream independently; target timing waits for fresh feedback before computing a bounded trajectory.",
+    "cache_fix_observed": true,
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-12"
+  },
+  {
+    "attempt": "attempt-13",
+    "run_id": "68df7619ab8d43ebbac7e3fff4b19c03",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 47,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_48",
+    "diagnosis": "KMR changed direction at the M2 approach waypoint with residual lateral velocity. The stopping footprint reached an occupied map cell despite the planned centerline being clear. Docking now requires observed zero motion at each waypoint before changing direction.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-13"
+  },
+  {
+    "attempt": "attempt-14",
+    "run_id": "78ee29e9864342b598006ea55d8cc154",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 55,
+    "assembled": [
+      "KET4_Square_4mm",
+      "RGOCG4-50_Round_4mm"
+    ],
+    "failed_task_id": "environment_56",
+    "diagnosis": "MoveIt forward-kinematics observation timed out during concurrent UR1/UR2 work. Recovery Framework now observes the owned Gazebo wrist directly and composes the fixed tool transforms, avoiding planner-service contention.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-14"
+  },
+  {
+    "attempt": "attempt-15",
+    "run_id": "bd02950872974cbca5608e6a5addea25",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 48,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_50",
+    "diagnosis": "A Gazebo wrist observation arrived 0.306 simulation seconds old before UR3 insertion. The unchanged 0.25-second freshness check prevented motion and release. Delayed observations now retry within the existing observation deadline; persistent staleness and cancellation still fail.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-15"
+  },
+  {
+    "attempt": "attempt-16",
+    "run_id": "a3d2f3e483d94f22970f07ac92601d21",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 13,
+    "assembled": [],
+    "failed_task_id": "environment_14",
+    "diagnosis": "The Cartesian endpoint was observed within tolerance after joint settling mismatch, but its warning passed printf-style arguments to RcutilsLogger. The message is now formatted before logging; strict-signature regression cases exercise the branch.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-16"
+  },
+  {
+    "attempt": "attempt-17",
+    "run_id": "149385c4e95f4b5e83f377f3e28ac1c1",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 70,
+    "assembled": [
+      "KET4_Square_4mm",
+      "RGOCG4-50_Round_4mm"
+    ],
+    "failed_task_id": "environment_71",
+    "diagnosis": "UR3 wrist observation exceeded its two-second wall-clock deadline under concurrent work. Recovery Framework controllers now consume recent dynamic TF samples and use a configured five-second observation deadline while retaining the 0.25 simulation-second freshness limit. All 400 concurrent read-only queries passed.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-17"
+  },
+  {
+    "attempt": "attempt-18",
+    "status": "startup_blocked",
+    "acknowledged_events": 0,
+    "diagnosis": "Installed ROS scene manifest still had the prior configuration fingerprint. Production did not start; rebuilt workspace with make bootstrap-gazebo before relaunch.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-18"
+  },
+  {
+    "attempt": "attempt-19",
+    "status": "startup_terminated",
+    "acknowledged_events": 0,
+    "diagnosis": "Existing SystemBridge launch cleanup matched the word gazebo in the parent shell evidence-copy command. Separated preparation from launch commands; SystemBridge remains unchanged.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-19"
+  },
+  {
+    "attempt": "attempt-20",
+    "run_id": "0874a760a900485cbd72bf4ebb10fcc5",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 55,
+    "assembled": [
+      "KET4_Square_4mm",
+      "RGOCG4-50_Round_4mm"
+    ],
+    "failed_task_id": "environment_57",
+    "diagnosis": "Free-space Cartesian fallback rejected joint settling mismatch before checking the observed Cartesian endpoint. The stopped tool was within 1.67 mm and 0.00845 rad of the target. Cartesian completion now requires controller success plus fresh pose evidence for both planning paths; joint-target home moves retain strict joint verification.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-20"
+  },
+  {
+    "attempt": "attempt-21",
+    "run_id": "840342bae9ad4eec9439c7c8b1ef69be",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 47,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_49",
+    "diagnosis": "compute_place_targets eagerly evaluated a pose-query fallback despite a valid recorded pickup offset. That unused query timed out. Cached finite offsets are now used directly, and read-only pose requests retry with independently correlated calls inside the five-second budget. Actuation is never retried by this change. A 4,000-query concurrent read-only stress check passed.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-21"
+  },
+  {
+    "attempt": "attempt-22",
+    "run_id": "f6d689011b4d4d889eeea978df908111",
+    "status": "blocked",
+    "reason": "Resource did not complete negotiated work",
+    "acknowledged_events": 33,
+    "assembled": [
+      "KET4_Square_4mm"
+    ],
+    "failed_task_id": "environment_33",
+    "diagnosis": "Measured KMR base velocity lagged the decelerating command on the M1 approach. The stopping-footprint guard blocked docking before a clearance violation. Investigation in progress; safety checks remain enabled.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-22"
+  },
+  {
+    "attempt": "attempt-23",
+    "run_id": "20fed46e7a6f45518383b076b99d06d5",
+    "status": "blocked",
+    "acknowledged_events": 54,
+    "assembled": [
+      "KET4_Square_4mm",
+      "RGOCG4-50_Round_4mm"
+    ],
+    "failed_task_id": "environment_55",
+    "diagnosis": "UR1 square8 descent reported a payload/floor collision. Independent observation found the physical peg metres from the wrist. Investigation continuing; the run is not complete. KMR M1 approaches passed with current-command QoS.",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-23"
+  },
+  {
+    "attempt": "attempt-24",
+    "run_id": "453ddfcd599140f0b0ba88e926ff34a1",
+    "status": "blocked",
+    "reason": "Physical peg displaced during ur5e-2 approach; observed grasp custody rejected",
+    "acknowledged_events": 76,
+    "assembled": [
+      "KET4_Square_4mm",
+      "KET8_Square_8mm",
+      "RGOCG4-50_Round_4mm"
+    ],
+    "failed_task_id": "environment_77",
+    "error": "Observed payload RGOCG8-50_8mm is outside the gripper: 0.0615 m",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-24"
+  },
+  {
+    "attempt": "attempt-25",
+    "run_id": "6f4171617dfa4d0fa9cf621b9c525b82",
+    "status": "blocked",
+    "reason": "Timed trajectory collision observation service did not reply within 3 seconds; no home motion dispatched",
+    "acknowledged_events": 16,
+    "assembled": [],
+    "failed_task_id": "environment_17",
+    "error": "Timed trajectory collision validation failed",
+    "evidence_directory": "/tmp/cais-eight-live-20260922/attempt-25"
+  }
+]

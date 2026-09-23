@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,6 +218,22 @@ def test_unknown_fixture_and_missing_geometry_are_rejected() -> None:
             validate_product_order({**base_order, "parts": [unknown]}, geometry)
     with pytest.raises(ValueError, match="has no assembly_board slots"):
         validate_product_order(base_order, {})
+
+
+def test_recovery_assembly_targets_match_gravity_supported_fixture_surfaces() -> None:
+    geometry = _gazebo_geometry()
+
+    gear = ProductProfile.geometry_for_part_from_geometry("gear_small", geometry)
+    machined = ProductProfile.geometry_for_part_from_geometry(
+        "KET4_Square_4mm",
+        geometry,
+    )
+
+    assert gear["slot_floor_z_m"] == pytest.approx(1.02)
+    assert gear["target_origin_pose"]["z"] == pytest.approx(1.03)
+    assert gear["place_tool_yaw_offset_rad"] == pytest.approx(math.pi / 2)
+    assert machined["slot_floor_z_m"] == pytest.approx(1.0239916)
+    assert machined["target_origin_pose"]["z"] == pytest.approx(1.0239916)
 
 
 def test_incomplete_known_nist_maps_are_rejected() -> None:

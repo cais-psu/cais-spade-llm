@@ -22,6 +22,7 @@ from .robot_task_model import (
     _resolve_value,
 )
 from .robot_task_registry import robot_task_registry
+from .execution_timing import record_simulation_function, record_simulation_step
 
 _TAUGHT_FUNCTIONS_ROOT = Path(__file__).resolve().parent / "taught_functions"
 _CARTESIAN_POSE_FIELDS = ("x", "y", "z", "qx", "qy", "qz", "qw")
@@ -2479,6 +2480,7 @@ def _validate_resolved_mg_pick_target(targets: dict[str, Any]) -> str:
     return ""
 
 
+@record_simulation_step
 async def _execute_task_step(  # noqa: C901 - task execution gates stay explicit.
     *,
     agent: Any,
@@ -2868,6 +2870,7 @@ def _physical_place_insert_board_lock_error(  # noqa: C901, PLR0912 - irreversib
     return ""
 
 
+@record_simulation_function
 async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     agent: Any,
     task_name: str,
@@ -3307,7 +3310,7 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
     computed_cartesian_reference: dict[str, Any] = {}
     computed_cartesian_at = 0.0
     resolved_cartesian_positions: dict[str, dict[str, float]] = {}
-    for step in task.program.steps:
+    for step_index, step in enumerate(task.program.steps):
         if (
             place_insert_release_only
             and task.name == "place_insert"
@@ -3388,6 +3391,38 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                 **original_task_context,
                 "manual_function_execution": True,
             }
+        controller = getattr(agent, "_controller", None)
+        queue_preparation = getattr(controller, "queue_next_motion_preparation", None)
+        if callable(queue_preparation):
+            queued = False
+            if (
+                execution_mode == "simulation"
+                and step.op == "move_cartesian"
+                and step_index + 1 < len(task.program.steps)
+            ):
+                following = task.program.steps[step_index + 1]
+                if following.op == "move_cartesian" and all(
+                    _evaluate_guard(
+                        guard,
+                        agent=agent,
+                        args=args,
+                        runtime_state=runtime_state,
+                        step_outputs=step_outputs,
+                    )
+                    for guard in following.when
+                ):
+                    next_params = _resolve_value(
+                        following.params,
+                        args=args,
+                        runtime_state=runtime_state,
+                        step_outputs=step_outputs,
+                    )
+                    if isinstance(next_params, dict) and not any(
+                        value is None for value in next_params.values()
+                    ):
+                        queued = bool(queue_preparation(following.op, next_params))
+            if not queued:
+                queue_preparation("", {})
         try:
             result = await _execute_task_step(
                 agent=agent,

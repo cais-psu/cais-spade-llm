@@ -1,0 +1,12 @@
+[
+  {
+    "stage": "before",
+    "fraction": 0.8,
+    "error_code": 1
+  },
+  {
+    "stage": "after",
+    "fraction": 1.0,
+    "error_code": 1
+  }
+]

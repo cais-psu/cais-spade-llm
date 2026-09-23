@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from spade.behaviour import CyclicBehaviour
@@ -20,12 +20,13 @@ from cais_spade_llm.agents.shared_information.environment_capabilities import (
     CapabilityReplyInbox,
     CapabilityRequestInbox,
     explore,
+    match_intake,
     message,
 )
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.product.environment import EnvironmentProductContext, verify_environment_run
 from cais_spade_llm.product.order import validate_product_order
-from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, read_json
+from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, fingerprint, read_json
 from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentRuntime
 from cais_spade_llm.resources.environment_models import (
     build_environment_models,
@@ -37,6 +38,13 @@ from cais_spade_llm.resources.environment_models import (
 
 SQUARE = "KET4_Square_4mm"
 BUFFER = "Buffer For Machined parts"
+
+
+@pytest.fixture(autouse=True)
+def isolated_environment_reports(tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime
+
+    monkeypatch.setattr(environment_runtime, 'RUN_DIRECTORY', tmp_path / 'environment_runs')
 
 
 @pytest.fixture
@@ -103,8 +111,10 @@ async def network(inputs, permitted=None):
     for agent in agents.values():
         agent.container = container
 
+    closed = asyncio.Event()
+
     async def consume(inbox):
-        while True:
+        while not closed.is_set():
             await inbox.run()
 
     workers = [asyncio.create_task(consume(inbox)) for inbox in inboxes]
@@ -114,6 +124,7 @@ async def network(inputs, permitted=None):
     try:
         yield runtime, driver
     finally:
+        closed.set()
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
@@ -175,7 +186,7 @@ def test_initial_buffer_occupancy_is_a_reference_and_never_implies_processing(in
 
 
 @pytest.mark.parametrize("schema_version", [2, 3])
-def test_distributed_square_trim_then_assembly_and_exit(inputs, schema_version):
+def test_distributed_square_trim_then_stationary_assembly(inputs, schema_version):
     if schema_version == 2:
         inputs["product_order"]["requirements"] = {
             part: [
@@ -189,6 +200,10 @@ def test_distributed_square_trim_then_assembly_and_exit(inputs, schema_version):
         async with network(inputs) as (runtime, driver):
             context = runtime.context
             before = context.snapshot()
+            for actor in context.resources.values():
+                for name in actor.model['local_event_alphabet']:
+                    actor.bind_executor(name, AsyncMock(return_value={}), lambda _task, _evidence: True,
+                                        validate_start=lambda _task, _state, _geometry: True)
             result = await explore(runtime, driver, timeout=15)
             assert result["status"] == "planned", result
             assert context.snapshot() == before and context.revision == 0
@@ -240,16 +255,217 @@ def test_distributed_square_trim_then_assembly_and_exit(inputs, schema_version):
                 == inputs["geometry"]["parts"]["assembly_target_map"][SQUARE]
             )
             result = await explore(runtime, driver)
-            assert result["status"] == "planned", result
-            for task in result["tasks"]:
-                context.acknowledge(
-                    {**context.prepare(task, simulated=True), "status": "completed"}
-                )
+            assert result == {"status": "completed", "tasks": []}
             assert context.outstanding() is None
+            assert context.part_tracker[context.product_name]["location"] == context.product_name
             assert context.report()["schema_version"] == schema_version
             verify_environment_run(context.report())
 
     asyncio.run(scenario())
+
+
+def test_one_part_round_order_selects_M1_circle_program_per_run(inputs):
+    from cais_spade_llm.ui import recovery_setup
+
+    order_path = (
+        ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-round-4mm-m1.json"
+    )
+    full_order = deepcopy(inputs["product_order"])
+    inputs["product_order"] = read_json(order_path)
+    original = deepcopy(inputs["scene"])
+    context = EnvironmentProductContext(**inputs)
+    assert context.machine_resource == "M1"
+    assert context.models["M1"]["current_configuration"]["program"]["effects"] == [
+        {"process": "trim", "result": "circle"}
+    ]
+    assert inputs["scene"] == original
+    assert original["machines"][0]["current_configuration"]["program"]["effects"] == [
+        {"process": "trim", "result": "square"}
+    ]
+    full_context = EnvironmentProductContext(
+        original, full_order, inputs["geometry"]
+    )
+    assert full_context.models["M1"]["current_configuration"]["program"]["effects"] == [
+        {"process": "trim", "result": "square"}
+    ]
+
+    setup = recovery_setup.default_setup()
+    setup["selected_product_order_file"] = str(order_path.relative_to(ROOT))
+    checked = recovery_setup.validate_setup(setup)
+    assert checked["scene"]["machines"][0]["current_configuration"]["program"]["effects"] == [
+        {"process": "trim", "result": "circle"}
+    ]
+    assert read_json(ROOT / setup["scene_file"])["machines"][0][
+        "current_configuration"
+    ]["program"]["effects"] == [{"process": "trim", "result": "square"}]
+
+    unavailable = deepcopy(inputs)
+    unavailable["scene"]["machines"][0].pop("program_options")
+    with pytest.raises(ValueError, match="no program"):
+        EnvironmentProductContext(**unavailable)
+
+
+def test_one_part_round_gazebo_accepts_only_saved_M1_circle_option(inputs):
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _expected_scene_fingerprint
+
+    scene = read_json(SCENE_PATH)
+    order = read_json(
+        ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-round-4mm-m1.json"
+    )
+    selected = EnvironmentProductContext(scene, order, inputs["geometry"]).inputs["scene"]
+    assert _expected_scene_fingerprint(selected, order) == fingerprint(scene)
+    assert _expected_scene_fingerprint(scene, inputs["product_order"]) == fingerprint(scene)
+
+    altered = deepcopy(selected)
+    altered["KMR"]["initial_pose"][0] += 0.1
+    with pytest.raises(ValueError, match="outside the bound machine program"):
+        _expected_scene_fingerprint(altered, order)
+
+
+def test_one_part_round_route_negotiates_empty_KMR_return_and_assembles(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import (
+        EnvironmentProductLoop,
+        _kmr_at_storage,
+        _robots_at_home,
+    )
+
+    part = "RGOCG4-50_Round_4mm"
+    inputs["product_order"] = read_json(
+        ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-round-4mm-m1.json"
+    )
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            loop = EnvironmentProductLoop()
+            home_goals = [goal for _, _, _, goal in loop._negotiation_goals(runtime) if goal]
+            assert {goal["resource_id"] for goal in home_goals} == {
+                row["resource_id"] for row in inputs["scene"]["robots"]
+            }
+            for goal in home_goals:
+                result = await explore(runtime, driver, part=part,
+                                       desired=context.requirements[part][-1], resource_goal=goal)
+                assert result["tasks"][0]["event_name"] == "move_home"
+                pending = context.prepare(result["tasks"][0], simulated=True)
+                assert not any(key.startswith("part:") for key in pending["reservations"])
+                context.acknowledge({**pending, "status": "completed"})
+            assert _robots_at_home(context)
+            first = await explore(runtime, driver, timeout=20)
+            assert first["status"] == "planned"
+            assert [(task["resource_id"], task["event_name"]) for task in first["tasks"]] == [
+                ("KMR", "pick_part"),
+                ("KMR", "move_to_resource"),
+                ("KMR", "place_release"),
+                ("M1", "machine_part"),
+            ]
+            assert first["tasks"][1]["parameters"]["target_resource"] == "M1"
+            assert first["tasks"][2]["parameters"]["destination_location"] == "M1"
+
+            for task in first["tasks"][:3]:
+                pending = context.prepare(task, simulated=True)
+                context.acknowledge({**pending, "status": "completed"})
+            assert context.snapshot()["KMR"]["resource_location"] == "M1"
+            assert not _kmr_at_storage(context)
+
+            returned = await explore(runtime, driver, part=part,
+                                     desired=context.requirements[part][-1], resource_goal={
+                "resource_id": "KMR", "values": {
+                    "resource_location": "Storage", "resource_state": "idle", "held_part": None,
+                },
+            })
+            assert returned["status"] == "planned"
+            return_task = returned["tasks"][0]
+            assert return_task["resource_id"] == "KMR"
+            assert return_task["event_name"] == "move_to_resource"
+            assert return_task["parameters"]["source_resource"] == "M1"
+            assert return_task["parameters"]["target_resource"] == "Storage"
+            pending = context.prepare(return_task, simulated=True)
+            before = context.snapshot()
+            with pytest.raises(ValueError, match="Acknowledgement"):
+                context.acknowledge({**pending, "status": "failed"})
+            assert context.snapshot() == before
+            assert not _kmr_at_storage(context)
+            context.acknowledge({**pending, "status": "completed"})
+            assert _kmr_at_storage(context)
+
+            pending = context.prepare(first["tasks"][3], simulated=True)
+            context.acknowledge({**pending, "status": "completed"})
+            assert context.part_tracker[part]["processCompleted"] == [
+                {"process": "trim", "result": "circle"}
+            ]
+            second = await explore(runtime, driver, timeout=20)
+            assert second["status"] == "planned"
+            actors = [task["resource_id"] for task in second["tasks"]]
+            assert list(dict.fromkeys(actors)) == [
+                "ur5e-1", "Conveyor", BUFFER, "ur5e-3"
+            ]
+            assert any(
+                task["parameters"].get("destination_location") == "Conveyor"
+                for task in second["tasks"] if task["resource_id"] == "ur5e-1"
+            )
+            assert second["tasks"][-1]["event_name"] == "place_insert"
+            assert second["tasks"][-1]["parameters"]["destination_location"] == "assembly_board-v1"
+            for index, task in enumerate(second["tasks"]):
+                pending = context.prepare(task, simulated=True)
+                context.acknowledge({**pending, "status": "completed"})
+                if task["event_name"] not in {"place_release", "place_insert"}:
+                    continue
+                assert not _robots_at_home(context)
+                goal = next(goal for key, _, _, goal in loop._negotiation_goals(runtime)
+                            if key == f"resource:{task['resource_id']}")
+                returned = await explore(runtime, driver, part=part,
+                                         desired=context.requirements[part][-1], resource_goal=goal)
+                assert len(returned["tasks"]) == 1
+                home = context.prepare(returned["tasks"][0], simulated=True)
+                assert home["event_name"] == "move_home"
+                with pytest.raises(ValueError, match="Acknowledgement"):
+                    context.acknowledge({**home, "status": "failed"})
+                assert not _robots_at_home(context)
+                if index + 1 < len(second["tasks"]):
+                    # An empty return must not reserve the released part on the conveyor.
+                    downstream = context.prepare(second["tasks"][index + 1], simulated=True)
+                    context.cancel_pending(downstream["task_id"])
+                context.acknowledge({**home, "status": "completed"})
+                assert context.snapshot()[task["resource_id"]]["resource_location"] == "home"
+            assert context.part_tracker[part]["state"] == "assembled"
+            assert _robots_at_home(context)
+            assert loop._negotiation_goals(runtime) == []
+            assert context.outstanding() is None
+            assert _kmr_at_storage(context)
+            assert (await explore(runtime, driver))["status"] == "completed"
+            runtime.outcome = {"status": "completed", "tasks": []}
+            runtime.stop("Completed run owner exited")
+            runtime.save()
+            assert runtime.stopped
+            assert read_json(runtime.path / "run.json")["outcome"]["status"] == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_one_part_round_machine_binding_rejects_M2_tasks(inputs):
+    inputs["product_order"] = read_json(
+        ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-round-4mm-m1.json"
+    )
+    context = EnvironmentProductContext(**inputs)
+    event = next(
+        event for event in context.models["KMR"]["events"]
+        if event["event_name"] == "move_to_resource"
+        and event["parameter_bindings"]["source_resource"]["equals"] == "Storage"
+        and event["parameter_bindings"]["target_resource"]["equals"] == "M2"
+    )
+    task = {
+        "resource_id": "KMR",
+        "event_id": event["event_id"],
+        "event_name": "move_to_resource",
+        "parameters": {
+            key: binding["equals"]
+            for key, binding in event["parameter_bindings"].items()
+        },
+        "part_name": "RGOCG4-50_Round_4mm",
+    }
+    assert not context.allows_task(task)
+    with pytest.raises(ValueError, match="bound machine lane"):
+        context.prepare(task, simulated=True)
 
 
 def test_process_plan_steps_are_conjunctions_and_later_effects_are_blocked(inputs):
@@ -392,7 +608,7 @@ def test_geometry_and_missing_connection_block_assembly(inputs):
     asyncio.run(scenario())
 
 
-def test_stale_ack_unknown_identity_and_controller_evidence_never_commit(inputs):
+def test_stale_ack_checks_only_task_participants_and_never_commits(inputs):
     async def scenario():
         async with network(inputs) as (runtime, driver):
             context = runtime.context
@@ -404,13 +620,19 @@ def test_stale_ack_unknown_identity_and_controller_evidence_never_commit(inputs)
             with pytest.raises(ValueError):
                 context.prepare(invalid, simulated=True)
             assert context.snapshot() == before
-            with pytest.raises(ValueError, match="execution adapter"):
-                context.prepare(task)
+            executable = context.prepare(task)
+            assert executable["evidence"] == "resource"
+            context.cancel_pending(executable["task_id"])
             pending = context.prepare(task, simulated=True)
             context.resources["M1"].model["current_configuration"]["tool"] = "changed"
+            assert context.acknowledge({**pending, "status": "completed"})
+            next_task = result["tasks"][1]
+            pending = context.prepare(next_task, simulated=True)
+            before = context.snapshot()
+            context.resources["KMR"].model["current_configuration"] = {"changed": True}
             with pytest.raises(ValueError, match="current configuration"):
                 context.acknowledge({**pending, "status": "completed"})
-            assert context.snapshot() == before and context.revision == 0
+            assert context.snapshot() == before and context.revision == 1
 
     asyncio.run(scenario())
 
@@ -437,6 +659,7 @@ def test_request_sender_and_revisions_are_checked(inputs):
             inbox = next(b for b in resource.behaviours if isinstance(b, CapabilityRequestInbox))
             with pytest.raises(ValueError, match="sender"):
                 await inbox.handle(runtime, "unrelated@localhost", request)
+            runtime.context.request_dependencies(request, ["M1"])
             runtime.context.resources["M1"].model["current_configuration"]["tool"] = "changed"
             assert not runtime.context.current_request(request)
             assert runtime.context.revision == 0
@@ -494,6 +717,74 @@ def test_resource_execution_requires_cca_and_validated_ack(inputs, monkeypatch):
                 "completed",
             ]
 
+    asyncio.run(scenario())
+
+
+def test_disjoint_tasks_commit_in_completion_order_and_conflicts_stay_reserved(inputs):
+    gear = "gear_small"
+    inputs["product_order"]["parts"] = [gear, SQUARE]
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            gear_result, square_result = await asyncio.gather(
+                explore(runtime, driver, part=gear, desired=context.requirements[gear][1]),
+                explore(runtime, driver, part=SQUARE, desired=context.requirements[SQUARE][0]),
+            )
+            gear_task, square_task = gear_result["tasks"][0], square_result["tasks"][0]
+            assert {gear_task["resource_id"], square_task["resource_id"]} == {"ur5e-4", "KMR"}
+            assert len({row["request"]["request_id"] for row in context.explorations}) == 2
+            assert not runtime.request_queues
+            gear_pending = context.prepare(gear_task, simulated=True)
+            square_pending = context.prepare(square_task, simulated=True)
+            with pytest.raises(ValueError, match="active reservations"):
+                context.prepare(square_task, simulated=True)
+            square_ack = {**square_pending, "status": "completed"}
+            gear_ack = {**gear_pending, "status": "completed"}
+            assert context.acknowledge(square_ack)
+            assert context.acknowledge(gear_ack)
+            assert not context.acknowledge(gear_ack)
+            assert context.pending is None
+            assert [row["acknowledgement"]["task_id"] for row in context.transitions] == [
+                square_pending["task_id"], gear_pending["task_id"],
+            ]
+    asyncio.run(scenario())
+
+
+def test_kmr_empty_return_and_machining_dispatch_concurrently(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            first = await explore(runtime, driver)
+            for task in first["tasks"][:3]:
+                pending = context.prepare(task, simulated=True)
+                assert context.acknowledge({**pending, "status": "completed"})
+            goals = EnvironmentProductLoop()._negotiation_goals(runtime)
+            assert {SQUARE, "resource:KMR"} <= {key for key, *_ in goals}
+            goals = [goal for goal in goals if goal[0] in {SQUARE, "resource:KMR"}]
+            results = await asyncio.gather(*(
+                explore(runtime, driver, part=part, desired=desired, resource_goal=goal)
+                for key, part, desired, goal in goals
+            ))
+            tasks = [result["tasks"][0] for result in results]
+            return_task = next(task for task in tasks if task["resource_id"] == "KMR")
+            machine_task = next(task for task in tasks if task["resource_id"] == "M1")
+            assert return_task["parameters"]["source_resource"] == "M1"
+            assert return_task["parameters"]["target_resource"] == "Storage"
+            assert machine_task["event_name"] == "machine_part"
+            returned = context.prepare(return_task, simulated=True)
+            machining = context.prepare(machine_task, simulated=True)
+            assert len(context.pending_tasks) == 2
+            assert not context._task_reservations(return_task, SQUARE) & context._task_reservations(machine_task, SQUARE)
+            assert context.acknowledge({**machining, "status": "completed"})
+            assert context.snapshot()["KMR"]["resource_location"] == "M1"
+            # The next handoff can be negotiated before the empty return acknowledges.
+            next_step = await explore(runtime, driver)
+            assert next_step["tasks"][0]["resource_id"] == "ur5e-1"
+            assert context.acknowledge({**returned, "status": "completed"})
+            assert context.snapshot()["KMR"]["resource_location"] == "Storage"
     asyncio.run(scenario())
 
 
@@ -586,6 +877,73 @@ def test_startup_factories_install_environment_protocol_and_existing_fsa(
     environment_runtime.prepare_environment_start(None)
 
 
+def test_prepared_environment_controllers_transfer_once_and_match_start(monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime, startup
+
+    controller = Mock()
+    prepared = {
+        'setup': {'permitted_resources': ['ur5e-1']},
+        'inputs': {'scene': 'snapshot'},
+        'launch_identity': ('gazebo_dual', 42),
+        'source_fingerprints': {'scene': 'abc'},
+        'prepared_controller_token': 'prepared-once',
+    }
+    binding = environment_runtime._preparation_binding(
+        prepared['setup'], prepared['inputs'], prepared['launch_identity'],
+        prepared['source_fingerprints'],
+    )
+    environment_runtime._prepared_controllers['prepared-once'] = {
+        'binding': binding,
+        'controllers': {'ur5e-1': controller},
+    }
+    monkeypatch.setattr(
+        startup, 'configuration_fingerprints',
+        lambda setup: deepcopy(prepared['source_fingerprints']),
+    )
+    assert environment_runtime.claim_prepared_environment_controllers(prepared) == {
+        'ur5e-1': controller,
+    }
+    assert environment_runtime.claim_prepared_environment_controllers(prepared) == {}
+    controller.shutdown.assert_not_called()
+
+
+def test_stop_during_environment_controller_preparation_rejects_late_owner(monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime, workflow_execution
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    controller = Mock()
+    controller.wait_for_services.return_value = True
+    monkeypatch.setattr(
+        workflow_execution,
+        '_robot_configuration',
+        lambda scene, robot: ({
+            'node_name': 'ur5e_1_workflow_controller',
+            'arm_joint_names': ['joint'],
+            'arm_trajectory_topic': '/arm/joint_trajectory',
+        }, {'home': [0.]}, {}),
+    )
+    monkeypatch.setattr(
+        gazebo_pick_place_controller,
+        'GazeboPickPlaceController',
+        lambda **kwargs: controller,
+    )
+    context = SimpleNamespace(
+        inputs={'scene': {'robots': [{'resource_id': 'ur5e-1'}]}},
+        models={'ur5e-1': {}},
+    )
+    started_generation = environment_runtime._discard_prepared_controllers()
+    environment_runtime._discard_prepared_controllers()
+    with pytest.raises(RuntimeError, match='cancelled before ownership transfer'):
+        environment_runtime._prepare_environment_controllers(
+            context,
+            {'permitted_resources': ['ur5e-1']},
+            ('gazebo_dual', 42),
+            {'scene': 'abc'},
+            started_generation,
+        )
+    controller.shutdown.assert_called_once()
+
+
 def test_changed_conditions_trigger_discovery_and_executable_alternative(
     inputs, tmp_path, monkeypatch
 ):
@@ -649,11 +1007,33 @@ def test_shared_handoff_disagreement_cannot_commit(inputs):
     assert context.snapshot() == before and context.pending is None
 
 
-def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, monkeypatch):
+@pytest.mark.parametrize("all_capabilities", [False, True, "eight"])
+def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, monkeypatch, all_capabilities):
     from cais_spade_llm.recovery_framework import environment_runtime
 
     monkeypatch.setattr(environment_runtime, "RUN_DIRECTORY", tmp_path)
     checks = []
+    storage_discoveries = []
+    active_storage_discoveries = set()
+    if all_capabilities == "eight":
+        inputs["product_order"] = read_json(
+            ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json"
+        )
+        negotiate = environment_runtime.EnvironmentProductLoop._negotiate_goal
+
+        async def observe_discovery(loop, runtime, key, part, desired, resource_goal):
+            intake = resource_goal is None and runtime.context.part_tracker[part]["location"] == "Storage"
+            if intake:
+                active_storage_discoveries.add(part)
+                storage_discoveries.append(part)
+                assert len(active_storage_discoveries) == 1
+            try:
+                return await negotiate(loop, runtime, key, part, desired, resource_goal)
+            finally:
+                if intake:
+                    active_storage_discoveries.remove(part)
+
+        monkeypatch.setattr(environment_runtime.EnvironmentProductLoop, "_negotiate_goal", observe_discovery)
 
     class SafetyInbox(CyclicBehaviour):
         async def run(self):
@@ -681,8 +1061,10 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                     ),
                 )
 
+    closed = asyncio.Event()
+
     async def consume(inbox):
-        while True:
+        while not closed.is_set():
             await inbox.run()
 
     async def scenario():
@@ -698,11 +1080,28 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                 | Template(metadata={"type": "resource_event"}),
             )
             inboxes = [safety]
-            for rid in ("KMR", "M1"):
+            handling_return_started = asyncio.Event()
+            execution_starts = []
+            for rid in (runtime.context.models if all_capabilities else ("KMR", "M1")):
                 agent = product.container.get_agent(runtime.jids[rid])
                 for name in agent.environment_context.model["local_event_alphabet"]:
 
                     async def execute(task):
+                        context = runtime.context
+                        rid, name = task["resource_id"], task["event_name"]
+                        execution_starts.append((rid, name))
+                        if rid == "ur5e-1" and name == "move_home" and context.resources[rid].valuation["resource_state"] == "placed":
+                            if all_capabilities != "eight":
+                                assert context.part_tracker[SQUARE]["state"] != "assembled"
+                            handling_return_started.set()
+                        if rid == "Conveyor" and all_capabilities != "eight":
+                            await asyncio.wait_for(handling_return_started.wait(), 10)
+                        if rid == "ur5e-3" and name == "move_home" and context.resources[rid].valuation["resource_state"] == "placed":
+                            if all_capabilities != "eight":
+                                assert context.part_tracker[task["part_name"]]["state"] == "assembled"
+                            assert runtime.outcome["status"] != "completed"
+                        if all_capabilities == "eight":
+                            await asyncio.sleep(.1 if name == "machine_part" else .02)
                         return {"task_id": task["task_id"]}
 
                     agent.environment_context.bind_executor(
@@ -725,19 +1124,65 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
             )
             workers = [asyncio.create_task(consume(inbox)) for inbox in inboxes]
             try:
-                await asyncio.wait_for(loop.run(), 45)
-                assert runtime.context.revision == 4
-                assert product.part_tracker[SQUARE]["processCompleted"] == [
-                    {"process": "trim", "result": "square"}
-                ]
-                assert len(checks) == 4 and all(check["request_id"] for check in checks)
+                await asyncio.wait_for(loop.run(), 45 * len(runtime.context.selected_parts))
+                if not all_capabilities:
+                    assert runtime.context.revision == 5
+                    assert product.part_tracker[SQUARE]["processCompleted"] == [
+                        {"process": "trim", "result": "square"}
+                    ]
+                else:
+                    assert handling_return_started.is_set()
+                    assert product.part_tracker[SQUARE]["state"] == "assembled"
+                    assert environment_runtime._robots_at_home(runtime.context)
+                    assert runtime.outcome["status"] == "completed", runtime.outcome
+                    if all_capabilities == "eight":
+                        assert all(product.part_tracker[part]["state"] == "assembled"
+                                   for part in runtime.context.selected_parts)
+                        assignments = runtime.intake_assignments
+                        assert set(assignments.values()) == {"M1", "M2"}
+                        intake = [row for row in runtime.context.negotiations
+                                  if row["kind"] == "dispatch" and row["event_name"] == "pick_part"]
+                        assert {row["offered_machine"] for row in intake[:2]} == {"M1", "M2"}
+                        assert len(intake) == 8
+                        assert set(storage_discoveries) == set(runtime.context.selected_parts)
+                        assert not active_storage_discoveries
+                        starts = {row["task_id"]: row for row in runtime.context.negotiations
+                                  if row["kind"] == "execution_started"}
+                        ends = {row["task_id"]: row["timestamp"] for row in runtime.context.negotiations
+                                if row["kind"] == "execution_completed"}
+                        assert any(
+                            left["part_name"] != right["part_name"]
+                            and left["resource_id"] != right["resource_id"]
+                            and left["event_name"] != "move_home" and right["event_name"] != "move_home"
+                            and max(left["timestamp"], right["timestamp"]) < min(ends[a], ends[b])
+                            for a, left in starts.items() for b, right in starts.items() if a != b
+                        )
+                    release = execution_starts.index(("ur5e-1", "place_release"))
+                    home = execution_starts.index(("ur5e-1", "move_home"), release)
+                    assembly = execution_starts.index(("ur5e-3", "place_insert"))
+                    assert release < home < assembly
+                assert runtime.context.snapshot()["KMR"] == {
+                    "resource_state": "idle", "held_part": None, "resource_location": "Storage"
+                }
+                events = [row["acknowledgement"]["event_name"]
+                          for row in runtime.context.transitions]
+                if not all_capabilities:
+                    assert events[:3] == ["pick_part", "move_to_resource", "place_release"]
+                    assert sorted(events[3:]) == ["machine_part", "move_to_resource"]
+                    assert 4 <= len(checks) <= 5
+                assert checks and all(check["request_id"] for check in checks)
+                approved = {node["id"] for check in checks for node in check["plan"]["nodes"]}
+                assert {row["acknowledgement"]["task_id"]
+                        for row in runtime.context.transitions} <= approved
                 assert runtime.context.pending is None
-                assert runtime.outcome["status"] == "execution_unavailable"
+                if not all_capabilities:
+                    assert runtime.outcome["status"] == "execution_unavailable"
                 assert all(
                     row["acknowledgement"]["evidence"] == "resource"
                     for row in runtime.context.transitions
                 )
             finally:
+                closed.set()
                 for worker in workers:
                     worker.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
@@ -763,3 +1208,294 @@ def test_environment_display_revision_tracks_discovery_without_full_model_copy(i
             assert runtime.snapshot_revision() != configured
 
     asyncio.run(check())
+
+
+def test_ur5e1_unavailable_after_discovery_rejects_offer_and_renegotiates(inputs):
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            for actor in context.resources.values():
+                for name in actor.model['local_event_alphabet']:
+                    actor.bind_executor(name, AsyncMock(return_value={}), lambda _task, _evidence: True,
+                                        validate_start=lambda _task, _state, _geometry: True)
+            first = await explore(runtime, driver)
+            for task in first['tasks']:
+                pending = context.prepare(task, simulated=True)
+                context.acknowledge({**pending, 'status': 'completed'})
+            discovered = await explore(runtime, driver)
+            task = discovered['tasks'][0]
+            assert task['resource_id'] == 'ur5e-1'
+            context.resources['ur5e-1'].executors.clear()
+            with pytest.raises(ValueError, match='Stale capability offer'):
+                context.prepare(task)
+            renewed = await explore(runtime, driver, timeout=10, candidate=task,
+                                    part=SQUARE, desired=context.requirements[SQUARE][-1])
+            assert not renewed.get('executable')
+            assert renewed.get('execution_unavailable') or renewed['status'] != 'planned'
+            assert not context.pending_tasks
+            assert len({row['request']['request_id'] for row in context.explorations}) >= 3
+    asyncio.run(scenario())
+
+
+def test_revision_cache_detects_nested_configuration_and_availability_changes(inputs, monkeypatch):
+    from cais_spade_llm.product import environment
+
+    context = EnvironmentProductContext(**inputs)
+    original = environment.fingerprint
+    hashed = Mock(side_effect=original)
+    monkeypatch.setattr(environment, 'fingerprint', hashed)
+    before = context.revisions()
+    assert hashed.call_count == len(context.resources)
+    assert context.revisions() == before
+    assert hashed.call_count == len(context.resources)
+    context.resources['M1'].model['current_configuration']['parameters']['speed'] = 7
+    changed = context.revisions()
+    assert changed['M1'] != before['M1']
+    assert hashed.call_count == len(context.resources) + 1
+    actor = context.resources['ur5e-1']
+    event = actor.model['local_event_alphabet'][0]
+    actor.bind_executor(event, AsyncMock(), lambda _t, _e: True,
+                        validate_start=lambda _t, _s, _g: True)
+    available = context.revisions()
+    actor.executors.clear()
+    assert context.revisions()['ur5e-1'] != available['ur5e-1']
+
+
+def test_discovery_wakes_when_acknowledgement_invalidates_in_flight_requests(inputs, monkeypatch):
+    from cais_spade_llm.agents.shared_information import environment_capabilities
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            sent = asyncio.Event()
+
+            async def hold_request(_behaviour, _message):
+                sent.set()
+
+            monkeypatch.setattr(environment_capabilities, 'send_agent_message', hold_request)
+            pending = asyncio.create_task(explore(runtime, driver, timeout=60))
+            await sent.wait()
+            runtime.context.resources["Storage"].revision += 1
+            result = await asyncio.wait_for(pending, 2)
+            assert result['status'] == 'stale'
+            assert runtime.request_queues == {}
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"fresh_stable": False}, {"observed_positions": [0.4, 0.0]},
+    {"observed_positions": [float("nan"), 0.0]}, {"missing_joints": ["joint_2"]},
+    {"held_part": SQUARE}, {"observed_positions": None},
+])
+def test_home_ack_requires_observed_empty_robot_at_configured_joints(change):
+    from cais_spade_llm.recovery_framework.workflow_execution import _validate_robot_completion
+
+    task = {"resource_id": "ur5e-3", "event_name": "move_home", "task_id": "home-3"}
+    evidence = {**task, "controller_result": {"status": "completed"}}
+    assert not _validate_robot_completion(task, evidence)
+    evidence["home_observation"] = {
+        "pose_name": "home", "joint_names": ["joint_1", "joint_2"],
+        "target_positions": [0.0, 0.0], "observed_positions": [0.001, -0.001],
+        "fresh_stable": True, "held_part": None, "missing_joints": [], **change,
+    }
+    assert _validate_robot_completion(task, evidence) is (not change)
+
+
+def test_home_requirement_does_not_interrupt_pick_context(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            actor = runtime.context.resources["ur5e-3"]
+            for state, held in [("at_pick", None), ("picked", SQUARE), ("positioned", SQUARE)]:
+                actor.valuation.update(resource_state=state, held_part=held)
+                assert "resource:ur5e-3" not in {
+                    key for key, *_ in EnvironmentProductLoop()._negotiation_goals(runtime)
+                }
+    asyncio.run(scenario())
+
+
+def test_home_offer_rejects_changed_availability_and_ignores_part_size(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            actor = context.resources["ur5e-3"]
+            actor.bind_executor("move_home", AsyncMock(return_value={}), lambda _t, _e: True,
+                                validate_start=AsyncMock(return_value=True))
+            context.geometry[SQUARE]["dimensions_m"] = [100.0, 100.0, 100.0]
+            goal = next(goal for key, _, _, goal in EnvironmentProductLoop()._negotiation_goals(runtime)
+                        if key == "resource:ur5e-3")
+            result = await explore(runtime, driver, part=SQUARE,
+                                   desired=context.requirements[SQUARE][-1], resource_goal=goal)
+            assert result["executable"]
+            task = result["tasks"][0]
+            assert task["event_name"] == "move_home"
+            actor.executors.clear()
+            with pytest.raises(ValueError, match="Stale capability offer"):
+                context.prepare(task)
+            result = await explore(runtime, driver, part=SQUARE,
+                                   desired=context.requirements[SQUARE][-1], resource_goal=goal)
+            assert not result["executable"]
+            assert not context.pending_tasks
+            assert actor.valuation["resource_location"] is None
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("home", [None, {}, {"home_pose_observed": True},
+                                  {"home_pose_observed": True, "downward_facing": False, "gripper_open": True}])
+def test_empty_KMR_return_requires_observed_downward_home(home):
+    from cais_spade_llm.recovery_framework.workflow_execution import _validate_kmr_completion
+
+    task = {"event_name": "move_to_resource", "task_id": "return-home",
+            "parameters": {"target_resource": "Storage"}}
+    evidence = {"status": "completed", "task_id": "return-home", "observations": {
+        "controllers_succeeded": True, "attached": False, "part_name": None,
+        "home_observation": home,
+    }}
+    assert not _validate_kmr_completion(task, evidence)
+    evidence["observations"]["home_observation"] = {
+        "home_pose_observed": True, "downward_facing": True, "gripper_open": True,
+    }
+    assert _validate_kmr_completion(task, evidence)
+
+
+def test_discovery_survives_unrelated_acknowledgements_and_rejects_dependency_changes(inputs):
+    context = EnvironmentProductContext(**inputs)
+    request = context.request(time.time() + 60)
+    context.revision += 1
+    context.resources["ur5e-4"].revision += 1
+    assert context.current_request(request)
+    context.request_dependencies(request, ["M1"])
+    context.resources["M1"].revision += 1
+    assert not context.current_request(request)
+
+
+def test_eight_peg_order_preserves_machine_programs_and_other_orders(inputs):
+    order_path = ROOT / "cais_spade_llm/specification/products/orders"
+    inputs["product_order"] = read_json(order_path / "assembly_board-v1-eight-pegs.json")
+    context = EnvironmentProductContext(**inputs)
+    assert set(context.selected_parts) == set(inputs["scene"]["Storage"]["slots"])
+    assert len(context.selected_parts) == 8
+    assert context.machine_resource is None
+    assert context.models["M1"]["current_configuration"]["program"]["effects"] == [{"process": "trim", "result": "square"}]
+    assert context.models["M2"]["current_configuration"]["program"]["effects"] == [{"process": "trim", "result": "circle"}]
+    assert read_json(order_path / "assembly_board-v1-recovery-framework.json")["parts"] == "all"
+    assert read_json(order_path / "assembly_board-v1-round-4mm-m1.json")["machine_resource"] == "M1"
+
+
+def test_intake_uses_local_machine_offers_and_observes_availability(inputs):
+    inputs["product_order"] = read_json(
+        ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json"
+    )
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            for rid in context.machine_ids:
+                context.resources[rid].bind_executor(
+                    "machine_part", AsyncMock(), lambda task, evidence: True,
+                    validate_start=AsyncMock(return_value=True),
+                )
+            result = await match_intake(runtime, driver, context.selected_parts)
+            assert result["status"] == "matched"
+            assert len(result["offers"]) == 8
+            assert all(offer["available"] and offer["executable"] for offer in result["offers"])
+            assert {offer["resource_id"] for offer in result["offers"]} == {"M1", "M2"}
+            replies = [row for row in context.negotiations
+                       if row["kind"] == "capability_reply" and row.get("scope") == "intake"]
+            assert {row["resource_id"] for row in replies} == {"M1", "M2"}
+            assert sum(len(row["offers"]) for row in replies) == 8
+            assert not any(model.get("selected_path") for model in context.exploration_models.values())
+            context.resources["M1"].executors.clear()
+            context.resources["M2"].valuation["part_name"] = "RGOCG4-50_Round_4mm"
+            updated = await match_intake(runtime, driver, context.selected_parts)
+            assert updated["request_id"] != result["request_id"]
+            assert all(not offer["executable"] for offer in updated["offers"]
+                       if offer["resource_id"] == "M1")
+            assert all(not offer["available"] for offer in updated["offers"]
+                       if offer["resource_id"] == "M2")
+            assert not runtime.request_queues
+
+    asyncio.run(scenario())
+
+
+
+@pytest.mark.parametrize("home_completed", [False, True])
+def test_retained_assembly_path_reuses_home_ack_from_another_part(inputs, home_completed):
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    part = "RGOCG4-50_Round_4mm"
+    inputs["product_order"]["parts"] = [SQUARE, part]
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            context.resources["Storage"].valuation[f"inventory.{part}"] = False
+            context.resources[BUFFER].valuation["zone_4_part"] = part
+            context.part_tracker[part].update(
+                location=BUFFER, state="ready",
+                processCompleted=[{"process": "trim", "result": "circle"}],
+            )
+            context.resources["Storage"].valuation[f"inventory.{SQUARE}"] = False
+            context.part_tracker[SQUARE].update(
+                location=context.product_name, state="assembled",
+                processCompleted=[effect for step in context.requirements[SQUARE]
+                                  for effect in step["processesToComplete"]],
+            )
+            robot = context.resources["ur5e-3"]
+            robot.valuation.update(
+                resource_state="placed", resource_location=context.product_name,
+                part_state="assembled", part_location=context.product_name,
+            )
+            for name in robot.model["local_event_alphabet"]:
+                robot.bind_executor(name, AsyncMock(), lambda _task, _evidence: True,
+                                    validate_start=AsyncMock(return_value=True))
+            loop = EnvironmentProductLoop()
+            loop.set_agent(driver.agent)
+            runtime.retained_paths = {}
+            desired = context.requirements[part][-1]
+            result = await loop._negotiate_goal(runtime, part, part, desired, None)
+            assert result["status"] == "planned", result
+            assert result["tasks"][0]["event_name"] == "move_home"
+            home = deepcopy(result["tasks"][0])
+            home["part_name"] = SQUARE
+            home.pop("offer_product_state", None)
+            pending = context.prepare(home, simulated=True)
+            if home_completed:
+                context.acknowledge({**pending, "status": "completed"})
+            else:
+                with pytest.raises(ValueError, match="Acknowledgement"):
+                    context.acknowledge({**pending, "status": "failed"})
+                context.cancel_pending(pending["task_id"])
+            transition_count = len(context.transitions)
+            result = await loop._negotiate_goal(runtime, part, part, desired, None)
+            assert result["status"] == "planned", result
+            assert result["tasks"][0]["event_name"] == (
+                "pick_approach" if home_completed else "move_home"
+            )
+            assert len(context.transitions) == transition_count
+            assert context.part_tracker[part]["location"] == BUFFER
+            assert bool([row for row in context.negotiations
+                         if row["kind"] == "retained_step_satisfied"]) == home_completed
+            if home_completed:
+                prepared = context.prepare(result["tasks"][0], simulated=True)
+                assert prepared["parameters"]["part_name"] == part
+                assert prepared["parameters"]["origin_resource_location"] == BUFFER
+
+    asyncio.run(scenario())
+
+
+def test_home_ack_accepts_equivalent_observed_revolute_angles():
+    from cais_spade_llm.recovery_framework.workflow_execution import _validate_robot_completion
+    import math
+
+    task = {"resource_id": "ur5e-1", "event_name": "move_home", "task_id": "home-equivalent"}
+    evidence = {**task, "controller_result": {"status": "completed"}, "home_observation": {
+        "pose_name": "home", "joint_names": ["shoulder"],
+        "target_positions": [-1.596], "observed_positions": [-1.596 + 2 * math.pi],
+        "fresh_stable": True, "held_part": None, "missing_joints": [],
+    }}
+    assert _validate_robot_completion(task, evidence)
+    evidence["home_observation"]["observed_positions"][0] += 0.1
+    assert not _validate_robot_completion(task, evidence)

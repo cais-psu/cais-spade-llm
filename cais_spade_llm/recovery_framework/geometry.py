@@ -5,7 +5,35 @@ from __future__ import annotations
 import math
 import struct
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
+
+
+@lru_cache(maxsize=128)
+def _xml_root(path: Path, modified: int, size: int) -> ET.Element:
+    return ET.parse(path).getroot()
+
+
+def _read_model(path: Path) -> ET.Element:
+    stamp = path.stat()
+    return _xml_root(path, stamp.st_mtime_ns, stamp.st_size)
+
+
+@lru_cache(maxsize=128)
+def _mesh_vertices(path: Path, modified: int, size: int) -> tuple:
+    data = path.read_bytes()
+    count = struct.unpack_from('<I', data, 80)[0] if len(data) >= 84 else 0
+    if len(data) == 84 + 50*count:
+        vertices = tuple(struct.unpack_from('<3f', data, 84+50*i+12+12*j)
+                         for i in range(count) for j in range(3))
+    else:
+        vertices = tuple(tuple(float(v) for v in fields[1:])
+                         for line in data.decode('ascii').splitlines()
+                         if (fields := line.split()) and fields[0] == 'vertex' and len(fields) == 4)
+    if not vertices:
+        raise ValueError(f'Empty STL collision mesh: {path}')
+    return tuple(min(v[i] for v in vertices) for i in range(3)), tuple(
+        max(v[i] for v in vertices) for i in range(3))
 
 
 def quaternion(rpy: list[float]) -> list[float]:
@@ -45,7 +73,7 @@ def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None
     imported individually. Floor support is represented below world z=0.
     """
     part_poses = part_poses or {}
-    world = ET.parse(world_path).getroot().find('world')
+    world = _read_model(world_path).find('world')
     boxes = [{'id': 'ground_plane', 'pose': [0., 0., -.055, 0., 0., 0., 1.], 'size': [40., 40., .1]}]
     models = [(model.get('name'), model, _pose(model)) for model in world.findall('model')]
     for include in world.findall('include'):
@@ -53,7 +81,7 @@ def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None
         path = models_path / uri.removeprefix('model://') / 'model.sdf'
         if not path.is_file():
             continue
-        model = ET.parse(path).getroot().find('model')
+        model = _read_model(path).find('model')
         models.append((include.findtext('name', model.get('name')), model, _pose(include)))
     for name, model, world_pose in models:
         if (model.findtext('static') != 'true' and name not in part_poses) or name == 'KMR':
@@ -79,20 +107,11 @@ def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None
                     path = models_path / relative
                     if not path.is_file():
                         path = models_path.parent / relative
-                    data = path.read_bytes()
                     scale = [float(v) for v in mesh.findtext('scale', '1 1 1').split()]
-                    count = struct.unpack_from('<I', data, 80)[0] if len(data) >= 84 else 0
-                    if len(data) == 84 + 50*count:
-                        vertices = [struct.unpack_from('<3f', data, 84+50*i+12+12*j)
-                                    for i in range(count) for j in range(3)]
-                    else:
-                        vertices = [tuple(float(v) for v in fields[1:])
-                                    for line in data.decode('ascii').splitlines()
-                                    if (fields := line.split()) and fields[0] == 'vertex' and len(fields) == 4]
-                    if not vertices:
-                        raise ValueError(f'Empty STL collision mesh: {path}')
-                    low = [min(v[i] for v in vertices)*scale[i] for i in range(3)]
-                    high = [max(v[i] for v in vertices)*scale[i] for i in range(3)]
+                    stamp = path.stat()
+                    minimum, maximum = _mesh_vertices(path, stamp.st_mtime_ns, stamp.st_size)
+                    low = [minimum[i]*scale[i] for i in range(3)]
+                    high = [maximum[i]*scale[i] for i in range(3)]
                     size = [high[i]-low[i] for i in range(3)]
                     local_pose = compose(local_pose, [*((high[i]+low[i])/2 for i in range(3)), 0., 0., 0., 1.])
                 else:

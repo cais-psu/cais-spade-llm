@@ -4968,10 +4968,15 @@ class SystemBridge:
             prewarmed: dict[str, Any] = {}
             if mode == "simulation":
                 self._set_startup_phase("simulation_readiness")
-                sim_ready, sim_reason = await asyncio.to_thread(
-                    self.simulation_start_ready,
-                    True,
-                )
+                readiness_deadline = time.monotonic() + 30.0
+                while True:
+                    sim_ready, sim_reason = await asyncio.to_thread(
+                        self.simulation_start_ready,
+                        True,
+                    )
+                    if sim_ready or time.monotonic() >= readiness_deadline:
+                        break
+                    await asyncio.sleep(1.0)
                 if not sim_ready:
                     raise RuntimeError(sim_reason)
                 # Hand off prewarmed controllers only when explicitly kept alive.

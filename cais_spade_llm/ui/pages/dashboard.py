@@ -120,4 +120,4 @@ def render(bridge: SystemBridge) -> None:
 
     refresh()
     timer = ui.timer(2.0, refresh)
-    client.on_delete(timer.cancel)
+    client.on_delete(lambda: timer.cancel(with_current_invocation=True))

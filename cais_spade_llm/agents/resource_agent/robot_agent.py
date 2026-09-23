@@ -924,10 +924,14 @@ class RobotAgent(ResourceAgent):
             if robot_scope.startswith("ur5e"):
                 if use_gazebo_controller:
                     return UR5eGazeboController(
-                        trajectory_topic=_UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC,
+                        trajectory_topic=self.controller_config.get(
+                            "arm_trajectory_topic", _UR5E_GAZEBO_ARM_TRAJECTORY_TOPIC
+                        ),
                         controller_config=self.controller_config,
                         named_positions=self.named_positions,
                         execution_mode=self.execution_mode,
+                        arm_joint_names=self.controller_config.get("arm_joint_names"),
+                        node_name=self.controller_config.get("node_name"),
                     )
                 return UR5eHardwareController(
                     controller_config=self.controller_config,

@@ -163,7 +163,7 @@ def create_resource_agents(
 
     prepared = prepared_start()
     if prepared is not None and not robot_context_only:
-        from cais_spade_llm.recovery_framework.delivery import check_stopped
+        from cais_spade_llm.recovery_framework.delivery import check_stopped, claim_prepared_worker
         from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
         from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
 
@@ -174,7 +174,10 @@ def create_resource_agents(
             controller.shutdown()
         ALLOWED_FUNCS['KMR'].update({'pick_part', 'move_to_resource', 'place_release'})
         return [
-            KMRResourceAgent("KMR@localhost", "none", cca_jid=cca_jid, tool_timeout_s=360),
+            KMRResourceAgent(
+                "KMR@localhost", "none", cca_jid=cca_jid, tool_timeout_s=360,
+                worker=claim_prepared_worker(prepared),
+            ),
             ResourceAgent("Storage@localhost", "none", name="Storage", cca_jid=cca_jid),
             ResourceAgent("M1@localhost", "none", name="M1", cca_jid=cca_jid),
         ]
@@ -183,15 +186,27 @@ def create_resource_agents(
 
     environment = prepared_environment_start()
     if environment is not None and not robot_context_only:
-        from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+        from cais_spade_llm.recovery_framework.environment_runtime import (
+            claim_prepared_environment_controllers,
+        )
+        from cais_spade_llm.recovery_framework.workflow_execution import (
+            create_environment_resource_agents,
+        )
         from cais_spade_llm.resources.environment_models import build_environment_models
 
-        for controller in prewarmed.values():
-            controller.shutdown()
-        models = build_environment_models(environment["inputs"]["scene"])
-        return [ResourceAgent(f"recovery-resource-{index}@localhost", "none", name=rid,
-                              cca_jid=cca_jid)
-                for index, rid in enumerate(models, 1)]
+        inputs = environment["inputs"]
+        models = build_environment_models(
+            inputs["scene"], schema_version=3 if "processPlan" in inputs["product_order"] else 2
+        )
+        prepared_by_environment = claim_prepared_environment_controllers(environment)
+        for key, controller in prepared_by_environment.items():
+            replaced = prewarmed.pop(key, None)
+            if replaced is not None and replaced is not controller:
+                replaced.shutdown()
+            prewarmed[key] = controller
+        return create_environment_resource_agents(
+            inputs["scene"], models, cca_jid, prewarmed_controllers=prewarmed,
+        )
 
     agents = []
     for init_file in resource_init_list:

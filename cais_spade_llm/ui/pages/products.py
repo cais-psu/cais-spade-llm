@@ -300,13 +300,11 @@ def render_nominal_product_model(bridge: SystemBridge, product_select: Any) -> N
                     "part_name": part,
                     **context.part_tracker[part],
                     "processCompleted": json.dumps(context.part_tracker[part]["processCompleted"]),
-                    "requirement": (
-                        json.dumps(context.product_order.get("processPlan", context.requirements)[part])
-                        if part in context.requirements
-                        else json.dumps({"location": "Exit", "state": "completed"})
+                    "requirement": json.dumps(
+                        context.product_order.get("processPlan", context.requirements)[part]
                     ),
                 }
-                for part in [*context.selected_parts, context.product_name]
+                for part in context.selected_parts
             ]
             fields = ["part_name", "requirement", "location", "state", "processCompleted", "last_task"]
             ui.table(

@@ -1,0 +1,66 @@
+[
+  {
+    "resource_id": "ur5e-1",
+    "observations": 1000,
+    "wall_seconds": 46.214819519169396,
+    "median_query_sec": 0.04679064700030722,
+    "max_query_sec": 0.19347757200011984,
+    "tf_qos": [
+      {
+        "depth": 0,
+        "reliability": "ReliabilityPolicy.BEST_EFFORT"
+      }
+    ],
+    "configured_timeout_sec": 5.0,
+    "failures": [],
+    "retried_read_timeouts": 0
+  },
+  {
+    "resource_id": "ur5e-2",
+    "observations": 1000,
+    "wall_seconds": 45.80706593117793,
+    "median_query_sec": 0.047067642997717485,
+    "max_query_sec": 0.13314042499405332,
+    "tf_qos": [
+      {
+        "depth": 0,
+        "reliability": "ReliabilityPolicy.BEST_EFFORT"
+      }
+    ],
+    "configured_timeout_sec": 5.0,
+    "failures": [],
+    "retried_read_timeouts": 0
+  },
+  {
+    "resource_id": "ur5e-3",
+    "observations": 1000,
+    "wall_seconds": 46.018785134729114,
+    "median_query_sec": 0.045791147495037876,
+    "max_query_sec": 0.14380283799255267,
+    "tf_qos": [
+      {
+        "depth": 0,
+        "reliability": "ReliabilityPolicy.BEST_EFFORT"
+      }
+    ],
+    "configured_timeout_sec": 5.0,
+    "failures": [],
+    "retried_read_timeouts": 0
+  },
+  {
+    "resource_id": "ur5e-4",
+    "observations": 1000,
+    "wall_seconds": 45.951396760719945,
+    "median_query_sec": 0.046486545499647036,
+    "max_query_sec": 0.1757783289940562,
+    "tf_qos": [
+      {
+        "depth": 0,
+        "reliability": "ReliabilityPolicy.BEST_EFFORT"
+      }
+    ],
+    "configured_timeout_sec": 5.0,
+    "failures": [],
+    "retried_read_timeouts": 0
+  }
+]

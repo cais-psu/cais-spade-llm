@@ -1,0 +1,59 @@
+bash scripts/bootstrap_gazebo_workspace.sh
+xarm_ros2 already present at /home/jongh/ros2_ws/src/xarm_ros2
+OnRobot_ROS2_Description already present at /home/jongh/ros2_ws/src/OnRobot_ROS2_Description
+IFRA_LinkAttacher already present at /home/jongh/ros2_ws/src/IFRA_LinkAttacher
+[1.100s] WARNING:colcon.colcon_core.package_selection:Some selected packages are already built in one or more underlay workspaces:
+	'xarm_msgs' is in: /home/jongh/ros2_ws/install/xarm_msgs
+	'xarm_api' is in: /home/jongh/ros2_ws/install/xarm_api
+If a package in a merged underlay workspace is overridden and it installs headers, then all packages in the overlay must sort their include directories by workspace order. Failure to do so may result in build failures or undefined behavior at run time.
+If the overridden package is used by another package in any underlay, then the overriding package in the overlay must be API and ABI compatible or undefined behavior at run time may occur.
+
+If you understand the risks and want to override a package anyways, add the following to the command line:
+	--allow-overriding xarm_api xarm_msgs
+
+This may be promoted to an error in a future release of colcon-override-check.
+Starting >>> linkattacher_msgs
+Finished <<< linkattacher_msgs [0.85s]
+Starting >>> mbot_demo
+Finished <<< mbot_demo [0.12s]
+Starting >>> onrobot_description
+Finished <<< onrobot_description [0.11s]
+Starting >>> realsense_gazebo_plugin
+Finished <<< realsense_gazebo_plugin [0.23s]
+Starting >>> uf_ros_lib
+Finished <<< uf_ros_lib [1.68s]
+Starting >>> xarm_description
+Finished <<< xarm_description [0.21s]
+Starting >>> xarm_msgs
+Finished <<< xarm_msgs [1.07s]
+Starting >>> xarm_sdk
+Finished <<< xarm_sdk [0.18s]
+Starting >>> ros2_linkattacher
+Finished <<< ros2_linkattacher [23.9s]
+Starting >>> xarm_api
+Finished <<< xarm_api [0.52s]
+Starting >>> xarm_controller
+Finished <<< xarm_controller [0.65s]
+Starting >>> xarm_gazebo
+Finished <<< xarm_gazebo [0.99s]
+Starting >>> xarm_moveit_config
+Finished <<< xarm_moveit_config [1.06s]
+Starting >>> cais_lab_robotics
+Finished <<< cais_lab_robotics [2.07s]
+Starting >>> xarm_moveit_servo
+Finished <<< xarm_moveit_servo [1.00s]
+Starting >>> xarm_planner
+Finished <<< xarm_planner [1.28s]
+
+Summary: 16 packages finished [36.7s]
+
+Gazebo workspace is ready.
+
+Next steps:
+  source /opt/ros/humble/setup.bash
+  source /home/jongh/ros2_ws/install/setup.bash
+  ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py
+
+Then, in a separate terminal:
+  cd /home/jongh/projects/cais-spade-llm
+  poetry run python -m cais_spade_llm

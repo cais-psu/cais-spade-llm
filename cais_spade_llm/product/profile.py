@@ -235,18 +235,37 @@ class ProductProfile:
         slot_xy = board.get("slots", {}).get(part_name)
         if slot_xy is None:
             return {}
+        board_center = deepcopy(board.get("center", {}))
+        slot_floor_z = board.get("slot_floor_z_m_by_part", {}).get(
+            part_name,
+            board.get("slot_floor_z_m"),
+        )
         geometry = {
             "part_name": part_name,
             "slot_xy": deepcopy(slot_xy),
             "part_height_m": parts.get("heights_m", {}).get(part_name),
             "model_name": parts.get("model_map", {}).get(part_name),
-            "slot_floor_z_m": board.get("slot_floor_z_m"),
-            "board_center": deepcopy(board.get("center", {})),
+            "slot_floor_z_m": slot_floor_z,
+            "board_center": board_center,
             "assembly_board-v1_aruco_to_assembly_board-v1": deepcopy(
                 board.get("assembly_board-v1_aruco_to_assembly_board-v1", {})
             ),
             "target_reference": deepcopy(product_geometry.get("target_reference", {})),
         }
+        place_tool_yaw_offset_rad = board.get(
+            "place_tool_yaw_offset_rad_by_part", {}
+        ).get(part_name)
+        if place_tool_yaw_offset_rad is not None:
+            geometry["place_tool_yaw_offset_rad"] = float(
+                place_tool_yaw_offset_rad
+            )
+        target_origin_z = board.get("target_origin_z_m", {}).get(part_name)
+        if target_origin_z is not None:
+            geometry["target_origin_pose"] = {
+                "x": float(board_center.get("x", 0.0)) + float(slot_xy[0]),
+                "y": float(board_center.get("y", 0.0)) + float(slot_xy[1]),
+                "z": float(target_origin_z),
+            }
         geometry.update(actual_mg_stl_geometry_for_part(part_name, parts))
         return geometry
 
@@ -339,7 +358,7 @@ def _load_geometry_for_destination_part(
     if not isinstance(slot_xy, (list, tuple)) or len(slot_xy) < 2:
         return {}
 
-    return {
+    geometry = {
         "slot_xy": list(slot_xy[:2]),
         "part_height_m": dict(parts.get("heights_m") or {}).get(part_name),
         "model_name": dict(parts.get("model_map") or {}).get(part_name),
@@ -350,6 +369,12 @@ def _load_geometry_for_destination_part(
         ),
         "target_reference": dict(geometry_doc.get("target_reference") or {}),
     }
+    place_tool_yaw_offset_rad = dict(
+        board.get("place_tool_yaw_offset_rad_by_part") or {}
+    ).get(part_name)
+    if place_tool_yaw_offset_rad is not None:
+        geometry["place_tool_yaw_offset_rad"] = float(place_tool_yaw_offset_rad)
+    return geometry
 
 
 def _apply_target_reference_pose(

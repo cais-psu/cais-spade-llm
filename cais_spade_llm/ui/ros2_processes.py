@@ -198,7 +198,12 @@ def build_ros2_launch_cmds(
             + "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
             "world_file:=table_recovery_framework.world run_perception:=false "
             "include_assembly_parts:=true include_loose_parts:=true "
-            "rviz_software_rendering:=false"
+            "launch_rviz:=false rviz_software_rendering:=false {simulation_arguments}"
+        ),
+        "recovery_rviz": (
+            "ros2 launch cais_lab_robotics recovery_framework_gazebo.launch.py "
+            "launch_gazebo:=false launch_moveit:=false launch_rviz:=true "
+            "rviz_software_rendering:=false {simulation_arguments}"
         ),
         "gazebo_dual_spec2primitives": (
             "ros2 launch cais_lab_robotics dual_moveit_gazebo.launch.py "
@@ -280,7 +285,10 @@ def render_ros2_launch_cmd(
     name: str,
 ) -> str:
     cmd = commands[name]
+    from cais_spade_llm.recovery_framework.simulation import launch_arguments
+
     return cmd.format(
+        simulation_arguments=launch_arguments() if '{simulation_arguments}' in cmd else '',
         xarm6_ip=hardware_ips.get("xarm6", hw_ip_defaults["xarm6"]),
         ur5e_ip=hardware_ips.get("ur5e", hw_ip_defaults["ur5e"]),
     )

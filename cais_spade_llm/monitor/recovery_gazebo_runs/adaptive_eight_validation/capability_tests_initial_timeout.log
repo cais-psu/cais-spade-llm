@@ -1,0 +1,595 @@
+.............................F.......................                    [100%]
+=================================== FAILURES ===================================
+________ test_task_ack_and_cca_exchange_uses_real_agent_inboxes[eight] _________
+
+self = <cais_spade_llm.recovery_framework.environment_runtime.EnvironmentProductLoop object at 0x7f472424c8b0>
+
+    async def run(self) -> None:
+        runtime = self.agent.environment_runtime
+        signature = fingerprint(
+            [
+                runtime.context.revision,
+                runtime.context.revisions(),
+                runtime.context.permitted_resources,
+                runtime.context.geometry,
+            ]
+        )
+        if runtime.stopped or getattr(self, "_last_attempt", None) == signature:
+            await asyncio.sleep(0.25)
+            return
+        self._last_attempt = signature
+        try:
+>           await self.work(runtime)
+
+cais_spade_llm/recovery_framework/environment_runtime.py:529: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+cais_spade_llm/recovery_framework/environment_runtime.py:715: in work
+    if not await self._collect_acknowledgement(runtime):
+cais_spade_llm/recovery_framework/environment_runtime.py:864: in _collect_acknowledgement
+    msg = self._deferred_acks.pop(0) if self._deferred_acks else await self.receive(timeout=0.05)
+.venv/lib/python3.10/site-packages/spade/behaviour.py:359: in receive
+    msg = await asyncio.wait_for(coro, timeout=timeout)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task cancelled name='Task-77090' coro=<Queue.get() done, defined at /usr/lib/python3.10/asyncio/queues.py:150>>
+timeout = 0.05
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        This function is a coroutine.
+        """
+        loop = events.get_running_loop()
+    
+        if timeout is None:
+            return await fut
+    
+        if timeout <= 0:
+            fut = ensure_future(fut, loop=loop)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut, loop=loop)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise exceptions.TimeoutError() from exc
+    
+        waiter = loop.create_future()
+        timeout_handle = loop.call_later(timeout, _release_waiter, waiter)
+        cb = functools.partial(_release_waiter, waiter)
+    
+        fut = ensure_future(fut, loop=loop)
+        fut.add_done_callback(cb)
+    
+        try:
+            # wait until the future completes or the timeout
+            try:
+>               await waiter
+E               asyncio.exceptions.CancelledError
+
+/usr/lib/python3.10/asyncio/tasks.py:432: CancelledError
+
+During handling of the above exception, another exception occurred:
+
+fut = <Task cancelled name='Task-22911' coro=<EnvironmentProductLoop.run() done, defined at /home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/environment_runtime.py:514>>
+timeout = 180
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        This function is a coroutine.
+        """
+        loop = events.get_running_loop()
+    
+        if timeout is None:
+            return await fut
+    
+        if timeout <= 0:
+            fut = ensure_future(fut, loop=loop)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut, loop=loop)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise exceptions.TimeoutError() from exc
+    
+        waiter = loop.create_future()
+        timeout_handle = loop.call_later(timeout, _release_waiter, waiter)
+        cb = functools.partial(_release_waiter, waiter)
+    
+        fut = ensure_future(fut, loop=loop)
+        fut.add_done_callback(cb)
+    
+        try:
+            # wait until the future completes or the timeout
+            try:
+                await waiter
+            except exceptions.CancelledError:
+                if fut.done():
+                    return fut.result()
+                else:
+                    fut.remove_done_callback(cb)
+                    # We must ensure that the task is not running
+                    # after wait_for() returns.
+                    # See https://bugs.python.org/issue32751
+                    await _cancel_and_wait(fut, loop=loop)
+                    raise
+    
+            if fut.done():
+                return fut.result()
+            else:
+                fut.remove_done_callback(cb)
+                # We must ensure that the task is not running
+                # after wait_for() returns.
+                # See https://bugs.python.org/issue32751
+                await _cancel_and_wait(fut, loop=loop)
+                # In case task cancellation failed with some
+                # exception, we should re-raise it
+                # See https://bugs.python.org/issue40607
+                try:
+>                   return fut.result()
+E                   asyncio.exceptions.CancelledError
+
+/usr/lib/python3.10/asyncio/tasks.py:456: CancelledError
+
+The above exception was the direct cause of the following exception:
+
+inputs = {'geometry': {'assembly_board': {'center': {'x': 0.0, 'y': 0.0, 'z': 1.0239916}, 'component_attachment_model': 'assemb...ssembly_board-v1', 'completed_product_pose': [0.5, 0.58, 1.075, 0.0, 0.0, 0.0], 'handling_robot': 'ur5e-3', ...}, ...}}
+tmp_path = PosixPath('/tmp/pytest-of-jongh/pytest-188/test_task_ack_and_cca_exchange2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f472597cd30>
+all_capabilities = 'eight'
+
+    @pytest.mark.parametrize("all_capabilities", [False, True, "eight"])
+    def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, monkeypatch, all_capabilities):
+        from cais_spade_llm.recovery_framework import environment_runtime
+    
+        monkeypatch.setattr(environment_runtime, "RUN_DIRECTORY", tmp_path)
+        checks = []
+        if all_capabilities == "eight":
+            inputs["product_order"] = read_json(
+                ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json"
+            )
+    
+        class SafetyInbox(CyclicBehaviour):
+            async def run(self):
+                packet = await self.receive(timeout=1)
+                if packet is None:
+                    return
+                body = json.loads(packet.body)
+                if packet.metadata["type"] == "plan_safety_check":
+                    checks.append(body)
+                    await send_agent_message(
+                        self,
+                        message(
+                            str(packet.sender),
+                            "plan_safety_result",
+                            {"ok": True, "request_id": body["request_id"]},
+                        ),
+                    )
+                elif body["status"] == "safety_check":
+                    await send_agent_message(
+                        self,
+                        message(
+                            str(packet.sender),
+                            "safety_decision",
+                            {"decision": "allow", "task_id": body["task_id"]},
+                        ),
+                    )
+    
+        closed = asyncio.Event()
+    
+        async def consume(inbox):
+            while not closed.is_set():
+                await inbox.run()
+    
+        async def scenario():
+            async with network(inputs) as (runtime, driver):
+                product = driver.agent
+                cca = ResourceAgent("cca@localhost", "none", name="cca")
+                cca.container = product.container
+                cca.container.agents[str(cca.jid)] = cca
+                safety = SafetyInbox()
+                cca.add_behaviour(
+                    safety,
+                    Template(metadata={"type": "plan_safety_check"})
+                    | Template(metadata={"type": "resource_event"}),
+                )
+                inboxes = [safety]
+                handling_return_started = asyncio.Event()
+                execution_starts = []
+                for rid in (runtime.context.models if all_capabilities else ("KMR", "M1")):
+                    agent = product.container.get_agent(runtime.jids[rid])
+                    for name in agent.environment_context.model["local_event_alphabet"]:
+    
+                        async def execute(task):
+                            context = runtime.context
+                            rid, name = task["resource_id"], task["event_name"]
+                            execution_starts.append((rid, name))
+                            if rid == "ur5e-1" and name == "move_home" and context.resources[rid].valuation["resource_state"] == "placed":
+                                if all_capabilities != "eight":
+                                    assert context.part_tracker[SQUARE]["state"] != "assembled"
+                                handling_return_started.set()
+                            if rid == "Conveyor" and all_capabilities != "eight":
+                                await asyncio.wait_for(handling_return_started.wait(), 10)
+                            if rid == "ur5e-3" and name == "move_home" and context.resources[rid].valuation["resource_state"] == "placed":
+                                if all_capabilities != "eight":
+                                    assert context.part_tracker[task["part_name"]]["state"] == "assembled"
+                                assert runtime.outcome["status"] != "completed"
+                            if all_capabilities == "eight":
+                                await asyncio.sleep(.1 if name == "machine_part" else .02)
+                            return {"task_id": task["task_id"]}
+    
+                        agent.environment_context.bind_executor(
+                            name,
+                            execute,
+                            lambda task, evidence: evidence == {"task_id": task["task_id"]},
+                            validate_start=AsyncMock(return_value=True),
+                        )
+                    for inbox, kind in (
+                        (agent._TaskInbox(), "task"),
+                        (agent._SafetyDecisionInbox(), "safety_decision"),
+                    ):
+                        agent.add_behaviour(inbox, Template(metadata={"type": kind}))
+                        inboxes.append(inbox)
+                loop = environment_runtime.EnvironmentProductLoop()
+                product.add_behaviour(
+                    loop,
+                    Template(metadata={"type": "plan_safety_result"})
+                    | Template(metadata={"type": "ack"}),
+                )
+                workers = [asyncio.create_task(consume(inbox)) for inbox in inboxes]
+                try:
+                    await asyncio.wait_for(loop.run(), 180 if all_capabilities == "eight" else 45)
+                    if not all_capabilities:
+                        assert runtime.context.revision == 5
+                        assert product.part_tracker[SQUARE]["processCompleted"] == [
+                            {"process": "trim", "result": "square"}
+                        ]
+                    else:
+                        assert handling_return_started.is_set()
+                        assert product.part_tracker[SQUARE]["state"] == "assembled"
+                        assert environment_runtime._robots_at_home(runtime.context)
+                        assert runtime.outcome["status"] == "completed", runtime.outcome
+                        if all_capabilities == "eight":
+                            assert all(product.part_tracker[part]["state"] == "assembled"
+                                       for part in runtime.context.selected_parts)
+                            assignments = runtime.intake_assignments
+                            assert set(assignments.values()) == {"M1", "M2"}
+                            intake = [row for row in runtime.context.negotiations
+                                      if row["kind"] == "dispatch" and row["event_name"] == "pick_part"]
+                            assert {row["offered_machine"] for row in intake[:2]} == {"M1", "M2"}
+                            assert len(intake) == 8
+                            starts = {row["task_id"]: row for row in runtime.context.negotiations
+                                      if row["kind"] == "execution_started"}
+                            ends = {row["task_id"]: row["timestamp"] for row in runtime.context.negotiations
+                                    if row["kind"] == "execution_completed"}
+                            assert any(
+                                left["part_name"] != right["part_name"]
+                                and left["resource_id"] != right["resource_id"]
+                                and left["event_name"] != "move_home" and right["event_name"] != "move_home"
+                                and max(left["timestamp"], right["timestamp"]) < min(ends[a], ends[b])
+                                for a, left in starts.items() for b, right in starts.items() if a != b
+                            )
+                        release = execution_starts.index(("ur5e-1", "place_release"))
+                        home = execution_starts.index(("ur5e-1", "move_home"), release)
+                        assembly = execution_starts.index(("ur5e-3", "place_insert"))
+                        assert release < home < assembly
+                    assert runtime.context.snapshot()["KMR"] == {
+                        "resource_state": "idle", "held_part": None, "resource_location": "Storage"
+                    }
+                    events = [row["acknowledgement"]["event_name"]
+                              for row in runtime.context.transitions]
+                    if not all_capabilities:
+                        assert events[:3] == ["pick_part", "move_to_resource", "place_release"]
+                        assert sorted(events[3:]) == ["machine_part", "move_to_resource"]
+                        assert 4 <= len(checks) <= 5
+                    assert checks and all(check["request_id"] for check in checks)
+                    approved = {node["id"] for check in checks for node in check["plan"]["nodes"]}
+                    assert {row["acknowledgement"]["task_id"]
+                            for row in runtime.context.transitions} <= approved
+                    assert runtime.context.pending is None
+                    if not all_capabilities:
+                        assert runtime.outcome["status"] == "execution_unavailable"
+                    assert all(
+                        row["acknowledgement"]["evidence"] == "resource"
+                        for row in runtime.context.transitions
+                    )
+                finally:
+                    closed.set()
+                    for worker in workers:
+                        worker.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
+    
+>       asyncio.run(scenario())
+
+test/test_environment_capabilities.py:1171: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.10/asyncio/runners.py:44: in run
+    return loop.run_until_complete(main)
+uvloop/loop.pyx:1518: in uvloop.loop.Loop.run_until_complete
+    ???
+test/test_environment_capabilities.py:1110: in scenario
+    await asyncio.wait_for(loop.run(), 180 if all_capabilities == "eight" else 45)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task cancelled name='Task-22911' coro=<EnvironmentProductLoop.run() done, defined at /home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/environment_runtime.py:514>>
+timeout = 180
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        This function is a coroutine.
+        """
+        loop = events.get_running_loop()
+    
+        if timeout is None:
+            return await fut
+    
+        if timeout <= 0:
+            fut = ensure_future(fut, loop=loop)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut, loop=loop)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise exceptions.TimeoutError() from exc
+    
+        waiter = loop.create_future()
+        timeout_handle = loop.call_later(timeout, _release_waiter, waiter)
+        cb = functools.partial(_release_waiter, waiter)
+    
+        fut = ensure_future(fut, loop=loop)
+        fut.add_done_callback(cb)
+    
+        try:
+            # wait until the future completes or the timeout
+            try:
+                await waiter
+            except exceptions.CancelledError:
+                if fut.done():
+                    return fut.result()
+                else:
+                    fut.remove_done_callback(cb)
+                    # We must ensure that the task is not running
+                    # after wait_for() returns.
+                    # See https://bugs.python.org/issue32751
+                    await _cancel_and_wait(fut, loop=loop)
+                    raise
+    
+            if fut.done():
+                return fut.result()
+            else:
+                fut.remove_done_callback(cb)
+                # We must ensure that the task is not running
+                # after wait_for() returns.
+                # See https://bugs.python.org/issue32751
+                await _cancel_and_wait(fut, loop=loop)
+                # In case task cancellation failed with some
+                # exception, we should re-raise it
+                # See https://bugs.python.org/issue40607
+                try:
+                    return fut.result()
+                except exceptions.CancelledError as exc:
+>                   raise exceptions.TimeoutError() from exc
+E                   asyncio.exceptions.TimeoutError
+
+/usr/lib/python3.10/asyncio/tasks.py:458: TimeoutError
+----------------------------- Captured stderr call -----------------------------
+2026-09-23 02:37:25,478 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-09-23 02:37:26,745 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_1
+2026-09-23 02:37:26,749 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_2
+2026-09-23 02:37:27,708 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_3
+2026-09-23 02:37:28,702 - agent:ur5e-4 - INFO - [Resource] Stored safety_decision=allow for task=environment_4
+2026-09-23 02:37:30,072 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_5
+2026-09-23 02:37:30,984 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_6
+2026-09-23 02:37:31,817 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_7
+2026-09-23 02:37:33,060 - agent:M1 - INFO - [Resource] Stored safety_decision=allow for task=environment_8
+2026-09-23 02:37:33,521 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_9
+2026-09-23 02:37:38,329 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_10
+2026-09-23 02:37:39,451 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_11
+2026-09-23 02:37:39,787 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_12
+2026-09-23 02:37:41,014 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_13
+2026-09-23 02:37:41,388 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_14
+2026-09-23 02:37:42,857 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_15
+2026-09-23 02:37:43,622 - agent:M2 - INFO - [Resource] Stored safety_decision=allow for task=environment_17
+2026-09-23 02:37:43,626 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_16
+2026-09-23 02:37:44,705 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_18
+2026-09-23 02:37:46,094 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_19
+2026-09-23 02:37:47,227 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_20
+2026-09-23 02:37:48,120 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_21
+2026-09-23 02:37:49,795 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_22
+2026-09-23 02:37:50,693 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_23
+2026-09-23 02:37:51,364 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_24
+2026-09-23 02:37:52,487 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_25
+2026-09-23 02:37:53,417 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_26
+2026-09-23 02:37:54,038 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_27
+2026-09-23 02:37:55,131 - agent:M1 - INFO - [Resource] Stored safety_decision=allow for task=environment_28
+2026-09-23 02:37:55,691 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_30
+2026-09-23 02:37:55,754 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_29
+2026-09-23 02:37:59,668 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_31
+2026-09-23 02:38:01,536 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_32
+2026-09-23 02:38:04,691 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_33
+2026-09-23 02:38:08,099 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_34
+2026-09-23 02:38:20,536 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_35
+2026-09-23 02:38:22,152 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_36
+2026-09-23 02:38:23,404 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_37
+2026-09-23 02:38:25,246 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_38
+2026-09-23 02:38:25,763 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_39
+2026-09-23 02:38:27,580 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_40
+2026-09-23 02:38:28,893 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_41
+2026-09-23 02:38:30,597 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_42
+2026-09-23 02:38:31,855 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_43
+2026-09-23 02:38:31,856 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_44
+2026-09-23 02:38:34,036 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_45
+2026-09-23 02:38:35,669 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_46
+2026-09-23 02:38:37,998 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_47
+2026-09-23 02:38:40,645 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_48
+2026-09-23 02:38:40,679 - agent:M1 - INFO - [Resource] Stored safety_decision=allow for task=environment_49
+2026-09-23 02:38:43,661 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_50
+2026-09-23 02:38:48,898 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_51
+2026-09-23 02:38:51,191 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_52
+2026-09-23 02:38:52,345 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_53
+2026-09-23 02:38:54,411 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_54
+2026-09-23 02:38:54,412 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_55
+2026-09-23 02:38:57,327 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_56
+2026-09-23 02:38:57,417 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_57
+2026-09-23 02:38:59,930 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_58
+2026-09-23 02:39:01,782 - agent:M2 - INFO - [Resource] Stored safety_decision=allow for task=environment_60
+2026-09-23 02:39:01,825 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_59
+2026-09-23 02:39:03,535 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_61
+2026-09-23 02:39:05,653 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_62
+2026-09-23 02:39:08,024 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_63
+2026-09-23 02:39:10,336 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_64
+2026-09-23 02:39:12,748 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_65
+2026-09-23 02:39:15,261 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_66
+2026-09-23 02:39:15,334 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_67
+2026-09-23 02:39:18,548 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_68
+2026-09-23 02:39:23,772 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_69
+2026-09-23 02:39:27,026 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_70
+2026-09-23 02:39:31,053 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_71
+2026-09-23 02:39:33,298 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_72
+2026-09-23 02:39:37,672 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_73
+2026-09-23 02:39:40,936 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_74
+2026-09-23 02:39:53,473 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_75
+2026-09-23 02:39:56,273 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_76
+2026-09-23 02:39:58,443 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_77
+2026-09-23 02:40:01,016 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_78
+2026-09-23 02:40:01,849 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_79
+2026-09-23 02:40:04,590 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_80
+2026-09-23 02:40:06,865 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_81
+2026-09-23 02:40:09,182 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_82
+2026-09-23 02:40:11,187 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_84
+2026-09-23 02:40:11,188 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_83
+2026-09-23 02:40:14,441 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_85
+2026-09-23 02:40:16,789 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_86
+2026-09-23 02:40:18,948 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_87
+2026-09-23 02:40:21,297 - agent:ur5e-2 - INFO - [Resource] Stored safety_decision=allow for task=environment_88
+2026-09-23 02:40:23,139 - agent:M1 - INFO - [Resource] Stored safety_decision=allow for task=environment_89
+2026-09-23 02:40:24,526 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_90
+------------------------------ Captured log call -------------------------------
+INFO     agent:assembly_board-v1:product_agent.py:292 ProductAgent 'assembly_board-v1' initialized.
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_1
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_2
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_3
+INFO     agent:ur5e-4:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_4
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_5
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_6
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_7
+INFO     agent:M1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_8
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_9
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_10
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_11
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_12
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_13
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_14
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_15
+INFO     agent:M2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_17
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_16
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_18
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_19
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_20
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_21
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_22
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_23
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_24
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_25
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_26
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_27
+INFO     agent:M1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_28
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_30
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_29
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_31
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_32
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_33
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_34
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_35
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_36
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_37
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_38
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_39
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_40
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_41
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_42
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_43
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_44
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_45
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_46
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_47
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_48
+INFO     agent:M1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_49
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_50
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_51
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_52
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_53
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_54
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_55
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_56
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_57
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_58
+INFO     agent:M2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_60
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_59
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_61
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_62
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_63
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_64
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_65
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_66
+INFO     agent:Buffer For Machined parts:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_67
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_68
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_69
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_70
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_71
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_72
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_73
+INFO     agent:ur5e-3:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_74
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_75
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_76
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_77
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_78
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_79
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_80
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_81
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_82
+INFO     agent:Conveyor:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_84
+INFO     agent:ur5e-1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_83
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_85
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_86
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_87
+INFO     agent:ur5e-2:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_88
+INFO     agent:M1:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_89
+INFO     agent:KMR:resource_agent.py:1876 [Resource] Stored safety_decision=allow for task=environment_90
+=========================== short test summary info ============================
+FAILED test/test_environment_capabilities.py::test_task_ack_and_cca_exchange_uses_real_agent_inboxes[eight]
+1 failed, 52 passed in 238.29s (0:03:58)

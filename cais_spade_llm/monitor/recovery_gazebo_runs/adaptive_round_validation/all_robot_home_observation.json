@@ -1,0 +1,136 @@
+{
+  "observed_at_unix": 1790133871.0307665,
+  "robots": {
+    "ur5e-1": {
+      "target": {
+        "ur5e_1_shoulder_pan_joint": 2.232023449619252,
+        "ur5e_1_shoulder_lift_joint": -1.5960064086763361,
+        "ur5e_1_elbow_joint": 1.615863605277993,
+        "ur5e_1_wrist_1_joint": -1.592172956911188,
+        "ur5e_1_wrist_2_joint": -1.5690505595531368,
+        "ur5e_1_wrist_3_joint": 2.232159020791153
+      },
+      "observed": {
+        "ur5e_1_shoulder_pan_joint": 2.230297172065942,
+        "ur5e_1_shoulder_lift_joint": -1.5917050424573578,
+        "ur5e_1_elbow_joint": 1.6165517066543469,
+        "ur5e_1_wrist_1_joint": -1.5928273964957285,
+        "ur5e_1_wrist_2_joint": -1.5690593950356297,
+        "ur5e_1_wrist_3_joint": 2.22959613171162
+      },
+      "missing_or_stale": [],
+      "max_joint_error_rad": 0.004301366218978364
+    },
+    "ur5e-2": {
+      "target": {
+        "ur5e_2_shoulder_pan_joint": 2.232023449619252,
+        "ur5e_2_shoulder_lift_joint": -1.5960064086763361,
+        "ur5e_2_elbow_joint": 1.615863605277993,
+        "ur5e_2_wrist_1_joint": -1.592172956911188,
+        "ur5e_2_wrist_2_joint": -1.5690505595531368,
+        "ur5e_2_wrist_3_joint": 2.232159020791153
+      },
+      "observed": {
+        "ur5e_2_shoulder_pan_joint": 2.231923214764043,
+        "ur5e_2_shoulder_lift_joint": -1.596025133387778,
+        "ur5e_2_elbow_joint": 1.61986469349457,
+        "ur5e_2_wrist_1_joint": -1.5959204827264457,
+        "ur5e_2_wrist_2_joint": -1.5688622526184859,
+        "ur5e_2_wrist_3_joint": 2.23205895159537
+      },
+      "missing_or_stale": [],
+      "max_joint_error_rad": 0.0040010882165768535
+    },
+    "ur5e-3": {
+      "target": {
+        "ur5e_3_shoulder_pan_joint": 2.232023449619252,
+        "ur5e_3_shoulder_lift_joint": -1.5960064086763361,
+        "ur5e_3_elbow_joint": 1.615863605277993,
+        "ur5e_3_wrist_1_joint": -1.592172956911188,
+        "ur5e_3_wrist_2_joint": -1.5690505595531368,
+        "ur5e_3_wrist_3_joint": 2.232159020791153
+      },
+      "observed": {
+        "ur5e_3_shoulder_pan_joint": 2.2323538419626843,
+        "ur5e_3_shoulder_lift_joint": -1.597461878819306,
+        "ur5e_3_elbow_joint": 1.6141308408555162,
+        "ur5e_3_wrist_1_joint": -1.595846727153055,
+        "ur5e_3_wrist_2_joint": -1.5662533484142276,
+        "ur5e_3_wrist_3_joint": 2.2280172334758
+      },
+      "missing_or_stale": [],
+      "max_joint_error_rad": 0.004141787315353085
+    },
+    "ur5e-4": {
+      "target": {
+        "ur5e_4_shoulder_pan_joint": -0.2705423585528064,
+        "ur5e_4_shoulder_lift_joint": -1.5960064086763361,
+        "ur5e_4_elbow_joint": 1.615863605277993,
+        "ur5e_4_wrist_1_joint": -1.592172956911188,
+        "ur5e_4_wrist_2_joint": -1.5690505595531368,
+        "ur5e_4_wrist_3_joint": 2.232159020791153
+      },
+      "observed": {
+        "ur5e_4_shoulder_pan_joint": -0.2706535190233348,
+        "ur5e_4_shoulder_lift_joint": -1.5960284546273023,
+        "ur5e_4_elbow_joint": 1.6198660431524088,
+        "ur5e_4_wrist_1_joint": -1.5959192721888096,
+        "ur5e_4_wrist_2_joint": -1.5688511468596253,
+        "ur5e_4_wrist_3_joint": 2.2320480033820997
+      },
+      "missing_or_stale": [],
+      "max_joint_error_rad": 0.004002437874415676
+    },
+    "KMR": {
+      "target": {
+        "joint_a1": 6e-10,
+        "joint_a2": 0.6033002789,
+        "joint_a3": -9e-10,
+        "joint_a4": -1.7207585463,
+        "joint_a5": 7e-10,
+        "joint_a6": 0.8175338284,
+        "joint_a7": -5e-10
+      },
+      "observed": {
+        "joint_a1": -0.004233060533417543,
+        "joint_a2": 0.6056098457526362,
+        "joint_a3": -0.0012175748579821288,
+        "joint_a4": -1.721743644953473,
+        "joint_a5": -0.0027533768917251678,
+        "joint_a6": 0.8136888414415706,
+        "joint_a7": -0.0032131710968652527
+      },
+      "missing_or_stale": [],
+      "max_joint_error_rad": 0.004233061133417543
+    }
+  },
+  "RGOCG4-50_Round_4mm": [
+    -0.00055,
+    -0.155176,
+    1.0239916,
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "KMR": [
+    -8.235186603760154,
+    2.1301286237094654,
+    0.0,
+    0.0,
+    0.0,
+    0.7071080798594737,
+    0.7071054825112364
+  ],
+  "KMR_tcp_pose": [
+    -8.76528428018339,
+    1.883909064242157,
+    0.7384897007786914,
+    0.9999990523968159,
+    -6.326539316720003e-05,
+    -0.0002693152881063368,
+    -0.001348581564466111
+  ],
+  "KMR_downward_axis_z": -0.9999962175940793,
+  "status": "completed"
+}

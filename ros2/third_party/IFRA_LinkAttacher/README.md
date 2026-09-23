@@ -13,8 +13,12 @@ Why this mirror exists:
 Patched behavior in this mirrored source:
 
 - Allows simultaneous attachments (multiple robot grasps in one run).
-- Prevents a single link from being attached to multiple targets at once.
+- Prevents a single link from being attached to multiple targets at once, with
+  an explicit exception for `assembly_board_v1::link` so the carrier retains
+  both fixtures and all eleven assembled components.
 - Preserves current relative grasp pose at attach time (avoids hard snap to link origin).
+- Runs joint attachment and removal on the Gazebo physics update thread. ROS service
+  responses follow that update; pending requests time out without a late mutation.
 
 After copying, rebuild:
 

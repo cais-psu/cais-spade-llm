@@ -205,7 +205,9 @@ def _declare_states(models: dict, scene: dict) -> None:
             None,
             scope="part",
         )
-        model["marked_state_conditions"] = [_equals(resource_state="idle", held_part=None)]
+        model["marked_state_conditions"] = [
+            _equals(resource_state="idle", held_part=None, resource_location="home")
+        ]
         model["notes"] = [
             "Initial idle/empty-gripper values are modeling assumptions, not observations.",
             "Existing pose, gripper, and trajectory checks remain in task execution.",

@@ -7,8 +7,9 @@ import json
 import shutil
 import threading
 import time
+from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from nicegui import context, core, ui
@@ -236,6 +237,60 @@ def _element(client, cls, label):
     )
 
 
+def test_simulation_controls_poll_without_dispatch_or_settings_changes(project, monkeypatch):
+    import time
+    from cais_spade_llm.ui.components.simulation_controls import render_simulation_controls
+
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(settings.default_setup(project), path, root=project)
+    initial_simulation = settings.load_setup(path, root=project)['simulation']
+    saved_bytes = path.read_bytes()
+    monkeypatch.setattr(settings, 'SETUP_PATH', path)
+    bridge = _run_bridge()
+    bridge.simulation_environment_running.return_value = False
+    bridge.ros2_start.return_value = bridge.ros2_stop.return_value = None
+    buttons = _capture_buttons(monkeypatch)
+    callbacks = []
+    client = Client(context.client.page)
+
+    async def check():
+        with client:
+            render_simulation_controls(bridge, lambda period, callback: callbacks.append((period, callback)), lambda: False)
+            assert callbacks[0][0] == 2.0
+            await callbacks[0][1]()
+            bridge.ros2_start.assert_not_called()
+            bridge.ros2_stop.assert_not_called()
+            bridge.start_system.assert_not_called()
+            assert not any(isinstance(e, (ui.select, ui.checkbox)) for e in client.elements.values())
+            assert set(buttons) == {'Open RViz', 'Close RViz', 'Stop Simulation'}
+            labels = [e.text for e in client.elements.values() if isinstance(e, ui.label)]
+            assert 'Simulation is stopped.' in labels
+            assert not any('settings apply' in text.lower() for text in labels)
+            bridge.simulation_environment_running.return_value = True
+            bridge.ros2_exec.return_value = (True, json.dumps({
+                'observed_at_unix': time.time(), 'real_time_factor': .4,
+                'settings': initial_simulation,
+            }))
+            await callbacks[0][1]()
+            labels = [e.text for e in client.elements.values() if isinstance(e, ui.label)]
+            assert any('Measured simulation speed: 0.40×' in text for text in labels)
+            assert not any('Requested' in text for text in labels)
+            assert path.read_bytes() == saved_bytes
+            bridge.ros2_start.assert_not_called()
+            bridge.ros2_stop.assert_not_called()
+            await buttons['Open RViz']()
+            bridge.ros2_start.assert_called_once_with('recovery_rviz')
+            await buttons['Close RViz']()
+            bridge.ros2_stop.assert_called_once_with('recovery_rviz')
+            bridge.ros2_exec.return_value = (True, '{}')
+            await callbacks[0][1]()
+            assert any('observation unavailable' in e.text for e in client.elements.values() if isinstance(e, ui.label))
+            assert path.read_bytes() == saved_bytes
+        client.delete()
+
+    asyncio.run(check())
+
+
 def test_complete_setup_form_only_saves_explicitly_and_preserves_nist_bindings(
     project, monkeypatch
 ):
@@ -331,9 +386,11 @@ def _run_bridge():
         "get_safety_rules",
     ):
         getattr(bridge, name).return_value = []
-    for name in ("get_robot_states", "get_task_states", "get_safety_state"):
+    for name in ("get_robot_states", "get_task_states", "get_safety_state", "get_environment_capabilities"):
         getattr(bridge, name).return_value = {}
+    bridge.get_environment_capabilities_revision.return_value = None
     bridge.simulation_environment_running.return_value = True
+    bridge.ros2_exec.return_value = (False, 'Performance observation unavailable')
     bridge.passive_digital_twin_environment_running.return_value = False
     bridge.simulation_start_ready.return_value = (True, "")
     bridge.ros2_proc_status.return_value = "running"
@@ -555,6 +612,29 @@ def test_startup_validation_caches_unchanged_inputs_and_invalidates_dependencies
     assert validate.call_count == 3
 
 
+@pytest.mark.parametrize('delivery, ready, reason, expected_reason', [
+    (True, True, 'Perception is still warming up: /detect_all.', ''),
+    (False, True, 'Perception is still warming up: /detect_all.',
+     'Perception is still warming up: /detect_all.'),
+    (True, False, 'Perception is still warming up: /detect_all.',
+     'Perception is still warming up: /detect_all.'),
+    (True, False, 'Waiting for /DETACHLINK', 'Waiting for /DETACHLINK'),
+    (True, True, 'Other readiness notice', 'Other readiness notice'),
+])
+def test_delivery_prerequisites_only_omit_optional_perception_note(
+    delivery, ready, reason, expected_reason
+):
+    bridge = _run_bridge()
+    bridge.simulation_start_ready.return_value = (ready, reason)
+    status = recovery_run._read_prerequisites(bridge, 'simulation', delivery=delivery)
+    assert status['ready'] is ready
+    assert status['reason'] == expected_reason
+    assert status['gazebo_running'] is True
+    bridge.simulation_start_ready.assert_called_once_with()
+    bridge.ros2_start.assert_not_called()
+    bridge.start_system.assert_not_called()
+
+
 def test_run_controls_enable_after_readiness_and_reuse_unchanged_widgets(project, monkeypatch):
     setup = settings.default_setup(project)
     path = project / settings.SETUP_RELATIVE
@@ -603,6 +683,98 @@ def test_run_controls_enable_after_readiness_and_reuse_unchanged_widgets(project
             assert any(getattr(e, "text", "") == "Gazebo is not running." for e in client.elements.values())
 
     asyncio.run(check())
+    client.delete()
+
+
+def test_selected_order_summary_refreshes_when_order_contents_change(project, monkeypatch):
+    from cais_spade_llm.recovery_framework import delivery
+
+    setup = settings.default_setup(project)
+    setup['selected_product_order_file'] = str(delivery.ORDER_PATH.relative_to(ROOT))
+    order_path = project / setup['selected_product_order_file']
+    shutil.copyfile(delivery.ORDER_PATH, order_path)
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    monkeypatch.setattr(settings, 'SETUP_PATH', path)
+    validation = settings.StartupValidation(root=project)
+    assert validation.read()[2]
+    assert 'Parts: KET4_Square_4mm' in validation.order_summary
+    assert 'Destination: M1' in validation.order_summary
+    order = json.loads(order_path.read_text())
+    order['objective'] = 'Updated delivery objective'
+    order_path.write_text(json.dumps(order))
+    assert validation.read()[2]
+    assert 'Objective: Updated delivery objective' in validation.order_summary
+    order_path.write_text('{')
+    assert validation.read()[1]
+    assert validation.order_summary == ''
+
+
+@pytest.mark.parametrize('status', ['execution_unavailable', 'blocked'])
+def test_run_keeps_execution_blocker_visible_without_stopping_agents(monkeypatch, status):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    setup = settings.default_setup()
+    monkeypatch.setattr(settings, 'load_setup', lambda *args, **kwargs: deepcopy(setup))
+    monkeypatch.setattr(recovery_run, 'prepare_environment_start', Mock())
+    bridge = _run_bridge()
+    bridge.consume_notice.return_value = ''
+    models = build_environment_models(settings.validate_setup(setup)['scene'])
+    task = {'resource_id': 'KMR', 'event_name': 'pick_part'}
+    outcome = {'status': status, 'reason': 'Controller completion evidence unavailable'}
+    if status == 'execution_unavailable':
+        outcome['execution_unavailable'] = [task]
+    runtime = {'models': models, 'outcome': outcome,
+               'environment_model': {'selected_path': [task]}}
+    bridge.get_environment_capabilities.side_effect = lambda: deepcopy(runtime) if bridge.system_running else {}
+    bridge.get_environment_capabilities_revision.side_effect = lambda: ('run', 1) if bridge.system_running else None
+    bridge.get_robot_states.side_effect = lambda: (
+        {'KMR': {'resource_state': 'idle', 'resource_location': 'Storage'}} if bridge.system_running else {}
+    )
+
+    async def started():
+        bridge.system_running = True
+
+    async def stopped():
+        bridge.system_running = False
+
+    bridge.start_system = AsyncMock(side_effect=started)
+    bridge.stop_system = AsyncMock(side_effect=stopped)
+    buttons = _capture_buttons(monkeypatch)
+    polls = []
+    monkeypatch.setattr(ui, 'timer', lambda interval, callback, **kwargs: polls.append(callback) or Mock())
+    client = Client(context.client.page)
+
+    async def scenario():
+        with client:
+            recovery_run.render(bridge)
+            bridge.start_system.assert_not_called()
+            await buttons['Start System']()
+            for _ in range(200):
+                await asyncio.sleep(.01)
+                if any(getattr(element, 'text', '') == 'Agents started.' for element in client.elements.values()):
+                    break
+            for _ in range(2):
+                for refresh in polls:
+                    await refresh()
+                texts = [getattr(element, 'text', '') for element in client.elements.values()]
+                assert 'Agents started.' in texts
+                assert 'System started successfully.' not in texts
+                assert 'Execution status' in texts and status in texts
+                assert outcome['reason'] in texts
+                assert 'KMR' in texts
+                rows = [row for element in client.elements.values() if isinstance(element, ui.table) for row in element.rows]
+                assert any(row.get('resource_id') == 'KMR' and row.get('event_name') == 'pick_part' for row in rows)
+                assert bridge.system_running
+                bridge.stop_system.assert_not_called()
+            await buttons['Stop System']()
+            for refresh in polls:
+                await refresh()
+            texts = [getattr(element, 'text', '') for element in client.elements.values()]
+            assert status not in texts and outcome['reason'] not in texts
+            assert 'KMR' not in texts
+            assert 'No resources available — start the system first' in texts
+    asyncio.run(scenario())
     client.delete()
 
 

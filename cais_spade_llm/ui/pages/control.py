@@ -1475,6 +1475,7 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
         "confirmed supervised move_insert trial. Start System is not required for manual "
         "Function Execution."
     ).classes("text-xs text-slate-500")
+    ui.link("Browse all resource functions and primitives", "/resources").classes("text-xs")
 
     ui.label("Function Execution").classes("text-sm font-semibold mt-2")
     assembly_board_v1_state: dict[str, object] = {
@@ -1531,10 +1532,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
     execution_blocker.set_visibility(False)
     execution_controls = ui.row().classes("items-center gap-2 w-full flex-wrap")
     assembly_container = ui.column().classes("w-full gap-2 mt-2")
-
-    ui.label("Function Definition").classes("text-sm font-semibold mt-2")
-    definition_summary = ui.label("").classes("text-xs text-slate-500")
-    definition_container = ui.column().classes("w-full gap-2")
 
     recording_container = ui.column().classes("w-full gap-2 mt-2")
     with recording_container:
@@ -5253,11 +5250,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             and saved_steps[str(step.get("step_name") or "")].get("pose")
         ]
         recording_container.set_visibility(bool(recordable_steps))
-        definition_summary.set_text(
-            f"{len(template)} ordered primitive step{'s' if len(template) != 1 else ''}."
-            if template
-            else "No function definition is available."
-        )
         if required_steps and function_name == "place_approach":
             recording_summary.set_text(
                 f"{len(saved_required)}/{len(required_steps)} required positions saved for "
@@ -5288,44 +5280,6 @@ def _predefined_function_record_body(  # noqa: C901, PLR0915 - UI callbacks shar
             if info.get("success") and recordable_steps
             else ""
         )
-        definition_container.clear()
-        with definition_container:
-            for index, step in enumerate(template, start=1):
-                step_name = str(step.get("step_name") or "")
-                primitive = str(step.get("primitive") or "")
-                recordable = bool(step.get("recordable"))
-                position_required = bool(step.get("required"))
-                with ui.card().classes("w-full p-3"):
-                    with ui.row().classes("items-center gap-2 w-full"):
-                        ui.label(str(index)).classes("text-xs font-semibold w-5")
-                        ui.label(step_name).classes("text-sm font-semibold")
-                        ui.label("→").classes("text-xs text-slate-400")
-                        ui.label(primitive).classes("text-sm text-blue-700")
-                        ui.space()
-                        if not recordable:
-                            ui.label("No recorded position required").classes(
-                                "text-xs text-slate-500"
-                            )
-                        elif position_required:
-                            ui.label("Recorded position required").classes(
-                                "text-xs text-blue-700"
-                            )
-                        else:
-                            ui.label("Optional Cartesian teaching").classes(
-                                "text-xs text-amber-700"
-                            )
-                    ui.label(
-                        f"Parameter source: {str(step.get('parameter_source') or '')}"
-                    ).classes("text-xs text-slate-500")
-                    if (
-                        function_name == "pick_approach"
-                        and step_name == "move_to_origin_resource_location"
-                    ):
-                        ui.label(
-                            "Automatic physical staging from `origin_resource_location`; "
-                            "no recording required."
-                        ).classes("text-xs text-blue-700")
-
         recording_steps.clear()
         with recording_steps:
             for step in recordable_steps:
