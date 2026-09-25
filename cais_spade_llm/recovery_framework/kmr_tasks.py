@@ -67,7 +67,7 @@ _pick = (
     _step('grasp', 'observe_grasp', initial=_state('initial')),
     _step('attach', 'attach_part'),
     _step('attached_collision', 'part_collision', attached=True),
-    _step('lift', 'move_cartesian', target=_path('pick', 'lift')),
+    _step('lift', 'move_to_pose', target=_path('pick', 'lift'), waypoints=_path('pick', 'lift_waypoints')),
     _step('lift_custody', 'custody', transform=_path('grasp')),
     _step('observations', 'observe_carrying', transform=_path('grasp')),
 )

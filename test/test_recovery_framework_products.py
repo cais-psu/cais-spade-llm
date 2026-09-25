@@ -274,7 +274,8 @@ def test_active_product_files_contain_only_the_configured_nist_setup() -> None:
         assert sorted(active_path.parent.glob("*.json")) == [active_path]
     assert {path.name for path in ORDER_PATH.parent.glob("*.json")} == {
         ORDER_PATH.name, "assembly_board-v1-kmr-storage-m1.json",
-        "assembly_board-v1-eight-pegs.json", "assembly_board-v1-round-4mm-m1.json"
+        "assembly_board-v1-eight-pegs.json", "assembly_board-v1-round-4mm-m1.json",
+        "assembly_board-v1-two-parts.json"
     }
 
 
@@ -348,3 +349,15 @@ def test_stationary_registration_does_not_reuse_removed_geometry() -> None:
     )
     assert Path(result["geometry_path"]) == GEOMETRY_PATH
     assert result["configured"] is False
+
+
+def test_two_part_order_preserves_full_order_requirements_and_default_selection():
+    order = load_product_order_file(ORDER_PATH.with_name('assembly_board-v1-two-parts.json'))
+    checked = validate_product_order(order, _gazebo_geometry(), require_process_requirements=True)
+    assert checked.selected_parts == ['KET4_Square_4mm', 'gear_small']
+    full = load_product_order_file(ORDER_PATH)
+    assert order['processPlan'] == {part: full['processPlan'][part] for part in checked.selected_parts}
+    assert 'machine_resource' not in order
+    from cais_spade_llm.ui.recovery_setup import default_setup
+
+    assert default_setup()['selected_product_order_file'] == str(ORDER_PATH.relative_to(ROOT))

@@ -387,6 +387,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                                                 prewarm_controllers=True,
                                                 launch_identity=bridge._simulation_launch_key(),
                                                 requested_at_unix=start_requested_at_unix,
+                                                diagnostic_cca_bypass=selected_setup.get("diagnostic_cca_bypass", False),
                                             )
                                         if start_cancelled["value"]:
                                             return

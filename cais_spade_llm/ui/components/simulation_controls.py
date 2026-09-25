@@ -61,7 +61,8 @@ def render_simulation_controls(bridge, timer, starting) -> None:
                     f"UR controllers {applied['ur_controller_rate_hz']} Hz · KMR 225 Hz · "
                     f"physics 0.001 s · cameras {'on' if applied['enable_camera_streams'] else 'off'} · "
                     f"shadows {'on' if applied['dynamic_shadows'] else 'off'} · "
-                    f"Gazebo viewer {applied['gazebo_gui_rate_hz']} FPS"
+                    f"Gazebo viewer {applied['gazebo_gui_rate_hz']} FPS · "
+                    f"ODE island threads {applied.get('ode_island_threads', 0)}"
                 )
             except (ValueError, TypeError, KeyError):
                 status.text = 'Simulation performance observation unavailable; waiting for the running scene.'

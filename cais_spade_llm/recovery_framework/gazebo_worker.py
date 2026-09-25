@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -15,6 +17,8 @@ from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.delivery import check_stopped, register_worker
+
+logger = logging.getLogger(__name__)
 
 
 class GazeboExecutionError(RuntimeError):
@@ -45,6 +49,7 @@ class GazeboWorker:
         self._result_path = None
         self._directory = None
         self._log = None
+        self._log_reader = None
         self._operation_lock = threading.Lock()
         register_worker(self)
 
@@ -66,6 +71,9 @@ class GazeboWorker:
                     self._cleanup()
                     await asyncio.sleep(.5)
             if result.get('status') != 'completed':
+                logger.error('[%s] %s failed: %s', self.label,
+                             request.get('pending', {}).get('event_name') or request.get('mode'),
+                             result.get('error', 'No completion evidence'))
                 raise GazeboExecutionError(result)
             return result
         except (asyncio.CancelledError, TimeoutError):
@@ -83,6 +91,8 @@ class GazeboWorker:
             self._directory = tempfile.TemporaryDirectory(prefix='cais_gazebo_worker_')
             directory = Path(self._directory.name)
             self._log = (directory / 'worker.log').open('w')
+            if self.label == 'KMR':
+                self._log_reader = (directory / 'worker.log').open()
             script = (
                 'source /opt/ros/humble/setup.bash\n'
                 'source "$1"\n'
@@ -108,6 +118,7 @@ class GazeboWorker:
         temporary.replace(directory / 'request.json')
         deadline = time.monotonic() + self.timeout_sec
         while True:
+            self._relay_log()
             if self._directory is None:
                 return self.last_result or {
                     'status': 'failed', 'error': f'{self.label} worker cancelled'
@@ -115,6 +126,7 @@ class GazeboWorker:
             if result_path.is_file():
                 envelope = json.loads(result_path.read_text())
                 if envelope['id'] == identifier:
+                    self._relay_log()
                     self.last_result = envelope['result']
                     return self.last_result
             if progress_path.is_file():
@@ -137,7 +149,19 @@ class GazeboWorker:
                 raise TimeoutError(f'{self.label} ROS worker exceeded its wall-clock watchdog')
             await asyncio.sleep(.02)
 
+    def _relay_log(self) -> None:
+        """Tee the KMR worker's existing ROS logs to the operator console."""
+        if self._log_reader is not None:
+            output = self._log_reader.read()
+            if output:
+                sys.stderr.write(output)
+                sys.stderr.flush()
+
     def _cleanup(self) -> None:
+        self._relay_log()
+        if self._log_reader is not None:
+            self._log_reader.close()
+            self._log_reader = None
         if self._log is not None:
             self._log.close()
             self._log = None

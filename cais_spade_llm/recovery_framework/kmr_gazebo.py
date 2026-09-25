@@ -91,6 +91,21 @@ def _expected_scene_fingerprint(scene: dict, order: dict) -> str:
     return fingerprint(saved_scene)
 
 
+def _nearest_pick_orientation(observed: list[float], choices: list[list[float]], tolerance: float) -> list[float]:
+    """Keep the closest configured downward grasp orientation for an empty KMR."""
+    if not choices or any(len(choice) != 4 or not all(math.isfinite(value) for value in choice)
+                          or not math.isclose(sum(value * value for value in choice), 1., abs_tol=1e-5)
+                          for choice in choices):
+        raise ValueError('KMR pickup requires configured unit grasp orientations')
+    if len(observed) != 4 or not all(math.isfinite(value) for value in observed):
+        raise ValueError('KMR pickup orientation observation is unavailable')
+    selected = max(choices, key=lambda choice: abs(sum(a*b for a,b in zip(observed,choice,strict=True))))
+    if rotate(observed, [0.,0.,1.])[2] < -math.cos(tolerance) and abs(sum(
+            a*b for a,b in zip(observed,selected,strict=True))) >= math.cos(tolerance/2):
+        return list(observed)
+    return list(selected)
+
+
 def storage_home(scene: dict, order: dict) -> dict:
     """Use a saved downward pickup posture above the configured Storage home dock."""
     storage = scene['Storage']
@@ -131,9 +146,8 @@ def run(request: dict, session: dict | None = None) -> dict:
         OrientationConstraint, PlanningScene, PlanningSceneComponents, PositionConstraint, RobotState, RobotTrajectory,
     )
     from moveit_msgs.srv import (
-        ApplyPlanningScene, GetCartesianPath, GetMotionPlan, GetPositionFK, GetPositionIK, GetStateValidity, GetPlanningScene,
+        ApplyPlanningScene, GetCartesianPath, GetMotionPlan, GetPositionFK, GetStateValidity, GetPlanningScene,
     )
-    from nav2_msgs.action import NavigateToPose
     from rcl_interfaces.srv import GetParameters
     from rclpy.action import ActionClient
     from rclpy.clock import Clock, ClockType
@@ -158,11 +172,14 @@ def run(request: dict, session: dict | None = None) -> dict:
         from rclpy.executors import SingleThreadedExecutor
         session['executor'] = SingleThreadedExecutor()
         session['executor'].add_node(session['node'])
+        session['node'].get_logger().info('[KMR] Controller initialized (execution_mode=simulation)')
     node = session['node']
     executor = session['executor']
     scene = request['inputs']['scene']
     kmr = scene['KMR']
     config = deepcopy(kmr['task_execution'])
+    if config.get('avoid_collisions') is False and node.get_parameter('use_sim_time').value is not True:
+        raise ValueError('Collision-check bypass requires Gazebo simulation')
     pending = request.get('pending', {})
     mode = request.get('mode')
     name = pending.get('event_name')
@@ -173,6 +190,9 @@ def run(request: dict, session: dict | None = None) -> dict:
     part_geometry = request.get('geometry', {}).get(part, {})
     if part_geometry.get('dimensions_m'):
         config['part_dimensions_m'] = list(part_geometry['dimensions_m'])
+    config['closed_gripper_width_m'] = config.get('closed_gripper_width_m_by_part', {}).get(
+        part, config['closed_gripper_width_m'],
+    )
     target_resource = (
         parameters.get('target_resource')
         or parameters.get('destination_location')
@@ -571,55 +591,33 @@ def run(request: dict, session: dict | None = None) -> dict:
         nonlocal planning_seconds
         planning_started = time.monotonic()
         if config.get('cartesian_motion_only'):
-            from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints, robot_trajectory
-
+            if stopped:
+                raise InterruptedError('Stop System cancelled KMR Cartesian preparation')
             if joints is not None:
                 raise ValueError('KMR arm motion requires explicit downward Cartesian waypoints')
             values = dict(zip(state.joint_state.name, state.joint_state.position))
             initial = [values[name] for name in kmr['arm_joint_names']]
             start = configuration_pose(state, initial)
-            targets = [*(waypoints or []), target]
+            from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
+
+            middle = config['cartesian_waypoints'].get('transfer_orientation_waypoint_xyzw_in_base_frame')
+            if middle is not None:
+                middle = compose(entity('KMR'), [0., 0., 0., *middle])[3:]
+            targets = fixed_orientation_waypoints(
+                start, target, [pose[:3] for pose in (waypoints or [])],
+                rotation_point=transport_pose()[:3],
+                angular_step=config['cartesian_waypoints'].get('angular_step_rad', .05),
+                rotation_midpoint=middle,
+            ) or [list(target)]
+            waypoints, target = targets[:-1], targets[-1]
+            if any(pose is None or len(pose) != 7 or not all(math.isfinite(v) for v in pose)
+                   or not math.isclose(sum(v*v for v in pose[3:]), 1., abs_tol=1e-5)
+                   for pose in [start, *targets]):
+                raise ValueError('KMR Cartesian waypoints require finite XYZ and a unit quaternion')
             if any(rotate(pose[3:], [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad'])
                    for pose in [start, *targets]):
                 raise ValueError('KMR Cartesian waypoints must keep the gripper downward')
-            def solve(pose, seed):
-                if stopped:
-                    raise InterruptedError('Stop System cancelled KMR waypoint conversion')
-                query = GetPositionIK.Request()
-                query.ik_request.group_name = config['planning_group']
-                query.ik_request.ik_link_name = config['tcp_link']
-                query.ik_request.robot_state = updated_state(state, kmr['arm_joint_names'], seed)
-                query.ik_request.pose_stamped.header.frame_id = 'world'
-                query.ik_request.pose_stamped.pose = pose_message(pose)
-                query.ik_request.avoid_collisions = True
-                query.ik_request.timeout = Duration(nanosec=200_000_000)
-                result = service(GetPositionIK, '/compute_ik', query, retry_read=True)
-                if result.error_code.val != 1:
-                    raise ValueError(f'KMR waypoint IK unavailable at {pose}')
-                positions = dict(zip(result.solution.joint_state.name, result.solution.joint_state.position))
-                return [positions[name] for name in kmr['arm_joint_names']]
-            settings = config['cartesian_waypoints']
-            rows = resolve_waypoints(start_pose=start, start_joints=initial, waypoints=targets,
-                names=kmr['arm_joint_names'], limits=limits, solve_ik=solve,
-                linear_step=settings['linear_step_m'], angular_step=settings['angular_step_rad'],
-                maximum_joint_step=settings['max_joint_step_rad'])
-            trajectory = robot_trajectory(kmr['arm_joint_names'], rows)
-            checked = 0
-            for left, right in zip(rows, rows[1:]):
-                count = max(1, math.ceil(max(abs(b - a) for a, b in zip(left['positions'], right['positions'])) / .05))
-                for index in range(count + 1):
-                    positions = [a + (b - a) * index / count for a, b in zip(left['positions'], right['positions'])]
-                    query = GetStateValidity.Request(group_name=config['planning_group'],
-                        robot_state=updated_state(state, kmr['arm_joint_names'], positions))
-                    valid = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
-                    if not valid.valid:
-                        raise ValueError(f'KMR waypoint motion is obstructed: {[(c.contact_body_1, c.contact_body_2) for c in valid.contacts]}')
-                    checked += 1
-            planning_seconds += time.monotonic() - planning_started
-            info = {'operation': 'cartesian_path', 'motion_method': 'Cartesian waypoints',
-                    'success': True, 'target': deepcopy(target), 'waypoints': deepcopy(targets),
-                    'avoid_collisions': True, 'fraction': 1., 'checked_states': checked}
-        elif cartesian:
+        if cartesian or config.get('cartesian_motion_only'):
             query = GetCartesianPath.Request()
             query.header.frame_id = 'world'
             query.group_name = config['planning_group']
@@ -629,7 +627,16 @@ def run(request: dict, session: dict | None = None) -> dict:
             query.max_step = .005
             query.jump_threshold = 2.
             query.revolute_jump_threshold = .35
-            query.avoid_collisions = True
+            query.avoid_collisions = config.get('avoid_collisions') is not False
+            if config.get('cartesian_motion_only'):
+                settings = config['cartesian_waypoints']
+                query.max_step = float(settings['linear_step_m'])
+                query.revolute_jump_threshold = float(settings['max_joint_step_rad'])
+                query.jump_threshold = 0.
+                if (not math.isfinite(query.max_step) or query.max_step <= 0
+                        or not math.isfinite(query.revolute_jump_threshold)
+                        or query.revolute_jump_threshold <= 0):
+                    raise ValueError('Invalid KMR Cartesian waypoint spacing')
             if hold_arm_base:
                 values = dict(zip(state.joint_state.name, state.joint_state.position))
                 query.path_constraints.joint_constraints = [JointConstraint(
@@ -638,11 +645,13 @@ def run(request: dict, session: dict | None = None) -> dict:
             result = service(GetCartesianPath, config['services']['cartesian_path'], query, retry_read=True)
             info = {'operation': 'cartesian_path', 'success': result.error_code.val == 1
                                and result.fraction >= .999, 'target': deepcopy(target),
-                               'avoid_collisions': True, 'fraction': result.fraction,
+                               'avoid_collisions': query.avoid_collisions, 'fraction': result.fraction,
+                               'collision_checks_bypassed': not query.avoid_collisions,
                                'error_code': result.error_code.val,
                                'waypoint_count': len(waypoints or []) + 1, 'joint_target': deepcopy(joints)}
             planning_seconds += time.monotonic()-planning_started
-            if result.error_code.val != 1 or result.fraction < .999:
+            if (result.error_code.val != 1 or not math.isfinite(result.fraction)
+                    or result.fraction < (1. if config.get('cartesian_motion_only') else .999)):
                 raise ValueError(f'Collision-aware Cartesian path incomplete: {result.fraction}')
             trajectory = result.solution
         else:
@@ -693,8 +702,35 @@ def run(request: dict, session: dict | None = None) -> dict:
             if response.error_code.val != 1:
                 raise ValueError(f'Collision-aware KMR motion planning failed: {response.error_code.val}')
             trajectory = response.trajectory
+        if config.get('cartesian_motion_only'):
+            from cais_spade_llm.recovery_framework.kmr_motion import _stop_bounded_interpolation_overshoot
+
+            info['bounded_interpolation_corrections'] = _stop_bounded_interpolation_overshoot(
+                trajectory.joint_trajectory, limits)
         retime_trajectory(trajectory.joint_trajectory, limits,
                           config['velocity_scaling'], config['acceleration_scaling'])
+        if config.get('cartesian_motion_only'):
+            from cais_spade_llm.resources.robot.cartesian_waypoints import trajectory_samples
+
+            points = trajectory.joint_trajectory.points
+            if any(abs(b-a) > config['cartesian_waypoints']['max_joint_step_rad']
+                   for left, right in zip(points, points[1:])
+                   for a, b in zip(left.positions, right.positions, strict=True)):
+                raise ValueError('KMR Cartesian trajectory has an IK joint discontinuity')
+            checked = 0
+            samples = (trajectory_samples(trajectory.joint_trajectory)
+                       if config.get('avoid_collisions') is not False else ())
+            for positions in samples:
+                if stopped:
+                    raise InterruptedError('Stop System cancelled KMR waypoint validation')
+                query = GetStateValidity.Request(group_name=config['planning_group'],
+                    robot_state=updated_state(state, kmr['arm_joint_names'], positions))
+                valid = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
+                if not valid.valid:
+                    raise ValueError(f'KMR waypoint motion is obstructed: {[(c.contact_body_1, c.contact_body_2) for c in valid.contacts]}')
+                checked += 1
+            info.update(dynamic_target=True, checked_states=checked,
+                        observed_start_pose=deepcopy(start), waypoints=deepcopy(targets))
         info['planning_wall_time_sec'] = time.monotonic()-planning_started
         info['trajectory'] = {
             'joint_names': list(trajectory.joint_trajectory.joint_names),
@@ -708,6 +744,8 @@ def run(request: dict, session: dict | None = None) -> dict:
     def execute_plan(plan):
         trajectory, info = plan
         measured = dict(zip((state := fresh_state()).name, state.position))
+        if stopped:
+            raise InterruptedError('Stop System cancelled KMR waypoint execution')
         if any(abs(measured[name]-value) > .02 for name, value in zip(
             trajectory.joint_trajectory.joint_names, trajectory.joint_trajectory.points[0].positions
         )):
@@ -739,14 +777,16 @@ def run(request: dict, session: dict | None = None) -> dict:
         execute_plan(plan_motion(observed_state(), target=target, joints=joints, cartesian=cartesian))
 
     def move_cartesian(target):
-        """Execute a complete collision-checked path with fixed TCP orientation."""
+        """Execute a complete path with fixed TCP orientation and configured checks."""
         current = tcp()
         if abs(sum(a * b for a, b in zip(current[3:], target[3:]))) < math.cos(
             config['orientation_tolerance_rad'] / 2
         ):
             raise ValueError('Cartesian segment must preserve the observed TCP orientation')
         move(target=target, cartesian=True)
-        return {'success': True, 'tcp_pose': tcp(), 'avoid_collisions': True, 'fraction': 1.0}
+        return {'success': True, 'tcp_pose': tcp(), 'fraction': 1.0,
+                'avoid_collisions': config.get('avoid_collisions') is not False,
+                'collision_checks_bypassed': config.get('avoid_collisions') is False}
 
     def move_to_configuration(joints, hold_arm_base=False):
         measured = dict(zip((state := fresh_state()).name, state.position))
@@ -765,15 +805,25 @@ def run(request: dict, session: dict | None = None) -> dict:
                 or abs(sum(a * b for a, b in zip(base_pose[3:], dock_orientation))) < math.cos(.035 / 2)):
             raise ValueError('KMR downward home requires the observed Storage dock')
         home = storage_home(scene, request['inputs']['product_order'])
+        current = tcp()
+        if rotate(current[3:], [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad']):
+            raise ValueError('KMR empty home requires a downward observed gripper')
+        target = [*home['tcp_pose'][:3], *current[3:]]
         gripper(kmr['gripper_stroke_m'])
-        move_to_pose(home['tcp_pose'])
+        before = len(operations)
+        move_to_pose(target)
         actual = tcp()
         state = fresh_state()
         joints = dict(zip(state.name, state.position))
-        error = max(abs(joints[name] - value) for name, value in zip(kmr['arm_joint_names'], home['joints'], strict=True))
+        plans = [row for row in operations[before:] if row.get('operation') == 'cartesian_path']
+        planned_joints = (plans[-1]['trajectory']['points'][-1]['positions'] if plans else
+                          [joints[name] for name in kmr['arm_joint_names']])
+        error = max(abs(joints[name]-value) for name,value in zip(kmr['arm_joint_names'],planned_joints,strict=True))
+        home = {**home, 'joints': list(planned_joints), 'tcp_pose': target}
         down = rotate(actual[3:], [0., 0., 1.])
         if (down[2] > -math.cos(config['orientation_tolerance_rad'])
-                or math.dist(actual[:3], home['tcp_pose'][:3]) > .012):
+                or math.dist(actual[:3], home['tcp_pose'][:3]) > .012
+                or error > .005):
             raise ValueError('KMR downward home endpoint was not observed')
         observation = {'operation': 'observed_storage_home', 'success': True,
                        'home_pose_observed': True, 'downward_facing': True,
@@ -837,35 +887,6 @@ def run(request: dict, session: dict | None = None) -> dict:
         execute_plan((trajectory, info))
         return {'success': True, 'joint_a1': joint_a1, 'tcp_pose': tcp()}
 
-    def ik_candidates(target, state, seed_configurations=None):
-        nonlocal planning_seconds
-        values = dict(zip(state.joint_state.name, state.joint_state.position))
-        current = [values[name] for name in kmr['arm_joint_names']]
-        seeds = [current, *(seed_configurations if seed_configurations is not None else
-                            [config['carrying_arm_configuration'], *config['ik_seed_configurations']])]
-        solutions = []
-        for seed in seeds:
-            query = GetPositionIK.Request()
-            query.ik_request.group_name = config['planning_group']
-            query.ik_request.ik_link_name = config['tcp_link']
-            query.ik_request.robot_state = updated_state(state, kmr['arm_joint_names'], seed)
-            query.ik_request.pose_stamped.header.frame_id = 'world'
-            query.ik_request.pose_stamped.pose = pose_message(target)
-            query.ik_request.avoid_collisions = True
-            query.ik_request.timeout = Duration(nanosec=200_000_000)
-            before = time.monotonic()
-            response = service(GetPositionIK, '/compute_ik', query, retry_read=True)
-            planning_seconds += time.monotonic()-before
-            if response.error_code.val != 1:
-                continue
-            answer = dict(zip(response.solution.joint_state.name, response.solution.joint_state.position))
-            candidate = [answer[name] for name in kmr['arm_joint_names']]
-            if bounded_joints(kmr['arm_joint_names'], candidate, limits) and all(
-                max(abs(a-b) for a, b in zip(candidate, previous)) > .02 for previous in solutions
-            ):
-                solutions.append(candidate)
-        return sorted(solutions, key=lambda candidate: sum(abs(a-b) for a, b in zip(candidate, current)))
-
     def planned_attachment(state, grasp_pose, part_pose):
         result = updated_state(state, [kmr['gripper_joint']], [config['closed_gripper_width_m']])
         support_allowance = float(config['attachment_support_contact_allowance_m'])
@@ -909,6 +930,12 @@ def run(request: dict, session: dict | None = None) -> dict:
         nonlocal planning_seconds
         before = time.monotonic()
         route = route if route is not None else route_between(source_resource, target_resource)
+        if config.get('avoid_collisions') is False:
+            return {'operation': 'validated_transport_sweep', 'success': True,
+                    'transport_sweep_validated': False, 'collision_checks_bypassed': True,
+                    'checked_states': 0, 'route': deepcopy(route), 'arm_configuration': [
+                        dict(zip(state.joint_state.name, state.joint_state.position))[name]
+                        for name in kmr['arm_joint_names']]}
         checked = 0
         for start, end in zip(route, route[1:]):
             steps = max(1, math.ceil(math.dist(start[:2], end[:2])/config['transport_sample_step_m']),
@@ -924,6 +951,7 @@ def run(request: dict, session: dict | None = None) -> dict:
                 checked += 1
         planning_seconds += time.monotonic()-before
         return {'operation': 'validated_transport_sweep', 'success': True,
+                'transport_sweep_validated': True, 'collision_checks_bypassed': False,
                 'checked_states': checked, 'sample_step_m': config['transport_sample_step_m'],
                 'route': deepcopy(route), 'arm_configuration': [
                     dict(zip(state.joint_state.name, state.joint_state.position))[name]
@@ -936,7 +964,8 @@ def run(request: dict, session: dict | None = None) -> dict:
         custody_id = uuid4().hex
         transport.publish(String(data=json.dumps({
             **probe, 'part_name': None, 'attached': False, 'custody_id': custody_id,
-            'transport_sweep_validated': True,
+            'transport_sweep_validated': sweep['transport_sweep_validated'],
+            'collision_checks_bypassed': sweep['collision_checks_bypassed'],
             'carrying_arm_configuration': sweep['arm_configuration'],
         })))
         spin_until(lambda: base_motion_status.get('transport_custody_ack') == {
@@ -1073,7 +1102,8 @@ def run(request: dict, session: dict | None = None) -> dict:
                    for row in operations):
             operations.append(validate_transport(observed_state()))
         transport_posture = {'carrying_arm_configuration': transport_configuration,
-                             'transport_sweep_validated': True}
+                             'transport_sweep_validated': config.get('avoid_collisions') is not False,
+                             'collision_checks_bypassed': config.get('avoid_collisions') is False}
         custody_evidence = {'operation': 'observed_transport_custody', 'success': True,
                             'checked_samples': 1, 'reference_frame': custody_query.reference_frame,
                             'expected_relative_pose': expected_relative.copy()}
@@ -1127,16 +1157,35 @@ def run(request: dict, session: dict | None = None) -> dict:
                     resource_location=target_resource, grasp_transform=transform,
                     carrying_arm_configuration=(request.get('custody') or {})['carrying_arm_configuration'])
 
-    def transport_pose():
+    def transport_pose(orientation=None):
         offset = config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m']
         target = compose(entity('KMR'), [*offset, 0., 0., 0., 1.])
-        return [*target[:3], *config['pick_orientation_xyzw']]
+        observed = tcp() if orientation is None else orientation
+        selected = observed[3:]
+        if rotate(selected, [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad']):
+            raise ValueError('KMR transport requires a downward observed gripper')
+        return [*target[:3], *selected]
 
     def transfer_waypoints(start, target):
         from cais_spade_llm.recovery_framework.kmr_motion import downward_transfer_waypoints
+        from cais_spade_llm.resources.robot.cartesian_waypoints import sample_segment
 
-        mount = compose(entity('KMR'), [*kmr['arm_mount_xyz'], *quaternion(kmr['arm_mount_rpy'])])
-        return downward_transfer_waypoints(start, target, mount, config['cartesian_waypoints'])
+        base = entity('KMR')
+        mount = compose(base, [*kmr['arm_mount_xyz'], *quaternion(kmr['arm_mount_rpy'])])
+        settings = config['cartesian_waypoints']
+        waypoints = downward_transfer_waypoints(start, target, mount, settings)
+        middle = settings.get('transfer_orientation_waypoint_xyzw_in_base_frame')
+        if middle and waypoints and abs(sum(a*b for a,b in zip(start[3:], target[3:]))) < .01:
+            # The saved midpoint fixes the downward yaw direction of a half turn.
+            middle = compose(base, [0., 0., 0., *middle])[3:]
+            half = len(waypoints)//2
+            first = sample_segment(start, [*start[:3], *middle], linear_step=1e6,
+                                   angular_step=1e6, minimum_samples=half)
+            second = sample_segment([*target[:3], *middle], target, linear_step=1e6,
+                                    angular_step=1e6, minimum_samples=len(waypoints)-half-1)
+            for waypoint, orientation in zip(waypoints, [*first, *second[1:]], strict=True):
+                waypoint[3:] = orientation[3:]
+        return waypoints
 
     def compute_place_targets(transform):
         if math.dist(entity('KMR')[:2], machine['KMR_docking_pose'][:2]) > .035:
@@ -1150,10 +1199,11 @@ def run(request: dict, session: dict | None = None) -> dict:
         if rotate(target[3:], [0., 0., 1.])[2] > -.999:
             raise ValueError('KMR placement requires a downward-facing grasp')
         approach = target.copy()
-        approach[2] += config['minimum_pick_lift_m']
+        approach[2] = max(target[2] + config['minimum_pick_lift_m'],
+                          config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2])
         retreat = target.copy()
-        retreat[2] += config['release_offsets_m'][0][2]
-        transport = transport_pose()
+        retreat[2] = max(target[2] + config['release_offsets_m'][0][2], approach[2])
+        transport = transport_pose(retreat)
         return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
                 'transfer_waypoints': transfer_waypoints(tcp(), approach), 'transport': transport,
                 'withdraw_waypoints': transfer_waypoints(retreat, transport)}
@@ -1176,15 +1226,20 @@ def run(request: dict, session: dict | None = None) -> dict:
         observed = entity(part)
         if initial is not None and math.dist(observed[:3], initial[:3]) > .01:
             raise ValueError('Storage part moved before target computation')
-        target = [*observed[:3], *config['pick_orientation_xyzw']]
+        choices = scene['Storage']['KMR_pick_orientations_xyzw'][part]
+        orientation = _nearest_pick_orientation(tcp()[3:], choices, config['orientation_tolerance_rad'])
+        target = [*observed[:3], *orientation]
         target[2] += config['grasp_height_m']
         approach = target.copy()
         approach[2] += scene['Storage']['KMR_pick_approach_clearance_m'][part]
-        lift = target.copy()
-        lift[2] += config['minimum_pick_lift_m']
+        clearance = target.copy()
+        clearance[2] += config['minimum_pick_lift_m']
+        lift = transport_pose(target)
+        if lift[2] < clearance[2]:
+            raise ValueError('Saved KMR carrying height does not clear the picked part')
         retreat = lift.copy()
-        retreat[0] += config['approach_clearance_m']
-        return {'target': target, 'approach': approach, 'lift': lift, 'retreat': retreat,
+        return {'target': target, 'approach': approach, 'lift': lift,
+                'lift_waypoints': [clearance], 'retreat': retreat,
                 'seed': list(scene['Storage']['KMR_pick_arm_configurations'][part]),
                 'carrying': list(config['carrying_arm_configuration'])}
 
@@ -1194,6 +1249,9 @@ def run(request: dict, session: dict | None = None) -> dict:
         fresh_state(timeout=5.)
 
     try:
+        node.get_logger().info(f'[KMR] {name or mode}: part={part}; target={target_resource}')
+        if mode == 'probe':
+            node.get_logger().info('[KMR] Waiting for services/actions and fresh joint feedback...')
         response = service(GetParameters, '/KMR_base_controller/get_parameters', GetParameters.Request(names=list(_SCENE_IDENTITY_PARAMETERS)), 60., retry_read=True)
         probe = _scene_identity([value.string_value for value in response.values])
         if probe['scene_fingerprint'] != _expected_scene_fingerprint(
@@ -1267,15 +1325,17 @@ def run(request: dict, session: dict | None = None) -> dict:
                 })
         if mode == 'probe':
             core_services = (
-                (GetMotionPlan, config['services']['motion_plan']),
+                (GetPositionFK, '/compute_fk'),
                 (GetCartesianPath, config['services']['cartesian_path']),
-                (GetPositionIK, '/compute_ik'),
-                (GetStateValidity, '/check_state_validity'),
                 (ApplyPlanningScene, config['services']['apply_scene']),
                 (GetEntityState, config['services']['get_state']),
                 (AttachLink, config['services']['attach']),
                 (DetachLink, config['services']['detach']),
             )
+            if config.get('avoid_collisions') is not False:
+                core_services += ((GetStateValidity, '/check_state_validity'),)
+            if not config.get('cartesian_motion_only'):
+                core_services += ((GetMotionPlan, config['services']['motion_plan']),)
             ready_services = []
             for kind, endpoint in core_services:
                 if endpoint not in clients:
@@ -1290,12 +1350,11 @@ def run(request: dict, session: dict | None = None) -> dict:
                 (FollowJointTrajectory, kmr['arm_controller']+'/follow_joint_trajectory'),
                 (FollowJointTrajectory, kmr['gripper_controller']+'/follow_joint_trajectory'),
                 (DockKMR, kmr['docking_action']),
-                (NavigateToPose, '/KMR/navigate_to_pose'),
             ):
                 if endpoint not in action_clients:
                     action_clients[endpoint] = ActionClient(node, kind, endpoint)
                 client = action_clients[endpoint]
-                spin_until(client.server_is_ready, 30.)
+                spin_until(client.server_is_ready, 30., f'{endpoint} discovery')
             operations.append({
                 'operation': 'verified_core_services',
                 'success': True,
@@ -1304,11 +1363,11 @@ def run(request: dict, session: dict | None = None) -> dict:
                     kmr['arm_controller']+'/follow_joint_trajectory',
                     kmr['gripper_controller']+'/follow_joint_trajectory',
                     kmr['docking_action'],
-                    '/KMR/navigate_to_pose',
                 ],
             })
         install_scene()
         if mode == 'probe':
+            node.get_logger().info('[KMR] All services/actions ready; fresh joint feedback and scene identity verified.')
             return {'status': 'completed', **probe, 'operations': operations, 'part_pose': initial,
                     'KMR_pose': base, 'timing': timings()}
         if mode == 'validate_pickup':
@@ -1318,10 +1377,11 @@ def run(request: dict, session: dict | None = None) -> dict:
                 ['KMR_base_x_joint', 'KMR_base_y_joint', 'KMR_base_yaw_joint',
                  *kmr['arm_joint_names'], kmr['gripper_joint']],
                 [*pose, *targets['seed'], kmr['gripper_stroke_m']])
-            query = GetStateValidity.Request(group_name=config['planning_group'], robot_state=state)
-            validity = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
-            if not validity.valid:
-                raise ValueError(f'Configured pickup posture collides: {[(c.contact_body_1, c.contact_body_2) for c in validity.contacts]}')
+            if config.get('avoid_collisions') is not False:
+                query = GetStateValidity.Request(group_name=config['planning_group'], robot_state=state)
+                validity = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
+                if not validity.valid:
+                    raise ValueError(f'Configured pickup posture collides: {[(c.contact_body_1, c.contact_body_2) for c in validity.contacts]}')
             descend = plan_motion(state, target=targets['target'], cartesian=True)
             held = planned_attachment(state_after(state, descend), targets['target'], initial)
             lift = plan_motion(held, target=targets['lift'], cartesian=True)
@@ -1447,12 +1507,14 @@ def run(request: dict, session: dict | None = None) -> dict:
         ))
         observation['controllers_succeeded'] = True
         observation['timing'] = timings()
+        node.get_logger().info(f'[KMR] {name} completed: part={part}; task={pending.get("task_id")}')
         return {
             'status': 'completed', 'resource_id': 'KMR', 'event_name': name,
             'task_id': pending.get('task_id'), 'observations': observation,
             'timing': observation['timing'],
         }
     except (RuntimeError, ValueError, TypeError, KeyError, TimeoutError, InterruptedError) as exc:
+        node.get_logger().error(f'[KMR] {name or mode} failed: {exc}')
         return {'status': 'failed', 'error': str(exc), 'operations': operations,
                 'primitive_results': primitive_results, 'timing': timings(),
                 'cancelled': stopped}

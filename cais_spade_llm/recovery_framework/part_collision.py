@@ -173,7 +173,7 @@ def mating_pose_valid(authorization: dict, pose: list[float]) -> bool:
         yaw = math.atan2(2 * (pose[6] * pose[5] + pose[3] * pose[4]),
                          1 - 2 * (pose[4] ** 2 + pose[5] ** 2))
         error = yaw - authorization['target_yaw_rad']
-        if abs(math.atan2(math.sin(error), math.cos(error))) > .002:
+        if abs(math.atan2(math.sin(error), math.cos(error))) > authorization.get('yaw_tolerance_rad', .002):
             return False
     return (all(math.isfinite(value) for value in pose)
             and math.hypot(pose[0] - target['x'], pose[1] - target['y']) <= tolerance

@@ -473,7 +473,7 @@ def launch_setup(context, *args, **kwargs):
                     'rviz_software_rendering',
                     'enable_camera_streams',
                     'simulation_speed', 'ur_controller_rate_hz', 'dynamic_shadows',
-                    'gazebo_gui_rate_hz', 'kmr_initial_part',
+                    'gazebo_gui_rate_hz', 'ode_island_threads', 'kmr_initial_part',
                 )
             }.items(),
         )]
@@ -593,6 +593,7 @@ def generate_launch_description():
         DeclareLaunchArgument('ur_controller_rate_hz', default_value='1000'),
         DeclareLaunchArgument('dynamic_shadows', default_value='false'),
         DeclareLaunchArgument('gazebo_gui_rate_hz', default_value='30'),
+        DeclareLaunchArgument('ode_island_threads', default_value='0'),
         DeclareLaunchArgument(
             'run_perception',
             default_value='false',

@@ -882,7 +882,11 @@ def main() -> None:
                     'linear_deceleration_mps2': self.max_linear_acceleration,
                     'map_available': self._occupancy_map is not None,
                 }
-                for velocity in ((x, y, angular), self._odom_velocity):
+                collision_checks = not (
+                    self.get_parameter('use_sim_time').value is True
+                    and self.kmr['task_execution'].get('avoid_collisions') is False)
+                self._motion_status['collision_checks_bypassed'] = not collision_checks
+                for velocity in (((x, y, angular), self._odom_velocity) if collision_checks else ()):
                     sweep = stopping_base_poses(
                         pose, velocity, self.max_linear_acceleration,
                         self.max_angular_acceleration, reaction_time,
@@ -994,7 +998,14 @@ def main() -> None:
                 and custody.get('launch_id') == self.get_parameter('launch_id').value
                 and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value
             )
-            if (carrying or simulated_empty_waypoints) and custody.get('transport_sweep_validated') is True:
+            collision_bypass = bool(
+                custody and custody.get('collision_checks_bypassed') is True
+                and self.get_parameter('use_sim_time').value is True
+                and self.kmr['task_execution'].get('avoid_collisions') is False
+                and custody.get('launch_id') == self.get_parameter('launch_id').value
+                and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value)
+            if (carrying or simulated_empty_waypoints) and (
+                    custody.get('transport_sweep_validated') is True or collision_bypass):
                 configuration = custody.get('carrying_arm_configuration')
                 if (not isinstance(configuration, list) or len(configuration) != 7
                         or any(not isinstance(value, (int, float)) or not math.isfinite(value)
@@ -1012,6 +1023,9 @@ def main() -> None:
                 return False
             if not custody or custody.get('attached') is not True:
                 return arm_parked and abs(width - float(self.kmr["gripper_stroke_m"])) <= .006
+            closed_width = self.kmr['task_execution'].get('closed_gripper_width_m_by_part', {}).get(
+                custody.get('part_name'), self.kmr['task_execution']['closed_gripper_width_m'],
+            )
             return bool(arm_parked and custody
                         and self._transport_custody_monotonic is not None
                         and time.monotonic() - self._transport_custody_monotonic < .75
@@ -1019,7 +1033,7 @@ def main() -> None:
                         and custody.get('part_name') in self.storage_parts
                         and custody.get('launch_id') == self.get_parameter('launch_id').value
                         and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value
-                        and abs(width - self.kmr['task_execution']['closed_gripper_width_m']) <= .006)
+                        and abs(width - closed_width) <= .006)
 
         def _transport_cb(self, message: String) -> None:
             try:
@@ -1465,7 +1479,10 @@ def main() -> None:
             try:
                 nav_goals = goals[:-1] if source is None else ()
                 direct_goals = goals[-1:] if source is None else goals
-                if source is not None and not base_path_is_clear(
+                collision_checks = not (
+                    self.get_parameter('use_sim_time').value is True
+                    and self.kmr['task_execution'].get('avoid_collisions') is False)
+                if collision_checks and source is not None and not base_path_is_clear(
                     self._occupancy_map, (pose, *direct_goals),
                 ):
                     self._abort_base_motion('KMR configured route intersects an obstacle or map is unavailable')

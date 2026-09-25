@@ -2889,6 +2889,7 @@ class GazeboPickPlaceController:
         self._last_joint_sim_time = None
         self._joint_state_received_monotonic = 0.0
         self._last_command_evidence: dict[str, Any] | None = None
+        self._last_joint_target_observation: dict[str, Any] | None = None
 
         # Remembered start pose for move_home (set externally or by UI recovery).
         self._last_start_pose = None
@@ -2902,6 +2903,7 @@ class GazeboPickPlaceController:
         """Queue resolved plan-only work to begin after the current goal is accepted."""
         if (
             self.execution_mode != "simulation"
+            or GazeboPickPlaceController._cartesian_motion_only(self)
             or primitive != "move_cartesian"
             or self.controller_config.get("background_preparation_enabled") is not True
         ):
@@ -3176,6 +3178,10 @@ class GazeboPickPlaceController:
         branch changes can create colliding interpolated motion even when the
         service reports a complete path.
         """
+        if (self.execution_mode == 'simulation'
+                and getattr(self, 'controller_config', {}).get('cartesian_motion', {}).get('avoid_collisions') is False):
+            self._last_path_validation = {'checked_states': 0, 'collision_checks_bypassed': True}
+            return True
         if (self.execution_mode != "simulation" or not getattr(
             self, "controller_config", {}).get("payload_collision", {}).get("enabled")):
             return True
@@ -3187,58 +3193,65 @@ class GazeboPickPlaceController:
         if mating_contact:
             evidence['mating_contact'] = deepcopy(mating_contact)
             evidence['permitted_contact_states'] = 0
-        previous = None
-        try:
+        def samples():
+            if GazeboPickPlaceController._cartesian_motion_only(self):
+                from cais_spade_llm.resources.robot.cartesian_waypoints import trajectory_samples
+
+                yield from trajectory_samples(trajectory)
+                return
+            previous = None
             for point in trajectory.points:
                 current = list(point.positions)
                 origin = current if previous is None else previous
                 steps = max(1, math.ceil(max(abs(b - a) for a, b in zip(
                     origin, current, strict=True)) / .05))
                 for index in range(1, steps + 1):
+                    yield [a + (b - a) * index / steps for a, b in zip(origin, current, strict=True)]
+                previous = current
+
+        try:
+            for positions in samples():
+                if self._shutdown_requested:
+                    self._last_failure_message = "Motion validation cancelled"
+                    return False
+                request = GetStateValidity.Request()
+                request.group_name = self.group_name
+                request.robot_state.is_diff = True
+                request.robot_state.joint_state.name = list(trajectory.joint_names)
+                request.robot_state.joint_state.position = positions
+                response = None
+                deadline = time.monotonic() + float(getattr(self, "tf_lookup_timeout_sec", 5.))
+                while response is None and time.monotonic() < deadline:
                     if self._shutdown_requested:
                         self._last_failure_message = "Motion validation cancelled"
                         return False
-                    request = GetStateValidity.Request()
-                    request.group_name = self.group_name
-                    request.robot_state.is_diff = True
-                    request.robot_state.joint_state.name = list(trajectory.joint_names)
-                    request.robot_state.joint_state.position = [
-                        a + (b - a) * index / steps for a, b in zip(origin, current, strict=True)
+                    evidence["observation_attempts"] = evidence.get("observation_attempts", 0) + 1
+                    response = self._wait_future(
+                        self._state_validity_client.call_async(request),
+                        timeout_sec=min(1., max(.001, deadline - time.monotonic())),
+                        label="timed trajectory collision validation", timeout_log_level="debug",
+                    )
+                evidence["checked_states"] += 1
+                permitted_contact = False
+                if response is not None and not response.valid and mating_contact:
+                    permitted_contact = self._validate_simulation_mating_contact(
+                        mating_contact, response.contacts, request.robot_state)
+                    if permitted_contact:
+                        evidence['permitted_contact_states'] += 1
+                if response is None or (not response.valid and not permitted_contact):
+                    evidence["observation_received"] = response is not None
+                    evidence["contacts"] = [] if response is None else [
+                        [contact.contact_body_1, contact.contact_body_2]
+                        for contact in response.contacts
                     ]
-                    response = None
-                    deadline = time.monotonic() + float(getattr(self, "tf_lookup_timeout_sec", 5.))
-                    while response is None and time.monotonic() < deadline:
-                        if self._shutdown_requested:
-                            self._last_failure_message = "Motion validation cancelled"
-                            return False
-                        evidence["observation_attempts"] = evidence.get("observation_attempts", 0) + 1
-                        response = self._wait_future(
-                            self._state_validity_client.call_async(request),
-                            timeout_sec=min(1., max(.001, deadline - time.monotonic())),
-                            label="timed trajectory collision validation", timeout_log_level="debug",
-                        )
-                    evidence["checked_states"] += 1
-                    permitted_contact = False
-                    if response is not None and not response.valid and mating_contact:
-                        permitted_contact = self._validate_simulation_mating_contact(
-                            mating_contact, response.contacts, request.robot_state)
-                        if permitted_contact:
-                            evidence['permitted_contact_states'] += 1
-                    if response is None or (not response.valid and not permitted_contact):
-                        evidence["observation_received"] = response is not None
-                        evidence["contacts"] = [] if response is None else [
-                            [contact.contact_body_1, contact.contact_body_2]
-                            for contact in response.contacts
-                        ]
-                        self._last_failure_message = (
-                            "Timed trajectory collision observation unavailable"
-                            if response is None else "Timed trajectory is in collision"
-                        )
-                        self._last_command_evidence = {
-                            "command_sent": False, "motion_path_validation": deepcopy(evidence),
-                        }
-                        return False
-                previous = current
+                    self._last_failure_message = (
+                        "Timed trajectory collision observation unavailable"
+                        if response is None else "Timed trajectory is in collision"
+                    )
+                    self._last_command_evidence = {
+                        "command_sent": False, "motion_path_validation": deepcopy(evidence),
+                    }
+                    return False
             evidence["collision_free"] = bool(trajectory.points)
             return evidence["collision_free"]
         finally:
@@ -3572,6 +3585,7 @@ class GazeboPickPlaceController:
         return bool(self._initialized and self._services_ready and spin_alive)
 
     def wait_for_services(self, timeout_sec: float = 60.0) -> bool:
+        """Wait for the observation and execution services required by this resource."""
         if not self.init():
             return False
         if self._services_ready:
@@ -3580,16 +3594,32 @@ class GazeboPickPlaceController:
         self._log().info("Waiting for services/actions...")
         deadline = time.monotonic() + timeout_sec
 
-        if self.execution_mode != "physical" and not self._wait_service(
+        if GazeboPickPlaceController._cartesian_motion_only(self):
+            from moveit_msgs.srv import GetPositionFK
+
+            for attribute, kind, name in (
+                ('_home_fk_client', GetPositionFK, '/compute_fk'),
+            ):
+                if not hasattr(self, attribute):
+                    setattr(self, attribute, self._node.create_client(kind, name, callback_group=self._cb_group))
+                if not self._wait_service(getattr(self, attribute), name, deadline):
+                    return False
+            if (self.controller_config['cartesian_motion'].get('avoid_collisions') is not False
+                    and not self._wait_service(self._state_validity_client, '/check_state_validity', deadline)):
+                return False
+            if not self._wait_service(self._cart_client, self.service_cartesian_path, deadline):
+                return False
+        elif self.execution_mode != "physical" and not self._wait_service(
             self._detect_all_client_legacy, self.service_detect_all, deadline
         ):
             return False
-        if not self._wait_service(self._cart_client, self.service_cartesian_path, deadline):
-            return False
-        if not self._wait_service(self._motion_plan_client, self.service_motion_plan, deadline):
-            return False
-        if not self._wait_action_server(self._exec_client, self.service_execute_traj, deadline):
-            return False
+        if not GazeboPickPlaceController._cartesian_motion_only(self):
+            if not self._wait_service(self._cart_client, self.service_cartesian_path, deadline):
+                return False
+            if not self._wait_service(self._motion_plan_client, self.service_motion_plan, deadline):
+                return False
+            if not self._wait_action_server(self._exec_client, self.service_execute_traj, deadline):
+                return False
 
         if self._link_attacher_enabled:
             if not self._wait_service(self._attach_client, self.service_attach, deadline):
@@ -4179,13 +4209,22 @@ class GazeboPickPlaceController:
                 "message": f"unknown pose '{pose_name}'; available={available}",
             }
         joint_values = [float(v) for v in positions]
-        if self._fresh_stable_joint_target(
+        preserve_home_orientation = (
+            self.execution_mode == "simulation"
+            and str(pose_name) == "home"
+            and getattr(self, "controller_config", {}).get("cartesian_motion", {}).get("home_preserve_orientation") is True
+        )
+        if preserve_home_orientation:
+            self._last_cartesian_home_pose = None
+            self._last_cartesian_home_joint_target = None
+        if not preserve_home_orientation and self._fresh_stable_joint_target(
             dict(zip(self.arm_joint_names, joint_values, strict=True)), tolerance=0.02,
         ):
             evidence = {
                 "command_sent": False,
                 "reason": "fresh stable endpoint already observed",
                 "target": dict(zip(self.arm_joint_names, joint_values, strict=True)),
+                "joint_observation": deepcopy(self._last_joint_target_observation),
             }
             self._last_command_evidence = evidence
             return {
@@ -4215,6 +4254,7 @@ class GazeboPickPlaceController:
                 self._last_command_evidence = {
                     **dict(self._last_command_evidence or {}),
                     "command_sent": True,
+                    "joint_observation": deepcopy(getattr(self, "_last_joint_target_observation", None)),
                 }
                 return {
                     "success": True,
@@ -5130,6 +5170,29 @@ class GazeboPickPlaceController:
                         f"{grasp_orientation_error or 'orientation is unavailable'}"
                     ),
                 }
+        choices = handling_access.get("grasp_orientations_xyzw")
+        choices_by_part = handling_access.get("grasp_orientations_xyzw_by_part")
+        if self.execution_mode == "simulation" and choices_by_part is not None:
+            if not isinstance(choices_by_part, dict):
+                return {"success": False, "message": "configured grasp_orientations_xyzw_by_part is invalid"}
+            choices = choices_by_part.get(target_part_name, choices)
+        if self.execution_mode == "simulation" and choices is not None:
+            from cais_spade_llm.recovery_framework.geometry import rotate
+
+            if (not isinstance(choices, list) or not choices
+                    or any(not isinstance(choice, list) or len(choice) != 4
+                           or not all(isinstance(value, (int, float)) and math.isfinite(value)
+                                      for value in choice)
+                           or not math.isclose(sum(value*value for value in choice), 1., abs_tol=1e-5)
+                           for choice in choices)):
+                return {"success": False, "message": "configured grasp_orientations_xyzw is invalid"}
+            current = [ee.orientation.x, ee.orientation.y, ee.orientation.z, ee.orientation.w]
+            grasp_quaternion = max(choices, key=lambda choice: abs(sum(
+                a*b for a,b in zip(current,choice,strict=True))))
+            if (rotate(current, [0., 0., 1.])[2] < -math.cos(.02)
+                    and abs(sum(a*b for a,b in zip(current,grasp_quaternion,strict=True)))
+                    >= math.cos(.02/2)):
+                grasp_quaternion = current
         configured_tcp_offset_z = handling_access.get("tcp_offset_z_m")
         if configured_tcp_offset_z is None:
             ee_tcp_offset_z = self._get_ee_tcp_world_z_offset()
@@ -5408,7 +5471,12 @@ class GazeboPickPlaceController:
         if explicit_access_poses is not None:
             result["approach_pose"] = explicit_access_poses[0]
             result["target_pose"] = explicit_access_poses[1]
-            result["access_retreat_pose"] = explicit_access_poses[0]
+            retreat_pose = dict(explicit_access_poses[0])
+            if (self._cartesian_motion_only()
+                    and getattr(self, "robot_name", None) in ("ur5e-1", "ur5e-2")):
+                clearance_z = self.controller_config["cartesian_motion"]["rotation_waypoint"][2]
+                retreat_pose["z"] = max(retreat_pose["z"], float(clearance_z))
+            result["access_retreat_pose"] = retreat_pose
             result["handling_robot_access_executed"] = True
         elif grasp_quaternion is not None:
             orientation = dict(
@@ -6714,14 +6782,48 @@ class GazeboPickPlaceController:
             self._last_failure_message = "Configured home FK is unavailable"
             return False
         target = response.pose_stamped[0].pose
+        preserve_orientation = getattr(self, 'controller_config', {}).get('cartesian_motion', {}).get('home_preserve_orientation') is True
+        if preserve_orientation:
+            from cais_spade_llm.recovery_framework.geometry import rotate
+
+            if self._attached_model is not None:
+                self._last_failure_message = 'Cartesian home requires an empty gripper'
+                return False
+            current = self._get_ee_pose()
+            if current is None:
+                self._last_failure_message = 'Cartesian home start pose is unavailable'
+                return False
+            q = current.orientation
+            if rotate([q.x,q.y,q.z,q.w],[0.,0.,1.])[2] > -math.cos(.02):
+                self._last_failure_message = 'Cartesian home requires a downward gripper'
+                return False
+            target.orientation = q
         if not self._move_xy_direct(target.position.x, target.position.y, target.position.z,
                                     target.orientation, "Cartesian home"):
             return False
-        if not self._fresh_stable_joint_target(dict(zip(self.arm_joint_names, positions, strict=True)),
-                                                tolerance=.02):
-            self._last_failure_message = "Cartesian home did not reach the configured joint posture"
-            return False
-        return True
+        if preserve_orientation:
+            if (self._last_command_evidence or {}).get('command_sent') is True:
+                targets = getattr(self, '_last_cartesian_joint_target', None)
+            else:
+                observed, missing = self._get_arm_joint_positions(timeout_sec=2.)
+                targets = (dict(zip(self.arm_joint_names, observed, strict=True))
+                           if observed is not None and not missing else None)
+            if not targets:
+                self._last_failure_message = 'Cartesian home planned joint endpoint is unavailable'
+                return False
+            self._last_cartesian_home_pose = self._make_pose(
+                target.position.x,target.position.y,target.position.z,target.orientation)
+            self._last_cartesian_home_joint_target = dict(targets)
+        else:
+            targets = dict(zip(self.arm_joint_names, positions, strict=True))
+        pending = self._motion_pending(2.)
+        while pending():
+            self._get_arm_joint_positions(timeout_sec=0.)
+            if self._fresh_stable_joint_target(targets, tolerance=.02):
+                return True
+            time.sleep(.02)
+        self._last_failure_message = "Cartesian home did not reach the configured joint posture"
+        return False
 
     def _move_joints_via_moveit(
         self,
@@ -7084,7 +7186,9 @@ class GazeboPickPlaceController:
         source_link = settings["observation_link"]
         scoped_link = f"{self.robot_model_name}::{source_link}"
         request = self._GetEntityState.Request(name=scoped_link, reference_frame=self.frame_id)
-        deadline = time.monotonic() + float(getattr(self, "tf_lookup_timeout_sec", 2.0))
+        observation_timeout = float(getattr(self, "tf_lookup_timeout_sec", 2.0))
+        deadline = time.monotonic() + observation_timeout
+        response_timeouts = 0
         observation_error = f"Gazebo link observation timed out: {scoped_link}"
         while True:
             if getattr(self, "_shutdown_requested", False):
@@ -7095,11 +7199,27 @@ class GazeboPickPlaceController:
                 self._last_failure_message = observation_error
                 return None
             response = self._wait_future(
-                self._get_state_client.call_async(request), timeout_sec=min(1.0, remaining),
+                self._get_state_client.call_async(request), timeout_sec=remaining,
                 label="observe Gazebo wrist pose", timeout_log_level="debug",
             )
             if response is None:
+                response_timeouts += 1
                 observation_error = f"Gazebo link observation timed out: {scoped_link}"
+                if response_timeouts >= 3:
+                    self._last_failure_message = observation_error
+                    return None
+                if getattr(self, '_shutdown_requested', False):
+                    self._last_failure_message = 'Observed tool pose was cancelled'
+                    return None
+                self._log().warning(
+                    f"{observation_error}; reconnecting for fresh observation ({response_timeouts}/3)"
+                )
+                self._node.destroy_client(self._get_state_client)
+                self._get_state_client = self._node.create_client(
+                    self._GetEntityState, self.service_get_entity_state, callback_group=self._cb_group,
+                )
+                deadline = time.monotonic() + observation_timeout
+                self._get_state_client.wait_for_service(timeout_sec=min(1., observation_timeout))
                 continue
             if not response.success:
                 self._last_failure_message = f"Gazebo link observation failed: {scoped_link}"
@@ -7261,17 +7381,21 @@ class GazeboPickPlaceController:
         tolerance: float,
         stable_for_sec: float = 0.05,
     ) -> bool:
-        """Return true only for a fresh, stable endpoint with no active goal."""
+        """Capture measured joints when a fresh, stable endpoint has no active goal."""
+        self._last_joint_target_observation = None
         if self.execution_mode != 'simulation' or self._simulation_goal is not None:
             return False
         now = time.monotonic()
         with self._joint_lock:
+            observed = []
             for name, target in targets.items():
                 value = self._joint_positions.get(name)
                 received = self._joint_received_times.get(name, 0.)
                 stable_since = self._joint_stable_since.get(name, now)
                 if (
                     value is None
+                    or not math.isfinite(value)
+                    or not math.isfinite(target)
                     or now - received > 1.
                     or now - stable_since < stable_for_sec
                     or (
@@ -7280,6 +7404,12 @@ class GazeboPickPlaceController:
                     ) > tolerance
                 ):
                     return False
+                observed.append(value)
+            self._last_joint_target_observation = {
+                "joint_names": list(targets), "target_positions": list(targets.values()),
+                "observed_positions": observed, "missing_joints": [], "fresh_stable": True,
+                "tolerance_rad": tolerance, "observed_at_unix": time.time(),
+            }
         return True
 
     def _current_simulation_state_is_collision_free(self) -> bool:
@@ -7704,7 +7834,9 @@ class GazeboPickPlaceController:
             future.add_done_callback(lambda _future: completed.set())
         except AttributeError:
             pass
-        while self._rclpy.ok() and not future.done() and pending():
+        while (self._rclpy.ok() and not future.done() and pending()
+               and (self.execution_mode != 'simulation'
+                    or not getattr(self, '_shutdown_requested', False))):
             completed.wait(0.05)
         if not future.done():
             try:
@@ -7787,7 +7919,25 @@ class GazeboPickPlaceController:
         def call(client, query, label):
             if not client.wait_for_service(timeout_sec=2.0):
                 raise RuntimeError(f"Payload scene service unavailable: {label}")
-            result = self._wait_future(client.call_async(query), timeout_sec=5.0, label=label)
+            attempts = 3 if label == "payload_pose" else 1
+            for attempt in range(attempts):
+                result = self._wait_future(client.call_async(query), timeout_sec=5.0, label=label)
+                if result is not None:
+                    break
+                if attempt + 1 < attempts:
+                    if getattr(self, "_shutdown_requested", False):
+                        break
+                    self._log().warning(
+                        f"Payload pose observation timed out for {model_name}; reconnecting"
+                    )
+                    self._node.destroy_client(client)
+                    client = self._node.create_client(
+                        self._GetEntityState, self.service_get_entity_state,
+                        callback_group=self._cb_group,
+                    )
+                    self._get_state_client = client
+                    if not client.wait_for_service(timeout_sec=1.0):
+                        break
             if result is None:
                 raise RuntimeError(f"Payload scene observation/acknowledgement missing: {label}")
             return result
@@ -7932,6 +8082,30 @@ class GazeboPickPlaceController:
         if detach_timeout <= 0.0:
             detach_timeout = self.detach_timeout_sec
 
+        retained_mating = None
+        mating = getattr(self, '_simulation_mating_context', None)
+        if (getattr(self, 'execution_mode', None) == 'simulation'
+                and self._attached_model == target_model and mating
+                and mating.get('model_name') == target_model
+                and mating.get('retain_fixture_attachment')):
+            from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
+
+            observed = self._wait_future(
+                self._get_state_client.call_async(self._GetEntityState.Request(
+                    name=target_model, reference_frame=self.frame_id)),
+                timeout_sec=5., label='observe mating part before fixture handoff',
+            )
+            if observed is None or not observed.success:
+                self._last_failure_message = 'Cannot observe mating part before fixture handoff'
+                return False
+            p, q = observed.state.pose.position, observed.state.pose.orientation
+            actual = [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+            corridor = {**mating, 'start_part_z': mating['target_origin_pose']['z']}
+            if not mating_pose_valid(corridor, actual):
+                self._last_failure_message = 'Mating part is not seated before fixture handoff'
+                return False
+            retained_mating = {'observed_pose': actual, 'valid': True, 'orientation_preserved': True}
+
         links_to_try: list[str] = []
         if prefer_attached_link and self._attached_link:
             links_to_try.append(self._attached_link)
@@ -7975,7 +8149,18 @@ class GazeboPickPlaceController:
             if response and response.success:
                 self._attached_model = None
                 self._attached_link = None
-                return self._sync_part_collision(target_model)
+                # Preserve the verified seat before free settling can change its phase.
+                if retained_mating and not self._attach_part_to_assembly_board(
+                    target_model, destination_location='assembly_board-v1',
+                ):
+                    self._last_failure_message = 'Released mating part could not be retained by its fixture'
+                    return False
+                synchronized = self._sync_part_collision(target_model)
+                if retained_mating:
+                    self._last_command_evidence['seated_mating_part'] = {
+                        **retained_mating, 'fixture_attachment_retained': True,
+                    }
+                return synchronized
 
             if response is None:
                 if log_failure:
@@ -8108,11 +8293,27 @@ class GazeboPickPlaceController:
             ),
         )
         for _sample_index in range(samples):
-            self._wait_process_time(interval_sec)
-            observed_position = self._get_entity_world_position(
-                model_name,
-                timeout_log_level="warn",
-            )
+            observed_position = None
+            attempts = 3 if getattr(self, 'execution_mode', None) == 'simulation' else 1
+            for attempt in range(attempts):
+                self._wait_process_time(interval_sec)
+                observed_position = self._get_entity_world_position(
+                    model_name,
+                    timeout_log_level="warn",
+                )
+                if observed_position is not None:
+                    break
+                if getattr(self, '_shutdown_requested', False):
+                    return False
+                if attempt + 1 < attempts:
+                    self._log().warning(
+                        f"snap_to_slot observation timed out for {model_name}; reconnecting"
+                    )
+                    self._node.destroy_client(self._get_state_client)
+                    self._get_state_client = self._node.create_client(
+                        self._GetEntityState, self.service_get_entity_state,
+                        callback_group=self._cb_group)
+                    self._get_state_client.wait_for_service(timeout_sec=1.)
             if observed_position is None:
                 self._log().error(
                     f"snap_to_slot could not observe {model_name} after attachment"
@@ -8248,11 +8449,11 @@ class GazeboPickPlaceController:
         )
         return bool(response and response.success)
 
-    def _observed_cartesian_endpoint_evidence(self, target) -> dict[str, Any] | None:
+    def _observed_cartesian_endpoint_evidence(self, target, observed=None) -> dict[str, Any] | None:
         """Compare the observed tool pose with a commanded Cartesian endpoint."""
         if not getattr(self, "_last_simulation_controller_succeeded", False):
             return None
-        observed = self._get_ee_pose()
+        observed = observed if observed is not None else self._get_ee_pose()
         if observed is None:
             return None
 
@@ -8309,6 +8510,27 @@ class GazeboPickPlaceController:
             ),
         }
 
+    def _fresh_simulation_tf_tool_pose(self):
+        """Read the current tool TF when Gazebo wrist observation is unavailable."""
+        if self.execution_mode != 'simulation' or getattr(self, '_shutdown_requested', False):
+            return None
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self.frame_id, self.ee_link, self._rclpy.time.Time())
+        except (self._tf2_ros.LookupException, self._tf2_ros.ConnectivityException,
+                self._tf2_ros.ExtrapolationException):
+            return None
+        stamp = transform.header.stamp.sec + transform.header.stamp.nanosec / 1e9
+        now = self._node.get_clock().now().nanoseconds / 1e9
+        if not math.isfinite(stamp) or abs(now - stamp) > .25:
+            return None
+        pose = self._Pose()
+        pose.position.x = transform.transform.translation.x
+        pose.position.y = transform.transform.translation.y
+        pose.position.z = transform.transform.translation.z
+        pose.orientation = transform.transform.rotation
+        return pose
+
     def _wait_for_simulation_cartesian_endpoint(self, target) -> dict[str, Any] | None:
         """Observe the commanded pose before another primitive consumes TF."""
         if not getattr(self, "_last_simulation_controller_succeeded", False):
@@ -8327,11 +8549,27 @@ class GazeboPickPlaceController:
         if self._attached_model != model_name or not math.isfinite(yaw):
             raise ValueError('Mating placement requires the identified attached part')
         current = self._get_ee_pose()
-        observed = self._wait_future(self._get_state_client.call_async(self._GetEntityState.Request(
-            name=model_name, reference_frame=self.frame_id)),
-            timeout_sec=5., label='observe held mating transform')
+        observed = None
+        for attempt in range(3):
+            if getattr(self, '_shutdown_requested', False):
+                raise InterruptedError('Held mating transform observation was cancelled')
+            observed = self._wait_future(self._get_state_client.call_async(self._GetEntityState.Request(
+                name=model_name, reference_frame=self.frame_id)),
+                timeout_sec=5., label='observe held mating transform')
+            if observed is not None:
+                break
+            if attempt < 2:
+                self._log().warning('Held mating transform observation timed out; reconnecting for fresh observation')
+                self._node.destroy_client(self._get_state_client)
+                self._get_state_client = self._node.create_client(
+                    self._GetEntityState, self.service_get_entity_state, callback_group=self._cb_group)
+                self._get_state_client.wait_for_service(timeout_sec=1.)
         if current is None or observed is None or not observed.success:
             raise RuntimeError('Cannot observe the held mating transform')
+        if attempt:
+            current = self._get_ee_pose()
+            if current is None:
+                raise RuntimeError('Cannot reobserve the gripper after the held mating transform')
         p, q = observed.state.pose.position, observed.state.pose.orientation
         ee = current.orientation
         inverse = [-ee.x, -ee.y, -ee.z, ee.w]
@@ -8339,6 +8577,11 @@ class GazeboPickPlaceController:
         relative = multiply(inverse, [q.x, q.y, q.z, q.w])
         target_q = [0., 0., math.sin(yaw / 2), math.cos(yaw / 2)]
         tool_q = multiply(target_q, [-relative[0], -relative[1], -relative[2], relative[3]])
+        if model_name in ('gear_small', 'gear_medium', 'gear_large'):
+            # The RG2 mounting yaw makes its finger spread the tool X axis; the shafts run along world X.
+            finger_axis = rotate(tool_q, [1., 0., 0.])
+            if abs(finger_axis[0]) > math.sin(math.radians(5.)):
+                raise ValueError(f'{model_name} gripper fingers do not clear the Gear_Plate shaft row')
         world_offset = rotate(tool_q, offset)
         xyz = [float(target_origin[axis]) - world_offset[i] for i, axis in enumerate(('x', 'y', 'z'))]
         if not all(math.isfinite(value) for value in [*xyz, *tool_q]):
@@ -8408,49 +8651,6 @@ class GazeboPickPlaceController:
         part = compose([p.x, p.y, p.z, q.x, q.y, q.z, q.w], authorization['tool_to_part_pose'])
         return mating_pose_valid(authorization, part)
 
-    def _resolve_cartesian_waypoints(self, waypoints: list, *, mating_contact: dict | None):
-        """Convert this primitive's explicit waypoints without a motion planner."""
-        from builtin_interfaces.msg import Duration
-        from moveit_msgs.srv import GetPositionIK
-        from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints, robot_trajectory
-
-        current = self._get_ee_pose()
-        positions, missing = self._get_arm_joint_positions(timeout_sec=2.)
-        if current is None or positions is None:
-            raise ValueError(f"Cartesian waypoint start observation unavailable: {missing}")
-        if not hasattr(self, "_waypoint_ik_client"):
-            self._waypoint_ik_client = self._node.create_client(
-                GetPositionIK, "/compute_ik", callback_group=self._cb_group)
-        def values(pose):
-            p, q = pose.position, pose.orientation
-            return [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
-        def solve(target, seed):
-            if self._shutdown_requested:
-                raise InterruptedError("Cartesian waypoint execution cancelled")
-            query = GetPositionIK.Request()
-            request = query.ik_request
-            request.group_name, request.ik_link_name = self.group_name, self.ee_link
-            request.pose_stamped.header.frame_id = self.frame_id
-            request.pose_stamped.pose = self._make_pose(*target[:3], self._make_orientation(*target[3:]))
-            request.robot_state.is_diff = True
-            request.robot_state.joint_state.name = list(self.arm_joint_names)
-            request.robot_state.joint_state.position = seed
-            request.avoid_collisions = not mating_contact
-            request.timeout = Duration(nanosec=200_000_000)
-            response = self._wait_future(self._waypoint_ik_client.call_async(query),
-                                         timeout_sec=5., label="resolve Cartesian waypoint IK")
-            if response is None or response.error_code.val != 1:
-                raise ValueError(f"Cartesian waypoint IK is unavailable at {target}")
-            joints = dict(zip(response.solution.joint_state.name, response.solution.joint_state.position))
-            return [joints[name] for name in self.arm_joint_names]
-        settings = self.controller_config["cartesian_motion"]
-        rows = resolve_waypoints(start_pose=values(current), start_joints=positions,
-            waypoints=[values(pose) for pose in waypoints], names=self.arm_joint_names,
-            limits=self._simulation_joint_limits(self.arm_joint_names), solve_ik=solve,
-            linear_step=settings["linear_step_m"], angular_step=settings["angular_step_rad"],
-            maximum_joint_step=settings["max_joint_step_rad"])
-        return robot_trajectory(self.arm_joint_names, rows)
-
     def _cartesian_move(
         self,
         target,
@@ -8461,21 +8661,20 @@ class GazeboPickPlaceController:
         time_scale: float | None = None,
         waypoints: list | None = None,
     ) -> bool:
+        """Execute fresh Cartesian targets through one request, as in the two-arm runtime."""
         self._last_command_evidence = {"command_sent": False, "motion_method": "Cartesian waypoints"}
+        if getattr(self, '_shutdown_requested', False):
+            self._last_failure_message = 'Cartesian execution cancelled before preparation'
+            return False
+        cartesian_only = GazeboPickPlaceController._cartesian_motion_only(self)
         mating_contact = (self._simulation_mating_segment(target)
                           if getattr(self, '_simulation_mating_context', None) else None)
         planning_started = time.monotonic()
         solution = None
         preparation_reason = "not eligible"
-        if GazeboPickPlaceController._cartesian_motion_only(self):
-            try:
-                solution = self._resolve_cartesian_waypoints([*(waypoints or []), target], mating_contact=mating_contact)
-            except (ValueError, RuntimeError) as exc:
-                self._last_failure_message = f"[{label}] {exc}"
-                return False
-            finally:
-                self._planning_wall_time_sec += time.monotonic() - planning_started
-            preparation_reason = "explicit Cartesian waypoints"
+        if cartesian_only:
+            allow_partial, min_fraction = False, 1.0
+            preparation_reason = "current Cartesian targets"
         elif avoid_collisions and not allow_partial and not mating_contact and not waypoints:
             solution, preparation_reason = self._consume_prepared_cartesian(target)
         if solution is None:
@@ -8491,6 +8690,32 @@ class GazeboPickPlaceController:
             # checks below, including FK and depth bounds for the intended shaft.
             request.avoid_collisions = avoid_collisions and not mating_contact
             request.start_state.is_diff = True
+            if cartesian_only:
+                settings = self.controller_config['cartesian_motion']
+                request.max_step = float(settings['linear_step_m'])
+                request.revolute_jump_threshold = float(settings['max_joint_step_rad'])
+                # A fixed relative jump factor can truncate a valid slow descent.
+                # The absolute configured bound is checked here and on the reply.
+                request.jump_threshold = 0.
+                if (not math.isfinite(request.max_step) or request.max_step <= 0
+                        or not math.isfinite(request.revolute_jump_threshold)
+                        or request.revolute_jump_threshold <= 0):
+                    self._last_failure_message = 'Invalid configured Cartesian waypoint spacing'
+                    return False
+                for pose in request.waypoints:
+                    p, q = pose.position, pose.orientation
+                    if (not all(math.isfinite(v) for v in (p.x, p.y, p.z, q.x, q.y, q.z, q.w))
+                            or not math.isclose(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w, 1., abs_tol=1e-5)):
+                        self._last_failure_message = 'Cartesian waypoints require finite XYZ and a unit quaternion'
+                        return False
+                positions, missing = self._get_arm_joint_positions(timeout_sec=2.)
+                if (positions is None or len(positions) != len(self.arm_joint_names)
+                        or not all(math.isfinite(v) for v in positions)):
+                    self._last_failure_message = f'Cartesian start observation unavailable: {missing}'
+                    return False
+                request.start_state.joint_state.name = list(self.arm_joint_names)
+                request.start_state.joint_state.position = list(positions)
+                request.avoid_collisions = settings.get('avoid_collisions') is not False and not mating_contact
 
             future = self._cart_client.call_async(request)
             response = self._wait_future(future, timeout_sec=10.0, label=f"plan:{label}")
@@ -8501,6 +8726,9 @@ class GazeboPickPlaceController:
                 return False
             if hasattr(response, "error_code") and response.error_code.val != 1:
                 self._last_failure_message = f"[{label}] Cartesian planning failed: {response.error_code.val}"
+                return False
+            if not math.isfinite(response.fraction):
+                self._last_failure_message = 'Cartesian response has a non-finite fraction'
                 return False
             if response.fraction < min_fraction:
                 self._last_failure_message = (
@@ -8517,15 +8745,17 @@ class GazeboPickPlaceController:
                 )
                 return False
             solution = response.solution
-        elif not GazeboPickPlaceController._cartesian_motion_only(self):
+        else:
             self._planning_wall_time_sec += time.monotonic() - planning_started
 
         if GazeboPickPlaceController._cartesian_motion_only(self):
             points = solution.joint_trajectory.points
             maximum_step = float(self.controller_config["cartesian_motion"]["max_joint_step_rad"])
-            if not points or any(abs(b - a) > maximum_step
+            if (solution.joint_trajectory.joint_names != list(self.arm_joint_names)
+                    or not points or any(len(point.positions) != len(self.arm_joint_names) for point in points)
+                    or any(abs(b - a) > maximum_step
                                  for left, right in zip(points, points[1:])
-                                 for a, b in zip(left.positions, right.positions, strict=True)):
+                                 for a, b in zip(left.positions, right.positions, strict=True))):
                 self._last_failure_message = "Cartesian trajectory has an IK joint discontinuity"
                 return False
         exec_goal = self._ExecuteTrajectory.Goal()
@@ -8533,11 +8763,29 @@ class GazeboPickPlaceController:
             scale = self.trajectory_time_scale
         else:
             scale = _as_float(time_scale, self.trajectory_time_scale)
-        self._scale_trajectory_timing(solution, scale)
+        try:
+            self._scale_trajectory_timing(solution, scale)
+        except ValueError as exc:
+            self._last_failure_message = f'Invalid Cartesian trajectory: {exc}'
+            return False
         valid = (self._simulation_trajectory_is_collision_free(
             solution.joint_trajectory, mating_contact=mating_contact) if mating_contact
             else self._simulation_trajectory_is_collision_free(solution.joint_trajectory))
         if not valid:
+            return False
+        if cartesian_only:
+            # Preparation can outlast the cached feedback on a slow simulation.
+            # Wait for a fresh sample before comparing against the planned start.
+            self._get_arm_joint_positions(timeout_sec=2.0)
+        if getattr(self, '_shutdown_requested', False):
+            self._last_failure_message = 'Cartesian execution cancelled before dispatch'
+            return False
+        if GazeboPickPlaceController._cartesian_motion_only(self) and not self._fresh_stable_joint_target(
+            dict(zip(solution.joint_trajectory.joint_names,
+                     solution.joint_trajectory.points[0].positions, strict=True)),
+            tolerance=.02, stable_for_sec=0.,
+        ):
+            self._last_failure_message = 'Fresh robot joints do not match the Cartesian start; refusing dispatch'
             return False
         endpoint_time = solution.joint_trajectory.points[-1].time_from_start
         self._trajectory_duration_sec += endpoint_time.sec + endpoint_time.nanosec / 1e9
@@ -8549,6 +8797,18 @@ class GazeboPickPlaceController:
             controller_endpoint_observed = self._wait_for_simulation_cartesian_endpoint(
                 target
             )
+            if not controller_endpoint_observed and joint_endpoint_observed:
+                self._get_arm_joint_positions(timeout_sec=2.0)
+                endpoint_joints = dict(zip(
+                    solution.joint_trajectory.joint_names,
+                    solution.joint_trajectory.points[-1].positions, strict=True))
+                if self._fresh_stable_joint_target(endpoint_joints, tolerance=.02):
+                    observed_tool = self._fresh_simulation_tf_tool_pose()
+                    if observed_tool is not None:
+                        controller_endpoint_observed = self._observed_cartesian_endpoint_evidence(
+                            target, observed=observed_tool)
+                        if controller_endpoint_observed is not None:
+                            controller_endpoint_observed['observation_source'] = 'fresh_joint_tf'
             if not (
                 controller_endpoint_observed
                 and controller_endpoint_observed["within_tolerance"]
@@ -8572,10 +8832,19 @@ class GazeboPickPlaceController:
                     f"orientation_error={controller_endpoint_observed['orientation_error_rad']:.6f}rad"
                 )
             self._last_failure_message = ""
+            if cartesian_only:
+                self._last_cartesian_joint_target = dict(zip(
+                    solution.joint_trajectory.joint_names,
+                    solution.joint_trajectory.points[-1].positions, strict=True))
             self._last_command_evidence = {
                 "command_sent": True,
                 "motion_method": "Cartesian waypoints",
                 "waypoint_count": len(waypoints or []) + 1,
+                "waypoints": [
+                    [pose.position.x, pose.position.y, pose.position.z,
+                     pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+                    for pose in [*(waypoints or []), target]
+                ],
                 "controller_endpoint": self.arm_trajectory_topic.removesuffix(
                     "/joint_trajectory"
                 )
@@ -8584,6 +8853,7 @@ class GazeboPickPlaceController:
                 "preparation_result": preparation_reason,
                 "motion_path_validation": deepcopy(getattr(self, "_last_path_validation", None)),
                 "controller_endpoint_observed": controller_endpoint_observed,
+                'dynamic_target': cartesian_only,
             }
             return True
 
@@ -8692,7 +8962,8 @@ class GazeboPickPlaceController:
             time_scale=_as_float(speed, self.trajectory_time_scale),
         )
         if not ok:
-            return {"success": False, "message": f"failed to move directly to ({x}, {y}, {z})"}
+            return {"success": False, "message": self._unavailable_message(
+                f"failed to move directly to ({x}, {y}, {z})")}
         return {"success": True, "message": f"moved directly to ({x:.4f}, {y:.4f}, {z:.4f})"}
 
     def _release_part_sequence(
@@ -8771,31 +9042,94 @@ class GazeboPickPlaceController:
         *,
         time_scale: float | None = None,
     ) -> bool:
+        if GazeboPickPlaceController._cartesian_motion_only(self):
+            settings = self.controller_config['cartesian_motion']
+            step = getattr(self, '_robot_task_step', None)
+            route = []
+            if step == ('pick_approach', 'move_above_part'):
+                route = list(settings.get('pick_transit_waypoints', []))
+            elif step == ('place_approach', 'move_above_destination'):
+                routes = settings.get('transit_waypoints', [])
+                route = list(routes[0]) if routes else []
+            from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
+
+            current = self._get_ee_pose()
+            if (current is None and self.execution_mode == 'simulation'
+                    and str(getattr(self, '_last_failure_message', '')).startswith(
+                        'Gazebo link observation timed out:')):
+                joints, missing = self._get_arm_joint_positions(timeout_sec=.2)
+                if joints is not None and not missing and self._fresh_stable_joint_target(
+                    dict(zip(self.arm_joint_names, joints, strict=True)),
+                    tolerance=.02,
+                ):
+                    current = self._fresh_simulation_tf_tool_pose()
+                    if current is not None:
+                        self._last_pose_observation = {
+                            'source': 'fresh_joint_tf', 'link': self.ee_link,
+                        }
+            if current is None:
+                detail = getattr(self, '_last_failure_message', '')
+                self._last_failure_message = (
+                    'Cartesian route start observation unavailable' + (f': {detail}' if detail else '')
+                )
+                return False
+            origin = [current.position.x, current.position.y, current.position.z]
+            if (getattr(self, 'robot_name', None) in ('ur5e-1', 'ur5e-2')
+                    and step == ('pick_grasp', 'retreat_from_source')
+                    and z > origin[2] + 1e-6):
+                route = [[origin[0], origin[1], z]]
+            if route and math.dist(origin, route[-1]) < math.dist(origin, route[0]):
+                route.reverse()
+            q = current.orientation
+            start = [*origin, q.x, q.y, q.z, q.w]
+            target = [target_x, target_y, z, orientation.x, orientation.y, orientation.z, orientation.w]
+            if getattr(self, 'robot_name', None) in ('ur5e-1', 'ur5e-2'):
+                if abs(sum(a*b for a,b in zip(start[3:],target[3:],strict=True))) >= math.cos(.02/2):
+                    target[3:] = start[3:]
+                elif step == ('pick_grasp', 'retreat_from_source') and route:
+                    route.append(list(settings['rotation_waypoint']))
+            try:
+                poses = fixed_orientation_waypoints(
+                    start, target, route,
+                    rotation_point=settings.get('rotation_waypoint', route[-1] if route else origin),
+                    angular_step=float(settings.get('angular_step_rad', .05)),
+                )
+            except ValueError as exc:
+                self._last_failure_message = str(exc)
+                return False
+            if not poses:
+                joints, missing = self._get_arm_joint_positions(timeout_sec=2.)
+                if joints is None or missing or not self._fresh_stable_joint_target(
+                    dict(zip(self.arm_joint_names, joints, strict=True)), tolerance=.02,
+                ):
+                    self._last_failure_message = 'Cartesian endpoint is not freshly stable'
+                    return False
+                self._last_command_evidence = {
+                    'command_sent': False, 'reason': 'fresh stable endpoint already observed',
+                    'motion_method': 'Cartesian waypoints', 'target': target,
+                    'observed_start_pose': start,
+                }
+                return True
+            endpoint_orientation = type(orientation)()
+            endpoint_orientation.x, endpoint_orientation.y, endpoint_orientation.z, endpoint_orientation.w = poses[-1][3:]
+            waypoints = []
+            for pose in poses[:-1]:
+                quaternion = type(orientation)()
+                quaternion.x, quaternion.y, quaternion.z, quaternion.w = pose[3:]
+                waypoints.append(self._make_pose(*pose[:3], quaternion))
+            executed = self._cartesian_move(
+                self._make_pose(target_x, target_y, z, endpoint_orientation), label_prefix,
+                time_scale=time_scale, waypoints=waypoints,
+            )
+            if executed and isinstance(getattr(self, '_last_command_evidence', None), dict):
+                self._last_command_evidence['observed_start_pose'] = start
+            return executed
         if self._cartesian_move(
             self._make_pose(target_x, target_y, z, orientation),
             label_prefix,
             time_scale=time_scale,
         ):
             return True
-
-        if GazeboPickPlaceController._cartesian_motion_only(self):
-            if (self._last_command_evidence or {}).get("command_sent"):
-                return False
-            current = self._get_ee_pose()
-            if current is None:
-                return False
-            current_xyz = [current.position.x, current.position.y, current.position.z]
-            target = self._make_pose(target_x, target_y, z, orientation)
-            for route in self.controller_config["cartesian_motion"].get("transit_waypoints", []):
-                ordered = list(route)
-                if math.dist(current_xyz, ordered[-1]) < math.dist(current_xyz, ordered[0]):
-                    ordered.reverse()
-                waypoints = [self._make_pose(*xyz, orientation) for xyz in ordered]
-                if self._cartesian_move(target, label_prefix, time_scale=time_scale, waypoints=waypoints):
-                    return True
-                if (self._last_command_evidence or {}).get("command_sent"):
-                    return False
-            return False
 
         current = self._get_ee_pose()
         if current is None:

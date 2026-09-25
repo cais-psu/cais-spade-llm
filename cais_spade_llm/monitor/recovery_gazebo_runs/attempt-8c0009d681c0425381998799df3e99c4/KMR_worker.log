@@ -1,0 +1,60 @@
+[INFO] [1790282266.482694367] [KMR_delivery_worker]: [KMR] Controller initialized (execution_mode=simulation)
+[INFO] [1790282266.515415015] [KMR_delivery_worker]: [KMR] probe: part=KET4_Square_4mm; target=M1
+[INFO] [1790282266.516490094] [KMR_delivery_worker]: [KMR] Waiting for services/actions and fresh joint feedback...
+[INFO] [1790282269.500254413] [KMR_delivery_worker]: [KMR] All services/actions ready; fresh joint feedback and scene identity verified.
+[INFO] [1790282271.589431421] [KMR_delivery_worker]: [KMR] pick_part: part=KET4_Square_4mm; target=M1
+[INFO] [1790282279.393007382] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET4_Square_4mm; task=environment_5
+[INFO] [1790282279.621331001] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET4_Square_4mm; target=M1
+[INFO] [1790282292.347007909] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET4_Square_4mm; task=environment_7
+[INFO] [1790282292.615912997] [KMR_delivery_worker]: [KMR] place_release: part=KET4_Square_4mm; target=M1
+[INFO] [1790282330.979933776] [KMR_delivery_worker]: [KMR] place_release completed: part=KET4_Square_4mm; task=environment_10
+[INFO] [1790282332.166076305] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282351.737001366] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790282357.714759575] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG4-50_Round_4mm; task=environment_22
+[INFO] [1790282357.967311869] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790282373.297308493] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG4-50_Round_4mm; task=environment_25
+[INFO] [1790282373.786355648] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790282405.449171904] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG4-50_Round_4mm; task=environment_31
+[INFO] [1790282406.517170359] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282429.666989637] [KMR_delivery_worker]: [KMR] pick_part: part=KET8_Square_8mm; target=M1
+[INFO] [1790282442.302535717] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET8_Square_8mm; task=environment_45
+[INFO] [1790282443.016770872] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET8_Square_8mm; target=M1
+[INFO] [1790282452.250104627] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET8_Square_8mm; task=environment_47
+[INFO] [1790282453.016274542] [KMR_delivery_worker]: [KMR] place_release: part=KET8_Square_8mm; target=M1
+[INFO] [1790282485.590477162] [KMR_delivery_worker]: [KMR] place_release completed: part=KET8_Square_8mm; task=environment_50
+[INFO] [1790282486.162454974] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282499.043974327] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790282511.158430593] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG8-50_8mm; task=environment_64
+[INFO] [1790282513.858394761] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790282528.598955724] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG8-50_8mm; task=environment_66
+[INFO] [1790282530.004944023] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790282562.028552075] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG8-50_8mm; task=environment_69
+[INFO] [1790282562.619065527] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282585.406999466] [KMR_delivery_worker]: [KMR] pick_part: part=KET12_Square_12mm; target=M1
+[INFO] [1790282598.979630019] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET12_Square_12mm; task=environment_84
+[INFO] [1790282600.269678279] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET12_Square_12mm; target=M1
+[INFO] [1790282610.516509944] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET12_Square_12mm; task=environment_86
+[INFO] [1790282611.292428633] [KMR_delivery_worker]: [KMR] place_release: part=KET12_Square_12mm; target=M1
+[INFO] [1790282643.641272450] [KMR_delivery_worker]: [KMR] place_release completed: part=KET12_Square_12mm; task=environment_89
+[INFO] [1790282645.098411313] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282668.730712328] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790282682.844047311] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG12-50_12mm; task=environment_103
+[INFO] [1790282685.004704409] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790282698.730808517] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG12-50_12mm; task=environment_106
+[INFO] [1790282700.363634495] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790282731.041116499] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG12-50_12mm; task=environment_110
+[INFO] [1790282731.478829457] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282758.702548272] [KMR_delivery_worker]: [KMR] pick_part: part=KET16_Square_16mm; target=M1
+[INFO] [1790282772.669446620] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET16_Square_16mm; task=environment_123
+[INFO] [1790282774.694324615] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET16_Square_16mm; target=M1
+[INFO] [1790282785.132168046] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET16_Square_16mm; task=environment_126
+[INFO] [1790282786.150529985] [KMR_delivery_worker]: [KMR] place_release: part=KET16_Square_16mm; target=M1
+[INFO] [1790282815.796129628] [KMR_delivery_worker]: [KMR] place_release completed: part=KET16_Square_16mm; task=environment_129
+[INFO] [1790282817.291779823] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790282832.224145205] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790282846.348576625] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG16-50_16mm; task=environment_141
+[INFO] [1790282848.134017211] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790282860.679276750] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG16-50_16mm; task=environment_144
+[INFO] [1790282861.261175512] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790282887.894560317] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG16-50_16mm; task=environment_146
+[INFO] [1790282888.364106279] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage

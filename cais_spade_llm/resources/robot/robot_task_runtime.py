@@ -3392,6 +3392,9 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                 "manual_function_execution": True,
             }
         controller = getattr(agent, "_controller", None)
+        cartesian_settings = getattr(controller, 'controller_config', {}).get('cartesian_motion', {})
+        if execution_mode == 'simulation' and cartesian_settings.get('only') is True:
+            controller._robot_task_step = (task.name, step.id)
         queue_preparation = getattr(controller, "queue_next_motion_preparation", None)
         if callable(queue_preparation):
             queued = False
@@ -3434,6 +3437,8 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
                 physical_overrides=physical_overrides,
             )
         finally:
+            if execution_mode == 'simulation' and cartesian_settings.get('only') is True:
+                controller._robot_task_step = None
             if original_task_context is not None:
                 runtime_state["_task_ctx"] = original_task_context
         if result.get("skipped"):

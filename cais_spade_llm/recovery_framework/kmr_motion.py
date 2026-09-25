@@ -45,8 +45,51 @@ def seconds(duration: Any) -> float:
     return duration.sec + duration.nanosec / 1e9
 
 
+def _stop_bounded_interpolation_overshoot(trajectory: Any, limits: dict) -> list[dict]:
+    """Stop only bounded-joint derivatives that make controller interpolation overshoot.
+
+    Args:
+        trajectory: A complete Cartesian joint trajectory from MoveIt.
+        limits: The URDF joint bounds used for dispatch validation.
+
+    Returns:
+        The repaired joint and segment pairs for execution evidence.
+    """
+    from cais_spade_llm.resources.robot.cartesian_waypoints import _coefficients, _extrema
+
+    names, points = trajectory.joint_names, trajectory.points
+    if not points or any(not bounded_joints(names, point.positions, limits) for point in points):
+        return []
+    corrections = []
+    for _ in range(3):
+        changed = False
+        for segment, (left, right) in enumerate(zip(points, points[1:])):
+            rows = [dict(positions=point.positions, velocities=point.velocities,
+                         accelerations=point.accelerations,
+                         time_from_start=seconds(point.time_from_start))
+                    for point in (left, right)]
+            for index, name in enumerate(names):
+                bounds = _extrema(_coefficients(*rows, index))
+                limit = limits[name]
+                overshoot = max(limit['lower'] - min(bounds), max(bounds) - limit['upper'], 0.)
+                if 1e-7 < overshoot <= .005:
+                    if any(point.velocities[index] or point.accelerations[index]
+                           for point in (left, right)):
+                        for point in (left, right):
+                            point.velocities[index] = 0.
+                            point.accelerations[index] = 0.
+                        corrections.append({'joint': name, 'segment': segment,
+                                            'original_overshoot_rad': overshoot})
+                        changed = True
+        if not changed:
+            break
+    return corrections
+
+
 def retime_trajectory(trajectory: Any, limits: dict, velocity: float, acceleration: float) -> None:
     """Apply requested scaling and enforce joint limits on a MoveIt timed path."""
+    from cais_spade_llm.resources.robot.cartesian_waypoints import _coefficients, _derivative, _extrema
+
     if not (0.0 < velocity <= 1.0 and 0.0 < acceleration <= 1.0):
         raise ValueError("KMR trajectory scaling must be in (0, 1]")
     names, points = trajectory.joint_names, trajectory.points
@@ -72,8 +115,19 @@ def retime_trajectory(trajectory: Any, limits: dict, velocity: float, accelerati
             if dt <= 0:
                 raise ValueError("KMR trajectory time must increase")
             for index, name in enumerate(names):
+                rows = [dict(positions=p.positions, velocities=p.velocities, accelerations=p.accelerations,
+                             time_from_start=seconds(p.time_from_start)) for p in (previous, point)]
+                coefficients = _coefficients(*rows, index)
+                bounds = _extrema(coefficients)
+                if min(bounds) < limits[name]['lower'] - 1e-7 or max(bounds) > limits[name]['upper'] + 1e-7:
+                    raise ValueError('KMR controller interpolation exceeds a bounded joint limit')
+                first = _derivative(coefficients)
+                second = _derivative(first)
                 scale = max(
                     scale,
+                    max(abs(value) for value in _extrema(first)) / dt / (limits[name]['velocity'] * velocity),
+                    math.sqrt(max(abs(value) for value in _extrema(second)) / dt**2
+                              / (limits[name]['acceleration'] * acceleration)),
                     abs(point.positions[index] - previous.positions[index])
                     / dt
                     / (limits[name]["velocity"] * velocity),

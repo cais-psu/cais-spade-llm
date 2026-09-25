@@ -8,6 +8,8 @@ import logging
 import threading
 import time
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from uuid import uuid4
 
 from spade.behaviour import CyclicBehaviour
@@ -165,13 +167,28 @@ def prepare_environment_start(
     prewarm_controllers: bool = False,
     launch_identity=None,
     requested_at_unix: float | None = None,
+    diagnostic_cca_bypass: bool = False,
 ) -> None:
-    """Capture saved matching inputs without searching or commanding a resource."""
+    """Capture saved matching inputs without searching or commanding a resource.
+
+    Args:
+        setup: Saved experiment settings, or None to clear prepared controllers.
+        prewarm_controllers: Prepare the selected simulation controllers.
+        launch_identity: Identity of the simulation owned by SystemBridge.
+        requested_at_unix: Time of the originating Start System request.
+        diagnostic_cca_bypass: Skip CCA approvals for this simulation only.
+    """
     global _prepared
     generation = _discard_prepared_controllers()
     if setup is None:
         _prepared = None
         return
+    if type(diagnostic_cca_bypass) is not bool or (
+        diagnostic_cca_bypass
+        and (setup.get("execution_mode") != "simulation" or not launch_identity
+             or not prewarm_controllers)
+    ):
+        raise ValueError("CCA bypass requires an explicitly prepared simulation launch")
     from cais_spade_llm.ui.recovery_setup import validate_setup
 
     inputs = validate_setup(setup)
@@ -184,9 +201,9 @@ def prepare_environment_start(
     source_fingerprints = {}
     if prewarm_controllers:
         from cais_spade_llm.recovery_framework.startup import configuration_fingerprints
-
         source_fingerprints = configuration_fingerprints(setup)
     prepared = {
+        "diagnostic_cca_bypass": diagnostic_cca_bypass,
         "setup": deepcopy(setup),
         "inputs": context.inputs,
         "launch_identity": deepcopy(launch_identity),
@@ -233,6 +250,13 @@ class EnvironmentRuntime:
     """Connect ProductAgent discovery, CCA checks, task dispatch, and evidence."""
 
     def __init__(self, agent, prepared: dict, resources: list) -> None:
+        self.diagnostic_cca_bypass = prepared.get("diagnostic_cca_bypass", False)
+        if type(self.diagnostic_cca_bypass) is not bool or (
+            self.diagnostic_cca_bypass
+            and (prepared["setup"].get("execution_mode") != "simulation"
+                 or not prepared.get("launch_identity"))
+        ):
+            raise ValueError("CCA bypass requires an explicitly prepared simulation launch")
         self.agent = agent
         self.product_jid = str(agent.jid).split("/", 1)[0]
         self.context = EnvironmentProductContext(
@@ -252,6 +276,22 @@ class EnvironmentRuntime:
         self.started_wall = time.monotonic()
         self.startup_timing = deepcopy(prepared.get("startup_timing", {}))
         self.planning_wall_time_sec = 0.0
+        self.reporting_timing: list[dict] = []
+        self.message_loop_timing = deque(maxlen=600)
+        self.message_loop_sample_count = 0
+        self.message_loop_max_delay_wall_time_sec = 0.0
+        self._calculation_executor = None
+        self._calculation_stop = threading.Event()
+        self._report_inputs = deepcopy(self.context.inputs)
+        self._report_initial_products = deepcopy(self.context.initial_product_states)
+        self._report_history = {field: [] for field in ('explorations', 'negotiations', 'transitions')}
+        self._report_process_models = None
+        self._report_processes = None
+        self._report_sequence = 0
+        self._persisted_sequence = 0
+        self._report_lock = threading.Lock()
+        self._report_task: asyncio.Task | None = None
+        self._pending_report: tuple | None = None
         self.outcome = {"status": "prepared"}
         self.reports = LatestReport(RUN_DIRECTORY, self.context.run_id)
         self.path = self.reports.path
@@ -264,6 +304,39 @@ class EnvironmentRuntime:
 
         bind_environment_executors(self, resources)
         agent.part_tracker = deepcopy(self.context.part_tracker)
+
+    async def calculate_capability(self, function, *args, request: dict, resource_id: str):
+        """Evaluate detached capability inputs using at most two owned workers."""
+        if self.stopped:
+            raise asyncio.CancelledError()
+        if self._calculation_executor is None:
+            self._calculation_executor = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="environment_capability")
+        queued = time.monotonic()
+        timing = {"kind": "capability_calculation", "request_id": request["request_id"],
+                  "branch_id": request["branch_id"], "resource_id": resource_id}
+
+        def calculate():
+            started = time.monotonic()
+            timing["queue_wall_time_sec"] = started - queued
+            try:
+                if self._calculation_stop.is_set():
+                    return None
+                return function(*args, stopped=self._calculation_stop.is_set)
+            finally:
+                timing["calculation_wall_time_sec"] = time.monotonic() - started
+
+        try:
+            return await asyncio.get_running_loop().run_in_executor(self._calculation_executor, calculate)
+        finally:
+            self.context.negotiations.append({**timing, "timestamp": time.time()})
+
+    def _close_calculations(self) -> None:
+        """Prevent queued work from running after this runtime is stopped."""
+        self._calculation_stop.set()
+        if self._calculation_executor is not None:
+            self._calculation_executor.shutdown(wait=False, cancel_futures=True)
+            self._calculation_executor = None
 
     def snapshot(self) -> dict:
         """Expose read-only runtime models, environmental graph, and progress."""
@@ -286,12 +359,19 @@ class EnvironmentRuntime:
             if self.context.part_tracker[part].get("state") == "assembled"
         ]
         return {
+            "diagnostic_cca_bypass": self.diagnostic_cca_bypass,
+            'collision_checks_bypassed': [
+                *[robot['resource_id'] for robot in self.context.inputs['scene']['robots']
+                  if robot.get('cartesian_motion', {}).get('avoid_collisions') is False],
+                *(['KMR'] if self.context.inputs['scene']['KMR']['task_execution'].get('avoid_collisions') is False else []),
+            ],
             "models": {
                 rid: resource.descriptor() for rid, resource in self.context.resources.items()
             },
             "environment_model": deepcopy(self.context.environment_model),
             "outcome": deepcopy(self.outcome),
             "product_states": deepcopy(self.context.part_tracker),
+            "initial_product_states": deepcopy(self.context.initial_product_states),
             "requirements": deepcopy(self.context.requirements),
             "resource_activity": activity,
             "machining_countdowns": {
@@ -362,21 +442,119 @@ class EnvironmentRuntime:
             id(self.outcome),
         )
 
-    def save(self) -> None:
-        """Save versioned evidence and process JSON from the actual runtime models."""
-        report = {
-            **self.context.report(),
-            "startup_timing": deepcopy(self.startup_timing),
-            "outcome": deepcopy(self.outcome),
+    def _report_snapshot(self) -> tuple:
+        """Capture mutable state without copying immutable models and history."""
+        started = time.monotonic()
+        context = self.context
+        context.revisions()
+        # Completed history and graph entries are append-only. Outcomes are
+        # replaced, never edited. The writer may copy these after capture.
+        environment_model = {
+            key: list(value) if isinstance(value, list) else deepcopy(value)
+            for key, value in context.environment_model.items()
         }
-        names = {e["event_name"] for model in self.context.models.values() for e in model["events"]}
-        self.reports.save(report, {
-            name: process_json(self.context.models, name) for name in sorted(names)
-        })
+        report = {
+            "schema_version": context.schema_version, "run_id": context.run_id,
+            "inputs": self._report_inputs,
+            "permitted_resources": list(context.permitted_resources),
+            "models": {rid: resource._revision_inputs[0] for rid, resource in context.resources.items()},
+            "executable_tasks": {rid: sorted(resource.executors) for rid, resource in context.resources.items()},
+            "initial_product_states": self._report_initial_products,
+            **{field: list(getattr(context, field)) for field in ('explorations', 'negotiations', 'transitions')},
+            "environment_model": environment_model,
+            "pending_tasks": deepcopy(context.pending_tasks), "reservations": dict(context.reservations),
+            "final_valuation": context.snapshot(), "final_product_states": deepcopy(context.part_tracker),
+            "revision": context.revision,
+            "diagnostic_cca_bypass": self.diagnostic_cca_bypass,
+            'collision_checks_bypassed': [
+                *[robot['resource_id'] for robot in self.context.inputs['scene']['robots']
+                  if robot.get('cartesian_motion', {}).get('avoid_collisions') is False],
+                *(['KMR'] if self.context.inputs['scene']['KMR']['task_execution'].get('avoid_collisions') is False else []),
+            ],
+            "startup_timing": deepcopy(self.startup_timing),
+            "outcome": self.outcome,
+            "reporting_timing": list(self.reporting_timing),
+            "message_loop_timing": list(self.message_loop_timing),
+            "message_loop_sample_count": self.message_loop_sample_count,
+            "message_loop_max_delay_wall_time_sec": self.message_loop_max_delay_wall_time_sec,
+        }
+        self._report_sequence += 1
+        return self._report_sequence, report, time.monotonic() - started
+
+    def _materialize_report(self, report: dict) -> dict:
+        """Copy the captured report outside acknowledgement and dispatch handling."""
+        memo = {id(report[key]): report[key] for key in ('inputs', 'initial_product_states')}
+        memo.update({id(model): model for model in report['models'].values()})
+        for field, previous in self._report_history.items():
+            for row, (source, copied) in zip(report[field], previous):
+                if row is source:
+                    memo[id(row)] = copied
+        materialized = deepcopy(report, memo)
+        for field in self._report_history:
+            self._report_history[field] = list(zip(report[field], materialized[field]))
+        return materialized
+
+    def _persist_report(self, snapshot: tuple) -> None:
+        sequence, report, snapshot_duration = snapshot
+        with self._report_lock:
+            if sequence <= self._persisted_sequence:
+                return
+            started = time.monotonic()
+            report = self._materialize_report(report)
+            materialized = time.monotonic()
+            models = report['models']
+            if models != self._report_process_models:
+                names = {event['event_name'] for model in models.values() for event in model['events']}
+                self._report_processes = {name: process_json(models, name) for name in sorted(names)}
+                self._report_process_models = models
+            write_started = time.monotonic()
+            self.reports.save(report, self._report_processes)
+            self._persisted_sequence = sequence
+            self.reporting_timing.append({"timestamp": time.time(),
+                                          "snapshot_wall_time_sec": snapshot_duration,
+                                          "materialization_wall_time_sec": materialized - started,
+                                          "process_export_wall_time_sec": write_started - materialized,
+                                          "write_wall_time_sec": time.monotonic() - write_started,
+                                          "persistence_wall_time_sec": time.monotonic() - started})
+
+    def save(self) -> None:
+        """Persist a complete snapshot, superseding any older queued report."""
+        self._persist_report(self._report_snapshot())
+
+    def queue_save(self) -> None:
+        """Queue the latest immutable report without waiting in the agent inbox."""
+        if self._report_task is not None and self._report_task.done():
+            self._report_task.result()
+        self._pending_report = self._report_snapshot()
+        if self._report_task is None or self._report_task.done():
+            self._report_task = asyncio.create_task(self._write_reports())
+
+    async def _write_reports(self) -> None:
+        while self._pending_report is not None:
+            snapshot, self._pending_report = self._pending_report, None
+            await asyncio.to_thread(self._persist_report, snapshot)
+
+    async def flush_reports(self) -> None:
+        """Finish queued persistence before closing or exporting the run."""
+        if self._report_task is not None:
+            await asyncio.shield(self._report_task)
+
+    async def _measure_message_loop(self) -> None:
+        """Sample scheduling delay using wall time, independently of Gazebo time."""
+        while not self.stopped:
+            expected = time.monotonic() + 0.1
+            await asyncio.sleep(0.1)
+            delay = max(0., time.monotonic() - expected)
+            self.message_loop_sample_count += 1
+            self.message_loop_max_delay_wall_time_sec = max(self.message_loop_max_delay_wall_time_sec, delay)
+            self.message_loop_timing.append({
+                "timestamp": time.time(), "delay_wall_time_sec": delay,
+            })
 
     def stop(self, reason: str = "Stopped by operator") -> None:
         """Close discovery and suppress execution without altering acknowledged state."""
         self.stopped = True
+        self._close_calculations()
         partial = {}
         for resource in self.resource_agents:
             worker = getattr(resource, "workflow_worker", None)
@@ -535,6 +713,8 @@ class EnvironmentProductLoop(CyclicBehaviour):
             asyncio.TimeoutError,
             OSError,
         ) as exc:
+            runtime.stop(str(exc))
+            await runtime.cancel_owned()
             runtime.outcome = {"status": "blocked", "reason": str(exc)}
             logger.warning("Environmental run blocked: %s", exc)
         finally:
@@ -546,7 +726,8 @@ class EnvironmentProductLoop(CyclicBehaviour):
                     runtime.context.geometry,
                 ]
             )
-            runtime.save()
+            runtime.queue_save()
+            await runtime.flush_reports()
             if not getattr(self, "_kickoff_reported", False):
                 self._report_kickoff(runtime)
 
@@ -558,6 +739,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
         failures: dict[str, dict] = {}
         ready: dict[str, dict] = {}
         dependencies: dict[str, dict] = {}
+        intake_timeouts = 0
         runtime.intake_assignments = {}
         runtime.admitted_parts = set()
         runtime.waiting_since = {}
@@ -566,6 +748,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
         self._plan_decision = None
         self._awaiting_plan_request = None
         approval = None
+        monitor = asyncio.create_task(runtime._measure_message_loop())
         try:
             await runtime.prepare_execution()
             while not runtime.stopped:
@@ -576,29 +759,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         decision = self._plan_decision
                         self._plan_decision = None
                         self._awaiting_plan_request = None
-                        context.negotiations.append({
-                            "kind": "CCA", "request_id": approval["request_id"],
-                            "task_ids": [task["task_id"] for task in approval["tasks"]],
-                            "requested_at_unix": approval["requested_at_unix"],
-                            "timestamp": time.time(), "decision": deepcopy(decision),
-                        })
-                        if decision.get("ok") is not True:
-                            runtime.stop("CCA rejected negotiated work")
-                            await runtime.cancel_owned()
-                            runtime.outcome = {"status": "blocked", "reason": "CCA rejected negotiated work", "details": decision}
+                        if not await self._dispatch_approved(runtime, approval, decision, attempted):
                             return
-                        self._report_kickoff(runtime)
-                        for task in approval["tasks"]:
-                            if not context.relevant_revisions_match(task) or not context.allows_task(task):
-                                context.cancel_pending(task["task_id"])
-                                attempted.clear()
-                                continue
-                            await send_agent_message(self, message(runtime.jids[task["resource_id"]], "task", task))
-                            if task["task_id"] in approval["new_admissions"]:
-                                runtime.admitted_parts.add(task["part_name"])
-                        runtime.outcome = {"status": "executing", "tasks": deepcopy(list(context.pending_tasks.values()))}
                         approval = None
-                        runtime.save()
                 all_goals = self._negotiation_goals(runtime)
                 for key, *_ in all_goals:
                     runtime.waiting_since.setdefault(key, time.monotonic())
@@ -641,6 +804,13 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         if key in waiting:
                             attempted.pop("intake", None)
                         continue
+                    if key == "intake":
+                        intake_timeouts = intake_timeouts + 1 if result.get("status") == "timeout" else 0
+                        if 0 < intake_timeouts < 3:
+                            # A missing reply says nothing about machine availability.
+                            # Renew the request instead of caching an empty offer set.
+                            attempted.pop(key, None)
+                            continue
                     attempted[key] = self._goal_signature(context, key, dependencies[key], revisions)
                     if key == "intake":
                         offers = [offer for offer in result.get("offers", []) if offer["available"]]
@@ -714,16 +884,25 @@ class EnvironmentProductLoop(CyclicBehaviour):
                 if pending:
                     runtime.set_plans(list(context.pending_tasks.values()))
                     request_id = uuid4().hex
-                    payload = self.agent._build_plan_validation_payload(
-                        skip_revalidation=False, request_id=request_id,
-                        validation_scope="active_window", composition_backend="explicit_fsa_dfa",
-                    )
-                    self._awaiting_plan_request = request_id
                     approval = {
                         "request_id": request_id, "tasks": pending, "new_admissions": new_admissions,
                         "requested_monotonic": time.monotonic(), "requested_at_unix": time.time(),
                     }
-                    await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
+                    if runtime.diagnostic_cca_bypass:
+                        decision = {
+                            "ok": True, "request_id": request_id,
+                            "diagnostic_cca_bypass": True,
+                        }
+                        if not await self._dispatch_approved(runtime, approval, decision, attempted):
+                            return
+                        approval = None
+                    else:
+                        payload = self.agent._build_plan_validation_payload(
+                            skip_revalidation=False, request_id=request_id,
+                            validation_scope="active_window", composition_backend="explicit_fsa_dfa",
+                        )
+                        self._awaiting_plan_request = request_id
+                        await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
                 if not discoveries and not context.pending_tasks:
                     if context.outstanding() is None and _robots_at_home(context):
                         context.environment_model.update(status="completed", closed=True)
@@ -745,10 +924,62 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         return
                 if not await self._collect_acknowledgement(runtime):
                     return
+        except asyncio.CancelledError:
+            runtime.stop("Environmental work cancelled")
+            await runtime.cancel_owned()
+            raise
         finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+            self._awaiting_plan_request = None
+            self._plan_decision = None
+            if approval is not None:
+                for task in approval["tasks"]:
+                    context.cancel_pending(task["task_id"])
             for discovery in discoveries.values():
                 discovery.cancel()
             await asyncio.gather(*discoveries.values(), return_exceptions=True)
+            if runtime.outcome.get("status") == "completed":
+                runtime._close_calculations()
+
+    async def _dispatch_approved(self, runtime, approval: dict, decision: dict, attempted: dict) -> bool:
+        """Recheck and send approved work without another scheduling cycle."""
+        context = runtime.context
+        context.negotiations.append({
+            "kind": "CCA_bypassed" if runtime.diagnostic_cca_bypass else "CCA",
+            "request_id": approval["request_id"],
+            "task_ids": [task["task_id"] for task in approval["tasks"]],
+            "requested_at_unix": approval["requested_at_unix"],
+            "waiting_wall_time_sec": time.monotonic() - approval["requested_monotonic"],
+            "timestamp": time.time(), "decision": deepcopy(decision),
+        })
+        if decision.get("ok") is not True:
+            runtime.stop("CCA rejected negotiated work")
+            await runtime.cancel_owned()
+            runtime.outcome = {"status": "blocked", "reason": "CCA rejected negotiated work", "details": decision}
+            return False
+        self._report_kickoff(runtime)
+        for task in approval["tasks"]:
+            if runtime.stopped:
+                return False
+            if (context.pending_for(task["task_id"]) != task
+                    or not context.relevant_revisions_match(task) or not context.allows_task(task)):
+                context.cancel_pending(task["task_id"])
+                attempted.clear()
+                continue
+            context.negotiations.append({
+                "kind": "task_sent", "task_id": task["task_id"],
+                "resource_id": task["resource_id"], "event_name": task["event_name"],
+                "timestamp": time.time(),
+            })
+            await send_agent_message(self, message(runtime.jids[task["resource_id"]], "task", task))
+            if task["task_id"] in approval["new_admissions"]:
+                runtime.admitted_parts.add(task["part_name"])
+        if runtime.stopped:
+            return False
+        runtime.outcome = {"status": "executing", "tasks": deepcopy(list(context.pending_tasks.values()))}
+        runtime.queue_save()
+        return True
 
     @staticmethod
     def _source_waiting(context, goals: list[tuple], admitted: set[str]) -> dict[str, list[str]]:
@@ -907,17 +1138,21 @@ class EnvironmentProductLoop(CyclicBehaviour):
 
     async def _collect_acknowledgement(self, runtime: EnvironmentRuntime) -> bool:
         """Commit one completed task without waiting for unrelated active work."""
+        if runtime.stopped:
+            return False
         msg = self._deferred_acks.pop(0) if self._deferred_acks else await self.receive(timeout=0.05)
         if msg is None:
             return True
         sender = str(msg.sender).split("/", 1)[0]
-        if msg.metadata.get("type") == "replan_request" and sender == str(self.agent.cca_jid).split("/", 1)[0]:
+        if (not runtime.diagnostic_cca_bypass and msg.metadata.get("type") == "replan_request"
+                and sender == str(self.agent.cca_jid).split("/", 1)[0]):
             runtime.stop("CCA interrupted execution")
             return False
         if (msg.metadata.get("type") == "plan_safety_result"
                 and sender == str(self.agent.cca_jid).split("/", 1)[0]):
             payload = json.loads(msg.body)
-            if payload.get("request_id") == getattr(self, "_awaiting_plan_request", None):
+            expected = getattr(self, "_awaiting_plan_request", None)
+            if expected is not None and payload.get("request_id") == expected:
                 self._plan_decision = payload
             return True
         if msg.metadata.get("type") != "ack":
@@ -926,6 +1161,11 @@ class EnvironmentProductLoop(CyclicBehaviour):
         task = runtime.context.pending_for(payload.get("task_id"))
         if task is None or sender != runtime.jids[task["resource_id"]]:
             return True
+        runtime.context.negotiations.append({
+            "kind": "ack_received", "task_id": task["task_id"],
+            "resource_id": task["resource_id"], "status": payload.get("status"),
+            "timestamp": time.time(),
+        })
         if payload.get("status") in {"accepted", "running"}:
             return True
         if payload.get("status") != "completed":
@@ -948,7 +1188,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
         for node in self.agent.process_planner.nodes:
             if node["id"] == task["task_id"]:
                 node["status"] = "completed"
-        runtime.save()
+        runtime.queue_save()
         return True
 
     async def receive_from(
@@ -1013,7 +1253,7 @@ def _kmr_at_storage(context: EnvironmentProductContext) -> bool:
 
 
 async def execute_environment_task(behaviour, msg, task: dict) -> None:
-    """Execute a declared task only after resource checks and CCA permission."""
+    """Execute a declared task after resource checks and the selected CCA mode."""
     agent = behaviour.agent
     runtime = getattr(agent, "environment_runtime", None)
     if runtime is None or str(msg.sender).split("/", 1)[0] != runtime.product_jid:
@@ -1022,6 +1262,10 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
     task_id = task.get("task_id")
 
     async def ack(status: str, **extra) -> None:
+        context.negotiations.append({
+            "kind": "ack_sent", "task_id": task_id, "resource_id": actor.resource_id,
+            "status": status, "timestamp": time.time(),
+        })
         await send_agent_message(
             behaviour,
             message(runtime.product_jid, "ack", {"task_id": task_id, "status": status, **extra}),
@@ -1067,29 +1311,36 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             is not True
         ):
             raise ValueError("Resource start conditions have not been validated")
-        await send_agent_message(
-            behaviour,
-            message(
-                agent.cca_jid,
-                "resource_event",
-                {
-                    "task_id": task_id,
-                    "resource_jid": str(agent.jid),
-                    "function_name": name,
-                    "params": task["parameters"],
-                    "status": "safety_check",
-                },
-            ),
-        )
-        context.negotiations.append({
-            "kind": "resource_safety_requested", "task_id": task_id,
-            "resource_id": actor.resource_id, "timestamp": time.time(),
-        })
-        decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id), 60)
-        context.negotiations.append({
-            "kind": "resource_safety_decision", "task_id": task_id,
-            "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
-        })
+        if runtime.diagnostic_cca_bypass:
+            decision = "allow"
+            context.negotiations.append({
+                "kind": "resource_safety_bypassed", "task_id": task_id,
+                "resource_id": actor.resource_id, "timestamp": time.time(),
+            })
+        else:
+            await send_agent_message(
+                behaviour,
+                message(
+                    agent.cca_jid,
+                    "resource_event",
+                    {
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": name,
+                        "params": task["parameters"],
+                        "status": "safety_check",
+                    },
+                ),
+            )
+            context.negotiations.append({
+                "kind": "resource_safety_requested", "task_id": task_id,
+                "resource_id": actor.resource_id, "timestamp": time.time(),
+            })
+            decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id), 60)
+            context.negotiations.append({
+                "kind": "resource_safety_decision", "task_id": task_id,
+                "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
+            })
         if (
             decision != "allow"
             or runtime.stopped
@@ -1097,20 +1348,21 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
         ):
             raise ValueError("CCA permission missing or execution context changed")
         await ack("running")
-        await send_agent_message(
-            behaviour,
-            message(
-                agent.cca_jid,
-                "resource_event",
-                {
-                    "task_id": task_id,
-                    "resource_jid": str(agent.jid),
-                    "function_name": name,
-                    "params": task["parameters"],
-                    "status": "running",
-                },
-            ),
-        )
+        if not runtime.diagnostic_cca_bypass:
+            await send_agent_message(
+                behaviour,
+                message(
+                    agent.cca_jid,
+                    "resource_event",
+                    {
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": name,
+                        "params": task["parameters"],
+                        "status": "running",
+                    },
+                ),
+            )
         context.negotiations.append({
             "kind": "execution_started", "task_id": task_id,
             "resource_id": actor.resource_id, "event_name": name,
@@ -1134,20 +1386,21 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
         completed = {**task, "status": "completed"}
         actor.validated_completions[task_id] = completed
         actor.completion_observations[task_id] = deepcopy(observations)
-        await send_agent_message(
-            behaviour,
-            message(
-                agent.cca_jid,
-                "resource_event",
-                {
-                    "task_id": task_id,
-                    "resource_jid": str(agent.jid),
-                    "function_name": name,
-                    "params": task["parameters"],
-                    "status": "completed",
-                },
-            ),
-        )
+        if not runtime.diagnostic_cca_bypass:
+            await send_agent_message(
+                behaviour,
+                message(
+                    agent.cca_jid,
+                    "resource_event",
+                    {
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "function_name": name,
+                        "params": task["parameters"],
+                        "status": "completed",
+                    },
+                ),
+            )
         await ack("completed", acknowledgement=completed)
     except (ValueError, KeyError, TypeError, RuntimeError, OSError, TimeoutError) as exc:
         if observations is not None:

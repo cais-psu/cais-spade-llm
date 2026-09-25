@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Any
 from uuid import uuid4
 
@@ -271,6 +271,28 @@ class EnvironmentProductContext:
     def snapshot(self) -> dict:
         """Read one coherent resource valuation for discovery or commit."""
         return {rid: resource.snapshot() for rid, resource in self.resources.items()}
+
+    def calculation_snapshot(self) -> EnvironmentProductContext:
+        """Detach calculation inputs while reusing immutable revision snapshots."""
+        self.revisions()
+        snapshot = copy(self)
+        snapshot.resources = {}
+        for rid, resource in self.resources.items():
+            frozen = copy(resource)
+            # revisions() replaces this detached copy whenever inputs change;
+            # calculations only read its model and valuation.
+            frozen.model, frozen.valuation, executors = resource._revision_inputs
+            frozen.executors = frozenset(executors)
+            frozen.visited = dict(resource.visited)
+            snapshot.resources[rid] = frozen
+        snapshot.models = {rid: resource.model for rid, resource in snapshot.resources.items()}
+        snapshot.part_tracker = deepcopy(self.part_tracker)
+        snapshot.geometry = deepcopy(self.geometry)
+        snapshot.requirements = deepcopy(self.requirements)
+        snapshot.permitted_resources = list(self.permitted_resources)
+        snapshot.reservations = dict(self.reservations)
+        snapshot.exploration_models = {}
+        return snapshot
 
     def allows_task(self, task: dict) -> bool:
         """Keep a bound one-part order on its declared machine lane."""
@@ -663,7 +685,7 @@ class EnvironmentProductContext:
         self.cancel_pending(task_id)
         return True
 
-    def report(self) -> dict:
+    def report(self, *, _memo: dict | None = None) -> dict:
         """Save the order's semantics without reinterpreting historical process facts."""
         return deepcopy(
             {
@@ -686,7 +708,7 @@ class EnvironmentProductContext:
                 "final_valuation": self.snapshot(),
                 "final_product_states": self.part_tracker,
                 "revision": self.revision,
-            }
+            }, _memo
         )
 
 

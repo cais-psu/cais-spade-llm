@@ -83,11 +83,28 @@ def _render_definitions(draft: dict, root: Path, message: Any, changed, refresh_
         ui.select(
             safety_options, label="Safety Requirement (.txt)", on_change=lambda _: changed()
         ).bind_value(draft, "selected_safety_file").classes("w-full")
+        def mode_changed(e) -> None:
+            draft["execution_mode"] = e.value
+            if e.value != "simulation":
+                draft["diagnostic_cca_bypass"] = False
+            changed()
+            refresh_forms()
+
         ui.select(
             _keep_value(settings.MODE_OPTIONS, draft["execution_mode"]),
             label="Mode",
-            on_change=lambda _: changed(),
-        ).bind_value(draft, "execution_mode")
+            value=draft["execution_mode"],
+            on_change=mode_changed,
+        )
+        draft.setdefault("diagnostic_cca_bypass", False)
+        bypass = ui.checkbox(
+            "Bypass CCA (simulation only)", on_change=lambda _: changed(),
+        ).bind_value(draft, "diagnostic_cca_bypass")
+        bypass.set_enabled(draft["execution_mode"] == "simulation")
+        ui.label(
+            "Skips CCA plan approval and resource permission for this simulation. "
+            "Resource reservations, controller limits and collision checks remain active."
+        ).classes("text-sm text-slate-600")
 
 
 def _render_resources(draft: dict, models: dict, changed, refresh_failure) -> None:

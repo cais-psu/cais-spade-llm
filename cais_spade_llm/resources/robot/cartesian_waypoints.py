@@ -3,14 +3,145 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+
+
+def fixed_orientation_waypoints(
+    start: Sequence[float], target: Sequence[float], clearance: Sequence[Sequence[float]],
+    *, rotation_point: Sequence[float], angular_step: float,
+    rotation_midpoint: Sequence[float] | None = None,
+) -> list[list[float]]:
+    """Translate at fixed orientation and turn only at a saved clearance point.
+
+    Args:
+        start: Fresh XYZ/xyzw pose in the planning frame.
+        target: Computed XYZ/xyzw endpoint in the same frame.
+        clearance: Ordered saved XYZ clearance points.
+        rotation_point: Saved XYZ location for a required orientation change.
+        angular_step: Maximum orientation interpolation interval in radians.
+        rotation_midpoint: Saved quaternion disambiguating a required half turn.
+
+    Returns:
+        Cartesian poses, including the endpoint, with duplicate poses removed.
+    """
+    sample_segment(start, target, linear_step=1e6, angular_step=angular_step)
+    route = [list(point) for point in clearance]
+    if any(len(point) != 3 or not all(math.isfinite(v) for v in point)
+           for point in [*route, rotation_point]):
+        raise ValueError('Cartesian clearance requires finite saved XYZ points')
+    dot = sum(a * b for a, b in zip(start[3:], target[3:], strict=True))
+    turning = abs(dot) < math.cos(.001 / 2)
+    if turning and list(rotation_point) not in route:
+        if math.dist(target[:3], rotation_point) < 1e-6:
+            route.append(list(rotation_point))
+        else:
+            route.insert(0, list(rotation_point))
+    result: list[list[float]] = []
+    previous = list(start)
+
+    def append(pose: Sequence[float]) -> None:
+        nonlocal previous
+        if (math.dist(previous[:3], pose[:3]) < 1e-9
+                and abs(sum(a * b for a, b in zip(previous[3:], pose[3:], strict=True))) > 1. - 1e-12):
+            return
+        result.append(list(pose))
+        previous = list(pose)
+
+    orientation = list(start[3:])
+    for xyz in route:
+        append([*xyz, *orientation])
+        if turning and xyz == list(rotation_point):
+            orientations = ([rotation_midpoint] if rotation_midpoint is not None and abs(dot) < .01 else [])
+            for quaternion in [*orientations, target[3:]]:
+                for pose in sample_segment(previous, [*xyz, *quaternion],
+                                           linear_step=1e6, angular_step=angular_step)[1:]:
+                    append(pose)
+            orientation = list(target[3:])
+            turning = False
+    append([*target[:3], *orientation])
+    return result
+
+
+def _validate_limits(names: Sequence[str], limits: dict) -> None:
+    if not names or len(set(names)) != len(names):
+        raise ValueError('Cartesian execution requires distinct owned joint names')
+    for name in names:
+        row = limits.get(name, {})
+        if (not all(key in row and math.isfinite(row[key])
+                    for key in ('lower', 'upper', 'velocity', 'acceleration'))
+                or row['lower'] >= row['upper']
+                or min(row['velocity'], row['acceleration']) <= 0):
+            raise ValueError(f'Invalid Cartesian joint limits: {name}')
+
+
+def _coefficients(left: dict, right: dict, index: int) -> list[float]:
+    """Match the controller's quintic interpolation on a unit time interval."""
+    dt = right['time_from_start'] - left['time_from_start']
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError('Cartesian trajectory time must increase')
+    c0 = left['positions'][index]
+    c1 = dt * left['velocities'][index]
+    c2 = .5 * dt**2 * left['accelerations'][index]
+    position = right['positions'][index] - c0 - c1 - c2
+    velocity = dt * right['velocities'][index] - c1 - 2 * c2
+    acceleration = dt**2 * right['accelerations'][index] - 2 * c2
+    return [c0, c1, c2, 10 * position - 4 * velocity + .5 * acceleration,
+            -15 * position + 7 * velocity - acceleration,
+            6 * position - 3 * velocity + .5 * acceleration]
+
+
+def _derivative(coefficients: Sequence[float]) -> list[float]:
+    return [index * value for index, value in enumerate(coefficients)][1:]
+
+
+def _value(coefficients: Sequence[float], fraction: float) -> float:
+    result = 0.
+    for coefficient in reversed(coefficients):
+        result = result * fraction + coefficient
+    return result
+
+
+def _extrema(coefficients: Sequence[float]) -> list[float]:
+    import numpy as np
+
+    roots = np.polynomial.polynomial.polyroots(_derivative(coefficients))
+    fractions = [0., 1., *(float(root.real) for root in roots
+                          if abs(root.imag) < 1e-8 and 0 < root.real < 1)]
+    return [_value(coefficients, fraction) for fraction in fractions]
+
+
+def trajectory_samples(trajectory, *, maximum_joint_step: float = .05) -> Iterator[list[float]]:
+    """Sample controller interpolation with a bound on joint travel per interval.
+
+    This uses position, velocity and acceleration at both ends, including
+    excursions between equal endpoint positions. Collision checks remain owned
+    by the resource controller and run before any trajectory is dispatched.
+    """
+    if not math.isfinite(maximum_joint_step) or maximum_joint_step <= 0:
+        raise ValueError('Cartesian collision sampling requires positive finite spacing')
+    previous = None
+    for point in trajectory.points:
+        current = {'positions': list(point.positions), 'velocities': list(point.velocities),
+                   'accelerations': list(point.accelerations),
+                   'time_from_start': point.time_from_start.sec + point.time_from_start.nanosec / 1e9}
+        if previous is None:
+            yield current['positions']
+        else:
+            coefficients = [_coefficients(previous, current, index)
+                            for index in range(len(trajectory.joint_names))]
+            speed = max(abs(v) for row in coefficients for v in _extrema(_derivative(row)))
+            count = max(1, math.ceil(speed / maximum_joint_step))
+            for index in range(1, count + 1):
+                yield [_value(row, index / count) for row in coefficients]
+        previous = current
 
 
 def sample_segment(start: Sequence[float], end: Sequence[float], *,
                    linear_step: float, angular_step: float, minimum_samples: int = 1) -> list[list[float]]:
     """Interpolate XYZ and the shortest quaternion arc without choosing a route."""
     if (len(start) != 7 or len(end) != 7 or not all(math.isfinite(v) for v in [*start, *end])
-            or min(linear_step, angular_step) <= 0):
+            or not all(math.isfinite(v) and v > 0 for v in (linear_step, angular_step))
+            or type(minimum_samples) is not int or minimum_samples < 1):
         raise ValueError('Cartesian waypoints require finite XYZ/xyzw poses and positive spacing')
     quaternions = []
     for pose in (start, end):
@@ -40,11 +171,13 @@ def sample_segment(start: Sequence[float], end: Sequence[float], *,
 def continuous_joints(values: Sequence[float], previous: Sequence[float],
                       names: Sequence[str], limits: dict, maximum_step: float) -> list[float]:
     """Keep the nearest valid revolute representation and reject an IK branch jump."""
-    if len(values) != len(names) or len(previous) != len(names):
+    _validate_limits(names, limits)
+    if (not math.isfinite(maximum_step) or maximum_step <= 0
+            or len(values) != len(names) or len(previous) != len(names)):
         raise ValueError('Waypoint IK did not return every owned joint')
     result = []
     for name, value, before in zip(names, values, previous, strict=True):
-        if not math.isfinite(value):
+        if not math.isfinite(value) or not math.isfinite(before):
             raise ValueError(f'Waypoint IK is not finite: {name}')
         turns = round((before - value) / (2 * math.pi))
         choices = [value + 2 * math.pi * k for k in (turns - 1, turns, turns + 1)]
@@ -92,10 +225,20 @@ def _segment_timing(positions: list[list[float]], names: Sequence[str], limits: 
     # Include endpoint-only segments and every connecting displacement in the bound.
     for left, right in zip(rows, rows[1:]):
         dt = right['time_from_start'] - left['time_from_start']
-        for name, a, b in zip(names, left['positions'], right['positions']):
-            duration = max(duration, 1.875 * abs(b - a) / limits[name]['velocity'],
-                           math.sqrt(5.78 * abs(b - a) / limits[name]['acceleration']),
-                           abs(b - a) / dt / limits[name]['velocity'])
+        for index, name in enumerate(names):
+            coefficients = _coefficients(left, right, index)
+            bounds = _extrema(coefficients)
+            if min(bounds) < limits[name]['lower'] - 1e-9 or max(bounds) > limits[name]['upper'] + 1e-9:
+                raise ValueError(f'Cartesian controller interpolation exceeds joint limits: {name}; '
+                                 f'positions={left["positions"][index], right["positions"][index]}; '
+                                 f'extrema={min(bounds), max(bounds)}')
+            velocity = _derivative(coefficients)
+            acceleration = _derivative(velocity)
+            duration = max(duration,
+                           max(abs(v) for v in _extrema(velocity)) / dt / limits[name]['velocity'],
+                           math.sqrt(max(abs(a) for a in _extrema(acceleration))
+                                     / dt**2 / limits[name]['acceleration']))
+    duration *= 1.000001
     for row in rows:
         row['time_from_start'] *= duration
         row['velocities'] = [v / duration for v in row['velocities']]
@@ -115,6 +258,12 @@ def resolve_waypoints(*, start_pose: Sequence[float], start_joints: Sequence[flo
     """
     if not waypoints:
         raise ValueError('Cartesian execution requires at least one waypoint')
+    _validate_limits(names, limits)
+    if (len(start_joints) != len(names)
+            or any(not math.isfinite(value) or not limits[name]['lower'] <= value <= limits[name]['upper']
+                   for name, value in zip(names, start_joints))
+            or not math.isfinite(maximum_joint_step) or maximum_joint_step <= 0):
+        raise ValueError('Cartesian execution requires finite bounded start joints and positive joint spacing')
     previous_pose, previous = list(start_pose), list(start_joints)
     result, elapsed = [], 0.
     for target in waypoints:

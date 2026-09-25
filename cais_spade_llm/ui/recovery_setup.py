@@ -100,6 +100,7 @@ def default_setup(root: Path = ROOT) -> dict[str, Any]:
         "permitted_resources": list(models),
         "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
         "execution_mode": "simulation",
+        "diagnostic_cca_bypass": False,
         "simulation": DEFAULT_SETTINGS.copy(),
         "runtime_recovery_mode": "pre_ran",
         "runtime_recovery_validation_policy": "validated",
@@ -307,7 +308,12 @@ def validate_setup(setup: dict, *, root: Path = ROOT) -> dict[str, Any]:
     from cais_spade_llm.recovery_framework.simulation import simulation_settings
 
     simulation_settings(setup)
+    bypass = setup.get("diagnostic_cca_bypass", False)
+    if type(bypass) is not bool or (bypass and setup.get("execution_mode") != "simulation"):
+        raise ValueError("CCA bypass is available only in simulation")
     inputs = product_inputs(setup["selected_product"], setup["selected_product_order_file"], root)
+    if bypass and "completion_conditions" in inputs["product_order"]:
+        raise ValueError("CCA bypass requires an assembly processPlan order")
     if setup.get("product_geometry_file") != inputs["product_geometry_file"]:
         raise ValueError("Geometry reference does not match the selected product manifest")
     scene = read_json(reference_path(setup["scene_file"], root))
@@ -501,6 +507,7 @@ def setup_summary(setup: dict) -> list[dict[str, str]]:
         ("Permitted resources", ", ".join(setup.get("permitted_resources", []))),
         ("Safety", setup.get("selected_safety_file")),
         ("Mode", MODE_OPTIONS.get(setup.get("execution_mode"), setup.get("execution_mode"))),
+        ("CCA", "Bypassed (simulation only)" if setup.get("diagnostic_cca_bypass") else "Enabled"),
         ("Recovery Handoff Mode", setup.get("runtime_recovery_mode")),
         ("Recovery Safety Mode", setup.get("runtime_recovery_validation_policy")),
         ("Archived Recovery Run", setup.get("runtime_recovery_archive_path") or "None"),

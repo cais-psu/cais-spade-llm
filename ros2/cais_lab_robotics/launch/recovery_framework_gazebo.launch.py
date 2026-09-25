@@ -413,10 +413,12 @@ def _moveit_parameters(
 def _runtime_world_without_static_kmr(
     world_path: Path, *, enable_camera_streams: bool = False,
     simulation_speed: int = 1, dynamic_shadows: bool = False,
-    gui_rate: int = 30,
+    gui_rate: int = 30, ode_island_threads: int = 0,
 ) -> Path:
     if simulation_speed not in (1, 2, 5, 10):
         raise ValueError('Simulation speed must be 1, 2, 5, or 10')
+    if type(ode_island_threads) is not int or ode_island_threads not in (0, 2, 4):
+        raise ValueError('ODE island threads must be 0, 2 or 4')
     tree = ET.parse(world_path)
     root = tree.getroot()
     world = root.find('world')
@@ -438,6 +440,17 @@ def _runtime_world_without_static_kmr(
         if element is None:
             element = ET.SubElement(physics, tag)
         element.text = str(value)
+    if ode_island_threads:
+        ode = physics.find('ode')
+        if ode is None:
+            ode = ET.SubElement(physics, 'ode')
+        solver = ode.find('solver')
+        if solver is None:
+            solver = ET.SubElement(ode, 'solver')
+        threads = solver.find('island_threads')
+        if threads is None:
+            threads = ET.SubElement(solver, 'island_threads')
+        threads.text = str(ode_island_threads)
     scene = world.find('scene')
     if scene is None:
         scene = ET.SubElement(world, 'scene')
@@ -445,8 +458,8 @@ def _runtime_world_without_static_kmr(
     if shadows is None:
         shadows = ET.SubElement(scene, 'shadows')
     shadows.text = str(dynamic_shadows).lower()
-    if gui_rate not in (30, 60):
-        raise ValueError('Gazebo viewer rate must be 30 or 60 Hz')
+    if gui_rate not in (15, 30, 60):
+        raise ValueError('Gazebo viewer rate must be 15, 30 or 60 Hz')
     gui = world.find('gui')
     if gui is None:
         gui = ET.SubElement(world, 'gui')
@@ -547,12 +560,14 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     speed = int(LaunchConfiguration('simulation_speed').perform(context))
     controller_rate = int(LaunchConfiguration('ur_controller_rate_hz').perform(context))
     gui_rate = int(LaunchConfiguration('gazebo_gui_rate_hz', default='30').perform(context))
+    ode_island_threads = int(LaunchConfiguration('ode_island_threads', default='0').perform(context))
     controllers = _controller_config(robots, controller_rate)
     performance = {
         'speed': speed, 'ur_controller_rate_hz': controller_rate,
         'enable_camera_streams': enabled('enable_camera_streams'),
         'dynamic_shadows': enabled('dynamic_shadows'),
         'gazebo_gui_rate_hz': gui_rate,
+        'ode_island_threads': ode_island_threads,
     }
     launch_id = uuid4().hex
     temporary_paths: list[Path] = []
@@ -585,7 +600,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
         world = _runtime_world_without_static_kmr(
             world, enable_camera_streams=enabled('enable_camera_streams'),
             simulation_speed=speed, dynamic_shadows=enabled('dynamic_shadows'),
-            gui_rate=gui_rate,
+            gui_rate=gui_rate, ode_island_threads=ode_island_threads,
         )
         temporary_paths.append(world)
         initial_pose = [str(value) for value in startup_pose]
@@ -906,6 +921,7 @@ def generate_launch_description() -> Any:
         'simulation_speed': '1', 'ur_controller_rate_hz': '1000',
         'dynamic_shadows': 'false',
         'gazebo_gui_rate_hz': '30',
+        'ode_island_threads': '0',
         'launch_gazebo': 'true', 'launch_gazebo_gui': 'true',
         'launch_moveit': 'true', 'launch_rviz': 'false',
         'rviz_software_rendering': 'true' if os.environ.get('WSL_DISTRO_NAME') else 'false',

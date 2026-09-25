@@ -1,0 +1,17 @@
+{
+  "product": "assembly_board-v1",
+  "product_jid": "assembly_board-v1@localhost",
+  "quantity": 1,
+  "objective": "assemble KET4_Square_4mm and gear_small on assembly_board-v1",
+  "parts": ["KET4_Square_4mm", "gear_small"],
+  "processPlan": {
+    "KET4_Square_4mm": [
+      {"processesToComplete": [{"process": "trim", "result": "square"}]},
+      {"processesToComplete": [{"process": "assembly"}]}
+    ],
+    "gear_small": [
+      {"processesToComplete": [{"process": "print_part"}]},
+      {"processesToComplete": [{"process": "assembly"}]}
+    ]
+  }
+}

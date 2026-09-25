@@ -60,6 +60,27 @@ def test_configured_workflow_home_retains_observed_collision_free_pose():
     controller._move_joints_via_moveit.assert_not_called()
 
 
+@pytest.mark.parametrize("condition", ["fresh", "stale", "moving", "nan", "nonfinite_target", "active_goal", "hardware"])
+def test_joint_endpoint_observation_requires_finite_fresh_stable_feedback(condition):
+    now = time.monotonic()
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller.execution_mode = "hardware" if condition == "hardware" else "simulation"
+    controller._simulation_goal = object() if condition == "active_goal" else None
+    controller.arm_joint_names = ["joint"]
+    controller._joint_lock = threading.Lock()
+    controller._joint_positions = {"joint": math.nan if condition == "nan" else 0.201}
+    controller._joint_received_times = {"joint": now - (2 if condition == "stale" else 0.1)}
+    controller._joint_stable_since = {"joint": now if condition == "moving" else now - 0.5}
+    controller._last_joint_target_observation = {"old": True}
+    assert controller._fresh_stable_joint_target(
+        {"joint": math.inf if condition == "nonfinite_target" else 0.2}, tolerance=0.02,
+    ) is (condition == "fresh")
+    if condition == "fresh":
+        assert controller._last_joint_target_observation["observed_positions"] == [0.201]
+    else:
+        assert controller._last_joint_target_observation is None
+
+
 def test_simulation_cartesian_fallback_remains_collision_checked():
     target = object()
     execute = Mock(return_value=True)
@@ -195,6 +216,56 @@ def test_configured_pick_orientation_controls_tool_pose_and_tcp_offset():
     assert normalized["approach_pose"]["qy"] == 1.0
     assert normalized["target_pose"]["qy"] == 1.0
 
+    from cais_spade_llm.recovery_framework import SCENE_PATH, read_json
+
+    choices = read_json(SCENE_PATH)['3D Printing Station']['handling_robot_access'][
+        'grasp_orientations_xyzw']
+    for observed in (choices[1], choices[2]):
+        controller._get_ee_pose = lambda observed=observed: SimpleNamespace(
+            position=SimpleNamespace(x=.5, y=-.5, z=1.5),
+            orientation=SimpleNamespace(x=observed[0], y=observed[1],
+                                        z=observed[2], w=observed[3]),
+        )
+        chosen = controller.compute_pick_targets(
+            part_name='gear_small',
+            product_geometry={'model_name': 'gear_small', 'part_height_m': .02,
+                'handling_robot_access': {'grasp_orientation_xyzw': choices[0],
+                    'grasp_orientations_xyzw': choices,
+                    'tcp_offset_z_m': -.218, 'approach_height_m': .12}},
+            detected_parts=[{'part_name': 'gear_small', 'model_name': 'gear_small',
+                             'x': .44, 'y': -.58, 'z': 1.11}],
+            use_global_min_pick_tcp_z=False,
+        )
+        assert chosen['success'] is True
+        assert [chosen['target_pose'][key] for key in ('qx', 'qy', 'qz', 'qw')] == pytest.approx(observed)
+
+    from cais_spade_llm.recovery_framework.geometry import multiply, rotate
+
+    access = read_json(SCENE_PATH)['3D Printing Station']['handling_robot_access']
+    observed = choices[1]
+    for part in ('gear_small', 'gear_medium', 'gear_large'):
+        controller._get_ee_pose = lambda observed=observed: SimpleNamespace(
+            position=SimpleNamespace(x=.5, y=-.5, z=1.5),
+            orientation=SimpleNamespace(x=observed[0], y=observed[1],
+                                        z=observed[2], w=observed[3]),
+        )
+        chosen = controller.compute_pick_targets(
+            part_name=part,
+            product_geometry={'model_name': part, 'part_height_m': .02,
+                              'handling_robot_access': access},
+            detected_parts=[{'part_name': part, 'model_name': part,
+                             'x': .44, 'y': -.58, 'z': 1.11}],
+            use_global_min_pick_tcp_z=False,
+        )
+        assert chosen['success'] is True
+        pick_q = [chosen['target_pose'][key] for key in ('qx', 'qy', 'qz', 'qw')]
+        assert pick_q in access['grasp_orientations_xyzw_by_part'][part]
+        if part == 'gear_medium':
+            assert pick_q == choices[0]
+        place_q = multiply([0., 0., math.sqrt(.5), math.sqrt(.5)], pick_q)
+        assert abs(rotate(place_q, [1., 0., 0.])[0]) < 1e-7
+        observed = place_q
+
 
 @pytest.mark.parametrize("cached_offset", [-.218, None, "invalid", float("nan")])
 def test_gear_placement_rotates_tool_ninety_degrees_without_moving_slot(cached_offset):
@@ -304,6 +375,36 @@ def test_slot_snap_requires_repeated_observed_gear_position(observations, expect
     assert result is expected
     assert get_position.call_count == len(observations)
     assert wait_process_time.call_count == len(observations)
+
+
+def test_slot_snap_retries_missing_gazebo_observation_without_skipping_samples():
+    expected = (.0294496, .1448242, 1.03)
+    controller = SimpleNamespace(
+        execution_mode='simulation', _shutdown_requested=False,
+        snap_to_slot_position_tolerance_m=.001,
+        snap_to_slot_observation_samples=3,
+        snap_to_slot_observation_interval_sec=.1,
+        _wait_process_time=Mock(),
+        _get_entity_world_position=Mock(side_effect=[None, expected, expected, expected]),
+        _xyz_distance=lambda a, b: math.dist(a, b),
+        _log=lambda: Mock(), _node=Mock(), _get_state_client=Mock(),
+        _GetEntityState=object(), service_get_entity_state='/get_entity_state',
+        _cb_group=object(),
+    )
+    controller._node.create_client.return_value = Mock()
+    assert GazeboPickPlaceController._verify_snapped_entity_position(
+        controller, 'gear_small', expected)
+    assert controller._get_entity_world_position.call_count == 4
+    assert controller._node.destroy_client.call_count == 1
+    controller._get_entity_world_position = Mock(return_value=None)
+    assert not GazeboPickPlaceController._verify_snapped_entity_position(
+        controller, 'gear_small', expected)
+    assert controller._get_entity_world_position.call_count == 3
+    controller.execution_mode = 'physical'
+    controller._get_entity_world_position = Mock(return_value=None)
+    assert not GazeboPickPlaceController._verify_snapped_entity_position(
+        controller, 'gear_small', expected)
+    assert controller._get_entity_world_position.call_count == 1
 
 
 def test_configured_machine_access_controls_horizontal_pick_and_retreat():
@@ -718,7 +819,10 @@ def test_payload_scene_diff_updates_only_owned_part(monkeypatch, attached):
 @pytest.mark.parametrize("attached", [False, True])
 @pytest.mark.parametrize("acknowledged", [False, True])
 @pytest.mark.parametrize("offset", [0., 2.])
-def test_payload_observation_uses_the_physical_attachment_frame(monkeypatch, attached, acknowledged, offset):
+@pytest.mark.parametrize("payload_timeouts", [0, 1])
+def test_payload_observation_uses_the_physical_attachment_frame(
+    monkeypatch, attached, acknowledged, offset, payload_timeouts,
+):
     import sys
     from cais_spade_llm.recovery_framework import part_collision
 
@@ -739,7 +843,10 @@ def test_payload_observation_uses_the_physical_attachment_frame(monkeypatch, att
     monkeypatch.setattr(part_collision, "observed_part_boxes", observe)
     monkeypatch.setattr(part_collision, "part_scene_update", scene_update)
     get_pose = Mock()
-    get_pose.call_async.return_value = SimpleNamespace(success=True, state=SimpleNamespace(pose=pose))
+    pose_response = SimpleNamespace(success=True, state=SimpleNamespace(pose=pose))
+    get_pose.call_async.side_effect = [None] * payload_timeouts + [pose_response]
+    gazebo_node = Mock()
+    gazebo_node.create_client.return_value = get_pose
     get_scene = Mock()
     get_scene.call_async.return_value = SimpleNamespace(scene=SimpleNamespace(
         allowed_collision_matrix=SimpleNamespace(entry_names=["owner_rg2_finger", "other_rg2_finger"]),
@@ -756,6 +863,7 @@ def test_payload_observation_uses_the_physical_attachment_frame(monkeypatch, att
         _payload_scene_clients={"get": get_scene, "apply": apply_scene},
         _get_state_client=get_pose, _GetEntityState=service,
         _wait_future=lambda future, **kwargs: future, _log=Mock(),
+        _node=gazebo_node, _cb_group=object(), service_get_entity_state="/get_entity_state",
         _tf_buffer=SimpleNamespace(lookup_transform=lambda *args: SimpleNamespace(
             transform=SimpleNamespace(translation=SimpleNamespace(x=0., y=0., z=.243)))),
         _rclpy=SimpleNamespace(time=SimpleNamespace(Time=lambda: None)),
@@ -773,6 +881,8 @@ def test_payload_observation_uses_the_physical_attachment_frame(monkeypatch, att
         assert evidence["collision_objects"] == rows
         apply_scene.call_async.assert_not_called()
         return
+    assert get_pose.call_async.call_count == payload_timeouts + 1
+    assert gazebo_node.destroy_client.call_count == payload_timeouts
     query = get_pose.call_async.call_args.args[0]
     assert query.name == "peg"
     assert query.reference_frame == ("robot::owner_tcp" if attached else "world")
@@ -868,7 +978,7 @@ def test_workflow_pose_uses_resource_owned_observation():
 
 
 @pytest.mark.parametrize("condition", [
-    "fresh", "stale", "missing", "timeout", "cancelled", "delayed", "cancelled_after_stale", "reply_retry",
+    "fresh", "stale", "missing", "timeout", "cancelled", "delayed", "cancelled_after_stale", "reply_retry", "deadline_retry",
 ])
 @pytest.mark.parametrize("observation_timeout", [2.0, 5.0])
 def test_observed_tool_poses_require_fresh_gazebo_link_measurement(
@@ -878,7 +988,9 @@ def test_observed_tool_poses_require_fresh_gazebo_link_measurement(
     from cais_spade_llm.resources.robot import gazebo_pick_place_controller as controller_module
 
     ticks = itertools.count(step=.2)
-    monkeypatch.setattr(controller_module.time, "monotonic", lambda: next(ticks))
+    elapsed = [0.]
+    monkeypatch.setattr(controller_module.time, "monotonic",
+                        lambda: elapsed[0] if condition == "deadline_retry" else next(ticks))
     parent = SimpleNamespace(position=SimpleNamespace(x=1., y=2., z=3.),
                              orientation=SimpleNamespace(x=0., y=0., z=math.sqrt(.5), w=math.sqrt(.5)))
     response = SimpleNamespace(success=condition != "missing", state=SimpleNamespace(pose=parent),
@@ -896,9 +1008,12 @@ def test_observed_tool_poses_require_fresh_gazebo_link_measurement(
         controller_config={"payload_collision": {"observation_link": "owner_wrist"}},
         tf_lookup_timeout_sec=observation_timeout,
         robot_model_name="robot", frame_id="world", ee_link="tool0", tcp_link="tcp",
-        _shutdown_requested=condition == "cancelled", _get_state_client=client,
+        _shutdown_requested=condition == "cancelled", _get_state_client=client, _log=lambda: Mock(),
         _GetEntityState=SimpleNamespace(Request=SimpleNamespace),
-        _node=SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=10_000_000_000))),
+        _node=SimpleNamespace(
+            get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=10_000_000_000)),
+            create_client=Mock(return_value=client), destroy_client=Mock()),
+        service_get_entity_state='/get_entity_state', _cb_group=object(),
         _wait_future=Mock(return_value=None if condition == "timeout" else response),
         _tf_buffer=SimpleNamespace(lookup_transform=Mock(side_effect=fixed_transform)),
         _rclpy=SimpleNamespace(time=SimpleNamespace(Time=lambda: 0)),
@@ -917,8 +1032,15 @@ def test_observed_tool_poses_require_fresh_gazebo_link_measurement(
         controller._wait_future.side_effect = receive_observation
     elif condition == "reply_retry":
         controller._wait_future.side_effect = [None, response]
+    elif condition == "deadline_retry":
+        def delayed_reply(_future, **kwargs):
+            if controller._wait_future.call_count == 1:
+                elapsed[0] += kwargs['timeout_sec']
+                return None
+            return response
+        controller._wait_future.side_effect = delayed_reply
     result = GazeboPickPlaceController._observed_simulation_link_poses(controller)
-    if condition in {"fresh", "delayed", "reply_retry"}:
+    if condition in {"fresh", "delayed", "reply_retry", "deadline_retry"}:
         assert result["tool0"].position.z == pytest.approx(3.2)
         assert result["tcp"].position.y == pytest.approx(2.1)
         assert result["tcp"].position.x == pytest.approx(1.)
@@ -926,7 +1048,9 @@ def test_observed_tool_poses_require_fresh_gazebo_link_measurement(
         assert (request.name, request.reference_frame) == ("robot::owner_wrist", "world")
         assert controller._last_pose_observation["source"] == "gazebo_link_state"
         assert controller._tf_buffer.lookup_transform.call_count == 2
-        assert client.call_async.call_count == (2 if condition in {"delayed", "reply_retry"} else 1)
+        assert client.call_async.call_count == (2 if condition in {"delayed", "reply_retry", "deadline_retry"} else 1)
+        assert controller._wait_future.call_args_list[0].kwargs['timeout_sec'] > 1.
+        assert controller._node.destroy_client.call_count == (1 if condition in {'reply_retry', 'deadline_retry'} else 0)
     else:
         assert result is None
         assert controller._last_failure_message
@@ -937,6 +1061,9 @@ def test_observed_tool_poses_require_fresh_gazebo_link_measurement(
             assert client.call_async.call_count == 1
         elif condition in {"stale", "timeout"}:
             assert client.call_async.call_count > 1
+            if condition == "timeout":
+                assert client.call_async.call_count == 3
+                assert controller._node.destroy_client.call_count == 2
             assert max(call.kwargs["timeout_sec"] for call in controller._wait_future.call_args_list) <= observation_timeout
 
 
@@ -1110,6 +1237,40 @@ def test_launch_selects_storage_part_without_empty_ros_argument(tmp_path, monkey
     assert all(arguments.values())
 
 
+@pytest.mark.parametrize('viewer', [15, 30, 60])
+@pytest.mark.parametrize('threads', [0, 2, 4])
+def test_viewer_and_ode_settings_are_forwarded_only_at_launch(tmp_path, viewer, threads):
+    import json
+    import shlex
+    from cais_spade_llm.recovery_framework.simulation import launch_arguments, simulation_settings
+
+    setup = {'simulation': {'gazebo_gui_rate_hz': viewer, 'ode_island_threads': threads,
+                            'speed': 1, 'ur_controller_rate_hz': 250}}
+    settings = simulation_settings(setup)
+    assert settings['gazebo_gui_rate_hz'] == viewer
+    assert settings['ode_island_threads'] == threads
+    assert simulation_settings({})['ode_island_threads'] == 0
+    path = tmp_path / 'setup.json'
+    path.write_text(json.dumps(setup))
+    arguments = dict(arg.split(':=', 1) for arg in shlex.split(launch_arguments(path)))
+    assert arguments['gazebo_gui_rate_hz'] == str(viewer)
+    assert arguments['ode_island_threads'] == str(threads)
+    assert arguments['simulation_speed'] == '1'
+    assert arguments['ur_controller_rate_hz'] == '250'
+    assert arguments['dynamic_shadows'] == arguments['enable_camera_streams'] == 'false'
+
+
+@pytest.mark.parametrize('setting,value', [
+    ('ode_island_threads', 1), ('ode_island_threads', 8), ('ode_island_threads', True),
+    ('ode_island_threads', 2.0), ('gazebo_gui_rate_hz', 10), ('gazebo_gui_rate_hz', True),
+])
+def test_viewer_and_ode_settings_reject_unsupported_values(setting, value):
+    from cais_spade_llm.recovery_framework.simulation import simulation_settings
+
+    with pytest.raises(ValueError):
+        simulation_settings({'simulation': {setting: value}})
+
+
 @pytest.mark.parametrize('part', ['gear_small', 'gear_medium', 'gear_large'])
 def test_recovery_gear_collision_mesh_keeps_open_bore_and_fixture_height(part):
     import json
@@ -1237,9 +1398,57 @@ def test_simulation_mating_targets_compensate_measured_grasp_offset():
     achieved = compose([insert[k] for k in ('x','y','z','qx','qy','qz','qw')], offset)
     assert achieved[:3] == pytest.approx(list(target.values()), abs=1e-12)
     assert achieved[3:] == pytest.approx([0., 0., math.sqrt(.5), math.sqrt(.5)], abs=1e-12)
+    fresh = SimpleNamespace(success=True, state=SimpleNamespace(pose=part))
+    controller._node = Mock()
+    controller._node.create_client.return_value = Mock()
+    controller._log = Mock(return_value=Mock())
+    controller.service_get_entity_state = '/get_entity_state'
+    controller._cb_group = object()
+    controller._wait_future = Mock(side_effect=[None, fresh])
+    retried = controller._simulation_mating_poses('gear_medium', target, math.pi/2)
+    assert retried['insert_pose'] == result['insert_pose']
+    controller._node.destroy_client.assert_called_once()
+    assert controller._wait_future.call_count == 2
+    controller._wait_future = Mock(return_value=None)
+    with pytest.raises(RuntimeError, match='Cannot observe the held mating transform'):
+        controller._simulation_mating_poses('gear_medium', target, math.pi/2)
+    assert controller._wait_future.call_count == 3
     controller._attached_model = 'gear_small'
     with pytest.raises(ValueError, match='identified attached part'):
         controller._simulation_mating_poses('gear_medium', target, math.pi/2)
+
+
+@pytest.mark.parametrize('part', ['gear_small', 'gear_medium', 'gear_large'])
+def test_gear_mating_rejects_fingers_aligned_with_shaft_row(part):
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._attached_model = part
+    controller.insertion_depth_m = .0025
+    controller.frame_id = 'world'
+    current = SimpleNamespace(
+        position=SimpleNamespace(x=.4, y=-.5, z=1.4),
+        orientation=SimpleNamespace(x=-math.sqrt(.5), y=math.sqrt(.5), z=0., w=0.),
+    )
+    observed_part = SimpleNamespace(
+        position=SimpleNamespace(x=.4, y=-.5, z=1.177),
+        orientation=SimpleNamespace(x=0., y=0., z=0., w=1.),
+    )
+    controller._get_ee_pose = lambda: current
+    controller._get_state_client = Mock()
+    controller._GetEntityState = SimpleNamespace(Request=lambda **kw: SimpleNamespace(**kw))
+    controller._wait_future = Mock(return_value=SimpleNamespace(
+        success=True, state=SimpleNamespace(pose=observed_part)))
+    target = {'x': -.0005504, 'y': .1448242, 'z': 1.0389916}
+    with pytest.raises(ValueError, match='gripper fingers do not clear'):
+        controller._simulation_mating_poses(part, target, math.pi / 2)
+
+    current.orientation = SimpleNamespace(x=0., y=1., z=0., w=0.)
+    result = controller._simulation_mating_poses(part, target, math.pi / 2)
+    from cais_spade_llm.recovery_framework.geometry import compose
+    relative = [0., 0., .223, 0., -1., 0., 0.]
+    insert = result['insert_pose']
+    achieved = compose([insert[key] for key in ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw')], relative)
+    assert achieved[:3] == pytest.approx(list(target.values()), abs=1e-12)
+    assert achieved[3:] == pytest.approx([0., 0., math.sqrt(.5), math.sqrt(.5)], abs=1e-12)
 
 
 @pytest.mark.parametrize('seated', [True, False])
@@ -1281,6 +1490,54 @@ def test_mating_snap_preserves_observed_phase_and_cannot_correct_unseated_part(m
         controller._set_entity_state_for_snap.assert_not_called()
 
 
+
+@pytest.mark.parametrize('mode,seated,attached', [
+    ('simulation', True, True), ('simulation', False, True),
+    ('simulation', True, False), ('physical', False, True),
+])
+def test_verified_mating_fixture_handoff_precedes_release_settling(mode, seated, attached):
+    calls = []
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller.execution_mode = mode
+    controller._link_attacher_enabled = True
+    controller._attached_model, controller._attached_link = 'gear_medium', 'wrist'
+    controller.frame_id, controller.robot_model_name = 'world', 'dual_robot'
+    controller.detach_timeout_sec, controller.detach_max_link_attempts = 1., 1
+    controller.primary_attach_link, controller.attach_link_candidates = 'wrist', ['wrist']
+    controller._simulation_mating_context = {
+        'model_name': 'gear_medium', 'target_yaw_rad': math.pi / 2,
+        'axis_tolerance_m': .0005, 'target_origin_pose': {'x': 0., 'y': 0., 'z': 1.039},
+        'retain_fixture_attachment': True,
+    }
+    observed = SimpleNamespace(pose=SimpleNamespace(
+        position=SimpleNamespace(x=0., y=0., z=1.039 if seated else 1.05),
+        orientation=SimpleNamespace(x=0., y=0., z=math.sqrt(.5), w=math.sqrt(.5)),
+    ))
+    controller._get_state_client = Mock()
+    controller._get_state_client.call_async.side_effect = lambda req: (
+        calls.append('observe') or SimpleNamespace(success=True, state=observed))
+    controller._GetEntityState = SimpleNamespace(Request=lambda **kw: SimpleNamespace(**kw))
+    controller._detach_client = Mock()
+    controller._detach_client.call_async.side_effect = lambda req: (
+        calls.append('detach') or SimpleNamespace(success=True))
+    controller._detach_srv = SimpleNamespace(Request=SimpleNamespace)
+    controller._wait_future = lambda future, **kw: future
+    controller._attach_part_to_assembly_board = Mock(
+        side_effect=lambda *a, **kw: calls.append('fixture') or attached)
+    controller._sync_part_collision = Mock(side_effect=lambda *a: calls.append('scene') or True)
+    controller._last_command_evidence = {}
+    success = controller._detach_part('gear_medium')
+    if mode == 'physical':
+        assert success and calls == ['detach', 'scene']
+    elif not seated:
+        assert not success and calls == ['observe']
+        assert controller._attached_model == 'gear_medium'
+    elif not attached:
+        assert not success and calls == ['observe', 'detach', 'fixture']
+    else:
+        assert success and calls == ['observe', 'detach', 'fixture', 'scene']
+        assert controller._last_command_evidence['seated_mating_part']['orientation_preserved']
+
 def test_mating_corridor_rejects_wrong_tooth_phase():
     from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
 
@@ -1289,6 +1546,27 @@ def test_mating_corridor_rejects_wrong_tooth_phase():
     assert not mating_pose_valid(context, [0.,0.,1.04,0.,0.,0.,1.])
     yaw = context['target_yaw_rad']
     assert mating_pose_valid(context, [0.,0.,1.04,0.,0.,math.sin(yaw/2),math.cos(yaw/2)])
+
+
+def test_simulation_gear_release_accepts_bounded_yaw_drift_but_rejects_wrong_phase():
+    from cais_spade_llm.recovery_framework import ROOT, read_json
+    from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
+
+    geometry_path = (ROOT / 'cais_spade_llm/specification/products/geometry'
+                     / 'assembly_board-v1-recovery-framework.json')
+    board = read_json(geometry_path)['gazebo']['assembly_board']
+    context = {**board['mating_contact_by_part']['gear_small'],
+               'target_origin_pose': {'x': .0294496, 'y': .1448242, 'z': 1.0389916},
+               'start_part_z': 1.0389916}
+    observed = [.029534030456404785, .14462789733256984, 1.0390201506013756,
+                .0001058975551361457, .0024431321180033144,
+                .7078902776770403, .7063181823098459]
+    assert context['yaw_tolerance_rad'] == .005
+    assert mating_pose_valid(context, observed)
+    wrong_yaw = context['target_yaw_rad'] + .006
+    assert not mating_pose_valid(context, [*observed[:3], 0., 0.,
+                                           math.sin(wrong_yaw/2), math.cos(wrong_yaw/2)])
+    assert not mating_pose_valid(context, [observed[0] + .001, *observed[1:]])
 
 
 def test_simulated_gear_mounting_ignores_only_configured_gear_contacts():
@@ -1366,16 +1644,13 @@ def test_explicit_waypoints_reject_ik_branch_changes_and_unavailable_poses():
     assert solve.call_count == 1
 
 
-def test_waypoint_resource_never_calls_a_motion_planner_on_conversion_failure():
-    controller = SimpleNamespace(
-        execution_mode='simulation', controller_config={'cartesian_motion': {'only': True}},
-        _resolve_cartesian_waypoints=Mock(side_effect=ValueError('unreachable waypoint')),
-        _planning_wall_time_sec=0., _cart_client=Mock(), _execute_simulation_motion_plan=Mock(),
-        _last_command_evidence=None,
-    )
-    assert not GazeboPickPlaceController._cartesian_move(controller, object())
-    controller._cart_client.call_async.assert_not_called()
+def test_waypoint_resource_never_calls_a_motion_planner_when_recording_is_missing(cartesian_motion_controller):
+    controller, target, response = cartesian_motion_controller
+    response.fraction = .8
+    assert not GazeboPickPlaceController._cartesian_move(controller, target)
+    controller._cart_client.call_async.assert_called_once()
     controller._execute_simulation_motion_plan.assert_not_called()
+    controller._resolve_cartesian_waypoints.assert_not_called()
     assert controller._last_command_evidence['command_sent'] is False
 
 
@@ -1411,3 +1686,685 @@ def test_payload_mesh_evidence_retains_provenance_without_triangle_copies():
     assert 'vertices' not in result[0]['mesh']
     assert 'vertices' in rows[0]['mesh']
     assert result[0]['support_contact_allowance_m'] == .001
+
+
+@pytest.mark.parametrize('field,value', [
+    ('linear_step', float('nan')), ('angular_step', float('inf')),
+    ('maximum_joint_step', float('nan')), ('start_joints', [float('nan')]),
+    ('limits', {'joint': {'lower': -2., 'upper': 2., 'velocity': 0., 'acceleration': 2.}}),
+])
+def test_explicit_waypoints_reject_invalid_configuration_before_ik(field, value):
+    from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints
+
+    solve = Mock(return_value=[.1])
+    arguments = dict(start_pose=[0., 0., 0., 1., 0., 0., 0.], start_joints=[0.],
+                     waypoints=[[0., 0., .1, 1., 0., 0., 0.]], names=['joint'],
+                     limits={'joint': {'lower': -2., 'upper': 2., 'velocity': 1., 'acceleration': 2.}},
+                     solve_ik=solve)
+    arguments[field] = value
+    with pytest.raises(ValueError):
+        resolve_waypoints(**arguments)
+    solve.assert_not_called()
+
+
+def test_explicit_waypoint_timing_bounds_controller_interpolation_between_samples():
+    import numpy as np
+    from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints
+
+    limits = {'joint': {'lower': -2., 'upper': 2., 'velocity': .4, 'acceleration': .6}}
+    rows = resolve_waypoints(start_pose=[0., 0., 0., 1., 0., 0., 0.], start_joints=[0.],
+        waypoints=[[.4, 0., 0., 1., 0., 0., 0.]], names=['joint'], limits=limits,
+        linear_step=.04, solve_ik=lambda pose, seed: [math.sin(4 * pose[0])])
+    # Solve the six boundary equations independently of the runtime coefficient helper.
+    for left, right in zip(rows, rows[1:]):
+        dt = right['time_from_start'] - left['time_from_start']
+        matrix = np.array([[1.,0,0,0,0,0], [0,1.,0,0,0,0], [0,0,2.,0,0,0],
+                           [1.,1,1,1,1,1], [0,1.,2,3,4,5], [0,0,2.,6,12,20]])
+        boundary = [left['positions'][0], left['velocities'][0] * dt,
+                    left['accelerations'][0] * dt**2, right['positions'][0],
+                    right['velocities'][0] * dt, right['accelerations'][0] * dt**2]
+        curve = np.polynomial.Polynomial(np.linalg.solve(matrix, boundary))
+        samples = np.linspace(0., 1., 1001)
+        assert np.max(np.abs(curve.deriv()(samples))) / dt <= .400001
+        assert np.max(np.abs(curve.deriv(2)(samples))) / dt**2 <= .600001
+
+
+def test_collision_samples_include_quintic_excursion_between_equal_positions():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import trajectory_samples
+
+    def point(velocity, seconds):
+        return SimpleNamespace(positions=[0.], velocities=[velocity], accelerations=[0.],
+                               time_from_start=SimpleNamespace(sec=seconds, nanosec=0))
+    trajectory = SimpleNamespace(joint_names=['joint'], points=[point(1., 0), point(-1., 2)])
+    samples = list(trajectory_samples(trajectory, maximum_joint_step=.02))
+    assert samples[0] == pytest.approx([0.]) and samples[-1] == pytest.approx([0.])
+    assert max(row[0] for row in samples) > .6
+    assert max(abs(b[0] - a[0]) for a, b in zip(samples, samples[1:])) <= .020001
+
+
+def test_waypoint_cancellation_never_dispatches_or_calls_a_planner(cartesian_motion_controller):
+    controller, target, _ = cartesian_motion_controller
+    controller._shutdown_requested = True
+    assert not GazeboPickPlaceController._cartesian_move(controller, target)
+    controller._cart_client.call_async.assert_not_called()
+    controller._send_simulation_joint_trajectory.assert_not_called()
+    controller._resolve_cartesian_waypoints.assert_not_called()
+    assert controller._last_command_evidence['command_sent'] is False
+
+
+@pytest.fixture
+def saved_waypoints_recording(tmp_path, monkeypatch):
+    import json
+    from cais_spade_llm.resources.robot import saved_waypoints
+
+    names = ['joint']
+    limits = {'joint': dict(lower=-2., upper=2., velocity=1., acceleration=2.)}
+    start, target = [0., 0., 1., 0., 1., 0., 0.], [.1, 0., 1., 0., 1., 0., 0.]
+    points = [dict(positions=[q], velocities=[0.], accelerations=[0.], time_from_start=t)
+              for q, t in ((0., 0.), (.2, 1.))]
+    resource = dict(joint_names=names, limits=limits, frame_id='world', routes=[
+        dict(id='pick_approach', start_pose=start, target_pose=target, points=points)])
+    payload = dict(version=1, execution_mode='simulation', source_fingerprints={},
+                   resources={name: resource for name in ('KMR','ur5e-1','ur5e-2','ur5e-3','ur5e-4')})
+    path = tmp_path/'waypoints.json'
+    path.write_text(json.dumps(payload))
+    saved_waypoints._read_saved.cache_clear()
+    monkeypatch.setattr(saved_waypoints, 'source_fingerprints', lambda: {})
+    command = Mock(side_effect=lambda names, points: (names, points))
+    monkeypatch.setattr(saved_waypoints, 'robot_trajectory', command)
+    return dict(settings={'saved_waypoints_file': str(path)}, resource_id='ur5e-4',
+                names=names, limits=limits, start_pose=start, start_joints=[0.],
+                target_pose=target), payload, path, command
+
+
+@pytest.mark.parametrize('resource_id', ['KMR','ur5e-1','ur5e-2','ur5e-3','ur5e-4'])
+def test_all_robots_replay_saved_joint_positions_and_timing(saved_waypoints_recording, resource_id, monkeypatch):
+    from cais_spade_llm.resources.robot import saved_waypoints, cartesian_waypoints
+
+    args, payload, _, command = saved_waypoints_recording
+    calculate = Mock(side_effect=AssertionError('Runtime IK/timing is forbidden'))
+    monkeypatch.setattr(cartesian_waypoints, 'resolve_waypoints', calculate)
+    monkeypatch.setattr(cartesian_waypoints, '_segment_timing', calculate)
+    args['resource_id'] = resource_id
+    motion, evidence = saved_waypoints.saved_motion(**args)
+    assert motion[1] == payload['resources'][resource_id]['routes'][0]['points']
+    assert evidence['runtime_ik'] is False
+    assert evidence['runtime_time_parameterization'] is False
+    assert evidence['saved_waypoints_id'] == 'pick_approach'
+    calculate.assert_not_called()
+    command.assert_called_once()
+
+
+@pytest.mark.parametrize('change', ['hardware','start','target','joints','limits','frame','missing','stale','timing','incomplete'])
+def test_saved_waypoints_reject_incompatible_execution(saved_waypoints_recording, change):
+    import json
+    from cais_spade_llm.resources.robot.saved_waypoints import saved_motion
+
+    args, payload, path, command = saved_waypoints_recording
+    if change == 'hardware':
+        args['execution_mode'] = 'physical'
+    elif change == 'start':
+        args['start_joints'] = [.1]
+    elif change == 'target':
+        args['target_pose'] = [.2, 0., 1., 0., 1., 0., 0.]
+    elif change == 'joints':
+        args['names'] = ['another_robot_joint']
+    elif change == 'limits':
+        args['limits'] = {'joint': dict(lower=-2., upper=2., velocity=.5, acceleration=2.)}
+    elif change == 'frame':
+        args['frame_id'] = 'another_frame'
+    elif change == 'missing':
+        path.unlink()
+    elif change == 'stale':
+        payload['source_fingerprints'] = {'changed': 'source'}
+        path.write_text(json.dumps(payload))
+    elif change == 'timing':
+        payload['resources']['ur5e-4']['routes'][0]['points'][-1]['time_from_start'] = .01
+        path.write_text(json.dumps(payload))
+    elif change == 'incomplete':
+        payload['failures'] = [{'resource_id': 'KMR', 'reason': 'unreachable'}]
+        path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        saved_motion(**args)
+    command.assert_not_called()
+
+
+def test_saved_waypoints_for_every_configured_robot_and_home_policy():
+    import json
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+
+    scene = json.loads(SCENE_PATH.read_text())
+    for robot in scene['robots']:
+        assert robot['cartesian_motion']['only'] is True
+        assert robot['cartesian_motion']['resource_id'] == robot['resource_id']
+        assert 'saved_waypoints_file' not in robot['cartesian_motion']
+        assert robot['cartesian_motion']['avoid_collisions'] is False
+        assert len(robot['initial_joint_positions']) == 6
+    assert scene['KMR']['task_execution']['cartesian_motion_only'] is True
+    assert 'saved_waypoints_file' not in scene['KMR']['task_execution']['cartesian_waypoints']
+    assert scene['KMR']['task_execution']['avoid_collisions'] is False
+
+
+def test_prepared_recording_covers_configured_parts_and_observed_home_joints():
+    import hashlib
+    import json
+    from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
+    from cais_spade_llm.recovery_framework.kmr_gazebo import storage_home
+    from cais_spade_llm.recovery_framework.workflow_execution import _robot_configuration
+    from cais_spade_llm.resources.robot.saved_waypoints import SAVED_WAYPOINTS_FILE, source_fingerprints
+
+    scene = json.loads(SCENE_PATH.read_text())
+    recording = json.loads((ROOT / SAVED_WAYPOINTS_FILE).read_text())
+    assert recording['failures'] == []
+    # This superseded recording remains offline evidence, not a production dependency.
+    archived_scene = ROOT / 'cais_spade_llm/monitor/recovery_gazebo_runs/recorded_two_part_validation/saved_waypoints_scene.json'
+    assert recording['source_fingerprints'][str(SCENE_PATH.relative_to(ROOT))] == hashlib.sha256(archived_scene.read_bytes()).hexdigest()
+    assert set(recording['resources']) == {'KMR', 'ur5e-1', 'ur5e-2', 'ur5e-3', 'ur5e-4'}
+    for robot in scene['robots']:
+        rid = robot['resource_id']
+        _, named, _ = _robot_configuration(scene, robot)
+        routes = recording['resources'][rid]['routes']
+        returns = [row for row in routes if row['id'].endswith('/move_home')]
+        assert returns
+        assert all(row['points'][-1]['positions'] == named['home'] for row in returns)
+        parts = ({'ur5e-3': list(scene['Storage']['slots']),
+                  'ur5e-4': scene['3D Printing Station']['initial_products']}.get(rid)
+                 or next(row['nominal_parts'] for row in scene['machines'] if row['handling_robot'] == rid))
+        assert set(parts) <= {row['id'].split('/')[0] for row in returns}
+    assert any(row['id'] == 'RGOCG4-50_Round_4mm/move_home'
+               for row in recording['resources']['ur5e-1']['routes'])
+    kmr = recording['resources']['KMR']['routes']
+    for part in scene['Storage']['slots']:
+        home = storage_home(scene, {'parts': [part]})
+        assert any('/move_home' in row['id'] and row['points'][-1]['positions'] == home['joints']
+                   for row in kmr)
+
+
+def test_prepared_KMR_placement_preserves_configured_part_orientation():
+    import json
+    from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
+    from cais_spade_llm.recovery_framework.geometry import compose, quaternion
+    from cais_spade_llm.recovery_framework.kmr_gazebo import inverse
+    from cais_spade_llm.resources.robot.saved_waypoints import SAVED_WAYPOINTS_FILE, poses_match
+
+    scene = json.loads(SCENE_PATH.read_text())
+    recording = json.loads((ROOT / SAVED_WAYPOINTS_FILE).read_text())
+    config = scene['KMR']['task_execution']
+    for part, slot in scene['Storage']['slots'].items():
+        grasp = [*slot[:2], slot[2] + config['grasp_height_m'], *config['pick_orientation_xyzw']]
+        held = compose(inverse(grasp), [*slot[:3], *quaternion(slot[3:])])
+        for machine in scene['machines']:
+            dock = machine['KMR_docking_pose']
+            fixture = machine['workholding_pose']
+            target = compose([*fixture[:3], *quaternion(fixture[3:])], inverse(held))
+            target[2] += .003
+            target = compose(inverse([*dock[:3], *quaternion(dock[3:])]), target)
+            matches = [row for row in recording['resources']['KMR']['routes']
+                       if row['id'].startswith(f'{part}/{machine["resource_id"]}/place_descend/')]
+            assert matches
+            assert all(poses_match(row['target_pose'], target) for row in matches)
+
+
+@pytest.mark.parametrize('outcome', ['success', 'collision', 'moved', 'stop'])
+def test_saved_waypoint_dispatch_preserves_validation_and_stop(outcome, cartesian_motion_controller):
+    controller, target, response = cartesian_motion_controller
+    solution = response.solution
+    controller._fresh_stable_joint_target.return_value = outcome != 'moved'
+    def validate(trajectory):
+        assert trajectory is solution.joint_trajectory
+        controller._shutdown_requested = outcome == 'stop'
+        return outcome != 'collision'
+    controller._simulation_trajectory_is_collision_free = Mock(side_effect=validate)
+    assert GazeboPickPlaceController._cartesian_move(controller, target) is (outcome == 'success')
+    controller._resolve_cartesian_waypoints.assert_not_called()
+    controller._cart_client.call_async.assert_called_once()
+    controller._scale_trajectory_timing.assert_called_once_with(solution, 1.)
+    if outcome == 'success':
+        controller._send_simulation_joint_trajectory.assert_called_once()
+        assert controller._last_command_evidence['dynamic_target'] is True
+    else:
+        controller._send_simulation_joint_trajectory.assert_not_called()
+        assert controller._last_command_evidence['command_sent'] is False
+
+
+@pytest.fixture
+def cartesian_motion_controller():
+    pytest.importorskip('moveit_msgs.msg')
+    from builtin_interfaces.msg import Time
+    from geometry_msgs.msg import Pose
+    from moveit_msgs.srv import GetCartesianPath
+    from cais_spade_llm.resources.robot.cartesian_waypoints import robot_trajectory
+
+    rows = [dict(positions=[q], velocities=[0.], accelerations=[0.], time_from_start=t)
+            for q, t in ((0., 0.), (.2, 1.))]
+    solution = robot_trajectory(['joint'], rows)
+    response = SimpleNamespace(solution=solution, fraction=1., error_code=SimpleNamespace(val=1))
+    target = Pose()
+    target.position.x, target.position.z, target.orientation.w = .2, 1., 1.
+    controller = SimpleNamespace(
+        execution_mode='simulation', controller_config={'cartesian_motion': {
+            'only': True, 'max_joint_step_rad': .35, 'linear_step_m': .01}},
+        _shutdown_requested=False, _planning_wall_time_sec=0., _trajectory_duration_sec=0.,
+        _resolve_cartesian_waypoints=Mock(), _load_saved_cartesian_waypoints=Mock(),
+        _cart_client=Mock(), _ExecuteTrajectory=SimpleNamespace(Goal=SimpleNamespace),
+        trajectory_time_scale=1., _scale_trajectory_timing=Mock(), arm_trajectory_topic='/arm/joint_trajectory',
+        _fresh_stable_joint_target=Mock(return_value=True),
+        _send_simulation_joint_trajectory=Mock(return_value=True),
+        _wait_for_simulation_cartesian_endpoint=Mock(return_value={'within_tolerance': True}),
+        _get_arm_joint_positions=Mock(return_value=([0.], [])), arm_joint_names=['joint'],
+        frame_id='world', group_name='arm', ee_link='tool0', _GetCartesianPath=GetCartesianPath,
+        _node=SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=Time))),
+        _wait_future=lambda future, **kwargs: future, _log=lambda: Mock(),
+        _simulation_trajectory_is_collision_free=Mock(return_value=True),
+        _execute_simulation_motion_plan=Mock(),
+    )
+    controller._cart_client.call_async.return_value = response
+    return controller, target, response
+
+
+@pytest.mark.parametrize('resource_id', ['ur5e-1', 'ur5e-2', 'ur5e-3', 'ur5e-4'])
+def test_each_UR_uses_changed_target_without_recording_or_per_sample_ik(resource_id, cartesian_motion_controller):
+    from copy import deepcopy
+    from cais_spade_llm.recovery_framework import SCENE_PATH, read_json
+
+    controller, target, _ = cartesian_motion_controller
+    settings = next(robot['cartesian_motion'] for robot in read_json(SCENE_PATH)['robots']
+                    if robot['resource_id'] == resource_id)
+    controller.controller_config['cartesian_motion'] = settings
+    controller._state_validity_client = Mock(side_effect=AssertionError('Collision checks disabled'))
+    controller._simulation_trajectory_is_collision_free = lambda trajectory: GazeboPickPlaceController._simulation_trajectory_is_collision_free(controller, trajectory)
+    original = deepcopy(target)
+    assert GazeboPickPlaceController._cartesian_move(controller, original)
+    target.position.x += .04
+    assert GazeboPickPlaceController._cartesian_move(controller, target)
+    queries = [call.args[0] for call in controller._cart_client.call_async.call_args_list]
+    assert [query.waypoints[-1].position.x for query in queries] == pytest.approx([.2, .24])
+    assert all(list(query.start_state.joint_state.position) == [0.] for query in queries)
+    assert all(query.avoid_collisions is False for query in queries)
+    controller._resolve_cartesian_waypoints.assert_not_called()
+    controller._load_saved_cartesian_waypoints.assert_not_called()
+    controller._execute_simulation_motion_plan.assert_not_called()
+    assert controller._last_command_evidence['motion_path_validation'] == {
+        'checked_states': 0, 'collision_checks_bypassed': True}
+
+
+@pytest.mark.parametrize('failure', ['partial', 'nan_fraction', 'nan_target', 'wrong_joints', 'jump', 'limits', 'no_start'])
+def test_dynamic_waypoint_failure_has_no_partial_dispatch(failure, cartesian_motion_controller):
+    controller, target, response = cartesian_motion_controller
+    if failure == 'partial':
+        response.fraction = .5
+    elif failure == 'nan_fraction':
+        response.fraction = math.nan
+    elif failure == 'nan_target':
+        target.position.x = math.nan
+    elif failure == 'wrong_joints':
+        response.solution.joint_trajectory.joint_names = ['another_robot_joint']
+    elif failure == 'jump':
+        response.solution.joint_trajectory.points[-1].positions = [1.]
+    elif failure == 'limits':
+        controller._scale_trajectory_timing.side_effect = ValueError('joint limit')
+    elif failure == 'no_start':
+        controller._get_arm_joint_positions.return_value = None, ['joint']
+    assert not GazeboPickPlaceController._cartesian_move(controller, target, allow_partial=True)
+    controller._send_simulation_joint_trajectory.assert_not_called()
+    controller._execute_simulation_motion_plan.assert_not_called()
+
+
+@pytest.mark.parametrize('feedback', ['fresh', 'missing', 'moved', 'stop'])
+def test_cartesian_dispatch_refreshes_feedback_after_preparation(feedback, cartesian_motion_controller):
+    controller, target, _ = cartesian_motion_controller
+    controller._fresh_stable_joint_target.return_value = False
+    reads = 0
+
+    def observe(**_kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            controller._fresh_stable_joint_target.return_value = feedback == 'fresh'
+            controller._shutdown_requested = feedback == 'stop'
+            if feedback == 'missing':
+                return None, ['joint']
+        return [1. if reads == 2 and feedback == 'moved' else 0.], []
+
+    controller._get_arm_joint_positions.side_effect = observe
+    assert GazeboPickPlaceController._cartesian_move(controller, target) is (feedback == 'fresh')
+    assert reads == 2
+    assert controller._send_simulation_joint_trajectory.called is (feedback == 'fresh')
+    controller._execute_simulation_motion_plan.assert_not_called()
+
+
+@pytest.mark.parametrize('mode', ['simulation', 'physical'])
+def test_service_wait_stop_cancels_simulation_without_changing_physical_wait(mode, monkeypatch):
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller as controller_module
+
+    future = Mock()
+    future.done.return_value = False
+    future.result.return_value = 'observed'
+    controller = SimpleNamespace(
+        execution_mode=mode, _shutdown_requested=False,
+        _rclpy=SimpleNamespace(ok=lambda: True), _log=lambda: Mock(),
+    )
+    waits = []
+
+    def poll(_seconds):
+        waits.append(_seconds)
+        controller._shutdown_requested = True
+        if len(waits) == 2:
+            future.done.return_value = True
+
+    event = Mock(wait=poll)
+    monkeypatch.setattr(controller_module.threading, 'Event', lambda: event)
+    result = GazeboPickPlaceController._wait_future(controller, future, 5., 'observe Gazebo wrist pose')
+    assert result == ('observed' if mode == 'physical' else None)
+    assert len(waits) == (2 if mode == 'physical' else 1)
+    assert future.cancel.called is (mode == 'simulation')
+
+
+def test_cartesian_route_preserves_missing_observation_reason():
+    controller = SimpleNamespace(
+        execution_mode='simulation', controller_config={'cartesian_motion': {'only': True}},
+        _get_ee_pose=lambda: None, _cartesian_move=Mock(),
+        _get_arm_joint_positions=lambda **kwargs: (None, ['joint']),
+        _last_failure_message='Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link',
+    )
+    assert not GazeboPickPlaceController._move_xy_direct(controller, 0., 0., 1., object(), 'home')
+    assert 'dual_robot::ur5e_2_wrist_3_link' in controller._last_failure_message
+    controller._cartesian_move.assert_not_called()
+
+
+@pytest.mark.parametrize('stable_joints,fresh_tf,accepted', [
+    (True, True, True), (False, True, False), (True, False, False),
+])
+def test_cartesian_route_start_uses_fresh_joints_and_tf_after_gazebo_timeout(
+    stable_joints, fresh_tf, accepted,
+):
+    orientation = SimpleNamespace(x=0., y=1., z=0., w=0.)
+    observed = SimpleNamespace(
+        position=SimpleNamespace(x=0., y=0., z=1.), orientation=orientation)
+    controller = SimpleNamespace(
+        execution_mode='simulation', robot_name='ur5e-1', ee_link='ur5e_1_tool0',
+        controller_config={'cartesian_motion': {'only': True}},
+        _get_ee_pose=lambda: None,
+        _get_arm_joint_positions=lambda **kwargs: ([0.] * 6, []),
+        arm_joint_names=[f'joint_{i}' for i in range(6)],
+        _fresh_stable_joint_target=Mock(return_value=stable_joints),
+        _fresh_simulation_tf_tool_pose=Mock(return_value=observed if fresh_tf else None),
+        _cartesian_move=Mock(return_value=True),
+        _make_pose=lambda x, y, z, q: (x, y, z, q),
+        _last_failure_message='Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link',
+        _last_command_evidence={},
+    )
+    result = GazeboPickPlaceController._move_xy_direct(
+        controller, .1, 0., 1., orientation, 'Cartesian home')
+    assert result is accepted
+    if accepted:
+        assert controller._last_pose_observation['source'] == 'fresh_joint_tf'
+        assert controller._last_command_evidence['observed_start_pose'] == [0., 0., 1., 0., 1., 0., 0.]
+    else:
+        controller._cartesian_move.assert_not_called()
+    assert controller._fresh_simulation_tf_tool_pose.called is stable_joints
+
+
+def test_direct_motion_failure_preserves_controller_rejection():
+    controller = SimpleNamespace(
+        wait_for_services=lambda: True, _make_pose=lambda *args: object(),
+        _cartesian_move=Mock(return_value=False), trajectory_time_scale=1.,
+        _last_failure_message='Invalid Cartesian trajectory: joint limit',
+    )
+    controller._unavailable_message = lambda default: GazeboPickPlaceController._unavailable_message(controller, default)
+    result = GazeboPickPlaceController._move_pose_direct(controller, 0., 0., 1., orientation=object())
+    assert result['success'] is False
+    assert 'Invalid Cartesian trajectory: joint limit' in result['message']
+
+
+@pytest.mark.parametrize('task,step,key', [
+    ('pick_approach', 'move_above_part', 'pick_transit_waypoints'),
+    ('place_approach', 'move_above_destination', 'transit_waypoints'),
+])
+def test_configured_transit_waypoints_keep_the_final_computed_target(task, step, key):
+    points = [[.1, .4, 1.5], [.2, .4, 1.5]]
+    orientation = SimpleNamespace(x=1., y=0., z=0., w=0.)
+    controller = SimpleNamespace(
+        execution_mode='simulation', controller_config={'cartesian_motion': {
+            'only': True, key: [points] if key == 'transit_waypoints' else points}},
+        _robot_task_step=(task, step), _cartesian_move=Mock(return_value=True),
+        _make_pose=lambda x, y, z, q: (x, y, z, q),
+        _get_ee_pose=lambda: SimpleNamespace(
+            position=SimpleNamespace(x=0., y=.4, z=1.5), orientation=orientation),
+    )
+    assert GazeboPickPlaceController._move_xy_direct(controller, .3, .45, 1.48, orientation, 'move_cartesian')
+    call = controller._cartesian_move.call_args
+    assert call.args[0] == (.3, .45, 1.48, orientation)
+    assert call.kwargs['waypoints'] == [(*point, orientation) for point in points]
+
+
+@pytest.mark.parametrize('yaw', [.4, -1.7, math.pi])
+def test_cartesian_translation_holds_orientation_and_turns_at_saved_clearance(yaw):
+    from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
+
+    start = [0., 0., 1., 1., 0., 0., 0.]
+    target = [.4, .2, 1.1, math.cos(yaw / 2), math.sin(yaw / 2), 0., 0.]
+    rotation = [.2, 0., 1.3]
+    poses = fixed_orientation_waypoints(
+        start, target, [[0., 0., 1.3], rotation, rotation, [.4, .2, 1.3]],
+        rotation_point=rotation, angular_step=.05,
+    )
+    assert poses[-1] == target
+    for a, b in zip([start, *poses], poses):
+        distance = math.dist(a[:3], b[:3])
+        dot = abs(sum(x * y for x, y in zip(a[3:], b[3:])))
+        angle = 2 * math.acos(min(1., dot))
+        assert distance > 1e-9 or angle > 1e-9
+        if distance > 1e-9:
+            assert angle < 1e-7
+        else:
+            assert a[:3] == b[:3] == rotation
+            assert angle <= .05 + 1e-7
+
+
+
+@pytest.mark.parametrize('feedback', ['settles', 'stale', 'stopped'])
+def test_cartesian_home_waits_for_observed_stability_without_repeating_motion(feedback, monkeypatch):
+    pytest.importorskip('moveit_msgs.srv')
+    pose = SimpleNamespace(position=SimpleNamespace(x=.2, y=.1, z=1.5), orientation=object())
+    controller = SimpleNamespace(
+        _home_fk_client=Mock(), arm_joint_names=['joint'], ee_link='tool0', frame_id='world',
+        _wait_future=lambda *args, **kwargs: SimpleNamespace(
+            error_code=SimpleNamespace(val=1), pose_stamped=[SimpleNamespace(pose=pose)]),
+        _move_xy_direct=Mock(return_value=True),
+        _get_arm_joint_positions=Mock(return_value=([.5], [])),
+        _fresh_stable_joint_target=Mock(side_effect=[False, feedback == 'settles']),
+    )
+    polls = iter([True, True, False] if feedback != 'stopped' else [False])
+    controller._motion_pending=lambda duration: lambda: next(polls)
+    monkeypatch.setattr('cais_spade_llm.resources.robot.gazebo_pick_place_controller.time.sleep', lambda _: None)
+    assert GazeboPickPlaceController._move_configuration_cartesian(controller, [.5]) is (feedback == 'settles')
+    controller._move_xy_direct.assert_called_once()
+    assert controller._get_arm_joint_positions.call_count == (0 if feedback == 'stopped' else 2)
+
+
+def test_return_rotates_at_saved_endpoint_without_repeating_the_clearance_route():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
+
+    start = [1., 0., 1.2, 0., 1., 0., 0.]
+    target = [0., 0., 1.1, 1., 0., 0., 0.]
+    clearance = [[1., 1., 1.2], [0., 1., 1.2]]
+    poses = fixed_orientation_waypoints(
+        start, target, clearance, rotation_point=target[:3], angular_step=.05,
+    )
+    translations = [b[:3] for a, b in zip([start, *poses], poses)
+                    if math.dist(a[:3], b[:3]) > 1e-9]
+    assert translations == [*clearance, target[:3]]
+    assert poses[0][3:] == start[3:]
+    assert poses[-1] == target
+
+def test_cartesian_unchanged_endpoint_has_no_duplicate_motion():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
+
+    pose = [0., 0., 1., 1., 0., 0., 0.]
+    assert fixed_orientation_waypoints(
+        pose, pose, [pose[:3], pose[:3]], rotation_point=pose[:3], angular_step=.05,
+    ) == []
+
+
+
+def test_simulation_collision_bypass_does_not_disable_hardware_request_checks(cartesian_motion_controller):
+    controller, target, response = cartesian_motion_controller
+    controller.execution_mode = 'physical'
+    controller.controller_config['cartesian_motion']['avoid_collisions'] = False
+    controller._consume_prepared_cartesian = Mock(return_value=(None, 'not eligible'))
+    response.fraction = .5
+    assert not GazeboPickPlaceController._cartesian_move(controller, target)
+    assert controller._cart_client.call_async.call_args.args[0].avoid_collisions is True
+    controller._send_simulation_joint_trajectory.assert_not_called()
+
+
+def test_equivalent_KMR_grasps_keep_the_observed_downward_orientation():
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _nearest_pick_orientation
+
+    choices = [[1., 0., 0., 0.], [0., 1., 0., 0.]]
+    retained = [0., 1., 0., 0.]
+    assert _nearest_pick_orientation(retained, choices, .02) == retained
+    assert _nearest_pick_orientation([1., 0., 0., 0.], choices, .02) == choices[0]
+    with pytest.raises(ValueError, match='unit grasp orientations'):
+        _nearest_pick_orientation(retained, [[0., 0., 0., 0.]], .02)
+
+
+def test_ur1_ur2_direct_home_and_next_pick_skip_subtolerance_turn():
+    observed = SimpleNamespace(x=math.cos(.0012), y=math.sin(.0012), z=0., w=0.)
+    nominal = SimpleNamespace(x=1., y=0., z=0., w=0.)
+    for step, label in ((None, 'Cartesian home'), (('pick_approach', 'move_above_part'), 'pick'),
+                        (('pick_approach', 'descend'), 'pick')):
+        controller = SimpleNamespace(
+            execution_mode='simulation', robot_name='ur5e-1',
+            controller_config={'cartesian_motion': {'only': True,
+                'transit_waypoints': [[[2., 0., 1.], [2., 1., 1.]]]}},
+            _robot_task_step=step, _cartesian_move=Mock(return_value=True),
+            _make_pose=lambda x, y, z, q: (x, y, z, q),
+            _get_ee_pose=lambda: SimpleNamespace(
+                position=SimpleNamespace(x=0., y=0., z=1.), orientation=observed),
+        )
+        assert GazeboPickPlaceController._move_xy_direct(
+            controller, 1., 0., 1., nominal, label)
+        target = controller._cartesian_move.call_args.args[0]
+        assert target == (1., 0., 1., observed)
+        assert controller._cartesian_move.call_args.kwargs['waypoints'] == []
+
+
+@pytest.mark.parametrize('robot,x', [('ur5e-1', -6.08), ('ur5e-2', -2.68)])
+def test_machine_pick_retreat_lifts_before_withdrawing_to_saved_clearance(robot, x):
+    from cais_spade_llm.recovery_framework import SCENE_PATH, read_json
+
+    scene = read_json(SCENE_PATH)
+    machine = next(item for item in scene['machines'] if item['handling_robot'] == robot)
+    settings = next(item['cartesian_motion'] for item in scene['robots']
+                    if item['resource_id'] == robot)
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller.execution_mode = 'simulation'
+    controller.robot_name = robot
+    controller.controller_config = {'cartesian_motion': settings}
+    controller.pick_tcp_z_bias_min_m = .003
+    controller.pick_tcp_z_bias_max_m = .02
+    controller.min_pick_tcp_z_m = 0.
+    controller.pick_z_adjustments_m = {}
+    controller.pick_tool0_z_adjustment_m = 0.
+    controller.approach_height_m = .2
+    controller.gripper_open = .11
+    controller.gripper_close = .02
+    controller.init = lambda: True
+    controller._get_ee_pose = lambda: SimpleNamespace(
+        position=SimpleNamespace(x=x-.218, y=.699, z=1.278),
+        orientation=SimpleNamespace(x=0., y=1., z=0., w=0.))
+    controller._make_pose = lambda xx, yy, zz, q: (xx, yy, zz, q)
+    controller._log = lambda: Mock()
+    result = controller.compute_pick_targets(
+        part_name='KET4_Square_4mm',
+        product_geometry={'model_name': 'KET4_Square_4mm', 'part_height_m': .05,
+                          'handling_robot_access': machine['handling_robot_access']},
+        detected_parts=[{'part_name': 'KET4_Square_4mm', 'model_name': 'KET4_Square_4mm',
+                         'x': x, 'y': 1.82, 'z': 1.06}],
+    )
+    assert result['success'] is True
+    assert result['approach_pose']['z'] == pytest.approx(1.303)
+    assert result['target_pose']['z'] == pytest.approx(1.303)
+    assert result['access_retreat_pose']['z'] == pytest.approx(1.35)
+    assert result['access_retreat_pose']['y'] == pytest.approx(1.64)
+
+    observed = SimpleNamespace(x=0., y=-1., z=.0011, w=0.)
+    nominal = SimpleNamespace(x=0., y=1., z=0., w=0.)
+    controller._robot_task_step = ('pick_grasp', 'retreat_from_source')
+    controller._get_ee_pose = lambda: SimpleNamespace(
+        position=SimpleNamespace(x=x, y=1.82, z=1.303), orientation=observed)
+    controller._cartesian_move = Mock(return_value=True)
+    assert GazeboPickPlaceController._move_xy_direct(
+        controller, x, 1.64, 1.35, nominal, 'retreat')
+    call = controller._cartesian_move.call_args
+    assert call.kwargs['waypoints'] == [(x, 1.82, 1.35, observed)]
+    assert call.args[0] == (x, 1.64, 1.35, observed)
+
+
+def test_machine_pick_retreat_keeps_required_large_turn_at_saved_clearance():
+    observed = SimpleNamespace(x=0., y=1., z=0., w=0.)
+    target = SimpleNamespace(x=-math.sin(.05), y=math.cos(.05), z=0., w=0.)
+    controller = SimpleNamespace(
+        execution_mode='simulation', robot_name='ur5e-2',
+        controller_config={'cartesian_motion': {'only': True,
+            'rotation_waypoint': [-3.15, .7, 1.35], 'angular_step_rad': .05}},
+        _robot_task_step=('pick_grasp', 'retreat_from_source'),
+        _cartesian_move=Mock(return_value=True),
+        _make_pose=lambda x, y, z, q: (x, y, z, q),
+        _get_ee_pose=lambda: SimpleNamespace(
+            position=SimpleNamespace(x=-2.68, y=1.82, z=1.303), orientation=observed),
+    )
+    assert GazeboPickPlaceController._move_xy_direct(
+        controller, -2.68, 1.64, 1.35, target, 'retreat')
+    waypoints = controller._cartesian_move.call_args.kwargs['waypoints']
+    assert waypoints[0][:3] == (-2.68, 1.82, 1.35)
+    assert any(point[:3] == (-3.15, .7, 1.35) for point in waypoints)
+
+
+def test_simulation_endpoint_uses_fresh_joint_tf_only_after_gazebo_observation_fails(
+    cartesian_motion_controller,
+):
+    controller, target, _ = cartesian_motion_controller
+    controller._last_simulation_controller_succeeded = True
+    controller.cartesian_position_tolerance_m = .005
+    controller.cartesian_orientation_tolerance_rad = .02
+    controller._wait_for_simulation_cartesian_endpoint = Mock(return_value=None)
+    controller._fresh_simulation_tf_tool_pose = Mock(return_value=target)
+    controller._observed_cartesian_endpoint_evidence = lambda pose, observed=None: (
+        GazeboPickPlaceController._observed_cartesian_endpoint_evidence(
+            controller, pose, observed=observed))
+    assert GazeboPickPlaceController._cartesian_move(controller, target)
+    assert controller._last_command_evidence['controller_endpoint_observed'][
+        'observation_source'] == 'fresh_joint_tf'
+    controller._fresh_simulation_tf_tool_pose.return_value = None
+    assert not GazeboPickPlaceController._cartesian_move(controller, target)
+
+
+@pytest.mark.parametrize('mode,age,accepted', [
+    ('simulation', .1, True), ('simulation', .5, False), ('physical', .1, False),
+])
+def test_fresh_tool_tf_endpoint_rejects_stale_feedback_and_hardware(mode, age, accepted):
+    transform = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=100, nanosec=0)),
+        transform=SimpleNamespace(
+            translation=SimpleNamespace(x=.2, y=.3, z=1.4),
+            rotation=SimpleNamespace(x=0., y=1., z=0., w=0.)),
+    )
+    controller = SimpleNamespace(
+        execution_mode=mode, _shutdown_requested=False,
+        _tf_buffer=SimpleNamespace(lookup_transform=Mock(return_value=transform)),
+        _rclpy=SimpleNamespace(time=SimpleNamespace(Time=lambda: None)),
+        _tf2_ros=SimpleNamespace(LookupException=RuntimeError,
+                                 ConnectivityException=ValueError,
+                                 ExtrapolationException=KeyError),
+        frame_id='world', ee_link='tool0',
+        _node=SimpleNamespace(get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=round((100+age)*1e9)))),
+        _Pose=lambda: SimpleNamespace(position=SimpleNamespace(),orientation=None),
+    )
+    pose = GazeboPickPlaceController._fresh_simulation_tf_tool_pose(controller)
+    assert (pose is not None) is accepted
+    if pose is not None:
+        assert pose.position.z == 1.4 and pose.orientation.y == 1.

@@ -1,8 +1,0 @@
-{
-  "status": "completed",
-  "checked_combined_states": 2415,
-  "KMR_base_sample_step_m": 0.05,
-  "UR_segments": "complete collision-checked Cartesian or free-space plans",
-  "wall_time_sec": 13.517103382007917,
-  "scope": "UR approach, pickup entry and withdrawal against empty parked KMR at M1 and along return route; planning only, no robot commands"
-}

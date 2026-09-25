@@ -1,0 +1,23 @@
+{
+  "run_id": "185d59e911854ed28e725a2f7d802b2d",
+  "parts": [
+    "gear_small",
+    "gear_medium",
+    "gear_large",
+    "KET4_Square_4mm",
+    "KET8_Square_8mm",
+    "KET12_Square_12mm",
+    "KET16_Square_16mm",
+    "RGOCG4-50_Round_4mm",
+    "RGOCG8-50_8mm",
+    "RGOCG12-50_12mm",
+    "RGOCG16-50_16mm"
+  ],
+  "launch": [
+    [
+      "gazebo_dual",
+      116868,
+      136611266163040
+    ]
+  ]
+}

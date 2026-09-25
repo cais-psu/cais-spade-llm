@@ -4,6 +4,10 @@ The existing task builders supply the configured topology and task programs.
 Catalogue-dependent DES expansions are replaced by parameterized declarations;
 only a runtime valuation contains the registered workpiece identities. The v1
 projector remains available for delivery and its tests.
+
+Within one configured model, a concrete composition event is identified by its
+event_id and complete parameter binding. event_name is the task-function name;
+it is not a synchronization symbol by itself.
 """
 
 from __future__ import annotations
@@ -132,6 +136,8 @@ def build_environment_models(
             for event in model["events"]
         ]
         model["events"] = [event for event in model["events"] if event is not None]
+        # These names bind executors. Shared DES events use event_id and the
+        # complete parameter binding, since names repeat across unrelated tasks.
         model["local_event_alphabet"] = list(
             dict.fromkeys(e["event_name"] for e in model["events"])
         )
@@ -154,7 +160,65 @@ def build_environment_models(
                 if rid != model["resource_id"]
             }
         )
+    validate_environment_composition(models)
     return models
+
+
+def validate_environment_composition(models: dict[str, dict]) -> None:
+    """Check that each shared event has one local definition per participant.
+
+    Args:
+        models: Resource descriptors in one configured model snapshot.
+
+    Raises:
+        ValueError: An event identity, participant, binding, or local field is invalid.
+    """
+    variants: dict[int, list[tuple[str, dict]]] = {}
+    for resource_id, model in models.items():
+        for event in model["events"]:
+            event_id = event["event_id"]
+            if type(event_id) is not int:
+                raise ValueError("Composition event_id must be an integer")
+            variants.setdefault(event_id, []).append((resource_id, event))
+            _validate_composition_fields(model, event, resource_id)
+
+    shared_fields = (
+        "event_name", "parameter_bindings", "participants", "product_effects",
+        "product_guards", "capability_transition", "controllable", "observable",
+    )
+    for event_id, entries in variants.items():
+        event = entries[0][1]
+        actual = [resource_id for resource_id, _ in entries]
+        declared = event["participants"]
+        actor_binding = event["parameter_bindings"].get("resource_id", {})
+        actor = actor_binding.get("equals")
+        if (
+            len(actual) != len(set(actual))
+            or len(declared) != len(set(declared))
+            or set(actual) != set(declared)
+            or set(actor_binding) != {"equals"}
+            or actor not in declared
+        ):
+            raise ValueError(f"Composition participants disagree for event_id {event_id}")
+        for _, peer in entries[1:]:
+            if any(peer.get(field) != event.get(field) for field in shared_fields):
+                raise ValueError(f"Composition variants disagree for event_id {event_id}")
+
+
+def _validate_composition_fields(model: dict, event: dict, resource_id: str) -> None:
+    for section in ("guards", "updates"):
+        for field, rule in event[section].items():
+            declaration = field
+            if field.endswith(".{delivered_part}"):
+                declaration = field.removesuffix(".{delivered_part}") + ".{part_name}"
+            if declaration not in model["state_variables"]:
+                raise ValueError(f"Undeclared composition field: {resource_id}.{field}")
+            for parameter in ("part_name", "delivered_part"):
+                if field.endswith(".{" + parameter + "}") and parameter not in event["parameter_bindings"]:
+                    raise ValueError(f"Unbound composition field: {resource_id}.{field}")
+            for operator, parameter in rule.items():
+                if operator.endswith("_from_param") and parameter not in event["parameter_bindings"]:
+                    raise ValueError(f"Unbound composition parameter: {resource_id}.{field}")
 
 
 def _declare_runtime_state(model: dict, registered: list[str], scene: dict) -> None:

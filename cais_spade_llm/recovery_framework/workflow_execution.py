@@ -300,20 +300,33 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
         timeout_sec=120,
     )
     runtime.assembly_fixture_registration = None
+    runtime.kmr_probe = None
 
     async def prepare_execution() -> None:
-        """Register shared fixtures once in the ordered production startup."""
-        if (runtime.assembly_fixture_registration is not None
-                or not any(isinstance(agent, RobotAgent) for agent in resources)):
-            return
-        registration = await runtime.assembly_worker.run({
-            "operation": "register_assembly_fixtures",
-            "scene": context.inputs["scene"],
-            "geometry": context.geometry,
-        })
-        if registration.get("status") != "completed":
-            raise ValueError(registration.get("error") or "Could not register assembly fixtures to their carrier")
-        runtime.assembly_fixture_registration = registration
+        """Register shared fixtures and verify KMR before production dispatch."""
+        if (runtime.assembly_fixture_registration is None
+                and any(isinstance(agent, RobotAgent) for agent in resources)):
+            registration = await runtime.assembly_worker.run({
+                "operation": "register_assembly_fixtures",
+                "scene": context.inputs["scene"],
+                "geometry": context.geometry,
+            })
+            if registration.get("status") != "completed":
+                raise ValueError(registration.get("error") or "Could not register assembly fixtures to their carrier")
+            runtime.assembly_fixture_registration = registration
+        kmr = by_name.get("KMR")
+        part = next((part for part in context.selected_parts
+                     if part in context.inputs["scene"]["Storage"]["slots"]), None)
+        if isinstance(kmr, KMRResourceAgent) and part is not None and runtime.kmr_probe is None:
+            try:
+                runtime.kmr_probe = await kmr.workflow_worker.run({
+                    "mode": "probe", "inputs": context.inputs, "geometry": context.geometry,
+                    "pending": {"parameters": {
+                        "part_name": part, "target_resource": context.machine_resource or "M1",
+                    }},
+                })
+            except RuntimeError as exc:
+                raise ValueError(f"KMR readiness failed: {exc}") from exc
 
     runtime.prepare_execution = prepare_execution
     for rid, actor in context.resources.items():
@@ -342,7 +355,7 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                         "timing": deepcopy(simulation_execution.get("timing", {})),
                     }
                     if task["event_name"] == "move_home" and result.get("status") == "completed":
-                        evidence["home_observation"] = await asyncio.to_thread(_observe_robot_home, owner)
+                        evidence["home_observation"] = await asyncio.to_thread(_observe_robot_home, owner, result)
                     return evidence
 
                 actor.bind_executor(
@@ -407,6 +420,7 @@ def _kmr_executor(runtime, agent: KMRResourceAgent):
             "pending": task, "valuation": runtime.context.snapshot(),
             "geometry": runtime.context.geometry,
             "custody": deepcopy(getattr(agent, "workflow_custody", None)),
+            "probe": deepcopy(getattr(runtime, "kmr_probe", None)),
         }
         agent._kmr_execution_request = deepcopy(request)
         try:
@@ -430,18 +444,93 @@ def _identity_matches(task: dict, evidence: dict) -> bool:
     )
 
 
-def _observe_robot_home(agent: RobotAgent) -> dict:
-    """Capture fresh, stable joint feedback at the configured home endpoint."""
+def _observe_robot_home(agent: RobotAgent, result: dict | None = None) -> dict:
+    """Use this home's measured endpoint, or capture it for older controllers."""
     controller = agent._controller
     target = list(agent.named_positions["home"])
     names = list(controller.arm_joint_names)
     tolerance = 0.02
+    preserve_orientation = (
+        controller.execution_mode == "simulation"
+        and controller.controller_config.get("cartesian_motion", {}).get("home_preserve_orientation") is True
+    )
+    if preserve_orientation:
+        from cais_spade_llm.recovery_framework.geometry import rotate
+
+        planned = getattr(controller, "_last_cartesian_home_joint_target", None)
+        home_pose = getattr(controller, "_last_cartesian_home_pose", None)
+        target = [planned[name] for name in names] if planned and all(name in planned for name in names) else []
+        deadline = time.monotonic() + 2.0
+        stable = False
+        while target and time.monotonic() < deadline:
+            controller._get_arm_joint_positions(timeout_sec=0.0)
+            stable = controller._fresh_stable_joint_target(planned, tolerance=tolerance)
+            if stable:
+                break
+            time.sleep(0.02)
+        joint_observation = deepcopy(getattr(controller, "_last_joint_target_observation", None)) if stable else None
+        measured_pose = controller._get_ee_pose() if home_pose is not None else None
+        home_xyz_confirmed = False
+        downward_orientation_confirmed = False
+        if measured_pose is not None:
+            measured_xyz = measured_pose.position
+            expected_xyz = home_pose.position
+            home_xyz_confirmed = all(
+                abs(actual - expected) <= 0.005
+                for actual, expected in zip(
+                    (measured_xyz.x, measured_xyz.y, measured_xyz.z),
+                    (expected_xyz.x, expected_xyz.y, expected_xyz.z), strict=True,
+                )
+            )
+            orientation = measured_pose.orientation
+            expected_orientation = home_pose.orientation
+            actual_q = [orientation.x, orientation.y, orientation.z, orientation.w]
+            expected_q = [expected_orientation.x, expected_orientation.y,
+                          expected_orientation.z, expected_orientation.w]
+            q_dot = abs(sum(a * b for a, b in zip(actual_q, expected_q, strict=True)))
+            orientation_error = 2.0 * math.acos(min(1.0, max(0.0, q_dot)))
+            downward_orientation_confirmed = (
+                orientation_error <= tolerance
+                and rotate(actual_q, [0.0, 0.0, 1.0])[2] <= -math.cos(tolerance)
+            )
+        return {
+            **(joint_observation or {}),
+            "pose_name": "home",
+            "joint_names": names,
+            "target_positions": target,
+            "fresh_stable": bool(stable and home_xyz_confirmed and downward_orientation_confirmed),
+            "held_part": agent._held_part,
+            "home_xyz_confirmed": home_xyz_confirmed,
+            "downward_orientation_confirmed": downward_orientation_confirmed,
+            "planned_joint_endpoint_confirmed": bool(stable),
+            "observed_at_unix": time.time(),
+        }
+    execution = ((result or {}).get("observations") or {}).get("simulation_execution", {})
+    records = execution.get("primitive_results") or []
+    if (execution.get("resource_id") == agent.agent_name
+            and execution.get("function_name") == "move_home" and records):
+        record = records[-1]
+        observed = (record.get("command_evidence") or {}).get("joint_observation") or {}
+        if (record.get("resource_id") == agent.agent_name
+                and record.get("function_name") == "move_home"
+                and record.get("primitive") == "move_to_named_pose"
+                and record.get("parameters", {}).get("pose_name") == "home"
+                and record.get("status") == "completed"
+                and observed.get("joint_names") == names
+                and observed.get("target_positions") == target
+                and record.get("started_at_unix", math.inf)
+                <= observed.get("observed_at_unix", -math.inf)
+                <= record.get("completed_at_unix", -math.inf)):
+            return {**deepcopy(observed), "pose_name": "home", "held_part": agent._held_part}
     deadline = time.monotonic() + 2.0
     while True:
         observed, missing = controller._get_arm_joint_positions(timeout_sec=0.0)
         stable = controller._fresh_stable_joint_target(
             dict(zip(names, target, strict=True)), tolerance=tolerance,
         )
+        if stable and getattr(controller, "_last_joint_target_observation", None):
+            return {**deepcopy(controller._last_joint_target_observation),
+                    "pose_name": "home", "held_part": agent._held_part}
         if stable or time.monotonic() >= deadline:
             return {
                 "pose_name": "home", "joint_names": names,

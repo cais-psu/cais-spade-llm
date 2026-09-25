@@ -29,19 +29,26 @@
         "transit_waypoints": [
           [
             [
-              -5.55,
+              -6.55,
               1.55,
               1.35
             ],
             [
-              -5.55,
+              -6.55,
               0.7,
               1.35
             ]
           ]
         ],
         "linear_step_m": 0.01,
-        "angular_step_rad": 0.05
+        "angular_step_rad": 0.05,
+        "resource_id": "ur5e-1",
+        "avoid_collisions": false,
+        "rotation_waypoint": [
+          -6.55,
+          0.7,
+          1.35
+        ]
       }
     },
     {
@@ -73,19 +80,26 @@
         "transit_waypoints": [
           [
             [
-              -2.15,
+              -3.1500000000000004,
               1.55,
               1.35
             ],
             [
-              -2.15,
+              -3.1500000000000004,
               0.7,
               1.35
             ]
           ]
         ],
         "linear_step_m": 0.01,
-        "angular_step_rad": 0.05
+        "angular_step_rad": 0.05,
+        "resource_id": "ur5e-2",
+        "avoid_collisions": false,
+        "rotation_waypoint": [
+          -3.15,
+          0.7,
+          1.35
+        ]
       }
     },
     {
@@ -116,7 +130,31 @@
         "max_joint_step_rad": 0.35,
         "transit_waypoints": [],
         "linear_step_m": 0.01,
-        "angular_step_rad": 0.05
+        "angular_step_rad": 0.05,
+        "resource_id": "ur5e-3",
+        "pick_transit_waypoints": [
+          [
+            0.4,
+            0.15,
+            1.5011292266317149
+          ],
+          [
+            0.0,
+            0.05,
+            1.5011292266317149
+          ],
+          [
+            -0.4,
+            0.15,
+            1.5011292266317149
+          ]
+        ],
+        "avoid_collisions": false,
+        "rotation_waypoint": [
+          0.0,
+          0.05,
+          1.5011292266317149
+        ]
       }
     },
     {
@@ -148,7 +186,15 @@
         "max_joint_step_rad": 0.35,
         "transit_waypoints": [],
         "linear_step_m": 0.01,
-        "angular_step_rad": 0.05
+        "angular_step_rad": 0.05,
+        "resource_id": "ur5e-4",
+        "avoid_collisions": false,
+        "rotation_waypoint": [
+          0.3,
+          -0.35,
+          1.5011292266317149
+        ],
+        "home_preserve_orientation": true
       }
     }
   ],
@@ -565,12 +611,24 @@
           0.0,
           0.0,
           0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
         ]
       ],
       "KET8_Square_8mm": [
         [
           1.0,
           0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
           0.0,
           0.0
         ]
@@ -581,12 +639,24 @@
           0.0,
           0.0,
           0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
         ]
       ],
       "KET16_Square_16mm": [
         [
           1.0,
           0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
           0.0,
           0.0
         ]
@@ -597,12 +667,24 @@
           0.0,
           0.0,
           0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
         ]
       ],
       "RGOCG8-50_8mm": [
         [
           1.0,
           0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
           0.0,
           0.0
         ]
@@ -613,12 +695,24 @@
           0.0,
           0.0,
           0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
         ]
       ],
       "RGOCG16-50_16mm": [
         [
           1.0,
           0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
           0.0,
           0.0
         ]
@@ -1117,7 +1211,46 @@
       "tcp_offset_z_m": -0.218,
       "approach_height_m": 0.12,
       "pose_format": "xyz_xyzw",
-      "validation_scope": "Collision-aware free-space approach followed by a vertical Cartesian grasp."
+      "validation_scope": "Collision-aware free-space approach followed by a vertical Cartesian grasp.",
+      "grasp_orientations_xyzw": [
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          -0.7071067811865476,
+          0.7071067811865476,
+          0.0,
+          0.0
+        ],
+        [
+          -1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          -0.7071067811865476,
+          -0.7071067811865476,
+          0.0,
+          0.0
+        ]
+      ],
+      "grasp_orientations_xyzw_by_part": {
+        "gear_small": [
+          [0.0, 1.0, 0.0, 0.0],
+          [-1.0, 0.0, 0.0, 0.0]
+        ],
+        "gear_medium": [
+          [0.0, 1.0, 0.0, 0.0]
+        ],
+        "gear_large": [
+          [0.0, 1.0, 0.0, 0.0],
+          [-1.0, 0.0, 0.0, 0.0]
+        ]
+      }
     }
   },
   "Exit": {
@@ -1302,6 +1435,10 @@
       "grasp_height_m": 0.025,
       "approach_clearance_m": 0.1,
       "closed_gripper_width_m": 0.015,
+      "closed_gripper_width_m_by_part": {
+        "KET16_Square_16mm": 0.024,
+        "RGOCG16-50_16mm": 0.024
+      },
       "part_dimensions_m": [
         0.004,
         0.004,
@@ -1494,12 +1631,19 @@
         "transport_tcp_position_in_base_frame_m": [
           -0.25,
           0.5,
-          1.1
+          1.16
         ],
         "turn_radius_m": 0.5,
         "turn_step_rad": 0.15,
-        "minimum_turn_angle_rad": 0.5
-      }
+        "minimum_turn_angle_rad": 0.5,
+        "transfer_orientation_waypoint_xyzw_in_base_frame": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "avoid_collisions": false
     }
   }
 }

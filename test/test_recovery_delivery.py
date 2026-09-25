@@ -88,14 +88,20 @@ def test_delivery_goal_has_three_tasks_and_preserves_assembly_semantics(inputs):
     assert state['processCompleted'] == []
 
 
-def test_saved_setup_selects_full_order_and_preserves_eight_pegs_and_delivery_demo():
+def test_saved_setup_selects_full_order_and_preserves_eight_pegs_and_delivery_demo(monkeypatch, tmp_path):
+    import json
+
+    saved_path = tmp_path / 'setup.json'
+    saved_path.write_text(json.dumps(recovery_setup.default_setup()))
+    monkeypatch.setattr(recovery_setup, 'SETUP_PATH', saved_path)
     setup = recovery_setup.load_setup()
     full_order = 'cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json'
     eight_order = 'cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json'
     assert setup['selected_product_order_file'] == full_order
     assert len(read_json(ROOT / eight_order)['parts']) == 8
     assert recovery_setup.default_setup()['selected_product_order_file'] == full_order
-    delivery_setup = {**setup, 'selected_product_order_file': str(delivery.ORDER_PATH.relative_to(delivery.ROOT))}
+    delivery_setup = {**setup, 'diagnostic_cca_bypass': False,
+                      'selected_product_order_file': str(delivery.ORDER_PATH.relative_to(delivery.ROOT))}
     assert startup.supports_delivery(delivery_setup)
     assert recovery_setup.startup_block_reason(delivery_setup) == ''
     inputs = recovery_setup.validate_setup(delivery_setup)
@@ -613,9 +619,10 @@ def test_gazebo_report_selection_and_refresh_are_read_only(tmp_path, monkeypatch
         client.delete()
 
 
-def test_ros_worker_does_not_depend_on_asyncio_child_watcher(monkeypatch):
+def test_ros_worker_does_not_depend_on_asyncio_child_watcher(monkeypatch, capsys):
     import subprocess
     import sys
+    from pathlib import Path
     from cais_spade_llm.recovery_framework.kmr_agent import GazeboWorker
 
     launch = subprocess.Popen
@@ -629,6 +636,8 @@ while True:
         envelope=json.loads(request.read_text())
         if envelope['id'] != previous:
             previous=envelope['id']
+            sys.stderr.write('[INFO] [KMR] All services ready.\\n')
+            sys.stderr.flush()
             temporary=directory/'result.tmp'
             temporary.write_text(json.dumps({'id':previous,'result':{'status':'completed'}}))
             temporary.replace(directory/'result.json')
@@ -644,6 +653,9 @@ while True:
             pid = worker.process.pid
             assert await worker.run({'mode': 'probe'}) == {'status': 'completed'}
             assert worker.process.pid == pid
+            assert (Path(worker._directory.name) / 'worker.log').read_text().count(
+                '[INFO] [KMR] All services ready.') == 2
+            assert capsys.readouterr().err.count('[INFO] [KMR] All services ready.') == 2
         finally:
             await worker.cancel()
         assert worker.process is None
@@ -831,7 +843,7 @@ def test_worker_preserves_base_abort_reason_and_docking_evidence():
     assert namespace['active_goals'] == []
 
 
-@pytest.mark.parametrize('feedback', ['delayed', 'stale_start', 'wrong_endpoint'])
+@pytest.mark.parametrize('feedback', ['delayed', 'stale_start', 'wrong_endpoint', 'stopped'])
 def test_arm_completion_requires_measured_endpoint_without_weakening_start_guard(feedback):
     import ast
     from pathlib import Path
@@ -854,10 +866,16 @@ def test_arm_completion_requires_measured_endpoint_without_weakening_start_guard
     operations = []
     execute = Mock()
     namespace = {'fresh_state': fresh_state, 'execute': execute, 'operations': operations,
-                 'deepcopy': deepcopy, 'spin_until': spin_until, 'joint_stamps': {'joint_a1': 2.}}
+                 'deepcopy': deepcopy, 'spin_until': spin_until, 'joint_stamps': {'joint_a1': 2.},
+                 'stopped': feedback == 'stopped'}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
     plan = (trajectory, {'operation': 'cartesian_path', 'target': None})
-    if feedback == 'stale_start':
+    if feedback == 'stopped':
+        with pytest.raises(InterruptedError, match='Stop System'):
+            namespace['execute_plan'](plan)
+        execute.assert_not_called()
+        assert operations == []
+    elif feedback == 'stale_start':
         with pytest.raises(ValueError, match='stale trajectory'):
             namespace['execute_plan'](plan)
         execute.assert_not_called()
@@ -877,6 +895,7 @@ def test_arm_completion_requires_measured_endpoint_without_weakening_start_guard
 
 def test_cartesian_segment_requires_complete_collision_check_and_copies_target():
     import ast
+    import math
     from pathlib import Path
     from cais_spade_llm.recovery_framework import kmr_gazebo
 
@@ -892,6 +911,7 @@ def test_cartesian_segment_requires_complete_collision_check_and_copies_target()
     service = Mock(return_value=response)
     namespace = {
         'planning_seconds': 0.0, 'time': SimpleNamespace(monotonic=lambda: 1.0),
+        'math': math,
         'GetCartesianPath': SimpleNamespace(Request=lambda: query), 'service': service,
         'config': {'planning_group': 'KMR_iiwa_arm', 'tcp_link': 'KMR_tcp',
                    'services': {'cartesian_path': '/compute_cartesian_path'},
@@ -915,6 +935,141 @@ def test_cartesian_segment_requires_complete_collision_check_and_copies_target()
     assert namespace['retime_trajectory'].call_count == 1
 
 
+@pytest.mark.parametrize('avoid_collisions', [True, False])
+def test_KMR_uses_fresh_targets_in_one_cartesian_request(avoid_collisions):
+    import ast
+    import math
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+    from cais_spade_llm.recovery_framework.geometry import rotate
+    from cais_spade_llm.recovery_framework.kmr_motion import retime_trajectory
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'plan_motion')
+    method.body[0] = ast.copy_location(ast.Global(names=['planning_seconds']), method.body[0])
+    points = [SimpleNamespace(positions=[q], velocities=[0.], accelerations=[0.],
+                              time_from_start=SimpleNamespace(sec=t, nanosec=0))
+              for q, t in ((0., 0), (.1, 1))]
+    response = SimpleNamespace(error_code=SimpleNamespace(val=1), fraction=1.,
+        solution=SimpleNamespace(joint_trajectory=SimpleNamespace(joint_names=['joint_a1'], points=points)))
+    requests = []
+    def service(_kind, endpoint, query, **kwargs):
+        requests.append((endpoint, query))
+        if endpoint == '/compute_cartesian_path':
+            return deepcopy(response)
+        assert avoid_collisions and endpoint == '/check_state_validity'
+        return SimpleNamespace(valid=True)
+    state = SimpleNamespace(joint_state=SimpleNamespace(name=['joint_a1'], position=[0.]))
+    config = {'cartesian_motion_only': True, 'avoid_collisions': avoid_collisions,
+              'planning_group': 'KMR_iiwa_arm', 'tcp_link': 'KMR_tcp', 'orientation_tolerance_rad': .02,
+              'services': {'cartesian_path': '/compute_cartesian_path'},
+              'cartesian_waypoints': {'linear_step_m': .01, 'max_joint_step_rad': .35},
+              'velocity_scaling': 1., 'acceleration_scaling': 1.}
+    namespace = dict(planning_seconds=0., time=SimpleNamespace(monotonic=lambda: 1.), math=math,
+        config=config, stopped=False, kmr={'arm_joint_names': ['joint_a1']},
+        configuration_pose=lambda *args: [0., 0., 1., 1., 0., 0., 0.], rotate=rotate,
+        transport_pose=lambda: [0., 0., 1., 1., 0., 0., 0.],
+        GetCartesianPath=SimpleNamespace(Request=lambda: SimpleNamespace(header=SimpleNamespace())),
+        GetStateValidity=SimpleNamespace(Request=lambda **kwargs: SimpleNamespace(**kwargs)),
+        service=service, deepcopy=deepcopy, pose_message=deepcopy, updated_state=lambda *args: state,
+        limits={'joint_a1': dict(lower=-2., upper=2., velocity=1., acceleration=2.)},
+        retime_trajectory=retime_trajectory)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    for x in (.2, .24):
+        _, evidence = namespace['plan_motion'](state, target=[x, 0., 1., 1., 0., 0., 0.], cartesian=True)
+        assert evidence['dynamic_target'] is True
+        assert evidence['collision_checks_bypassed'] is (not avoid_collisions)
+        assert (evidence['checked_states'] > 0) is avoid_collisions
+    paths = [query for endpoint, query in requests if endpoint == '/compute_cartesian_path']
+    assert len(paths) == 2
+    assert [query.waypoints[-1][0] for query in paths] == [.2, .24]
+    assert all(query.avoid_collisions is avoid_collisions for query in paths)
+    namespace['stopped'] = True
+    previous = len(requests)
+    with pytest.raises(InterruptedError):
+        namespace['plan_motion'](state, target=[.2, 0., 1., 1., 0., 0., 0.], cartesian=True)
+    assert len(requests) == previous
+
+
+@pytest.mark.parametrize('part,size,width', [
+    ('KET16_Square_16mm', .016, .024),
+    ('RGOCG16-50_16mm', .016, .024),
+    ('KET12_Square_12mm', .012, .015),
+])
+def test_KMR_part_gripper_target_matches_saved_width_without_mutating_scene(inputs, part, size, width):
+    import ast
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    body = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run').body
+    def assignment(statement, name):
+        return (isinstance(statement, ast.Assign) and isinstance(statement.targets[0], ast.Name)
+                and statement.targets[0].id == name)
+    start = next(i for i, statement in enumerate(body) if assignment(statement, 'config'))
+    end = next(i for i, statement in enumerate(body) if assignment(statement, 'target_resource'))
+    scene = deepcopy(inputs['scene'])
+    namespace = dict(kmr=scene['KMR'], deepcopy=deepcopy,
+        node=SimpleNamespace(get_parameter=lambda _name: SimpleNamespace(value=True)),
+        request={'pending': {'parameters': {'part_name': part}},
+                 'geometry': {part: {'dimensions_m': [size, size, .05]}}})
+    exec(compile(ast.Module(body=body[start:end], type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    assert namespace['config']['closed_gripper_width_m'] == width
+    assert namespace['config']['part_dimensions_m'] == [size, size, .05]
+    assert namespace['config']['closed_gripper_width_m'] > size
+    assert scene == inputs['scene']
+
+
+def test_KMR_probe_requires_production_actions_without_interactive_Nav2(inputs):
+    import ast
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    probe = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                 and any(isinstance(row, ast.Assign) and isinstance(row.targets[0], ast.Name)
+                         and row.targets[0].id == 'core_services' for row in node.body))
+    clients, actions, operations = {}, {}, []
+    def action_client(_node, _kind, endpoint):
+        assert endpoint != '/KMR/navigate_to_pose'
+        return SimpleNamespace(server_is_ready=lambda: True)
+    def ready(predicate, *_args):
+        assert predicate()
+    kmr = inputs['scene']['KMR']
+    namespace = dict(kmr=kmr, config=kmr['task_execution'], clients=clients,
+        action_clients=actions, operations=operations, spin_until=ready, ActionClient=action_client,
+        node=SimpleNamespace(create_client=lambda _kind, _endpoint: SimpleNamespace(service_is_ready=lambda: True)))
+    for name in ('GetPositionFK', 'GetCartesianPath', 'ApplyPlanningScene', 'GetEntityState',
+                 'AttachLink', 'DetachLink', 'GetStateValidity', 'GetMotionPlan', 'FollowJointTrajectory', 'DockKMR'):
+        namespace[name] = object()
+    exec(compile(ast.Module(body=probe.body, type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    expected = {kmr['arm_controller']+'/follow_joint_trajectory',
+                kmr['gripper_controller']+'/follow_joint_trajectory',kmr['docking_action']}
+    assert set(actions) == expected == set(operations[-1]['actions'])
+
+
+def test_KMR_transport_bypass_reports_an_unchecked_sweep(inputs):
+    import ast
+    from pathlib import Path
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'validate_transport')
+    method.body[0] = ast.copy_location(ast.Global(names=['planning_seconds']), method.body[0])
+    kmr = inputs['scene']['KMR']
+    config = {**kmr['task_execution'], 'avoid_collisions': False}
+    state = SimpleNamespace(joint_state=SimpleNamespace(name=kmr['arm_joint_names'], position=[0.]*7))
+    service = Mock(side_effect=AssertionError('Collision service must not be called'))
+    namespace = dict(planning_seconds=0., time=SimpleNamespace(monotonic=lambda: 1.),
+        config=config, kmr=kmr, deepcopy=deepcopy, service=service)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(kmr_gazebo.__file__), 'exec'), namespace)
+    result = namespace['validate_transport'](state, route=[[0., 0., 0.], [1., 0., 0.]])
+    assert result['checked_states'] == 0
+    assert result['transport_sweep_validated'] is False
+    assert result['collision_checks_bypassed'] is True
+    service.assert_not_called()
+
+
 def test_transport_sweep_rejects_attached_payload_collision_before_dispatch(inputs):
     import ast
     import math
@@ -922,6 +1077,7 @@ def test_transport_sweep_rejects_attached_payload_collision_before_dispatch(inpu
     from cais_spade_llm.recovery_framework import kmr_gazebo
 
     tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    inputs['scene']['KMR']['task_execution']['avoid_collisions'] = True
     method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'validate_transport')
     method.body[0] = ast.copy_location(ast.Global(names=['planning_seconds']), method.body[0])
     queries = []
@@ -1674,10 +1830,10 @@ def test_transport_failure_retains_observed_progress_without_event_completion(fa
 
 
 @pytest.mark.parametrize("empty_return", [False, True])
-def test_scene_refresh_removes_old_payload_boxes_and_preserves_observed_parts(empty_return):
+def test_scene_refresh_removes_old_payload_boxes_and_preserves_observed_parts(empty_return, monkeypatch):
     import ast
     from pathlib import Path
-    from cais_spade_llm.recovery_framework import kmr_gazebo
+    from cais_spade_llm.recovery_framework import kmr_gazebo, part_collision
 
     tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
     method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'install_scene')
@@ -1689,12 +1845,18 @@ def test_scene_refresh_removes_old_payload_boxes_and_preserves_observed_parts(em
     collision_object.REMOVE = 1
     components = Mock(side_effect=lambda **kw: SimpleNamespace(**kw))
     components.WORLD_OBJECT_NAMES = 8
+    monkeypatch.setattr(part_collision, 'collision_object', lambda row: SimpleNamespace(
+        id=row['id'], operation=0, pose=row['pose']))
+    def collision_boxes(_world, _models, poses, *, exact_models):
+        assert exact_models == {*observed, 'Gear_Plate'}
+        return [row for row in boxes if row['id'].split('/')[0] in poses]
+
     namespace = {
         "PlanningScene": lambda **kw: scene,
         "component_parts": list(observed), "part": "second", "entity": observed.__getitem__,
         "mode": "environment_task", "name": "move_to_resource" if empty_return else "place_release",
         "held_part": None if empty_return else "second", "ROOT": Path('/tmp'),
-        "collision_boxes": lambda *args: [row for row in boxes if row["id"].split("/")[0] in args[2]],
+        "collision_boxes": collision_boxes,
         "session": {},
         "GetPlanningScene": SimpleNamespace(Request=lambda **kw: SimpleNamespace(**kw)),
         "PlanningSceneComponents": components, "CollisionObject": collision_object,
@@ -1717,3 +1879,70 @@ def test_scene_refresh_removes_old_payload_boxes_and_preserves_observed_parts(em
     assert 'first/link/collision' not in updates
     assert namespace['operations'][-1]['initialized'] is False
     assert namespace['operations'][-1]['observed_part_poses'] == ({} if empty_return else {'second': observed['second']})
+
+
+@pytest.mark.parametrize('position_error,held_part,accepted', [
+    (0., None, True), (.03, None, False), (0., 'gear_small', False),
+])
+def test_ur4_orientation_preserving_home_requires_saved_xyz_and_empty_gripper(
+    position_error, held_part, accepted,
+):
+    from cais_spade_llm.recovery_framework.workflow_execution import (
+        _observe_robot_home, _validate_robot_completion,
+    )
+
+    orientation = SimpleNamespace(x=0., y=1., z=0., w=0.)
+    expected = SimpleNamespace(position=SimpleNamespace(x=.5, y=-.5, z=1.5),
+                               orientation=orientation)
+    actual = SimpleNamespace(position=SimpleNamespace(x=.5 + position_error, y=-.5, z=1.5),
+                             orientation=orientation)
+    joint_observation = {
+        'joint_names': ['joint'], 'target_positions': [.2],
+        'observed_positions': [.2], 'missing_joints': [], 'fresh_stable': True,
+    }
+    controller = SimpleNamespace(
+        execution_mode='simulation',
+        controller_config={'cartesian_motion': {'home_preserve_orientation': True}},
+        arm_joint_names=['joint'], _last_cartesian_home_joint_target={'joint': .2},
+        _last_cartesian_home_pose=expected, _last_joint_target_observation=joint_observation,
+        _get_arm_joint_positions=lambda **kwargs: ([.2], []),
+        _fresh_stable_joint_target=lambda *args, **kwargs: True,
+        _get_ee_pose=lambda: actual,
+    )
+    agent = SimpleNamespace(_controller=controller, named_positions={'home': [.8]},
+                            agent_name='ur5e-4', _held_part=held_part)
+    observation = _observe_robot_home(agent)
+    task = {'resource_id': 'ur5e-4', 'event_name': 'move_home', 'task_id': 'home-1'}
+    evidence = {**task, 'controller_result': {'status': 'completed'},
+                'home_observation': observation}
+    assert _validate_robot_completion(task, evidence) is accepted
+    assert observation['home_xyz_confirmed'] is (position_error == 0.)
+
+
+def test_KMR_repairs_only_small_controller_overshoot_at_a_bounded_joint():
+    from cais_spade_llm.recovery_framework.kmr_motion import (
+        retime_trajectory, _stop_bounded_interpolation_overshoot,
+    )
+
+    def point(position, velocity, second):
+        return SimpleNamespace(positions=[position], velocities=[velocity],
+            accelerations=[0.], time_from_start=SimpleNamespace(sec=second, nanosec=0))
+
+    limits = {'joint_a7': {'lower': -3.0541, 'upper': 3.0541,
+                           'velocity': 1., 'acceleration': 2.}}
+    path = SimpleNamespace(joint_names=['joint_a7'], points=[
+        point(3.053, .01, 0), point(3.0541, 0., 1),
+    ])
+    corrections = _stop_bounded_interpolation_overshoot(path, limits)
+    assert len(corrections) == 1
+    assert corrections[0]['joint'] == 'joint_a7'
+    assert path.points[0].positions == [3.053] and path.points[1].positions == [3.0541]
+    assert [row.velocities[0] for row in path.points] == [0., 0.]
+    retime_trajectory(path, limits, 1., 1.)
+
+    invalid = SimpleNamespace(joint_names=['joint_a7'], points=[
+        point(3.053, .08, 0), point(3.0541, 0., 1),
+    ])
+    assert _stop_bounded_interpolation_overshoot(invalid, limits) == []
+    with pytest.raises(ValueError, match='interpolation exceeds'):
+        retime_trajectory(invalid, limits, 1., 1.)

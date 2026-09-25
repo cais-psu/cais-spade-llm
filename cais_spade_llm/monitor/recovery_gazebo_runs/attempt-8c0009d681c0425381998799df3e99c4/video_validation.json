@@ -1,0 +1,23 @@
+{
+  "validated": true,
+  "full_frames_decoded": 12208,
+  "preview_frames_decoded": 1221,
+  "fps": 15.0,
+  "size": [
+    1908,
+    998
+  ],
+  "duration_sec": 813.8666666666667,
+  "preview_duration_sec": 81.4,
+  "capture": {
+    "status": "captured",
+    "started_at_unix": 1790282244.9390242,
+    "ended_at_unix": 1790283058.9826427,
+    "fps": 15.0,
+    "frames": 12208,
+    "captures": 12125,
+    "repeated_frames": 83,
+    "max_capture_gap_sec": 0.3293038929987233,
+    "wall_duration_sec": 814.0436208739993
+  }
+}

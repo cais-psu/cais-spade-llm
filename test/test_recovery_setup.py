@@ -24,6 +24,12 @@ from cais_spade_llm.ui.components.recovery_setup import render_setup
 from cais_spade_llm.ui.pages import recovery_framework, recovery_run, safety
 
 
+@pytest.fixture(autouse=True)
+def isolated_controller_preparation(monkeypatch):
+    """Keep UI Start/Stop tests independent of live ROS service discovery."""
+    monkeypatch.setattr(recovery_run, "prepare_environment_start", Mock())
+
+
 @pytest.fixture
 def project(tmp_path):
     setup = settings.default_setup()
@@ -68,6 +74,52 @@ def test_defaults_and_save_leave_all_source_definitions_unchanged(project):
     after.pop(settings.SETUP_RELATIVE)
     assert before == after
     assert "password" not in path.read_text()
+
+
+@pytest.mark.parametrize("mode,bypass", [("physical", True), ("simulation", "true"), ("simulation", 1)])
+def test_CCA_bypass_invalid_mode_cannot_replace_saved_setup(project, mode, bypass):
+    setup = settings.default_setup(project)
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    before = path.read_bytes()
+    setup.update(execution_mode=mode, diagnostic_cca_bypass=bypass)
+    with pytest.raises(ValueError, match="only in simulation"):
+        settings.save_setup(setup, path, root=project)
+    assert path.read_bytes() == before
+
+
+def test_setup_CCA_bypass_saves_explicitly_and_clears_when_Physical_is_selected(project, monkeypatch):
+    buttons = _capture_buttons(monkeypatch)
+    bridge = SimpleNamespace(system_running=False, _starting=False, _stopping=False)
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(settings.default_setup(project), path, root=project)
+    before = path.read_bytes()
+    client = Client(context.client.page)
+
+    async def scenario():
+        monkeypatch.setattr(core, "loop", asyncio.get_running_loop())
+        with client:
+            render_setup(bridge, root=project)
+            bypass = next(element for element in client.elements.values()
+                          if isinstance(element, ui.checkbox) and element.text == "Bypass CCA (simulation only)")
+            assert bypass.enabled and bypass.value is False
+            bypass.value = True
+            await asyncio.sleep(0)
+            assert path.read_bytes() == before
+            buttons["Save setup"]()
+            saved = settings.load_setup(path, root=project)
+            assert saved["diagnostic_cca_bypass"] is True
+            assert {row["setting"]: row["value"] for row in settings.setup_summary(saved)}["CCA"] == "Bypassed (simulation only)"
+            _element(client, ui.select, "Mode").value = "physical"
+            await asyncio.sleep(0)
+            bypass = next(element for element in client.elements.values()
+                          if isinstance(element, ui.checkbox) and element.text == "Bypass CCA (simulation only)")
+            assert not bypass.enabled and bypass.value is False
+            buttons["Save setup"]()
+            assert settings.load_setup(path, root=project)["diagnostic_cca_bypass"] is False
+        client.delete()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -711,12 +763,15 @@ def test_selected_order_summary_refreshes_when_order_contents_change(project, mo
 
 
 @pytest.mark.parametrize('status', ['execution_unavailable', 'blocked'])
-def test_run_keeps_execution_blocker_visible_without_stopping_agents(monkeypatch, status):
+@pytest.mark.parametrize('bypass', [False, True])
+def test_run_keeps_execution_blocker_visible_without_stopping_agents(monkeypatch, status, bypass):
     from cais_spade_llm.resources.environment_models import build_environment_models
 
     setup = settings.default_setup()
+    setup['diagnostic_cca_bypass'] = bypass
     monkeypatch.setattr(settings, 'load_setup', lambda *args, **kwargs: deepcopy(setup))
-    monkeypatch.setattr(recovery_run, 'prepare_environment_start', Mock())
+    preparation = Mock()
+    monkeypatch.setattr(recovery_run, 'prepare_environment_start', preparation)
     bridge = _run_bridge()
     bridge.consume_notice.return_value = ''
     models = build_environment_models(settings.validate_setup(setup)['scene'])
@@ -759,6 +814,10 @@ def test_run_keeps_execution_blocker_visible_without_stopping_agents(monkeypatch
                     await refresh()
                 texts = [getattr(element, 'text', '') for element in client.elements.values()]
                 assert 'Agents started.' in texts
+                prepared = [call for call in preparation.call_args_list
+                            if call.args and isinstance(call.args[0], dict)]
+                assert len(prepared) == 1
+                assert prepared[0].kwargs['diagnostic_cca_bypass'] is bypass
                 assert 'System started successfully.' not in texts
                 assert 'Execution status' in texts and status in texts
                 assert outcome['reason'] in texts

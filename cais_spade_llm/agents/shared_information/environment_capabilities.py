@@ -69,6 +69,149 @@ def _transition(context, request: dict, offer: dict, resource_id: str) -> dict:
     }
 
 
+def _calculate_reply(context, rid: str, request: dict, model: dict, max_steps: int, *, stopped) -> tuple | None:
+    """Evaluate one RA step using detached inputs, without sending or committing."""
+    resource = context.resources[rid]
+    context.exploration_models[request["request_id"]] = {"dependencies": {}}
+    reply = {key: request[key] for key in (
+        "run_id", "request_id", "branch_id", "revision", "resource_revisions")}
+    reply.update(resource_id=rid, children=[], transitions=[], bids=[], rejections=[])
+    children = []
+    if request.get("scope") == "intake":
+        reply["intake_offers"] = []
+        if request.get("intake_parts") != model.get("intake_parts"):
+            raise ValueError("Intake request differs from its correlated part queue")
+        for part in request["intake_parts"]:
+            if stopped():
+                return None
+            desired = next(step for step in context.requirements[part]
+                           if not matches_requirement(context.part_tracker[part], step))
+            for task in candidates(resource.model, request["valuation"], part, desired, context.requirements[part]):
+                if (task["parameters"].get("process") not in resource.model["process_capabilities"]
+                        or not context.allows_task(task)):
+                    continue
+                status, reasons = feasibility(resource.model, task, context.geometry[part])
+                if status != "FEASIBLE":
+                    reply["rejections"].append({"resource_id": rid, "part_name": part,
+                                                "reason": "; ".join(reasons)})
+                    continue
+                event = next(event for event in resource.model["events"]
+                             if event["event_id"] == task["event_id"])
+                reply["intake_offers"].append({
+                    "resource_id": rid, "part_name": part, "task": task,
+                    "prerequisites": deepcopy(event["guards"]),
+                    "effects": deepcopy(event["product_effects"]),
+                    "resource_revision": deepcopy(request["resource_revisions"][rid]),
+                    "executable": task["event_name"] in resource.executors,
+                    "available": resource.valuation.get("part_name") is None
+                                 and f"resource:{rid}" not in context.reservations
+                                 and f"access:{rid}" not in context.reservations,
+                })
+    else:
+        state_key = fingerprint([request["valuation"], request["products"]])
+        execution_unavailable = any(
+            task["event_name"] not in context.resources[task["resource_id"]].executors
+            for task in request["path"]
+        )
+        cost = (
+            bool(request["unresolved"]),
+            execution_unavailable,
+            len(request["path"]),
+            tuple((task["resource_id"], task["event_id"]) for task in request["path"]),
+        )
+        key = (request["request_id"], state_key)
+        previous = resource.visited.get(key)
+        best_length = model.get("best_length", max_steps)
+        if execution_unavailable:
+            best_length = min(
+                best_length,
+                model.get("model_best_length", max_steps),
+            )
+        if (previous is None or cost < previous) and len(request["path"]) <= min(
+            best_length, max_steps
+        ):
+            resource.visited[key] = cost
+            part, desired = request["part_name"], request["desired_property"]
+            goal = request.get("resource_goal")
+            candidate = request.get("candidate")
+            achieved = (
+                all(request["valuation"][goal["resource_id"]].get(key) == value
+                    for key, value in goal["values"].items())
+                if goal else matches_requirement(request["products"][part], desired)
+            )
+            if achieved and candidate is None:
+                reply["bids"].append(
+                    {"path": request["path"], "unresolved": request["unresolved"]}
+                )
+            else:
+                for offer in resource.alternatives(
+                    context, request["valuation"], request["products"], part, desired
+                ):
+                    if stopped():
+                        return None
+                    if offer["status"] == "INFEASIBLE":
+                        reply["rejections"].append(
+                            {
+                                "resource_id": rid,
+                                "event_name": offer["task"]["event_name"],
+                                "reason": "; ".join(offer["reasons"]),
+                            }
+                        )
+                        continue
+                    task = offer["task"]
+                    if candidate is not None:
+                        context.request_dependencies(request, context._task_participants(task))
+                        if all(task.get(key) == candidate.get(key)
+                               for key in ("resource_id", "event_id", "event_name", "parameters")):
+                            reply["bids"].append({"path": [task], "unresolved": [
+                                {"resource_id": rid, "reason": reason}
+                                for reason in offer["reasons"]
+                            ]})
+                            reply["transitions"].append(_transition(context, request, offer, rid))
+                        continue
+                    if (
+                        goal is None
+                        and
+                        task["event_name"] == "move_to_resource"
+                        and request["valuation"][rid].get("held_part") != part
+                        and request["products"][part]["location"] != "Storage"
+                    ):
+                        continue
+                    context.request_dependencies(request, context._task_participants(task))
+                    unresolved = [
+                        *request["unresolved"],
+                        *(
+                            {"resource_id": rid, "reason": reason}
+                            for reason in offer["reasons"]
+                        ),
+                    ]
+                    following = {
+                        **request,
+                        "branch_id": uuid4().hex,
+                        "valuation": offer["valuation"],
+                        "products": offer["products"],
+                        "path": [*request["path"], task],
+                        "unresolved": unresolved,
+                    }
+                    children.append((rid, following))
+                    reply["transitions"].append(_transition(context, request, offer, rid))
+                location = request["products"][part]["location"]
+                for neighbor in (() if candidate is not None or goal else resource.model["neighbors"]):
+                    if neighbor in context.permitted_resources and handoff_matches(
+                        context.models[neighbor], location
+                    ):
+                        children.append((neighbor, {**request, "branch_id": uuid4().hex}))
+                if not children:
+                    reply["rejections"].append(
+                        {
+                            "resource_id": rid,
+                            "reason": "No enabled transition or compatible neighboring handoff",
+                        }
+                    )
+    reply["children"] = [child["branch_id"] for _, child in children]
+    return reply, children, context.exploration_models[request["request_id"]]["dependencies"], resource.visited
+
+
 class CapabilityRequestInbox(CyclicBehaviour):
     """Evaluate one local graph step and forward reachable neighboring searches."""
 
@@ -86,177 +229,80 @@ class CapabilityRequestInbox(CyclicBehaviour):
             self.agent.logger.warning("Rejected capability request: %s", exc)
 
     async def handle(self, runtime, sender: str, request: dict) -> None:
-        """Run the same handler for local SPADE delivery and XMPP delivery."""
+        """Calculate off-loop, then validate and publish on the resource's loop."""
         context = runtime.context
         rid = self.agent.agent_name
         resource = context.resources[rid]
         model = context.exploration_models.get(request.get("request_id"), {})
-        allowed = {
-            runtime.product_jid,
-            *(runtime.jids[peer] for peer in resource.model["neighbors"]),
-            runtime.jids[rid],
-        }
+        allowed = {runtime.product_jid, runtime.jids[rid],
+                   *(runtime.jids[peer] for peer in resource.model["neighbors"])}
         if sender not in allowed or rid not in context.permitted_resources:
             raise ValueError("Capability request sender or resource is not permitted")
-        reply = {
-            key: request[key]
-            for key in ("run_id", "request_id", "branch_id", "revision", "resource_revisions")
-        }
-        reply.update(resource_id=rid, children=[], transitions=[], bids=[], rejections=[])
-        children = []
-        if model:
-            model["observed_resources"][rid] = deepcopy(request["resource_revisions"][rid])
+        if not model or model.get("closed") or runtime.stopped:
+            return
+        context.negotiations.append({
+            "kind": "capability_request_received", "request_id": request["request_id"],
+            "branch_id": request["branch_id"], "resource_id": rid, "timestamp": time.time(),
+        })
+        model["observed_resources"][rid] = deepcopy(request["resource_revisions"][rid])
         if request.get("scope") == "intake":
             context.request_dependencies(request, sorted({
                 rid, *(peer for event in resource.model["events"] for peer in event["participants"])
             }))
-        if (
-            not context.current_request(request)
-            or request["resource_revisions"][rid] != context.revisions([rid])[rid]
-            or request.get("part_name") != model.get("part_name")
-            or request.get("desired_property") != model.get("desired_property")
-            or request.get("resource_goal") != model.get("resource_goal")
-            or request.get("candidate") != model.get("candidate")
-            or request.get("geometry") != context.geometry.get(request.get("part_name"))
-            or time.time() > request["deadline"]
-            or runtime.stopped
-        ):
-            reply["rejections"].append(
-                {"resource_id": rid, "reason": "Expired or changed exploration context"}
+        valid = (
+            context.current_request(request)
+            and request["resource_revisions"][rid] == context.revisions([rid])[rid]
+            and all(request.get(field) == model.get(field) for field in (
+                "part_name", "desired_property", "resource_goal", "candidate"))
+            and request.get("geometry") == context.geometry.get(request.get("part_name"))
+            and time.time() <= request["deadline"]
+        )
+        children = []
+        reply = {key: request[key] for key in (
+            "run_id", "request_id", "branch_id", "revision", "resource_revisions")}
+        reply.update(resource_id=rid, children=[], transitions=[], bids=[], rejections=[])
+        if valid:
+            snapshot = context.calculation_snapshot()
+            calculation_model = {key: deepcopy(model.get(key)) for key in (
+                "intake_parts", "best_length", "model_best_length") if key in model}
+            result = await runtime.calculate_capability(
+                _calculate_reply, snapshot, rid, request, calculation_model, runtime.max_steps,
+                request=request, resource_id=rid,
             )
-        elif request.get("scope") == "intake":
-            reply["intake_offers"] = []
-            if request.get("intake_parts") != model.get("intake_parts"):
-                raise ValueError("Intake request differs from its correlated part queue")
-            for part in request["intake_parts"]:
-                desired = next(step for step in context.requirements[part]
-                               if not matches_requirement(context.part_tracker[part], step))
-                for task in candidates(resource.model, request["valuation"], part, desired, context.requirements[part]):
-                    if (task["parameters"].get("process") not in resource.model["process_capabilities"]
-                            or not context.allows_task(task)):
-                        continue
-                    status, reasons = feasibility(resource.model, task, context.geometry[part])
-                    if status != "FEASIBLE":
-                        reply["rejections"].append({"resource_id": rid, "part_name": part,
-                                                    "reason": "; ".join(reasons)})
-                        continue
-                    event = next(event for event in resource.model["events"]
-                                 if event["event_id"] == task["event_id"])
-                    reply["intake_offers"].append({
-                        "resource_id": rid, "part_name": part, "task": task,
-                        "prerequisites": deepcopy(event["guards"]),
-                        "effects": deepcopy(event["product_effects"]),
-                        "resource_revision": deepcopy(request["resource_revisions"][rid]),
-                        "executable": task["event_name"] in resource.executors,
-                        "available": resource.valuation.get("part_name") is None
-                                     and f"resource:{rid}" not in context.reservations
-                                     and f"access:{rid}" not in context.reservations,
-                    })
-        else:
-            state_key = fingerprint([request["valuation"], request["products"]])
-            execution_unavailable = any(
-                task["event_name"] not in context.resources[task["resource_id"]].executors
-                for task in request["path"]
+            if result is None or runtime.stopped or model.get("closed"):
+                return
+            calculated, children, dependencies, visited = result
+            context.request_dependencies(request, dependencies)
+            dependencies = {rid, *dependencies}
+            current = context.revisions(dependencies)
+            valid = (
+                context.current_request(request)
+                and snapshot.permitted_resources == context.permitted_resources
+                and snapshot.geometry == context.geometry
+                and snapshot.requirements == context.requirements
+                and all(current[peer] == request["resource_revisions"][peer] for peer in dependencies)
+                and time.time() <= request["deadline"]
             )
-            cost = (
-                bool(request["unresolved"]),
-                execution_unavailable,
-                len(request["path"]),
-                tuple((task["resource_id"], task["event_id"]) for task in request["path"]),
-            )
-            key = (request["request_id"], state_key)
-            previous = resource.visited.get(key)
-            best_length = model.get("best_length", runtime.max_steps)
-            if execution_unavailable:
-                best_length = min(
-                    best_length,
-                    model.get("model_best_length", runtime.max_steps),
-                )
-            if (previous is None or cost < previous) and len(request["path"]) <= min(
-                best_length, runtime.max_steps
-            ):
-                resource.visited[key] = cost
-                part, desired = request["part_name"], request["desired_property"]
-                goal = request.get("resource_goal")
-                candidate = request.get("candidate")
-                achieved = (
-                    all(request["valuation"][goal["resource_id"]].get(key) == value
-                        for key, value in goal["values"].items())
-                    if goal else matches_requirement(request["products"][part], desired)
-                )
-                if achieved and candidate is None:
-                    reply["bids"].append(
-                        {"path": request["path"], "unresolved": request["unresolved"]}
-                    )
-                else:
-                    for offer in resource.alternatives(
-                        context, request["valuation"], request["products"], part, desired
-                    ):
-                        if offer["status"] == "INFEASIBLE":
-                            reply["rejections"].append(
-                                {
-                                    "resource_id": rid,
-                                    "event_name": offer["task"]["event_name"],
-                                    "reason": "; ".join(offer["reasons"]),
-                                }
-                            )
-                            continue
-                        task = offer["task"]
-                        if candidate is not None:
-                            context.request_dependencies(request, context._task_participants(task))
-                            if all(task.get(key) == candidate.get(key)
-                                   for key in ("resource_id", "event_id", "event_name", "parameters")):
-                                reply["bids"].append({"path": [task], "unresolved": [
-                                    {"resource_id": rid, "reason": reason}
-                                    for reason in offer["reasons"]
-                                ]})
-                                reply["transitions"].append(_transition(context, request, offer, rid))
-                            continue
-                        if (
-                            goal is None
-                            and
-                            task["event_name"] == "move_to_resource"
-                            and request["valuation"][rid].get("held_part") != part
-                            and request["products"][part]["location"] != "Storage"
-                        ):
-                            continue
-                        context.request_dependencies(request, context._task_participants(task))
-                        unresolved = [
-                            *request["unresolved"],
-                            *(
-                                {"resource_id": rid, "reason": reason}
-                                for reason in offer["reasons"]
-                            ),
-                        ]
-                        following = {
-                            **request,
-                            "branch_id": uuid4().hex,
-                            "valuation": offer["valuation"],
-                            "products": offer["products"],
-                            "path": [*request["path"], task],
-                            "unresolved": unresolved,
-                        }
-                        children.append((rid, following))
-                        reply["transitions"].append(_transition(context, request, offer, rid))
-                    location = request["products"][part]["location"]
-                    for neighbor in (() if candidate is not None or goal else resource.model["neighbors"]):
-                        if neighbor in context.permitted_resources and handoff_matches(
-                            context.models[neighbor], location
-                        ):
-                            children.append((neighbor, {**request, "branch_id": uuid4().hex}))
-                    if not children:
-                        reply["rejections"].append(
-                            {
-                                "resource_id": rid,
-                                "reason": "No enabled transition or compatible neighboring handoff",
-                            }
-                        )
-        reply["children"] = [child["branch_id"] for _, child in children]
-        # Announce child searches before dispatch. PA tracks branch identifiers,
-        # so replies arriving on different agent loops may safely interleave.
+            if valid:
+                reply = calculated
+                for key, cost in visited.items():
+                    if key not in resource.visited or cost < resource.visited[key]:
+                        resource.visited[key] = cost
+                # Intake availability can change without changing physical state.
+                # Task reservations are checked again atomically by prepare().
+                for offer in reply.get("intake_offers", []):
+                    offer["available"] = (resource.valuation.get("part_name") is None
+                        and f"resource:{rid}" not in context.reservations
+                        and f"access:{rid}" not in context.reservations)
+        if not valid:
+            children = []
+            reply["rejections"].append({"resource_id": rid, "reason": "Expired or changed exploration context"})
         await send_agent_message(self, message(runtime.product_jid, "capability_reply", reply))
         for peer, child in children:
+            if runtime.stopped or not context.current_request(request):
+                break
             await send_agent_message(self, message(runtime.jids[peer], "capability_request", child))
+
 
 
 class CapabilityReplyInbox(CyclicBehaviour):
@@ -304,6 +350,7 @@ async def match_intake(runtime, behaviour, parts: list[str]) -> dict:
         "kind": "capability_request", "scope": "intake", "request_id": request["request_id"],
         "parts": list(parts), "resource_ids": peers, "timestamp": time.time(),
     })
+    status = "stopped"
     try:
         pending = set(peers)
         for rid in peers:
@@ -331,10 +378,19 @@ async def match_intake(runtime, behaviour, parts: list[str]) -> dict:
                 "resource_id": rid, "offers": deepcopy(reply.get("intake_offers", [])),
                 "rejections": deepcopy(reply.get("rejections", [])), "timestamp": time.time(),
             })
-        return {"status": status, "offers": offers if status == "matched" else [],
-                "dependencies": deepcopy(model["dependencies"]), "request_id": request["request_id"]}
+        if runtime.stopped:
+            status = "stopped"
+        result = {"status": status, "offers": offers if status == "matched" else [],
+                  "dependencies": deepcopy(model["dependencies"]), "request_id": request["request_id"]}
+        context.negotiations.append({
+            "kind": "selection", "scope": "intake", "request_id": request["request_id"],
+            "result": deepcopy(result), "wall_time_sec": time.monotonic() - started,
+            "timestamp": time.time(),
+        })
+        return result
     finally:
-        model.update(closed=True, status="intake_matched", offers=deepcopy(offers))
+        model.update(closed=True, status="intake_matched" if status == "matched" else status,
+                     offers=deepcopy(offers))
         runtime.request_queues.pop(request["request_id"], None)
         runtime.planning_wall_time_sec += time.monotonic() - started
 
@@ -382,7 +438,7 @@ async def explore(
             "kind": "capability_request", "request_id": request["request_id"],
             "part_name": request["part_name"], "desired_property": deepcopy(request["desired_property"]),
             "resource_goal": deepcopy(resource_goal), "candidate": deepcopy(candidate),
-            "resource_revisions": deepcopy(request["resource_revisions"]),
+            "resource_revisions": deepcopy(request["resource_revisions"]), "timestamp": time.time(),
         })
         pending, completed = {request["branch_id"]}, set()
         await send_agent_message(
@@ -417,7 +473,7 @@ async def explore(
                 "resource_id": reply["resource_id"],
                 "transitions": deepcopy(reply.get("transitions", [])),
                 "rejections": deepcopy(reply.get("rejections", [])),
-                "bid_count": len(reply.get("bids", [])),
+                "bid_count": len(reply.get("bids", [])), "timestamp": time.time(),
             })
             resolved = [bid for bid in model["bids"] if not bid["unresolved"]]
             if resolved:

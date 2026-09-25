@@ -20,6 +20,7 @@
   ],
   "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
   "execution_mode": "simulation",
+  "diagnostic_cca_bypass": true,
   "runtime_recovery_mode": "pre_ran",
   "runtime_recovery_validation_policy": "validated",
   "runtime_recovery_archive_path": "",
@@ -35,9 +36,10 @@
   "failure_scenario": null,
   "simulation": {
     "speed": 1,
-    "ur_controller_rate_hz": 1000,
+    "ur_controller_rate_hz": 250,
     "enable_camera_streams": false,
     "dynamic_shadows": false,
-    "gazebo_gui_rate_hz": 30
+    "gazebo_gui_rate_hz": 15,
+    "ode_island_threads": 0
   }
 }

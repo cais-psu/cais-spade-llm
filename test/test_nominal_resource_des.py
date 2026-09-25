@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock
-
 import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -22,9 +21,15 @@ from cais_spade_llm.ui.components.nominal_resource_des import (
     nominal_capability_graph,
     nominal_capability_mermaid,
     nominal_capability_rows,
+    nominal_composition_event_rows,
     nominal_des_mermaid,
     nominal_event_rows,
     nominal_inventory_rows,
+    nominal_product_process_event_rows,
+    nominal_product_process_plan_diagram,
+    nominal_resource_default_fields,
+    nominal_resource_capability_diagram,
+    nominal_resource_state_diagram,
     nominal_state_rows,
     render_nominal_resource_des,
 )
@@ -747,6 +752,316 @@ def test_capability_graph_excludes_events_that_only_consult_resource_guards(mode
     assert "place_release" not in names
 
 
+def test_resource_capability_diagrams_use_existing_event_endpoints(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    for resource_id, model in models.items():
+        diagram = nominal_resource_capability_diagram(model)
+        assert diagram["nodes"] and diagram["mermaid"].startswith("flowchart LR"), resource_id
+        represented = {
+            event_id
+            for edge in diagram["edges"]
+            for event_id in edge["event_ids"]
+        }
+        assert represented == {row["id"] for row in nominal_capability_rows(model)}, resource_id
+        endpoints = {
+            json.dumps(event["capability_transition"][end], sort_keys=True)
+            for event in model["events"]
+            if event["event_id"] in represented
+            for end in ("source", "target")
+        }
+        assert {json.dumps(node["value"], sort_keys=True) for node in diagram["nodes"]} == endpoints
+        assert {row["id"] for row in diagram["state_rows"]} == {
+            node["id"] for node in diagram["nodes"]
+        }
+        assert SQUARE not in diagram["mermaid"]
+
+
+def test_robot_product_graph_keeps_move_home_guard_in_event_details(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    model = models["ur5e-1"]
+    diagram = nominal_resource_capability_diagram(model)
+    values = {node["id"]: node["value"] for node in diagram["nodes"]}
+    assert model["state_variables"]["resource_state"]["domain"] == [
+        "idle", "at_pick", "picked", "positioned", "placed"
+    ]
+    home = next(edge for edge in diagram["edges"] if edge["event_name"] == "move_home")
+    assert values[home["source"]] == {"resource_id": "ur5e-1", "resource_state": "any"}
+    assert values[home["target"]] == {
+        "resource_id": "ur5e-1", "resource_location": "home", "resource_state": "idle"
+    }
+    original = next(event for event in model["events"] if event["event_id"] in home["event_ids"])
+    assert original["guards"]["held_part"] == {"equals": None}
+    assert original["parameter_bindings"]["home_available"] == {"equals": True}
+    assert not any(
+        "start -->" in line or "(((" in line for line in diagram["mermaid"].splitlines()
+    )
+
+    model["current_valuation"]["resource_state"] = "picked"
+    model["marked_state_conditions"] = [{"resource_state": {"equals": "placed"}}]
+    assert nominal_resource_capability_diagram(model) == diagram
+
+
+def test_resource_state_diagram_follows_the_five_robot_states_and_guards(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    for robot in ("ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"):
+        model = models[robot]
+        diagram = nominal_resource_state_diagram(model, "resource_state")
+        values = {node["id"]: node["value"] for node in diagram["nodes"]}
+        assert list(values.values()) == ["idle", "at_pick", "picked", "positioned", "placed"]
+        assert values[diagram["initial_id"]] == "idle"
+        arrows = {
+            (values[edge["source"]], edge["event_name"], values[edge["target"]])
+            for edge in diagram["edges"]
+        }
+        assert {("idle", "pick_approach", "at_pick"),
+                ("at_pick", "pick_grasp", "picked"),
+                ("picked", "place_approach", "positioned"),
+                ("placed", "move_home", "idle")} <= arrows
+        assert {source for source, name, _ in arrows if name == "move_home"} == {
+            "idle", "at_pick", "placed"
+        }
+        approach = next(
+            edge for edge in diagram["edges"]
+            if values[edge["source"]] == "idle"
+            and edge["event_name"] == "pick_approach"
+        )
+        assert set(approach["event_ids"]) == {
+            event["event_id"] for event in model["events"]
+            if event["event_name"] == "pick_approach"
+        }
+
+
+def test_resource_state_diagrams_use_exact_fields_events_and_symbolic_effects(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    for resource_id, model in models.items():
+        for field in model["state_variables"]:
+            diagram = nominal_resource_state_diagram(model, field)
+            represented = {
+                event_id for edge in diagram["edges"] for event_id in edge["event_ids"]
+            }
+            expected = {
+                event["event_id"] for event in model["events"]
+                if field in event["updates"] or field in event.get("collection_effects", {})
+            }
+            assert represented == expected, (resource_id, field)
+            assert diagram["mermaid"].startswith("flowchart LR")
+            assert len(diagram["state_rows"]) == len(diagram["nodes"])
+
+    kmr = nominal_resource_state_diagram(models["KMR"], "resource_location")
+    assert {edge["event_name"] for edge in kmr["edges"]} == {"move_to_resource"}
+    buffer = nominal_resource_state_diagram(models[BUFFER], "zone_1_part")
+    assert {json.dumps(node["value"], sort_keys=True) for node in buffer["nodes"]} == {
+        "null", '{"reference": "delivered_part"}', '{"reference": "part_name"}'
+    }
+    zone_4 = nominal_resource_state_diagram(models[BUFFER], "zone_4_part")
+    assert {edge["event_name"] for edge in zone_4["edges"]} == {
+        "advance_part", "pick_grasp"
+    }
+    conveyor = nominal_resource_state_diagram(models["Conveyor"], "part_location.{part_name}")
+    movement = [edge for edge in conveyor["edges"] if edge["event_name"] == "advance_conveyor"]
+    values = {node["id"]: node["value"] for node in conveyor["nodes"]}
+    assert all(isinstance(values[edge["target"]], dict) for edge in movement)
+    assert all(values[edge["target"]] == {
+        "collection_effect": "acknowledged shared belt occupancy"
+    } for edge in movement)
+
+
+def test_all_resource_default_diagrams_retain_exact_event_variants(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    expected = {
+        **{robot: ["resource_state"] for robot in
+           ("ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4")},
+        "M1": ["resource_state", "staging_part"],
+        "M2": ["resource_state", "staging_part"],
+        "KMR": ["resource_state", "resource_location"],
+        "Conveyor": [
+            "part_location.{part_name}", "part_order.{part_name}",
+            "loading_reserved_by",
+        ],
+        BUFFER: ["zone_1_part", "zone_2_part", "zone_3_part", "zone_4_part"],
+        "Storage": ["inventory.{part_name}"],
+        "3D Printing Station": ["output.{part_name}"],
+        "Exit": ["resource_state", "product_location"],
+    }
+    assert {rid: nominal_resource_default_fields(model) for rid, model in models.items()} == expected
+    for resource_id, fields in expected.items():
+        details = {row["event_id"]: row for row in
+                   nominal_composition_event_rows(models, resource_id)}
+        assert set(details) == {event["event_id"] for event in models[resource_id]["events"]}
+        for field in fields:
+            diagram = nominal_resource_state_diagram(models[resource_id], field)
+            represented = {event_id for edge in diagram["edges"]
+                           for event_id in edge["event_ids"]}
+            assert represented <= details.keys(), (resource_id, field)
+            for event_id in represented:
+                original = next(e for e in models[resource_id]["events"]
+                                if e["event_id"] == event_id)
+                row = details[event_id]
+                assert row["event_name"] == original["event_name"]
+                assert row["parameter_bindings"] == original["parameter_bindings"]
+                assert row["participants"] == original["participants"]
+                assert row["actor"] == original["parameter_bindings"]["resource_id"]["equals"]
+                assert row["guards"][resource_id] == original["guards"]
+                assert row["updates"][resource_id] == original["updates"]
+                assert row["product_effects"] == original["product_effects"]
+        if resource_id == "Conveyor":
+            assert any(row["event_name"] == "place_approach" for row in details.values())
+            assert any(len(edge["event_ids"]) > 1 for field in fields
+                       for edge in nominal_resource_state_diagram(
+                           models[resource_id], field
+                       )["edges"])
+
+
+def test_product_process_plan_stages_keep_order_initial_print_and_exact_effects(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    trim = {"process": "trim", "result": "square"}
+    printing = {"process": "print_part"}
+    assembly = {"process": "assembly", "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"}
+    requirements = {SQUARE: [
+        {"processesToComplete": [trim, printing]},
+        {"processesToComplete": [assembly]},
+    ]}
+    initial = {SQUARE: {"processCompleted": [printing]}}
+    diagram = nominal_product_process_plan_diagram(requirements, initial, SQUARE)
+    values = {node["id"]: node["completed"] for node in diagram["nodes"]}
+    assert values[diagram["initial_id"]] == [printing]
+    assert len(diagram["nodes"]) == 5 and len(diagram["edges"]) == 5
+    assert {tuple(edge["requirement"].items()) for edge in diagram["edges"]} == {
+        tuple(effect.items()) for effect in (trim, printing, assembly)
+    }
+    assert all(set(map(str, values[edge["source"]])) == set(map(str, [trim, printing]))
+               for edge in diagram["edges"] if edge["requirement"] == assembly)
+    assert any(edge["requirement"] == trim and values[edge["source"]] == [printing]
+               for edge in diagram["edges"])
+    assert 'result=square' in diagram["mermaid"] and 'target=GMC_Laser_Plate_Virtual/KET4_Square_4mm' in diagram["mermaid"]
+    assert f'    start --> {diagram["initial_id"]}' in diagram["mermaid"]
+    assert '(((' in diagram["mermaid"]
+
+    variants = nominal_product_process_event_rows(models, requirements, SQUARE)
+    by_requirement = {name: {row["event_name"] for row in variants
+                             if row["requirement"]["process"] == name}
+                      for name in ("trim", "print_part", "assembly")}
+    assert "machine_part" in by_requirement["trim"]
+    assert "print_part" in by_requirement["print_part"]
+    assert "place_insert" in by_requirement["assembly"]
+    assert all(row["event_id"] in {
+        event["event_id"] for event in models[row["actor"]]["events"]
+    } for row in variants)
+
+
+def test_resource_state_diagram_uses_configured_initial_and_complete_marking(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    model = models["ur5e-1"]
+    initial = deepcopy(model["current_valuation"])
+    diagram = nominal_resource_state_diagram(model, "resource_state", initial_valuation=initial)
+    assert "start --> s0" in diagram["mermaid"]
+    assert "(((" not in diagram["mermaid"]
+    model["current_valuation"]["resource_state"] = "picked"
+    assert nominal_resource_state_diagram(
+        model, "resource_state", initial_valuation=initial
+    ) == diagram
+
+    storage = models["Storage"]
+    storage["marked_state_conditions"] = [
+        {"inventory.{part_name}": {"equals": True}}
+    ]
+    marked = nominal_resource_state_diagram(storage, "inventory.{part_name}")
+    true_id = next(node["id"] for node in marked["nodes"] if node["value"] is True)
+    assert f'{true_id}((("{true_id}<br/>true")))' in marked["mermaid"]
+    assert marked["initial_id"] is None
+
+
+def test_resource_diagrams_show_kmr_routes_buffer_handoffs_and_shared_belt(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    kmr = nominal_resource_capability_diagram(models["KMR"])
+    values = {node["id"]: node["value"] for node in kmr["nodes"]}
+    routes = {
+        (values[edge["source"]]["resource_location"], values[edge["target"]]["resource_location"])
+        for edge in kmr["edges"] if edge["event_name"] == "move_to_resource"
+    }
+    assert routes == {("Storage", "M1"), ("M1", "Storage"),
+                      ("Storage", "M2"), ("M2", "Storage")}
+
+    buffer = nominal_resource_capability_diagram(models[BUFFER])
+    states = {node["id"]: node["value"] for node in buffer["nodes"]}
+    transitions = {
+        (json.dumps(states[edge["source"]], sort_keys=True), edge["event_name"],
+         json.dumps(states[edge["target"]], sort_keys=True))
+        for edge in buffer["edges"]
+    }
+    conveyor_state = {"part_location": "Conveyor"}
+
+    def zone(number):
+        return {"part_location": BUFFER, "zone": number}
+
+    gripper = {"part_location": "ur5e-3", "part_state": "in_gripper"}
+    for source, event_name, target in [
+        (conveyor_state, "advance_conveyor", zone(1)),
+        *((zone(number), "advance_part", zone(number + 1)) for number in (1, 2, 3)),
+        (zone(4), "pick_grasp", gripper),
+    ]:
+        assert (json.dumps(source, sort_keys=True), event_name,
+                json.dumps(target, sort_keys=True)) in transitions
+
+    conveyor = nominal_resource_capability_diagram(models["Conveyor"])
+    values = {node["id"]: node["value"] for node in conveyor["nodes"]}
+    movement = [edge for edge in conveyor["edges"] if edge["event_name"] == "advance_conveyor"]
+    assert {(json.dumps(values[edge["source"]], sort_keys=True),
+             json.dumps(values[edge["target"]], sort_keys=True)) for edge in movement} == {
+        (json.dumps(conveyor_state, sort_keys=True), json.dumps(conveyor_state, sort_keys=True)),
+        (json.dumps(conveyor_state, sort_keys=True), json.dumps(zone(1), sort_keys=True)),
+    }
+    movement_ids = {
+        event["event_id"] for event in models["Conveyor"]["events"]
+        if event["event_name"] == "advance_conveyor"
+    }
+    assert {event_id for edge in movement for event_id in edge["event_ids"]} == movement_ids
+    assert "next_locations" not in conveyor["mermaid"]
+    detailed = nominal_capability_graph(models["Conveyor"], models)
+    assert all(edge["collection_effects"]["Conveyor"] for edge in detailed["edges"]
+               if edge["event"]["event_name"] == "advance_conveyor")
+
+
+def test_repeated_endpoint_arrows_keep_original_event_ids(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    model = build_environment_models(scene)["Storage"]
+    second = deepcopy(model["events"][0])
+    second["event_id"] += 1000
+    second["parameter_bindings"]["handoff_acknowledged"] = {"equals": False}
+    model["events"].append(second)
+    diagram = nominal_resource_capability_diagram(model)
+    assert len(diagram["edges"]) == 1
+    assert diagram["edges"][0]["event_ids"] == sorted(
+        event["event_id"] for event in model["events"]
+    )
+    detailed = nominal_capability_graph(model, {"Storage": model})
+    for original in model["events"]:
+        variant = next(
+            edge for edge in detailed["edges"] if edge["event_id"] == original["event_id"]
+        )
+        assert variant["resource_id"] == "KMR"
+        assert variant["event"] == original
+        assert variant["guards"]["Storage"] == original["guards"]
+        assert variant["updates"]["Storage"] == original["updates"]
+
+
 def test_loading_capabilities_connect_to_the_shared_conveyor_movement(scene):
     from cais_spade_llm.resources.environment_models import build_environment_models
 
@@ -1034,7 +1349,9 @@ def test_resources_panel_renders_all_resources_with_only_read_calls(scene):
     elements = list(panel.descendants())
     texts = [getattr(element, "text", "") for element in elements]
     assert "Live observations" not in texts
-    assert "Capability graph" in texts
+    assert "Resource capability graph" in texts
+    assert "Product processPlan stages" in texts
+    assert "No active processPlan." in texts
     assert any("all resident parts together" in text for text in texts)
     assert "Configured / assumed initial values — not live observations." in texts
     for rid in build_nominal_resource_des_models(scene):
@@ -1096,8 +1413,19 @@ def test_complete_resources_page_keeps_one_read_only_live_status_poll(scene, mod
         for resource in models:
             selector.set_value(resource)
             await asyncio.sleep(0)
-            graph = next(item for item in page.descendants() if isinstance(item, ui.mermaid))
-            assert graph.content == nominal_capability_mermaid(runtime_models[resource], models=runtime_models)
+            graphs = [item.content for item in page.descendants() if isinstance(item, ui.mermaid)]
+            fields = nominal_resource_default_fields(runtime_models[resource])
+            assert len(graphs) == len(fields), resource
+            assert graphs == [
+                nominal_resource_state_diagram(runtime_models[resource], field)["mermaid"]
+                for field in fields
+            ]
+            assert any(
+                getattr(item, "text", "") == "Marked state conditions: " + json.dumps(
+                    runtime_models[resource]["marked_state_conditions"], ensure_ascii=False
+                )
+                for item in page.descendants()
+            )
         await asyncio.sleep(0)
 
     asyncio.run(switch_resources())
@@ -1304,7 +1632,30 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
     from cais_spade_llm.ui.components import nominal_resource_des as component
 
     models = build_environment_models(scene)
-    state = {"revision": 1, "snapshot": {"models": models, "environment_model": {}, "outcome": {"status": "prepared"}}}
+    requirements = {
+        SQUARE: [{"processesToComplete": [{"process": "trim", "result": "square"}]}],
+        "gear_small": [
+            {"processesToComplete": [{"process": "print_part"}]},
+            {"processesToComplete": [{"process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"}]},
+        ],
+    }
+    initial_products = {
+        SQUARE: {"processCompleted": []},
+        "gear_small": {"processCompleted": [{"process": "print_part"}]},
+    }
+    state = {
+        "revision": 1,
+        "snapshot": {
+            "models": models,
+            "environment_model": {},
+            "outcome": {"status": "prepared"},
+            "run_id": "configured-run",
+            "processPlan": {},
+            "requirements": requirements,
+            "initial_product_states": initial_products,
+            "product_states": deepcopy(initial_products),
+        },
+    }
     bridge = Mock()
     bridge.load_config.return_value = scene
     bridge.get_environment_capabilities_revision.side_effect = lambda: state["revision"]
@@ -1319,59 +1670,151 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
             refresh = component.render_nominal_resource_des(bridge)
             await refresh()
             export.assert_not_called()
-            resource = next(e for e in client.elements.values() if isinstance(e, ui.select) and e.label == "Resource")
-            des = next(e for e in client.elements.values() if isinstance(e, ui.expansion) and e.text == "DES details")
-            des.set_value(True)
-            event = next(e for e in client.elements.values() if isinstance(e, ui.select) and e.label == "Nominal event")
-            event.set_value(event.options[-1])
-            process = next(e for e in client.elements.values() if isinstance(e, ui.expansion) and e.text == "Complete process JSON")
-            process.set_value(True)
+            resource = next(e for e in client.elements.values()
+                            if isinstance(e, ui.select) and e.label == "Resource")
+            part = next(e for e in client.elements.values()
+                        if isinstance(e, ui.select) and e.label == "Part")
+            assert resource.value == "Conveyor" and part.value == SQUARE
+            assert len([e for e in client.elements.values() if isinstance(e, ui.mermaid)]) == 4
+            initial_conditions = next(e for e in client.elements.values()
+                                      if isinstance(e, ui.expansion)
+                                      and e.text == "Configured initial values and marked state conditions")
+            initial_conditions.set_value(True)
             await asyncio.sleep(0)
+            initial_data = json.loads(next(e.content for e in initial_conditions.descendants()
+                                           if isinstance(e, ui.code)))
+            assert initial_data["marked_state_conditions"] == models["Conveyor"]["marked_state_conditions"]
+            assert "part_location.KET4_Square_4mm" in initial_data["current_valuation"]
+
+            des = next(e for e in client.elements.values()
+                       if isinstance(e, ui.expansion) and e.text == "DES details")
+            des.set_value(True)
+            event = next(e for e in client.elements.values()
+                         if isinstance(e, ui.select) and e.label == "Nominal event")
+            event.set_value(event.options[-1])
+            process = next(e for e in client.elements.values()
+                           if isinstance(e, ui.expansion) and e.text == "Complete process JSON")
+            process.set_value(True)
             export.assert_called()
+            details = next(e for e in client.elements.values()
+                           if isinstance(e, ui.expansion)
+                           and e.text == "Local capability graph and event details")
+            assert not any(isinstance(item, ui.mermaid) for item in details.descendants())
+            details.set_value(True)
+            await asyncio.sleep(0)
+            assert any(isinstance(item, ui.mermaid)
+                       and item.content == component.nominal_capability_mermaid(models["Conveyor"], models=models)
+                       for item in details.descendants())
+            assert any(isinstance(item, ui.mermaid)
+                       and item.content == component.nominal_resource_capability_diagram(models["Conveyor"])["mermaid"]
+                       for item in details.descendants())
+            detail_codes = [json.loads(e.content) for e in details.descendants() if isinstance(e, ui.code)]
+            assert any(isinstance(value, list)
+                       and value == nominal_composition_event_rows(models, "Conveyor")
+                       for value in detail_codes)
+
+            part.set_value("gear_small")
+            await asyncio.sleep(0)
+            product_graph = [e for e in client.elements.values() if isinstance(e, ui.mermaid)
+                             and e.content == nominal_product_process_plan_diagram(
+                                 requirements, initial_products, "gear_small"
+                             )["mermaid"]][0]
+            assert "start --> p1" in product_graph.content
+            variants = next(e for e in client.elements.values() if isinstance(e, ui.expansion)
+                            and e.text == "Declared event variants for these process steps")
+            assert not any(isinstance(e, ui.code) for e in variants.descendants())
+            variants.set_value(True)
+            await asyncio.sleep(0)
+            assert any(isinstance(e, ui.code) for e in variants.descendants())
+
+            local_contents = {
+                nominal_resource_state_diagram(models["Conveyor"], field)["mermaid"]
+                for field in nominal_resource_default_fields(models["Conveyor"])
+            }
+            compact = [e for e in client.elements.values() if isinstance(e, ui.mermaid)
+                       and e.content in local_contents]
+            assert len(compact) == 3
+            compact_ids = [e.id for e in compact]
+            product_id = product_graph.id
             elements = set(client.elements)
             for _ in range(3):
                 await refresh()
             assert set(client.elements) == elements
             assert bridge.get_environment_capabilities.call_count == 1
+
             state["revision"] = 2
             state["snapshot"]["outcome"] = {"status": "needs_context", "reason": "Tool evidence missing"}
+            state["snapshot"]["product_states"]["gear_small"]["processCompleted"] = [
+                {"process": "print_part"},
+                {"process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"}
+            ]
             await refresh()
             assert bridge.get_environment_capabilities.call_count == 2
-            assert resource.value == "Conveyor"
-            assert des.value and process.value
+            assert resource.value == "Conveyor" and part.value == "gear_small"
+            assert des.value and process.value and details.value and variants.value
             assert event.value == event.options[-1]
             assert set(client.elements) == elements
-            assert any("Tool evidence missing" in getattr(e, "text", "") for e in client.elements.values())
+            assert all(eid in client.elements for eid in compact_ids + [product_id])
+            assert any("Tool evidence missing" in getattr(e, "text", "")
+                       for e in client.elements.values())
+            assert any("Current processCompleted" in getattr(e, "text", "")
+                       and "assembly" in e.text for e in client.elements.values())
 
-            graph = next(e for e in client.elements.values() if isinstance(e, ui.mermaid))
-            graph_content = graph.content
-            update_graph = Mock(wraps=graph.set_content)
-            monkeypatch.setattr(graph, "set_content", update_graph)
-            details = next(e for e in client.elements.values()
-                           if isinstance(e, ui.expansion) and e.text == "Local capability graph and event details")
-            details.set_value(True)
-            await asyncio.sleep(0)
             state["revision"] = 3
-            for peer in models["ur5e-1"]["events"]:
-                peer["guards"]["resource_state"] = {"equals": "idle"}
+            peer = next(e for e in models["ur5e-1"]["events"]
+                        if e["event_name"] == "place_release" and "Conveyor" in e["participants"])
+            peer["guards"]["resource_state"] = {"equals": "idle"}
             await refresh()
-            update_graph.assert_not_called()
-            assert graph.content == graph_content
-            data = json.loads(next(e.content for e in details.descendants() if isinstance(e, ui.code)))
-            handoff = next(edge for edge in data["edges"] if edge["resource_id"] == "ur5e-1")
-            assert handoff["guards"]["ur5e-1"]["resource_state"] == {"equals": "idle"}
-            assert details.value and des.value and process.value
-            assert resource.value == "Conveyor"
+            assert all(eid in client.elements for eid in compact_ids + [product_id])
+            detail_codes = [json.loads(e.content) for e in details.descendants() if isinstance(e, ui.code)]
+            assert any(isinstance(value, dict)
+                       and any(edge["guards"].get("ur5e-1", {}).get("resource_state") == {"equals": "idle"}
+                               for edge in value.get("edges", []))
+                       for value in detail_codes)
 
             state["revision"] = 4
             models["Conveyor"]["events"] = [
-                event for event in models["Conveyor"]["events"]
-                if event["event_name"] != "advance_conveyor"
+                e for e in models["Conveyor"]["events"] if e["event_name"] != "advance_conveyor"
             ]
             await refresh()
-            update_graph.assert_called_once()
-            assert "advance_conveyor" not in graph.content
-            assert graph.content == nominal_capability_mermaid(models["Conveyor"], models=models)
+            assert product_id in client.elements
+            local_contents = {
+                nominal_resource_state_diagram(models["Conveyor"], field)["mermaid"]
+                for field in nominal_resource_default_fields(models["Conveyor"])
+            }
+            current_compact = [e for e in client.elements.values()
+                               if isinstance(e, ui.mermaid) and e.content in local_contents]
+            assert len(current_compact) == 3
+            assert all(e.id not in compact_ids for e in current_compact)
+            assert all("advance_conveyor" not in e.content for e in current_compact)
+
+            resource.set_value("ur5e-1")
+            await asyncio.sleep(0)
+            robot_graph = next(e for e in client.elements.values() if isinstance(e, ui.mermaid))
+            configured_graph = robot_graph.content
+            assert "start --> s0" in configured_graph
+            state["revision"] = 5
+            models["ur5e-1"]["current_valuation"]["resource_state"] = "picked"
+            await refresh()
+            assert robot_graph.content == configured_graph
+            resource.set_value("Conveyor")
+            await asyncio.sleep(0)
+            assert part.value == "gear_small" or any(
+                isinstance(e, ui.select) and e.label == "Part" and e.value == "gear_small"
+                for e in client.elements.values()
+            )
+            assert any(isinstance(e, ui.expansion)
+                       and e.text == "Configured initial values and marked state conditions"
+                       and e.value for e in client.elements.values())
+            assert any(isinstance(e, ui.expansion)
+                       and e.text == "Local capability graph and event details"
+                       and e.value for e in client.elements.values())
+            assert any(isinstance(e, ui.expansion)
+                       and e.text == "DES details" and e.value
+                       for e in client.elements.values())
+            assert any(isinstance(e, ui.expansion)
+                       and e.text == "Declared event variants for these process steps"
+                       and e.value for e in client.elements.values())
 
     asyncio.run(check())
     client.delete()

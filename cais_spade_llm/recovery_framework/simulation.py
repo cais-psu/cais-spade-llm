@@ -16,6 +16,7 @@ DEFAULT_SETTINGS = {
     "enable_camera_streams": False,
     "dynamic_shadows": False,
     "gazebo_gui_rate_hz": 30,
+    "ode_island_threads": 0,
 }
 
 
@@ -33,8 +34,10 @@ def simulation_settings(setup: dict) -> dict:
     for key in ("enable_camera_streams", "dynamic_shadows"):
         if type(settings[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
-    if type(settings['gazebo_gui_rate_hz']) is not int or settings['gazebo_gui_rate_hz'] not in (30, 60):
-        raise ValueError('Gazebo viewer rate must be 30 or 60 Hz')
+    if type(settings['gazebo_gui_rate_hz']) is not int or settings['gazebo_gui_rate_hz'] not in (15, 30, 60):
+        raise ValueError('Gazebo viewer rate must be 15, 30 or 60 Hz')
+    if type(settings['ode_island_threads']) is not int or settings['ode_island_threads'] not in (0, 2, 4):
+        raise ValueError('ODE island threads must be 0, 2 or 4')
     return settings
 
 
@@ -59,6 +62,7 @@ def launch_arguments(path: Path | None = None) -> str:
         f"enable_camera_streams:={str(settings['enable_camera_streams']).lower()}",
         f"dynamic_shadows:={str(settings['dynamic_shadows']).lower()}",
         f"gazebo_gui_rate_hz:={settings['gazebo_gui_rate_hz']}",
+        f"ode_island_threads:={settings['ode_island_threads']}",
     ]
     if initial_part:
         arguments.insert(0, shlex.quote(f"kmr_initial_part:={initial_part}"))

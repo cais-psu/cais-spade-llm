@@ -1,7 +1,0 @@
-usage: ui_main.py [-h] [--headless]
-
-CAIS-SPADE-LLM: multi-agent manufacturing system
-
-options:
-  -h, --help  show this help message and exit
-  --headless  Run without the web UI (agents only, Ctrl+C to stop)

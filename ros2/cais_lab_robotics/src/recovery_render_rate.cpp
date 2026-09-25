@@ -21,9 +21,9 @@ public:
   {
     const double rate = settings->HasElement("render_rate") ?
       settings->Get<double>("render_rate") : 30.0;
-    if (rate != 30.0 && rate != 60.0)
+    if (rate != 15.0 && rate != 30.0 && rate != 60.0)
     {
-      gzerr << "Recovery viewer render_rate must be 30 or 60 Hz\n";
+      gzerr << "Recovery viewer render_rate must be 15, 30 or 60 Hz\n";
       return;
     }
     auto *timer = new QTimer(this);

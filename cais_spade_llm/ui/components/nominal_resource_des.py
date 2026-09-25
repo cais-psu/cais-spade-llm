@@ -273,8 +273,11 @@ def nominal_capability_mermaid(
         A graph retaining exact resource, location, event, and parameter names.
         It describes available tasks, not a live state or a scheduling policy.
     """
+    return _capability_graph_mermaid(nominal_capability_graph(model, models), event_id)
+
+
+def _capability_graph_mermaid(graph: dict, event_id: int | None = None) -> str:
     lines = ["flowchart TB"]
-    graph = nominal_capability_graph(model, models)
     for node in graph["nodes"]:
         state = dict(sorted(node["state"].items()))
         label = "<br/>".join(_diagram_label(line) for line in _state_text(state).splitlines())
@@ -289,6 +292,275 @@ def nominal_capability_mermaid(
         if edge["event_id"] == event_id:
             lines.append(f"    linkStyle {index} stroke:#d97706,stroke-width:4px")
     return "\n".join(lines)
+
+
+def nominal_resource_capability_diagram(model: dict) -> dict:
+    """Draw one resource's declared capability transitions and event names.
+
+    Args:
+        model: One resource descriptor containing the existing event endpoints.
+
+    Returns:
+        One compact graph, its exact endpoint table, and original event IDs.
+        Resource valuations and shared guards remain separate conditions.
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    node_ids: dict[str, str] = {}
+    edge_ids: dict[tuple[str, str, str], int] = {}
+
+    def intern(value: dict) -> str:
+        key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+        if key not in node_ids:
+            node_id = f"s{len(nodes)}"
+            node_ids[key] = node_id
+            nodes.append({"id": node_id, "value": deepcopy(value)})
+        return node_ids[key]
+
+    for event in _capability_events(model, {}):
+        transition = event["capability_transition"]
+        source = intern(transition["source"])
+        target = intern(transition["target"])
+        key = (source, target, event["event_name"])
+        if key not in edge_ids:
+            edge_ids[key] = len(edges)
+            edges.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "event_name": event["event_name"],
+                    "event_ids": [],
+                }
+            )
+        edges[edge_ids[key]]["event_ids"].append(event["event_id"])
+
+    lines = ["flowchart LR"]
+    state_rows = []
+    for node in nodes:
+        value = node["value"]
+        short: list[str] | None = None
+        if len(value) == 1:
+            field, item = next(iter(value.items()))
+            candidate = _text(item)
+            if len(field) <= 20 and len(candidate) <= 24:
+                short = [field, candidate]
+        elif set(value) == {"part_location", "zone"}:
+            short = [f"zone = {_text(value['zone'])}"]
+        label = node["id"] if short is None else "<br/>".join(
+            [node["id"], *(_diagram_label(part) for part in short)]
+        )
+        lines.append(f'    {node["id"]}(("{label}"))')
+        state_rows.append({"id": node["id"], "value": _text(value)})
+    for edge in edges:
+        lines.append(
+            f'    {edge["source"]} -->|"{_diagram_label(edge["event_name"])}"| {edge["target"]}'
+        )
+    return {"nodes": nodes, "edges": edges, "state_rows": state_rows, "mermaid": "\n".join(lines)}
+
+
+def nominal_resource_default_fields(model: dict) -> list[str]:
+    """Choose the exact local state variables shown for a resource by default.
+
+    Args:
+        model: One configured resource descriptor.
+
+    Returns:
+        Existing state-variable names in diagram order.
+    """
+    resource_id = model["resource_id"]
+    if resource_id in {"ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"}:
+        requested = ["resource_state"]
+    elif resource_id in {"M1", "M2"}:
+        requested = ["resource_state", "staging_part"]
+    elif resource_id == "KMR":
+        requested = ["resource_state", "resource_location"]
+    elif resource_id == "Conveyor":
+        requested = [
+            "part_location.{part_name}", "part_order.{part_name}", "loading_reserved_by"
+        ]
+    elif resource_id == "Buffer For Machined parts":
+        requested = [f"zone_{zone}_part" for zone in (1, 2, 3, 4)]
+    elif resource_id == "Storage":
+        requested = [field for field in model["state_variables"] if field.startswith("inventory.")]
+    elif resource_id == "3D Printing Station":
+        requested = [field for field in model["state_variables"] if field.startswith("output.")]
+    elif resource_id == "Exit":
+        requested = ["resource_state", "product_location"]
+    else:
+        requested = list(model["state_variables"])[:1]
+    return [field for field in requested if field in model["state_variables"]]
+
+
+def _process_requirement_label(requirement: dict) -> str:
+    return " ".join(f"{key}={_text(value)}" for key, value in requirement.items())
+
+
+def nominal_product_process_plan_diagram(
+    requirements: dict, initial_product_states: dict, part_name: str
+) -> dict:
+    """Draw one part's ordered processPlan specification and configured start.
+
+    Args:
+        requirements: Resolved, ordered processesToComplete for selected parts.
+        initial_product_states: Product states before any acknowledged task.
+        part_name: Exact selected part identifier.
+
+    Returns:
+        A per-part process-stage graph. Transport events stutter in this view.
+    """
+    steps = requirements[part_name]
+    effects = []
+    groups = []
+    for step in steps:
+        group = []
+        for requirement in step["processesToComplete"]:
+            group.append(len(effects))
+            effects.append(requirement)
+        groups.append(group)
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    node_ids: dict[frozenset[int], str] = {}
+    queue: deque[frozenset[int]] = deque()
+
+    def intern(completed: frozenset[int]) -> str:
+        if completed not in node_ids:
+            node_id = f"p{len(nodes)}"
+            node_ids[completed] = node_id
+            nodes.append({
+                "id": node_id,
+                "completed": [deepcopy(effects[index]) for index in sorted(completed)],
+                "indices": sorted(completed),
+            })
+            queue.append(completed)
+        return node_ids[completed]
+
+    intern(frozenset())
+    initial_effects = initial_product_states.get(part_name, {}).get("processCompleted", [])
+    initial = frozenset(
+        index for index, effect in enumerate(effects) if effect in initial_effects
+    )
+    initial_id = intern(initial)
+    while queue:
+        completed = queue.popleft()
+        group = next(
+            (group for group in groups if any(index not in completed for index in group)),
+            None,
+        )
+        if group is None:
+            continue
+        for index in group:
+            if index in completed:
+                continue
+            target = frozenset((*completed, index))
+            edges.append({
+                "source": node_ids[completed],
+                "target": intern(target),
+                "requirement": deepcopy(effects[index]),
+            })
+
+    lines = ["flowchart LR"]
+    state_rows = []
+    for node in nodes:
+        completed = frozenset(node["indices"])
+        next_step = next(
+            (number for number, group in enumerate(groups, 1)
+             if any(index not in completed for index in group)),
+            None,
+        )
+        label = node["id"] if next_step is None else f"{node['id']}<br/>step {next_step}"
+        if next_step is None:
+            lines.append(f'    {node["id"]}((("{label}")))')
+        else:
+            lines.append(f'    {node["id"]}(("{label}"))')
+        state_rows.append({
+            "id": node["id"],
+            "completed": deepcopy(node["completed"]),
+            "next_step": next_step,
+        })
+    lines.extend(["    start(( ))", f"    start --> {initial_id}"])
+    for edge in edges:
+        label = _diagram_label(_process_requirement_label(edge["requirement"]))
+        lines.append(f'    {edge["source"]} -->|"{label}"| {edge["target"]}')
+    return {
+        "part_name": part_name,
+        "nodes": nodes,
+        "edges": edges,
+        "state_rows": state_rows,
+        "initial_id": initial_id,
+        "mermaid": "\n".join(lines),
+    }
+
+
+def _declares_process_effect(event: dict, requirement: dict) -> bool:
+    for effect in event["product_effects"].get("processCompleted", []):
+        if set(effect) != set(requirement):
+            continue
+        for field, value in effect.items():
+            if isinstance(value, dict) and "set_from_param" in value:
+                binding = event["parameter_bindings"].get(value["set_from_param"], {})
+                if "equals" in binding and binding["equals"] != requirement[field]:
+                    break
+            elif value != requirement[field]:
+                break
+        else:
+            return True
+    return False
+
+
+def nominal_product_process_event_rows(models: dict, requirements: dict, part_name: str) -> list[dict]:
+    """List declared event variants that can establish one part's process steps.
+
+    Args:
+        models: Resource descriptors from one configured model snapshot.
+        requirements: Resolved processesToComplete for selected parts.
+        part_name: Exact selected part identifier.
+
+    Returns:
+        Potential event variants with their unchanged participant conditions.
+    """
+    rows = []
+    for step_number, step in enumerate(requirements[part_name], 1):
+        for requirement in step["processesToComplete"]:
+            for resource_id, model in models.items():
+                for event in model["events"]:
+                    actor = event["parameter_bindings"]["resource_id"]["equals"]
+                    part_binding = event["parameter_bindings"].get("part_name", {})
+                    if (
+                        actor != resource_id
+                        or ("equals" in part_binding and part_binding["equals"] != part_name)
+                        or not _declares_process_effect(event, requirement)
+                    ):
+                        continue
+                    peers = {
+                        peer_id: next(
+                            item for item in models[peer_id]["events"]
+                            if item["event_id"] == event["event_id"]
+                        )
+                        for peer_id in event["participants"]
+                    }
+                    rows.append({
+                        "step": step_number,
+                        "requirement": deepcopy(requirement),
+                        "event_id": event["event_id"],
+                        "event_name": event["event_name"],
+                        "actor": actor,
+                        "participants": list(event["participants"]),
+                        "parameter_bindings": deepcopy(event["parameter_bindings"]),
+                        "guards": {rid: deepcopy(peer["guards"]) for rid, peer in peers.items()},
+                        "updates": {rid: deepcopy(peer["updates"]) for rid, peer in peers.items()},
+                        "product_guards": deepcopy(event.get("product_guards", {})),
+                        "product_effects": deepcopy(event["product_effects"]),
+                        "collection_guards": {
+                            rid: deepcopy(peer["collection_guards"])
+                            for rid, peer in peers.items() if "collection_guards" in peer
+                        },
+                        "collection_effects": {
+                            rid: deepcopy(peer["collection_effects"])
+                            for rid, peer in peers.items() if "collection_effects" in peer
+                        },
+                    })
+    return rows
 
 
 def environment_capability_mermaid(environment: dict) -> str:
@@ -387,86 +659,113 @@ def nominal_inventory_rows(model: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _field_rules(rules: dict, field: str) -> list[dict]:
-    matches = []
-    for template, rule in rules.items():
-        if template == field or any(
-            template.endswith(f".{{{name}}}") and field.startswith(template.split("{", 1)[0])
-            for name in ("part_name", "delivered_part")
-        ):
-            matches.append(rule)
-    return matches
-
-
-def nominal_des_mermaid(model: dict[str, Any], field: str) -> str:
-    """Render a state-variable projection using the displayed DES definitions.
+def nominal_resource_state_diagram(
+    model: dict[str, Any], field: str, *, initial_valuation: dict | None = None
+) -> dict:
+    """Project guarded local events onto one declared resource state variable.
 
     Args:
         model: One nominal resource descriptor.
-        field: An exact declared state-variable name.
+        field: An exact state-variable name from the descriptor.
+        initial_valuation: Initial values; the UI supplies configured values.
 
     Returns:
-        Mermaid source with exact labels and synthetic internal node IDs.
-        A parameter target retains its declared name, rather than inventing a
-        concrete outcome for an unbound transport event.
+        A compact DES diagram with exact values, event names, and original IDs.
+        Other participant conditions remain in the full event details.
     """
     declaration = model["state_variables"][field]
-    if "domain" not in declaration or "{part_name}" in field:
-        label = _diagram_label({"field": field, "declaration": declaration})
-        return f'flowchart LR\n    parameter["{label}"]'
-    domain = declaration["domain"]
-    lines = ["flowchart LR"]
-    nodes = {}
-    for index, value in enumerate(domain):
-        key = json.dumps(value)
-        nodes[key] = f"s{index}"
-        lines.append(f'    s{index}["{_diagram_label(value)}"]')
-    initial = nodes[json.dumps(model["current_valuation"][field])]
-    lines.extend(["    initial(( ))", f"    initial --> {initial}"])
-    edges = set()
-    parameter_nodes = {}
-    for event in model["events"]:
-        updates = _field_rules(event["updates"], field)
-        if not updates:
+    if initial_valuation is None:
+        initial_valuation = model["current_valuation"]
+    local_graph = nominal_capability_graph(model)
+    state_key = _graph_field(model["resource_id"], field)
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    node_ids: dict[str, str] = {}
+    edge_ids: dict[tuple[str, str, str], int] = {}
+
+    def intern(value: Any) -> str:
+        key = json.dumps(value, sort_keys=True, ensure_ascii=False)
+        if key not in node_ids:
+            node_id = f"s{len(nodes)}"
+            node_ids[key] = node_id
+            nodes.append({"id": node_id, "value": deepcopy(value)})
+        return node_ids[key]
+
+    if "{part_name}" not in field:
+        for value in declaration.get("domain", []):
+            intern(value)
+    initial_id = intern(initial_valuation[field]) if field in initial_valuation else None
+
+    for edge in local_graph["edges"]:
+        event = edge["event"]
+        if field not in event["updates"] and field not in event.get("collection_effects", {}):
             continue
-        update = updates[0]
-        sources = domain
-        for guard in _field_rules(event["guards"], field):
-            if "equals" in guard:
-                sources = [
-                    value
-                    for value in sources
-                    if type(value) is type(guard["equals"]) and value == guard["equals"]
-                ]
-            elif "not_equals" in guard:
-                sources = [
-                    value
-                    for value in sources
-                    if type(value) is not type(guard["not_equals"]) or value != guard["not_equals"]
-                ]
-            elif "equals_from_param" in guard:
-                binding = event["parameter_bindings"][guard["equals_from_param"]]
-                if "equals" in binding:
-                    sources = [
-                        value
-                        for value in sources
-                        if type(value) is type(binding["equals"]) and value == binding["equals"]
-                    ]
-        if "set" in update:
-            target = nodes[json.dumps(update["set"])]
+        before = local_graph["nodes"][edge["source"]]["state"]
+        after = local_graph["nodes"][edge["target"]]["state"]
+        source_value = before.get(state_key, {})
+        guard = event["guards"].get(field, {})
+        if "equals" in guard:
+            source_value = guard["equals"]
+        elif "equals_from_param" in guard:
+            source_value = _graph_parameter(event, guard["equals_from_param"])
+        target_value = after.get(state_key, {})
+        source = intern(source_value)
+        target = intern(target_value)
+        key = (source, target, event["event_name"])
+        if key not in edge_ids:
+            edge_ids[key] = len(edges)
+            edges.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "event_name": event["event_name"],
+                    "event_ids": [],
+                }
+            )
+        if event["event_id"] not in edges[edge_ids[key]]["event_ids"]:
+            edges[edge_ids[key]]["event_ids"].append(event["event_id"])
+
+    marked = {
+        json.dumps(condition[field]["equals"], sort_keys=True, ensure_ascii=False)
+        for condition in model["marked_state_conditions"]
+        if set(condition) == {field} and "equals" in condition[field]
+    }
+    lines = ["flowchart LR"]
+    state_rows = []
+    for node in nodes:
+        value = node["value"]
+        value_text = _text(value)
+        label = node["id"] if isinstance(value, dict) or len(value_text) > 24 else (
+            f"{node['id']}<br/>{_diagram_label(value_text)}"
+        )
+        if json.dumps(value, sort_keys=True, ensure_ascii=False) in marked:
+            lines.append(f'    {node["id"]}((("{label}")))')
         else:
-            parameter = update["set_from_param"]
-            if parameter not in parameter_nodes:
-                node = f"p{len(parameter_nodes)}"
-                parameter_nodes[parameter] = node
-                lines.append(f'    {node}["{_diagram_label(parameter)}"]')
-                lines.append(f"    style {node} stroke-dasharray: 5 5")
-            target = parameter_nodes[parameter]
-        for source in sources:
-            edges.add((nodes[json.dumps(source)], event["event_name"], target))
-    for source, event_name, target in sorted(edges):
-        lines.append(f'    {source} -->|"{_diagram_label(event_name)}"| {target}')
-    return "\n".join(lines)
+            lines.append(f'    {node["id"]}(("{label}"))')
+        state_rows.append({"id": node["id"], "value": value_text})
+    if initial_id is not None:
+        lines.extend(["    start(( ))", f"    start --> {initial_id}"])
+    for edge in edges:
+        lines.append(
+            f'    {edge["source"]} -->|"{_diagram_label(edge["event_name"])}"| {edge["target"]}'
+        )
+    return {
+        "field": field,
+        "nodes": nodes,
+        "edges": edges,
+        "state_rows": state_rows,
+        "initial_id": initial_id,
+        "mermaid": "\n".join(lines),
+    }
+
+
+def nominal_des_mermaid(
+    model: dict[str, Any], field: str, *, initial_valuation: dict | None = None
+) -> str:
+    """Render one declared state-variable projection as a guarded DES diagram."""
+    return nominal_resource_state_diagram(
+        model, field, initial_valuation=initial_valuation
+    )["mermaid"]
 
 
 def nominal_state_rows(model: dict[str, Any]) -> list[dict[str, Any]]:
@@ -541,6 +840,47 @@ def nominal_event_rows(models: dict[str, dict], resource_id: str, event_name: st
     return rows
 
 
+def nominal_composition_event_rows(models: dict[str, dict], resource_id: str) -> list[dict]:
+    """Collect exact shared variants shown by one resource's local diagrams.
+
+    Args:
+        models: Resource descriptors from one configured model snapshot.
+        resource_id: Exact selected resource identifier.
+
+    Returns:
+        One row per event_id with every participant's unchanged conditions.
+    """
+    rows = []
+    for event in sorted(models[resource_id]["events"], key=lambda item: item["event_id"]):
+        peers = {
+            rid: next(
+                peer for peer in models[rid]["events"]
+                if peer["event_id"] == event["event_id"]
+            )
+            for rid in event["participants"]
+        }
+        rows.append({
+            "event_id": event["event_id"],
+            "event_name": event["event_name"],
+            "actor": event["parameter_bindings"]["resource_id"]["equals"],
+            "participants": list(event["participants"]),
+            "parameter_bindings": deepcopy(event["parameter_bindings"]),
+            "guards": {rid: deepcopy(peer["guards"]) for rid, peer in peers.items()},
+            "updates": {rid: deepcopy(peer["updates"]) for rid, peer in peers.items()},
+            "product_guards": deepcopy(event.get("product_guards", {})),
+            "product_effects": deepcopy(event["product_effects"]),
+            "collection_guards": {
+                rid: deepcopy(peer["collection_guards"])
+                for rid, peer in peers.items() if "collection_guards" in peer
+            },
+            "collection_effects": {
+                rid: deepcopy(peer["collection_effects"])
+                for rid, peer in peers.items() if "collection_effects" in peer
+            },
+        })
+    return rows
+
+
 def _table(
     columns: list[tuple[str, str]], rows: list[dict], row_key: str, page_size: int = 8
 ) -> None:
@@ -579,6 +919,9 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
     busy = False
     initialized = False
     refresh_sections: list[Callable] = []
+    selected_resource_id = ""
+    product_part_choice: str | None = None
+    expanded_sections: dict[tuple[str, ...], bool] = {}
     snapshot_reader = getattr(bridge, "get_environment_capabilities", lambda: {})
     revision_reader = getattr(bridge, "get_environment_capabilities_revision", None)
 
@@ -594,7 +937,10 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
         label: str, builder: Callable, value: Callable, *,
         icon: str = "data_object", expanded: bool = False,
     ):
-        expansion = ui.expansion(label, icon=icon, value=expanded).classes("w-full")
+        section_key = (selected_resource_id, label)
+        expansion = ui.expansion(
+            label, icon=icon, value=expanded_sections.get(section_key, expanded)
+        ).classes("w-full")
         content = ui.column().classes("w-full")
         content.move(expansion)
         previous: Any = object()
@@ -616,9 +962,13 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
             with content:
                 builder(current)
 
-        expansion.on_value_change(refresh)
+        def on_expansion_change() -> None:
+            expanded_sections[section_key] = bool(expansion.value)
+            refresh()
+
+        expansion.on_value_change(on_expansion_change)
         refresh_sections.append(refresh)
-        if expanded:
+        if expansion.value:
             refresh()
         return expansion
 
@@ -644,6 +994,8 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
 
             @ui.refreshable
             def details() -> None:
+                nonlocal selected_resource_id
+                selected_resource_id = selected.value
                 refresh_sections.clear()
 
                 def model() -> dict:
@@ -652,6 +1004,57 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                 ui.label(selected.value).classes("text-lg font-semibold mt-2")
                 occupancy = ui.label().classes("text-sm")
                 neighbors = ui.label().classes("text-sm")
+                ui.label("Resource capability graph").classes("font-semibold")
+                local_diagrams = ui.column().classes("w-full")
+
+                def draw_local_diagrams() -> None:
+                    local_diagrams.clear()
+                    with local_diagrams:
+                        for field in nominal_resource_default_fields(model()):
+                            diagram = nominal_resource_state_diagram(
+                                model(), field,
+                                initial_valuation=configured[selected.value]["current_valuation"],
+                            )
+                            ui.label(field).classes("font-medium mt-2")
+                            ui.mermaid(diagram["mermaid"]).classes("w-full overflow-auto")
+                            _table(
+                                [("id", "State"), ("value", "Exact value")],
+                                diagram["state_rows"], "id", 10,
+                            )
+
+                draw_local_diagrams()
+                marked_conditions = ui.label().classes("text-sm text-slate-600")
+                ui.label(
+                    "These are projections of local state variables. The event name labels "
+                    "each arrow; the exact event_id and full parameter binding identify a "
+                    "shared event variant. All participant and product conditions still apply."
+                ).classes("text-sm text-slate-500")
+                lazy_section(
+                    "Configured initial values and marked state conditions",
+                    lambda data: ui.code(
+                        json.dumps(data, indent=2, ensure_ascii=False), language="json"
+                    ).classes("w-full"),
+                    lambda: {
+                        "current_valuation": configured[selected.value]["current_valuation"],
+                        "marked_state_conditions": model()["marked_state_conditions"],
+                    },
+                )
+                ui.label("Product processPlan stages").classes("font-semibold")
+                product_part_select = ui.select([], label="Part").classes("w-full")
+                product_holder = ui.column().classes("w-full")
+                product_current = ui.label().classes("text-sm text-slate-600")
+                ui.label(
+                    "This per-part processPlan projection shows exact ordered requirements. "
+                    "Transport events leave these stages unchanged, while their resource and "
+                    "custody conditions still apply. A final circle means this part's "
+                    "processPlan is complete; run completion also requires the robots at home."
+                ).classes("text-sm text-slate-500")
+                if selected.value == "Conveyor":
+                    ui.label(
+                        "advance_conveyor updates all resident parts together and preserves "
+                        "downstream order. These diagrams do not claim independent part "
+                        "movement or validated physical spacing."
+                    ).classes("text-sm text-slate-600")
                 lazy_section(
                     "Functions and composed primitives",
                     render_resource_function_rows,
@@ -659,14 +1062,136 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     icon="precision_manufacturing",
                     expanded=True,
                 )
-                ui.label("Capability graph").classes("font-semibold")
-                graph = ui.mermaid(nominal_capability_mermaid(model(), models=models)).classes(
-                    "w-full overflow-auto"
-                )
-                last_definition = deepcopy((model()["events"], model()["state_variables"]))
+                last_local_definition = deepcopy((
+                    model()["events"], model()["state_variables"],
+                    model()["marked_state_conditions"],
+                    configured[selected.value]["current_valuation"],
+                ))
+                last_product_definition: Any = object()
+                product_refreshing = False
+                refresh_product_variants: Callable[[], None] | None = None
+
+                def refresh_local_graph() -> None:
+                    nonlocal last_local_definition
+                    current = model()
+                    definition = (
+                        current["events"], current["state_variables"],
+                        current["marked_state_conditions"],
+                        configured[selected.value]["current_valuation"],
+                    )
+                    if definition != last_local_definition:
+                        last_local_definition = deepcopy(definition)
+                        draw_local_diagrams()
+
+                def refresh_product_graph() -> None:
+                    nonlocal last_product_definition, product_refreshing, product_part_choice
+                    nonlocal refresh_product_variants
+                    if product_refreshing:
+                        return
+                    product_refreshing = True
+                    try:
+                        requirements = live.get("requirements", {}) if "processPlan" in live else {}
+                        parts = list(requirements)
+                        preferred = product_part_choice if product_part_choice in parts else None
+                        if preferred is None and parts:
+                            current_part = live.get("environment_model", {}).get("part_name")
+                            preferred = current_part if current_part in parts else parts[0]
+                        if product_part_select.options != parts:
+                            product_part_select.set_options(parts, value=preferred)
+                        elif product_part_select.value != preferred:
+                            product_part_select.set_value(preferred)
+                        product_part_choice = preferred
+                        product_part_select.set_visibility(bool(parts))
+                        definition = (
+                            live.get("run_id"), preferred,
+                            deepcopy(requirements.get(preferred)) if preferred else None,
+                            deepcopy(live.get("initial_product_states", {}).get(preferred))
+                            if preferred else None,
+                        )
+                        if definition != last_product_definition:
+                            last_product_definition = deepcopy(definition)
+                            product_holder.clear()
+                            refresh_product_variants = None
+                            with product_holder:
+                                if preferred is None:
+                                    ui.label("No active processPlan.").classes("text-sm text-slate-500")
+                                else:
+                                    diagram = nominal_product_process_plan_diagram(
+                                        requirements, live.get("initial_product_states", {}),
+                                        preferred,
+                                    )
+                                    ui.mermaid(diagram["mermaid"]).classes("w-full overflow-auto")
+                                    _table(
+                                        [("id", "State"), ("completed", "processCompleted"),
+                                         ("next_step", "Next step")],
+                                        [
+                                            {**row, "completed": _text(row["completed"]),
+                                             "next_step": row["next_step"] or "complete"}
+                                            for row in diagram["state_rows"]
+                                        ],
+                                        "id", 10,
+                                    )
+                                    initial = live.get("initial_product_states", {}).get(preferred, {})
+                                    ui.label(
+                                        "Configured initial processCompleted: "
+                                        + _text(initial.get("processCompleted", []))
+                                    ).classes("text-sm text-slate-600")
+                                    variant_key = ("product", preferred, "event variants")
+                                    variant_expansion = ui.expansion(
+                                        "Declared event variants for these process steps",
+                                        icon="data_object",
+                                        value=expanded_sections.get(variant_key, False),
+                                    ).classes("w-full")
+                                    variant_content = ui.column().classes("w-full")
+                                    variant_content.move(variant_expansion)
+                                    previous_variants: list[dict] | None = None
+
+                                    def show_variants() -> None:
+                                        nonlocal previous_variants
+                                        expanded_sections[variant_key] = bool(variant_expansion.value)
+                                        if not variant_expansion.value:
+                                            return
+                                        rows = nominal_product_process_event_rows(
+                                            models, requirements, preferred
+                                        )
+                                        if rows == previous_variants:
+                                            return
+                                        previous_variants = deepcopy(rows)
+                                        variant_content.clear()
+                                        with variant_content:
+                                            ui.label(
+                                                "Declared variants are potential matches; "
+                                                "current guards and execution evidence still apply."
+                                            ).classes("text-sm text-slate-500")
+                                            ui.code(
+                                                json.dumps(rows, indent=2, ensure_ascii=False),
+                                                language="json",
+                                            ).classes("w-full")
+
+                                    variant_expansion.on_value_change(show_variants)
+                                    refresh_product_variants = show_variants
+                                    show_variants()
+                        if refresh_product_variants is not None:
+                            refresh_product_variants()
+                        if preferred is None:
+                            product_current.text = ""
+                        else:
+                            current = live.get("product_states", {}).get(preferred, {})
+                            product_current.text = (
+                                "Current processCompleted: "
+                                + _text(current.get("processCompleted", []))
+                            )
+                    finally:
+                        product_refreshing = False
+
+                def choose_product_part() -> None:
+                    nonlocal product_part_choice
+                    product_part_choice = product_part_select.value
+                    refresh_product_graph()
+
+                product_part_select.on_value_change(choose_product_part)
 
                 def refresh_summary() -> None:
-                    nonlocal last_definition
                     current = model()
                     occupancy.text = "Occupancy: " + current.get(
                         "state_evidence", "configured initial assumptions"
@@ -674,22 +1199,14 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     neighbors.text = "Connected neighbors: " + ", ".join(
                         current.get("neighbors", [])
                     )
-                    definition = (current["events"], current["state_variables"])
-                    if definition != last_definition:
-                        last_definition = deepcopy(definition)
-                        content = nominal_capability_mermaid(current, models=models)
-                        if content != graph.content:
-                            graph.set_content(content)
+                    marked_conditions.text = "Marked state conditions: " + json.dumps(
+                        current["marked_state_conditions"], ensure_ascii=False
+                    )
+                    refresh_local_graph()
+                    refresh_product_graph()
 
                 refresh_summary()
                 refresh_sections.append(refresh_summary)
-                ui.label(
-                    "States belong to the selected resource. Edges show its tasks and shared handoffs, with exact event_id and responsible resource. All participant conditions still apply and are available in event details."
-                ).classes("text-sm text-slate-500")
-                if selected.value == "Conveyor":
-                    ui.label(
-                        "advance_conveyor updates all resident parts together and preserves downstream order. The graph does not describe independent part movement or validated physical spacing."
-                    ).classes("text-sm text-slate-600")
                 json_section(
                     "Current configuration and process capabilities",
                     lambda: {
@@ -797,8 +1314,34 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     lambda: nominal_capability_rows(model(), models),
                     icon="route",
                 )
-                json_section(
+
+                def detailed_capability_graph(data: dict) -> None:
+                    endpoints = nominal_resource_capability_diagram(model())
+                    ui.label("Declared capability endpoints").classes("font-medium")
+                    ui.mermaid(endpoints["mermaid"]).classes("w-full overflow-auto")
+                    _table(
+                        [("id", "State"), ("value", "Exact endpoint")],
+                        endpoints["state_rows"], "id", 10,
+                    )
+                    ui.label("Guarded local graph").classes("font-medium")
+                    ui.mermaid(_capability_graph_mermaid(data)).classes(
+                        "w-full overflow-auto"
+                    )
+                    ui.code(
+                        json.dumps(data, indent=2, ensure_ascii=False), language="json"
+                    ).classes("w-full")
+                    ui.label("Shared event variants").classes("font-medium")
+                    ui.code(
+                        json.dumps(
+                            nominal_composition_event_rows(models, selected.value),
+                            indent=2, ensure_ascii=False,
+                        ),
+                        language="json",
+                    ).classes("w-full")
+
+                lazy_section(
                     "Local capability graph and event details",
+                    detailed_capability_graph,
                     lambda: nominal_capability_graph(model(), models),
                 )
                 lazy_section(
@@ -815,7 +1358,11 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                     "These identities identify current contents. Resource eligibility is evaluated from capabilities and conditions."
                 ).classes("text-sm text-slate-500")
 
-                with ui.expansion("DES details", icon="account_tree").classes("w-full") as des:
+                des_key = (selected.value, "DES details")
+                with ui.expansion(
+                    "DES details", icon="account_tree",
+                    value=expanded_sections.get(des_key, False),
+                ).classes("w-full") as des:
                     ui.label(model()["execution_support"]).classes("text-sm text-amber-800")
                     for note in model()["notes"]:
                         ui.label(note).classes("text-sm text-slate-600")
@@ -845,7 +1392,10 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                         nonlocal diagram
                         if not des.value:
                             return
-                        source = nominal_des_mermaid(model(), diagram_field.value)
+                        source = nominal_des_mermaid(
+                            model(), diagram_field.value,
+                            initial_valuation=configured[selected.value]["current_valuation"],
+                        )
                         if diagram is None:
                             with diagram_holder:
                                 diagram = ui.mermaid(source).classes("w-full overflow-auto")
@@ -853,10 +1403,16 @@ def render_nominal_resource_des(bridge: SystemBridge) -> Callable[[], Awaitable[
                             diagram.set_content(source)
 
                     refresh_sections.append(refresh_diagram)
-                    des.on_value_change(refresh_diagram)
+
+                    def on_des_change() -> None:
+                        expanded_sections[des_key] = bool(des.value)
+                        refresh_diagram()
+
+                    des.on_value_change(on_des_change)
                     diagram_field.on_value_change(refresh_diagram)
                     ui.label(
-                        "This diagram projects one state variable. All event guards still apply. Dashed targets name values supplied by task parameters."
+                        "This diagram projects one state variable. All event guards still "
+                        "apply. Parameter and collection outcomes remain symbolic."
                     ).classes("text-xs text-slate-500")
                     evidence = ui.label().classes("text-sm text-slate-500")
 
