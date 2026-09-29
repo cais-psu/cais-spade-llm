@@ -841,6 +841,7 @@ def robot_primitive_sequence_validator(
     )
 
     target_alias_to_part: dict[str, str] = {}
+    target_alias_primitive: dict[str, str] = {}
 
     for step_result in trace_metadata.get("step_results") or []:
         if not isinstance(step_result, dict):
@@ -864,9 +865,26 @@ def robot_primitive_sequence_validator(
                 normalized_fact = event_fact_path.replace("/", ".").strip(".")
                 fact_parts = [seg for seg in normalized_fact.split(".") if seg]
                 if len(fact_parts) >= 3 and fact_parts[0] == "event_facts":
-                    target_alias_to_part[".".join(fact_parts[1:3])] = part_token
+                    alias = ".".join(fact_parts[1:3])
+                    target_alias_to_part[alias] = part_token
+                    target_alias_primitive[alias] = primitive
 
+        if primitive in {
+            "move_cartesian", "move_pose", "move_relative", "move_to_named_pose",
+            "move_joints", "rotate_joint", "move_insert", "compute_pick_targets", "compute_place_targets",
+        }:
+            # A previously reached pose is not evidence after moving away or
+            # replacing the target. Re-establish it from this step's bindings.
+            trace_facts = {
+                key: sources for key, sources in trace_facts.items()
+                if key[0] != "motion_landed_on_target"
+            }
         if primitive in {"move_cartesian", "move_pose"}:
+            coordinate_refs = {}
+            for axis in ("x", "y", "z"):
+                binding = authored_params.get(axis)
+                ref = binding.get("context_ref") if isinstance(binding, dict) else binding
+                coordinate_refs[axis] = str(ref or "").replace("/", ".").strip(".")
             for ref in context_refs:
                 normalized = ref.replace("/", ".").strip(".")
                 parts = [seg for seg in normalized.split(".") if seg]
@@ -876,7 +894,14 @@ def robot_primitive_sequence_validator(
                 if "target_pose" not in parts[3:]:
                     continue
                 part_token = target_alias_to_part.get(alias)
-                if not part_token:
+                if release_to_target_required and target_alias_primitive.get(alias) != "compute_place_targets":
+                    continue
+                if acquisition_required and target_alias_primitive.get(alias) != "compute_pick_targets":
+                    continue
+                if not part_token or not all(
+                    coordinate_refs[axis] == f"event_facts.{alias}.target_pose.{axis}"
+                    for axis in ("x", "y", "z")
+                ):
                     continue
                 _robot_add_trace_fact(
                     trace_facts,

@@ -511,23 +511,56 @@ class BaseSafetyChecker:
     # ------------------------------------------------------------------ #
     # Shared: DFA Transition Logic (The Math)
     # ------------------------------------------------------------------ #
+    def transition_evidence(
+        self, rule_id: str, current_state: str, sigma: frozenset[str]
+    ) -> dict[str, Any]:
+        """Evaluate one DFA step without inventing a stutter transition.
+
+        Args:
+            rule_id: Exact identifier of the applicable requirement.
+            current_state: Monitor state reached by the accepted history.
+            sigma: Complete proposition valuation, including an empty step.
+
+        Returns:
+            Matched guards, unique successor, and accepting-state reachability.
+        """
+        dfa = self.dfas.get(rule_id) or {}
+        matches = [
+            {"guard": label, "to": destination}
+            for label, destination in dfa.get("transitions", {}).get(current_state, [])
+            if self._eval_label(label, sigma, dfa.get("ap_symbols", []))
+        ]
+        destinations = {row["to"] for row in matches}
+        next_state = next(iter(destinations)) if len(destinations) == 1 else None
+        reachable = next_state in dfa.get("accepting_reachable_states", [])
+        reason = (
+            "dfa_missing_transition" if not destinations
+            else "dfa_ambiguous_transition" if len(destinations) != 1
+            else "accepting_state_unreachable" if not reachable
+            else ""
+        )
+        return {
+            "rule_id": rule_id,
+            "from": current_state,
+            "label": sorted(sigma),
+            "rule_label": sorted(set(sigma) & set(dfa.get("ap_symbols", []))),
+            "matched_transitions": matches,
+            "to": next_state,
+            "accepting": next_state in dfa.get("accepting_states", []),
+            "accepting_reachable": reachable,
+            "status": "passed" if not reason else "rejected",
+            "reason": reason,
+        }
+
     def _delta(self, rule_id: str, current_state: str, sigma: frozenset[str]) -> str:
-        """
-        Calculates the next state for a specific rule given the current state and active APs.
-        """
-        dfa_data = self.dfas.get(rule_id)
-        if not dfa_data:
-            return current_state
-
-        transitions = dfa_data.get("transitions", {}).get(current_state, [])
-        ap_symbols = dfa_data.get("ap_symbols", [])
-
-        for label, dst in transitions:
-            if self._eval_label(label, sigma, ap_symbols):
-                return dst
-
-        # If no transition matches, remain in current state (Stuttering)
-        return current_state
+        """Return a unique successor or stop validation on a malformed DFA step."""
+        evidence = self.transition_evidence(rule_id, current_state, sigma)
+        if evidence["to"] is None:
+            raise ValueError(
+                f"{evidence['reason']}: rule {rule_id!r}, state {current_state!r}, "
+                f"label {sorted(sigma)!r}"
+            )
+        return evidence["to"]
 
     def _eval_label(self, label: str, sigma: frozenset[str], rule_aps: list[str]) -> bool:
         """

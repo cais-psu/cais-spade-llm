@@ -1,5 +1,11 @@
 # Gazebo resource functions and primitives
 
+**Document role: saved function and primitive reference.** Use the
+[implementation plan](IMPLEMENTATION_PLAN.md) for future work and experiment
+gates, and [implementation history](IMPLEMENTATION_HISTORY.md) for the dated
+project narrative. Commissioning results below retain their original limits;
+later accepted runs supersede earlier incomplete-run status.
+
 The saved source for this layout is `cais_spade_llm/initialization/recovery_framework_gazebo.json`, in `resource_programs`. It stores each resource's complete primitive catalog separately from its ordered function steps. The Resources UI reads and edits this record. Gazebo and recovery pin its validated revision. Changed revisions, undeclared commands, and commands without a valid executor are rejected. Controller observations, attachment state, clearance, and final position are checked during execution even when a function's saved composition is edited.
 
 The editor accepts parameter changes and additional supported robot motion or perception steps. Required steps retain their relative order, executor, guards, and safety metadata; the required final step remains last. Added steps require unique IDs, supported arguments, and valid bindings to earlier outputs. The executor consumes the resulting saved order. This permits added waypoints without allowing an edit to remove a required handoff or final observation.

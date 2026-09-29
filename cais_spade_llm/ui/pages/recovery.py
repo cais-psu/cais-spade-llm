@@ -9,7 +9,7 @@ from typing import Any
 
 from nicegui import ui
 
-from cais_spade_llm.recovery_framework.diagnostics import MODES, ROOT, jobs, read_object
+from cais_spade_llm.recovery_framework.diagnostics import MODES, ROOT, inspect_inputs, jobs, read_object
 from cais_spade_llm.ui.evidence import (
     BackgroundSection,
     TablePager,
@@ -70,7 +70,7 @@ def _record(data: dict, path: Path) -> None:
             "resource_jid",
             "primitive_local_turn_index",
             "scenario",
-            "outline_source",
+            "outline_source", "run_id", "stage", "turn", "tool_round", "attempt",
         ):
             if key in payload:
                 ui.label(f"{key}: {_cell(payload[key])}").classes("text-sm")
@@ -104,27 +104,65 @@ def _record(data: dict, path: Path) -> None:
                 response["context_requests"],
                 ("request_type", "resource_jid", "part_name", "reason"),
             )
-        with ui.expansion("prompts", icon="chat").classes("w-full"):
-            if not data["prompts"]:
-                ui.label("prompts: not recorded")
-            for reference, resolved in data["prompts"]:
-                ui.label(reference).classes("text-xs break-all text-slate-500")
-                if resolved is None:
-                    ui.label("Prompt file not recorded in this example.").classes("text-amber-700")
+        with ui.expansion("Requests and raw responses", icon="chat").classes("w-full"):
+            captures = data.get("captures") or []
+            if not captures:
+                ui.label("Exact application request: not captured").classes("text-amber-700")
+            for capture in captures:
+                record = capture["record"]
+                title = (
+                    f"{record.get('kind', 'record')} · round {record.get('tool_round', '?')} "
+                    f"· attempt {record.get('attempt', '?')} · {capture['status']}"
+                )
+                if capture["status"] == "captured":
+                    lazy_file(title, Path(capture["path"]))
                 else:
-                    lazy_file("Exact recorded prompt", resolved)
+                    ui.label(f"{title}: {capture['path']}").classes("text-amber-700")
+            for reference, resolved in data["prompts"]:
+                if resolved is not None:
+                    lazy_file("Legacy prompt / prepared preview (not proof of a sent request)", resolved)
+        if payload.get("prepared_preview"):
+            ui.label("Prepared preview: not sent")
         lazy_file("responses / original record", path)
-        _validation(data)
+        _validation(data, path)
 
 
-def _validation(data: dict) -> None:
+def _validation(data: dict, path: Path) -> None:
     payload = data["payload"]
     with ui.expansion("validation", icon="fact_check", value=True).classes("w-full"):
         _table(
             "Recorded validation stages",
             data["validations"],
-            ("candidate_id", "validation_category", "validator_role", "status", "mocked", "reason"),
+            ("candidate_id", "validation_category", "validator_role", "status", "outcome", "mocked", "reason"),
         )
+        for stage in data["validations"]:
+            evidence = stage.get("evidence")
+            title = f"Candidate {stage.get('candidate_id', '?')} · {stage.get('validator_role', '?')} · {stage.get('validation_category', '?')}"
+            with ui.expansion(title).classes("w-full"):
+                if not isinstance(evidence, dict):
+                    ui.label("Detailed evidence: not recorded")
+                    continue
+                ui.label(f"Evidence source: {'mocked' if stage.get('mocked') else 'validator record'}")
+                if evidence.get("feasibility_status"):
+                    ui.badge(evidence["feasibility_status"])
+                support = evidence.get("primitive_support") or {}
+                if support:
+                    _table("Backward derivation: matching successor transitions", support.get("matching_transitions") or [],
+                           ("event_name", "parameter_bindings", "valuation_coverage", "composition_prerequisites"))
+                    _table("Forward validation: primitive union and witnesses", support.get("primitives") or [],
+                           ("primitive", "feasibility_status", "params", "reason", "contributors"))
+                    ui.label(f"Valuation fields checked: {support.get('covered_valuation_fields', [])}")
+                    ui.label(f"Valuation fields deferred to composition: {support.get('deferred_valuation_fields', [])}")
+                safety = evidence.get("safety_context") or evidence.get("safety_ctx") or {}
+                if safety:
+                    _table("CCA requirements and DFA steps", safety.get("rule_checks") or [],
+                           ("rule_id", "from", "label", "to", "accepting", "accepting_reachable", "status", "reason"))
+                lazy_file("Complete recorded findings and parameter attempts", path)
+        for candidate in data.get("validation_details") or []:
+            with ui.expansion(f"Candidate {candidate.get('candidate_id', candidate.get('candidate_index', '?'))}: selection and projected state").classes("w-full"):
+                _table("Recorded candidate", [candidate],
+                       ("candidate_id", "selection_status", "projected_state", "task", "rejection_reason"))
+                lazy_file("Complete candidate record", path)
         if data["rules"]:
             _table(
                 "Recovery safety rule results",
@@ -183,6 +221,10 @@ def _test_controls(refresh, *, root: Path, debug_root: Path, is_active) -> None:
                 ).classes("w-full")
                 custom = ui.input("Additional saved runtime_context JSON path").classes("w-full")
                 mode = ui.select(list(MODES), value="outline", label="Test mode").classes("w-full")
+                response_source = ui.select(
+                    ["live", "fixture_response_replay"], value="live", label="Model response source",
+                ).classes("w-full")
+                replay = ui.input("Response replay JSON path (used only for explicit replay)").classes("w-full")
                 checkpoint = ui.select(
                     {
                         "": "Generate a new outline",
@@ -195,6 +237,46 @@ def _test_controls(refresh, *, root: Path, debug_root: Path, is_active) -> None:
                 ui.label(
                     "Reusing an outline requires matching saved inputs, settings, and validator code."
                 ).classes("text-xs text-slate-500")
+                with ui.expansion("Inspect selected inputs (prepared preview: not sent)", icon="preview").classes("w-full") as preview:
+                    inputs_view = BackgroundSection()
+
+                def inspect_selected() -> None:
+                    if not preview.value:
+                        return
+                    source = custom.value or runtime_context.value
+                    if not source or not scenario.value:
+                        return
+
+                    def read() -> dict:
+                        return inspect_inputs(contained_path(root, source), Path(scenario.value), root=root)
+
+                    def display(inputs: dict) -> None:
+                        saved = inputs["runtime_context"]
+                        ui.label(f"Input fingerprint: {inputs['fingerprint']}").classes("text-xs break-all")
+                        ui.label(f"Evidence source: {saved.get('evidence_source', 'synthetic / not declared')}")
+                        ui.label(f"Goal: {_cell(saved.get('goal_state'))}")
+                        ui.label(f"Remaining obligations: {_cell(saved.get('obligation_targets'))}")
+                        ui.label(f"Model settings: {_cell(inputs['generation_settings'])}")
+                        _table("Resource observations", saved.get("resource_snapshots") or [],
+                               ("resource_jid", "resource_state", "held_part", "current_pose", "evidence_source"))
+                        lazy_file("Starting state, observations, goals and operator guidance", Path(inputs["context_source"]))
+                        lazy_file("Failure scenario and trigger", Path(inputs["scenario_source"]))
+                        dependencies = ui.select(list(inputs["files"]), label="Referenced input file", with_input=True).classes("w-full")
+                        dependency_view = ui.column().classes("w-full")
+
+                        def selected_dependency() -> None:
+                            dependency_view.clear()
+                            if dependencies.value and dependencies.value != "runtime_context":
+                                with dependency_view:
+                                    render_file(root / dependencies.value)
+
+                        dependencies.on_value_change(selected_dependency)
+
+                    inputs_view.load(read, display)
+
+                preview.on_value_change(lambda _: inspect_selected())
+                for control in (scenario, runtime_context, custom):
+                    control.on_value_change(lambda _: inspect_selected())
                 message = ui.label().classes("text-sm")
                 progress = ui.column().classes("w-full")
                 last_status = None
@@ -214,8 +296,14 @@ def _test_controls(refresh, *, root: Path, debug_root: Path, is_active) -> None:
                             if checkpoint.value
                             else None
                         )
+                        if response_source.value == "fixture_response_replay" and not replay.value:
+                            raise ValueError("Explicit replay requires a response replay JSON file")
                         directory = await jobs.start(
-                            mode.value, context_path, Path(scenario.value), checkpoint_path
+                            mode.value, context_path, Path(scenario.value), checkpoint_path,
+                            replay_responses=(
+                                contained_path(root, replay.value)
+                                if response_source.value == "fixture_response_replay" and replay.value else None
+                            ),
                         )
                         message.text = (
                             "Test started. Prompts and validation are saved as stages complete."
@@ -337,6 +425,10 @@ def render(*, root: Path = ROOT, debug_root: Path = DEBUG_ROOT, is_active=lambda
                 ui.badge(example["status"]).props("color=blue-grey outline")
                 ui.label(f"scenario: {example['scenario']}").classes("text-sm")
                 ui.label(example["id"]).classes("text-xs text-slate-500")
+                if "response_source" in example:
+                    ui.badge(f"Model response source: {example['response_source']}").props("outline")
+                    ui.label(f"Evidence source: {example['evidence_source']}").classes("text-sm")
+                    ui.label("Operator guidance: " + ("assisted" if example["assisted"] else "unassisted" if example["assisted"] is False else "not recorded")).classes("text-sm")
             stage = ui.toggle(
                 STAGES, value=next(iter(example["stages"]), "recovery_outline")
             ).props("no-caps")
@@ -383,6 +475,7 @@ def render(*, root: Path = ROOT, debug_root: Path = DEBUG_ROOT, is_active=lambda
             _all_files(example)
             if example["id"].startswith("test_runs/"):
                 lazy_file("Test inputs and settings", example["path"] / "inputs.json")
+                lazy_file("Predefined task-level DES audit", example["path"] / "task_des_audit.json")
                 lazy_file("Test progress log", example["path"] / "runner.log")
 
     def loaded(rows: list[dict], selection: str | None = None) -> None:

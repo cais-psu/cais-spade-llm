@@ -29,6 +29,8 @@ from cais_spade_llm.agents.shared_information.recovery_validation_protocol impor
     recovery_validation_stage,
 )
 
+from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
+
 _logger = logging.getLogger(__name__)
 
 
@@ -3345,6 +3347,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 state_fingerprint=state_fingerprint,
                 snapshot_fingerprint=str(ra_reply.get("snapshot_fingerprint") or ""),
                 mocked=bool(ra_reply.get("mocked")),
+                evidence=transition_result,
             )
         )
         if transition_findings or not bool(transition_result.get("allowed")):
@@ -3372,12 +3375,20 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
 
         primitive_support = physical_result.get("primitive_support")
         primitive_support = primitive_support if isinstance(primitive_support, dict) else {}
+        expected_support = derive_primitive_union(
+            task=validated_task, recovery_des_model=recovery_des_model,
+        )
         witnesses = primitive_support.get("primitives")
         witnesses = witnesses if isinstance(witnesses, list) else []
         if physical_result.get("allowed") is True and (
             primitive_support.get("descriptor_fingerprint") != recovery_des_model_fingerprint
             or primitive_support.get("expected_start_state") != validated_task.get("expected_start_state")
             or primitive_support.get("expected_end_state") != validated_task.get("expected_end_state")
+            or primitive_support.get("semantics") != "successor_primitive_union"
+            or primitive_support.get("matching_transitions") != expected_support["matching_transitions"]
+            or expected_support["missing_support"]
+            or [row.get("primitive") for row in witnesses if isinstance(row, dict)]
+            != [row["primitive"] for row in expected_support["primitives"]]
             or not witnesses
             or any(
                 not isinstance(row, dict)
@@ -3419,6 +3430,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                     ra_reply.get("snapshot_fingerprint") or ""
                 ),
                 mocked=bool(ra_reply.get("mocked")),
+                evidence=physical_result,
             )
         )
         if physical_findings or not bool(physical_result.get("allowed")):
@@ -3621,6 +3633,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                     cca_reply.get("safety_rule_fingerprint") or ""
                 ),
                 mocked=bool(cca_reply.get("mocked")),
+                evidence=cca_result,
             )
         )
         if cca_findings or not bool(cca_result.get("is_safe")):

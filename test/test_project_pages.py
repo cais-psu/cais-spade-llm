@@ -701,3 +701,19 @@ def test_reused_outline_is_visible_and_grounding_is_not_safety(tmp_path):
     assert data['payload']['outline_source'] == '/source/outline_checkpoint.json'
     _write(run, 'multi_turn_turn01_grounding_response_20260416T155255.txt', {'phase': 'grounding'})
     assert stage_records(run, 'recovery_safety') == []
+
+
+def test_request_only_failure_is_indexed_once_with_exact_attempts(tmp_path):
+    from cais_spade_llm.ui.recovery_evidence import list_examples, stage_records, read_stage_record
+
+    directory = tmp_path / "recovery_outline"
+    request = _write(directory / "requests/call1", "round00_attempt01_request.json", {
+        "kind": "provider_request", "tool_round": 0, "attempt": 1,
+        "payload": {"messages": [{"role": "user", "content": "real request"}]},
+    })
+    examples = list_examples(tmp_path)
+    assert len(examples) == 1
+    assert examples[0]["path"] == directory
+    assert set(examples[0]["stages"]) == {"recovery_outline"}
+    assert stage_records(directory, "recovery_outline") == [request]
+    assert read_stage_record(directory, request)["captures"][0]["record"]["payload"]["messages"][0]["content"] == "real request"

@@ -13,6 +13,10 @@ LLM-authored plan flow:
 
 from __future__ import annotations
 
+from cais_spade_llm.agents.shared_information.llm_request_records import (
+    recorded_structured_call, recovery_request_directory,
+)
+
 import json
 import logging
 from collections import Counter
@@ -2111,7 +2115,10 @@ async def generate_primitive_batch_with_llm_agent(
             )
         )
         prompt_text = render_multi_turn_phase_prompt(prompt_input)
-        raw_response = await ask_llm_structured(
+        raw_response = await recorded_structured_call(
+            ask_llm_structured,
+            directory=recovery_request_directory(prepared_recovery_request, "primitive_generation"),
+            run_id=str(recovery_session_id or ""), stage="primitive_generation", turn=turn_index,
             prompt=prompt_text,
             response_format=response_schema,
             include_agent_instructions=False,
@@ -2122,20 +2129,9 @@ async def generate_primitive_batch_with_llm_agent(
         )
         if llm_request.get("messages") != expected_messages:
             llm_request = {
-                "model": str(
-                    getattr(llm_agent, "model", "")
-                    or getattr(llm_agent, "llm_model", "")
-                ).strip(),
-                "messages": expected_messages,
-                "reasoning_effort": str(
-                    getattr(llm_agent, "reasoning_effort", "")
-                    or getattr(llm_agent, "llm_reasoning_effort", "")
-                ).strip(),
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": deepcopy(response_schema),
-                },
-                "response_source": "unknown",
+                "capture_status": "not captured", "request_sent": None,
+                "prepared_preview": {"messages": expected_messages, "response_format": response_schema},
+                "preview_status": "not sent",
             }
         parsed_response = deepcopy(raw_response) if isinstance(raw_response, dict) else {}
         decision, turn_entry = await _handle_primitive_generation_phase(

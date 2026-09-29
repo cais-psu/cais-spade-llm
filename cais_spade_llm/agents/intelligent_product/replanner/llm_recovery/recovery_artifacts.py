@@ -177,14 +177,15 @@ def _render_structured_llm_request(
     *,
     fallback_prompt_text: str,
 ) -> str:
-    """Render one complete structured request as a readable debug artifact."""
+    """Render a readable summary; immutable provider records remain authoritative."""
     llm_request = _extract_structured_llm_request(payload)
     messages = [
         deepcopy(row)
         for row in (llm_request.get("messages") or [])
         if isinstance(row, dict)
     ]
-    if not messages and str(fallback_prompt_text or "").strip():
+    preview = not messages or llm_request.get("request_sent") is False
+    if preview and str(fallback_prompt_text or "").strip():
         messages = [{"role": "user", "content": fallback_prompt_text}]
 
     request_sent = llm_request.get("request_sent")
@@ -192,7 +193,10 @@ def _render_structured_llm_request(
         str(request_sent).lower() if isinstance(request_sent, bool) else "(unknown)"
     )
     lines = [
-        "Structured LLM Request",
+        "Structured LLM Request Summary",
+        f"Exact capture: {llm_request.get('capture_status') or 'not captured'}",
+        "Prepared preview: not sent" if preview else "See immutable request records for every actual attempt.",
+        f"Request records: {json.dumps(llm_request.get('request_record_paths') or [])}",
         f"Model: {str(llm_request.get('model') or '').strip() or '(unknown)'}",
         (
             "Reasoning effort: "
@@ -491,6 +495,12 @@ def _outline_audit_payload(
     selected_transition_outline_id = _extract_selected_transition_outline_id(payload)
     if selected_transition_outline_id:
         result_payload["selected_transition_outline_id"] = selected_transition_outline_id
+    result_payload["candidate_validation_records"] = deepcopy(
+        latest_turn.get("candidate_evaluations") or enriched_response.get("candidate_evaluations") or []
+    )
+    result_payload["request_record_paths"] = deepcopy(
+        (latest_turn.get("llm_request") or {}).get("request_record_paths") or []
+    )
     result_payload.pop("transition_trace", None)
     return result_payload
 
@@ -1192,6 +1202,8 @@ def _primitive_substream_response_text(turn: dict[str, Any]) -> str:
         "primitive_local_turn_index": int(turn.get("primitive_local_turn_index") or 0),
         "decision": decision,
         "response": response_payload,
+        "validation_evidence": deepcopy(turn),
+        "request_record_paths": deepcopy((turn.get("llm_request") or {}).get("request_record_paths") or []),
     }
     return json.dumps(response_artifact, indent=2, ensure_ascii=True, default=str)
 

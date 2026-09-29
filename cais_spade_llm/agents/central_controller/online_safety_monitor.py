@@ -27,6 +27,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
 
         # STATE: Track currently running actions across the factory
         self.running_aps: set[str] = set()
+        self.history_error: dict[str, Any] | None = None
 
         # STATE: Track currently active state APs across the factory
         self.resource_state_aps: dict[str, set[str]] = {}
@@ -122,6 +123,8 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         Returns:
             Admissibility and evidence without mutating DFA states or running_aps.
         """
+        if self.history_error is not None:
+            return False, {"reason": "monitor_history_unavailable", "history_error": self.history_error}
         predicted = list(predicted_state_aps or [])
 
         # Outline projection supplies the full successor valuation, including
@@ -133,49 +136,28 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         )
         sigma = frozenset(set(self.running_aps) | state_aps | set(candidate_aps))
 
-        next_states: dict[str, str] = {}
-        violated_rule = None
-        violated_from = None
-        violated_to = None
-
-        for rule_id in self.dfas:
-            curr = self.current_states.get(rule_id, "1")
-            dfa = self.dfas[rule_id]
-            destinations = {
-                dst
-                for label, dst in dfa["transitions"].get(curr, [])
-                if self._eval_label(label, sigma, dfa["ap_symbols"])
-            }
-            nxt = next(iter(destinations)) if len(destinations) == 1 else None
-
-            if nxt not in dfa["accepting_reachable_states"]:
-                violated_rule = rule_id
-                violated_from = curr
-                violated_to = nxt
-                break
-
-            next_states[rule_id] = nxt
-
-        if violated_rule:
-            return False, {
-                "violated_rule": violated_rule,
-                "violated_from": violated_from,
-                "violated_to": violated_to,
-                "successor_state_aps": sorted(state_aps),
-                "candidate_aps": candidate_aps,
-                "running_snapshot": list(self.running_aps),
-                "state_snapshot": sorted(self._all_state_aps()),
-                "predicted_state_aps": predicted,
-            }
-
-        return True, {
-            "running_snapshot": list(self.running_aps),
+        checks = [
+            self.transition_evidence(rule_id, self.current_states[rule_id], sigma)
+            for rule_id in self.dfas
+        ]
+        failed = next((row for row in checks if row["status"] != "passed"), None)
+        info = {
+            "rule_checks": checks,
+            "label": sorted(sigma),
+            "running_snapshot": sorted(self.running_aps),
             "state_snapshot": sorted(self._all_state_aps()),
-            "next_states": next_states,
             "successor_state_aps": sorted(state_aps),
-            "candidate_aps": candidate_aps,
+            "candidate_aps": list(candidate_aps),
             "predicted_state_aps": predicted,
         }
+        if failed is not None:
+            info.update(
+                violated_rule=failed["rule_id"], violated_from=failed["from"],
+                violated_to=failed["to"], reason=failed["reason"],
+            )
+            return False, info
+        info["next_states"] = {row["rule_id"]: row["to"] for row in checks}
+        return True, info
 
     def process_start_event(self, event: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         """
@@ -242,7 +224,11 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         next_states: dict[str, str] = {}
         for rule_id in self.dfas:
             prev = self.current_states.get(rule_id, "1")
-            nxt = self._delta(rule_id, prev, sigma)
+            try:
+                nxt = self._delta(rule_id, prev, sigma)
+            except ValueError:
+                self.history_error = self.transition_evidence(rule_id, prev, sigma)
+                raise
             next_states[rule_id] = nxt
         self.current_states = next_states
 

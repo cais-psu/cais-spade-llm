@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from itertools import product
+from itertools import islice, product
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -144,10 +144,13 @@ def _parameter_assignments(
         if not choices:
             return [], False
         values[name] = choices
+    rows = product(*(values[name] for name in values))
     assignments = [
         {name: value for name, value in zip(values, row, strict=True) if value is not omitted}
-        for row in product(*(values[name] for name in values))
+        for row in islice(rows, 4096)
     ]
+    if next(rows, None) is not None:
+        complete = False
     return assignments, complete
 
 
@@ -183,6 +186,84 @@ def _precondition_result(entry: dict[str, Any], snapshot: dict[str, Any]) -> dic
     return None
 
 
+def derive_primitive_union(
+    *, task: dict[str, Any], recovery_des_model: dict[str, Any]
+) -> dict[str, Any]:
+    """Collect primitive identities from every matching successor transition.
+
+    Args:
+        task: Candidate carrying the proposed resource and product valuations.
+        recovery_des_model: Private RA transition model and primitive support.
+
+    Returns:
+        Unordered support with all contributing bindings and valuation coverage.
+        Product effects and execution prerequisites remain composition obligations.
+    """
+    declarations = recovery_des_model.get("state_variables") or {}
+    end = task["expected_end_state"]
+    covered = [
+        field for field in end
+        if field in declarations
+        and declarations[field].get("private") is not True
+        and declarations[field].get("scope", "resource") == "resource"
+    ]
+    transitions: list[dict[str, Any]] = []
+    primitives: dict[str, dict[str, Any]] = {}
+    missing_support: list[str] = []
+    for event in recovery_des_model.get("events", []):
+        bindings = _successor_bindings(task, event, recovery_des_model)
+        if bindings is None:
+            continue
+        transition = {
+            "event_name": event["event_name"],
+            "parameter_bindings": deepcopy(bindings),
+            "valuation_coverage": {
+                field: {
+                    "value": deepcopy(end[field]),
+                    "basis": "update" if field in event.get("updates", {}) else "preserved",
+                }
+                for field in covered
+            },
+            "composition_prerequisites": deepcopy(event.get("guards") or {}),
+            "composition_contract": deepcopy(event.get("composition_contract") or {}),
+            "primitives": [],
+        }
+        transitions.append(transition)
+        steps = event.get("primitive_support")
+        if not isinstance(steps, list):
+            missing_support.append(event["event_name"])
+            continue
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict) or not isinstance(step.get("primitive"), str):
+                missing_support.append(event["event_name"])
+                continue
+            name = step["primitive"]
+            transition["primitives"].append(name)
+            row = primitives.setdefault(name, {"primitive": name, "contributors": []})
+            row["contributors"].append({
+                "event_name": event["event_name"],
+                "step_index": index,
+                "parameter_bindings": deepcopy(bindings),
+                "step": deepcopy(step),
+                "covered_valuation_fields": list(covered),
+            })
+    support = {
+        "semantics": "successor_primitive_union",
+        "descriptor_fingerprint": recovery_des_model.get("descriptor_fingerprint", ""),
+        "expected_start_state": deepcopy(task.get("expected_start_state") or {}),
+        "expected_end_state": deepcopy(end),
+        "covered_valuation_fields": covered,
+        "deferred_valuation_fields": [field for field in end if field not in covered],
+        "matching_transitions": transitions,
+        "missing_support": list(dict.fromkeys(missing_support)),
+        "primitives": list(primitives.values()),
+    }
+    if len(transitions) == 1:
+        support["event_name"] = transitions[0]["event_name"]
+        support["parameter_bindings"] = deepcopy(transitions[0]["parameter_bindings"])
+    return support
+
+
 def validate_primitive_support(
     *,
     task: dict[str, Any],
@@ -190,7 +271,7 @@ def validate_primitive_support(
     recovery_snapshot: dict[str, Any],
     validate_primitive: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
-    """Derive alternatives and require a capability witness for each primitive.
+    """Require a capability witness for every primitive in the successor union.
 
     Args:
         task: Grounded candidate with exact expected start and end conditions.
@@ -199,82 +280,67 @@ def validate_primitive_support(
         validate_primitive: Resource-owned, non-executing physical evaluator.
 
     Returns:
-        Feasibility, selected primitive support, and evidence for every attempted
-        alternative. Primitive Composition must still establish ordering,
-        compatible parameter bindings, and the complete intended condition.
+        Feasibility, the complete primitive union, and attempted witnesses.
+        Composition must still establish ordering, compatible bindings, and
+        the complete intended successor condition.
     """
-    catalog = {row["name"]: row for row in recovery_des_model.get("primitive_catalog", [])}
-    alternatives: list[dict[str, Any]] = []
-    missing_context = False
-    for event in recovery_des_model.get("events", []):
-        bindings = _successor_bindings(task, event, recovery_des_model)
-        if bindings is None:
-            continue
-        steps = event.get("primitive_support") or []
-        alternative: dict[str, Any] = {
-            "event_name": event["event_name"],
-            "parameter_bindings": deepcopy(bindings),
-            "primitives": [],
-        }
-        alternatives.append(alternative)
-        if not steps:
-            alternative.update(_result("NEEDS_CONTEXT", "Matching event has no primitive support"))
-            missing_context = True
-            continue
-        statuses: list[str] = []
-        for step in steps:
-            name = step["primitive"]
-            entry = catalog.get(name)
-            primitive_result: dict[str, Any]
-            if entry is None:
-                primitive_result = _result(
-                    "NEEDS_CONTEXT", f"Primitive {name!r} is absent from the RA catalog"
-                )
-            else:
-                primitive_result = _check_primitive(
-                    step=step,
-                    entry=entry,
-                    bindings=bindings,
-                    snapshot=recovery_snapshot,
-                    validate_primitive=validate_primitive,
-                )
-            alternative["primitives"].append({"primitive": name, **primitive_result})
-            statuses.append(primitive_result["feasibility_status"])
-        status = (
-            "INFEASIBLE"
-            if "INFEASIBLE" in statuses
-            else "NEEDS_CONTEXT"
-            if "NEEDS_CONTEXT" in statuses
-            else "FEASIBLE"
-        )
-        alternative["feasibility_status"] = status
-        if status == "FEASIBLE":
-            support = {
-                "event_name": event["event_name"],
-                "parameter_bindings": deepcopy(bindings),
-                "primitives": deepcopy(alternative["primitives"]),
-                "descriptor_fingerprint": recovery_des_model.get("descriptor_fingerprint", ""),
-                "expected_start_state": deepcopy(task.get("expected_start_state") or {}),
-                "expected_end_state": deepcopy(task["expected_end_state"]),
-            }
-            return {
-                **_result(
-                    "FEASIBLE",
-                    "One matching transition has feasible primitive support",
-                    alternatives=alternatives,
-                ),
-                "primitive_support": support,
-            }
-        missing_context |= status == "NEEDS_CONTEXT"
-    if not alternatives:
+    support = derive_primitive_union(task=task, recovery_des_model=recovery_des_model)
+    if not support["matching_transitions"]:
         result = _result("INFEASIBLE", "No predefined successor supports expected_end_state")
         result["constraint_code"] = "unsupported_successor_condition"
-        return result
-    return _result(
-        "NEEDS_CONTEXT" if missing_context else "INFEASIBLE",
-        "No matching transition has demonstrated feasible primitive support",
-        alternatives=alternatives,
+        return {**result, "primitive_support": support}
+    catalog = {row["name"]: row for row in recovery_des_model.get("primitive_catalog", [])}
+    statuses = ["NEEDS_CONTEXT"] if support["missing_support"] else []
+    for row in support["primitives"]:
+        name = row["primitive"]
+        entry = catalog.get(name)
+        attempts: list[dict[str, Any]] = []
+        witness = None
+        if entry is not None:
+            for contributor in row["contributors"]:
+                check = _check_primitive(
+                    step=contributor["step"], entry=entry,
+                    bindings=contributor["parameter_bindings"],
+                    snapshot=recovery_snapshot, validate_primitive=validate_primitive,
+                )
+                attempts.append({"event_name": contributor["event_name"], **check})
+                if check["feasibility_status"] == "FEASIBLE":
+                    witness = check
+                    break
+        if witness is None:
+            unresolved = entry is None or any(
+                check["feasibility_status"] == "NEEDS_CONTEXT" for check in attempts
+            )
+            witness = _result(
+                "NEEDS_CONTEXT" if unresolved else "INFEASIBLE",
+                f"No demonstrated capability witness for primitive {name!r}",
+            )
+        row.update(witness)
+        row["parameter_attempts"] = attempts
+        row["composition_contract"] = {
+            key: deepcopy((entry or {}).get(key))
+            for key in ("preconditions", "effects", "capability_constraints", "required_evidence")
+            if key in (entry or {})
+        }
+        statuses.append(row["feasibility_status"])
+    status = (
+        "INFEASIBLE" if "INFEASIBLE" in statuses
+        else "NEEDS_CONTEXT" if "NEEDS_CONTEXT" in statuses
+        else "FEASIBLE" if support["primitives"]
+        else "INFEASIBLE"
     )
+    return {
+        **_result(
+            status,
+            "Every primitive in the successor union has a capability witness"
+            if status == "FEASIBLE"
+            else f"{status}: the successor union is empty or lacks required capability evidence",
+            matching_transitions=deepcopy(support["matching_transitions"]),
+            primitive_union=[row["primitive"] for row in support["primitives"]],
+            missing_support=deepcopy(support["missing_support"]),
+        ),
+        "primitive_support": support,
+    }
 
 
 def _check_primitive(
@@ -314,7 +380,12 @@ def _check_primitive(
             result = _result("NEEDS_CONTEXT", "Primitive evaluator returned no evidence")
         status = result.get("feasibility_status")
         if result.get("allowed") is True and status == "FEASIBLE":
-            return {**result, "params": deepcopy(params)}
+            return {
+                **result, "params": deepcopy(params),
+                "parameter_checks": [
+                    *findings, {"params": deepcopy(params), "result": deepcopy(result)}
+                ],
+            }
         unknown |= status not in {"FEASIBLE", "INFEASIBLE"}
         findings.append({"params": params, "result": deepcopy(result)})
     return _result(
@@ -324,4 +395,4 @@ def _check_primitive(
     )
 
 
-__all__ = ["validate_primitive_support"]
+__all__ = ["derive_primitive_union", "validate_primitive_support"]

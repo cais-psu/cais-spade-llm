@@ -33,10 +33,12 @@ def _recovery_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     for raw_rule in llm_input.get("loaded_safety_rules") or []:
         if not isinstance(raw_rule, dict):
-            continue
+            raise ValueError("Loaded safety rule is malformed")
+        if not str(raw_rule.get("id") or raw_rule.get("rule_id") or "").strip():
+            raise ValueError("Loaded safety rule has no identifier")
         ap_scope = str(raw_rule.get("ap_scope") or "").strip().lower()
         if ap_scope not in {"recovery", "bridge", "both", "nominal"}:
-            continue
+            raise ValueError("Loaded safety rule has no supported applicability scope")
         dfa_dot = str(raw_rule.get("dfa_dot") or "").strip()
         recovery_aps = _recovery_rule_aps(raw_rule)
         if not dfa_dot:
@@ -67,6 +69,12 @@ def _recovery_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
         rule["recovery_aps"] = recovery_aps
         rule["dfa_dot"] = dfa_dot
         selected.append(rule)
+    required = set(llm_input.get("required_safety_rule_ids") or [])
+    available = {str(rule.get("id") or rule.get("rule_id") or "") for rule in selected}
+    if required - available:
+        raise ValueError(f"Required recovery safety rules are missing: {sorted(required - available)}")
+    if len(available) != len(selected):
+        raise ValueError("Applicable recovery safety rule identifiers are duplicated")
     return selected
 
 
@@ -281,6 +289,39 @@ def _selector_matches_event(
     return False
 
 
+def _require_state_evidence(
+    selector: dict[str, Any], resources: dict[str, dict[str, Any]], parts: dict[str, dict[str, Any]],
+) -> None:
+    """Stop AP grounding when a required state fact is absent rather than false."""
+    mode = selector.get("mode")
+    part_mode = mode in {"part_goal_satisfied", "part_at_destination"}
+    selected = _normalize_token(selector.get("part" if part_mode else "resource") or "any")
+    rows = [
+        row for name, row in (parts if part_mode else resources).items()
+        if selected == "any" or selected == (
+            _normalize_token(name) if part_mode else _normalize_token(name).split("@", 1)[0]
+        )
+    ]
+    if not rows:
+        raise ValueError(f"Required safety state evidence is missing for {selected!r}")
+    fields = []
+    if mode in {"part_goal_satisfied", "resource_state"}:
+        fields.append(("current_state", "state"))
+    if selector.get("destination"):
+        fields.append(("current_location", "location", "resource_location"))
+    if mode in {"part_at_destination", "resource_in_destination"} and not selector.get("destination"):
+        raise ValueError("Safety destination selector has no exact destination binding")
+    if mode == "part_goal_satisfied" and not selector.get("states"):
+        raise ValueError("Safety part-goal selector has no exact state binding")
+    if mode == "resource_state" and not selector.get("state"):
+        raise ValueError("Safety resource-state selector has no exact state binding")
+    for row in rows:
+        # An explicit null is a declared symbolic valuation; absence of the
+        # field is missing evidence. Geometry remains the RA's responsibility.
+        if any(not any(field in row for field in alternatives) for alternatives in fields):
+            raise ValueError(f"Required safety state fields are missing for {selected!r}")
+
+
 def _selector_matches_state(
     selector: dict[str, Any],
     *,
@@ -373,6 +414,8 @@ def project_outline_macro_recovery_aps(
             ):
                 candidate_aps.append(label)
             elif full.startswith("ap_state/"):
+                _require_state_evidence(selector, pre_resources, pre_parts)
+                _require_state_evidence(selector, projected_resources, projected_parts)
                 if _selector_matches_state(
                     selector,
                     resources_by_jid=pre_resources,
@@ -558,6 +601,8 @@ def validate_outline_macro_recovery_safety(
             "is_safe": True,
             "safety_ctx": {
                 "rule_ids": [],
+                "rule_checks": [],
+                "coverage": "no_applicable_rules",
                 "running_aps": [],
                 "candidate_aps": list(projection.get("candidate_aps") or []),
                 "predicted_state_aps": list(projection.get("predicted_state_aps") or []),
@@ -675,7 +720,12 @@ def validate_outline_macro_recovery_safety(
     violated_rule = dict(rule_lookup.get(violated_rule_id) or {})
 
     safety_ctx = {
-        "rule_ids": [violated_rule_id] if violated_rule_id else [],
+        "rule_ids": list(rule_lookup),
+        "rule_checks": [
+            {**deepcopy(check), "requirement": deepcopy(rule_lookup.get(check["rule_id"], {}))}
+            for check in info.get("rule_checks", [])
+        ],
+        "label": deepcopy(info.get("label", [])),
         "running_aps": _dedupe_tokens(
             list(info.get("running_snapshot") or [])
             + list(projection.get("current_state_aps") or [])
@@ -686,7 +736,7 @@ def validate_outline_macro_recovery_safety(
         ),
         "safe_next_task_ids": [],
         "status": "violated" if not allowed else "safe",
-        "reason": _safety_violation_reason(violated_rule) if violated_rule else "",
+        "reason": info.get("reason") or (_safety_violation_reason(violated_rule) if violated_rule else ""),
         "safety_rules": [deepcopy(violated_rule)] if violated_rule else [],
     }
 

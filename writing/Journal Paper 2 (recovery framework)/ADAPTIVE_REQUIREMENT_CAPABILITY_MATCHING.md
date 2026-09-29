@@ -1,5 +1,10 @@
 # Adaptive matching of product requirements to resource capabilities
 
+**Document role: requirement/capability design reference.** The
+[implementation plan](IMPLEMENTATION_PLAN.md) is the sole current roadmap;
+[formal validation](JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md) defines the
+validation contract. Earlier migration steps below retain their original scope.
+
 **Status: processPlan matching and resource graph representation are implemented.**
 Controller integration and live execution of these process plans are outside this change.
 The separate KMR Storage-to-M1 delivery retains

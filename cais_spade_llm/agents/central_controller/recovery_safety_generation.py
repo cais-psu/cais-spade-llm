@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+from cais_spade_llm.agents.shared_information.llm_request_records import recorded_structured_call
 
 _FIXED_STATE_FIELDS = (
     "resource_state",
@@ -41,7 +42,7 @@ def _captured_structured_request(
     fallback_prompt: str,
     fallback_response_format: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return the complete recovery safety request sent to the LLM."""
+    """Return capture metadata, explicitly labeling unavailable request evidence."""
     request_payload = deepcopy(llm_request)
     messages = [
         deepcopy(row)
@@ -54,21 +55,13 @@ def _captured_structured_request(
         for row in messages
     ):
         request_payload = {
-            "messages": [{"role": "user", "content": fallback_prompt}],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": deepcopy(fallback_response_format),
+            "capture_status": "not captured", "request_sent": None,
+            "prepared_preview": {
+                "messages": [{"role": "user", "content": fallback_prompt}],
+                "response_format": {"type": "json_schema", "json_schema": deepcopy(fallback_response_format)},
             },
-            "response_source": "unknown",
-            "request_sent": None,
+            "preview_status": "not sent",
         }
-    request_payload.setdefault(
-        "response_format",
-        {
-            "type": "json_schema",
-            "json_schema": deepcopy(fallback_response_format),
-        },
-    )
     return request_payload
 
 
@@ -1837,8 +1830,10 @@ async def generate_recovery_safety_bundle(
         recovery_safety_dir / "recovery_safety_grounding_prompt_latest.txt"
     )
     try:
-        grounding = await controller_agent.ask_llm_structured(
-            prompt,
+        grounding = await recorded_structured_call(
+            controller_agent.ask_llm_structured, directory=recovery_safety_dir,
+            run_id=str(payload.get("recovery_safety_scope_id") or ""), stage="safety", turn=1,
+            prompt=prompt,
             response_format=response_format,
             include_agent_instructions=False,
         )
@@ -2041,6 +2036,7 @@ async def generate_recovery_safety_bundle(
         )
 
     grounding_response = _grounding_response_from_rule_results(all_rule_results)
+    grounding_response["request_record_paths"] = deepcopy(captured_request.get("request_record_paths") or [])
     response_path = _write_json(recovery_safety_dir / response_name, grounding_response)
     latest_response_path = _write_json(
         recovery_safety_dir / "recovery_safety_grounding_response_latest.json",
@@ -2065,7 +2061,8 @@ async def generate_recovery_safety_bundle(
             "ungroundable_rules": ungroundable,
             "failure_reason": "one or more safety rules could not be grounded for the active recovery scope",
             "snapshot_artifact_path": snapshot_path,
-            "grounding_prompt_artifact_path": prompt_path,
+            "request_record_paths": deepcopy(captured_request.get("request_record_paths") or []),
+        "grounding_prompt_artifact_path": prompt_path,
             "latest_grounding_prompt_artifact_path": latest_prompt_path,
             "grounding_llm_response_artifact_path": llm_response_path,
             "latest_grounding_llm_response_artifact_path": latest_llm_response_path,
@@ -2112,6 +2109,7 @@ async def generate_recovery_safety_bundle(
         "ungroundable_rules": [],
         "failure_reason": "",
         "snapshot_artifact_path": snapshot_path,
+        "request_record_paths": deepcopy(captured_request.get("request_record_paths") or []),
         "grounding_prompt_artifact_path": prompt_path,
         "latest_grounding_prompt_artifact_path": latest_prompt_path,
         "grounding_llm_response_artifact_path": llm_response_path,

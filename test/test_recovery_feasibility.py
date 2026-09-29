@@ -72,17 +72,19 @@ def _check(model: dict | None = None, task: dict | None = None, evaluator=None) 
     )
 
 
-def test_one_feasible_alternative_suffices() -> None:
+def test_one_feasible_alternative_does_not_satisfy_the_union() -> None:
     def evaluate(*, primitive: str, params: dict) -> dict:
         allowed = primitive == "release_part"
         return {"allowed": allowed, "feasibility_status": "FEASIBLE" if allowed else "INFEASIBLE"}
 
     result = _check(evaluator=evaluate)
-    assert result["allowed"] is True
-    assert result["primitive_support"]["event_name"] == "place_insert"
-    assert [row["feasibility_status"] for row in result["evidence"]["alternatives"]] == [
-        "INFEASIBLE",
-        "FEASIBLE",
+    assert result["allowed"] is False
+    assert result["feasibility_status"] == "INFEASIBLE"
+    assert [row["primitive"] for row in result["primitive_support"]["primitives"]] == [
+        "move_to_named_pose", "release_part",
+    ]
+    assert [row["feasibility_status"] for row in result["primitive_support"]["primitives"]] == [
+        "INFEASIBLE", "FEASIBLE",
     ]
 
 
@@ -511,3 +513,124 @@ def test_cca_rejection_after_ra_success_preserves_the_pa_prefix() -> None:
         "projected_safety_dfa_states",
     ):
         assert session.get(key) == before.get(key)
+
+
+def test_union_deduplicates_identity_and_retains_all_bindings() -> None:
+    model = _model()
+    second = deepcopy(model["events"][0])
+    second["event_name"] = "another_home_transition"
+    second["primitive_support"][0]["params"]["pose_name"] = "prusa-mk4-1"
+    model["events"] = [model["events"][0], second]
+    calls = []
+
+    def evaluate(*, primitive, params):
+        calls.append(deepcopy(params))
+        allowed = params["pose_name"] == "prusa-mk4-1"
+        return {"allowed": allowed, "feasibility_status": "FEASIBLE" if allowed else "INFEASIBLE"}
+
+    result = _check(model=model, evaluator=evaluate)
+    assert result["allowed"] is True
+    support = result["primitive_support"]
+    assert support["semantics"] == "successor_primitive_union"
+    assert len(support["primitives"]) == 1
+    witness = support["primitives"][0]
+    assert len(witness["contributors"]) == 2
+    assert len(witness["parameter_attempts"]) == 2
+    assert witness["params"] == {"pose_name": "prusa-mk4-1"}
+    assert calls == [{"pose_name": "home"}, {"pose_name": "prusa-mk4-1"}]
+
+
+@pytest.mark.parametrize("missing, status", [(False, "INFEASIBLE"), (True, "NEEDS_CONTEXT")])
+def test_known_empty_union_differs_from_missing_support(missing, status) -> None:
+    model = _model()
+    for event in model["events"]:
+        if missing:
+            event.pop("primitive_support")
+        else:
+            event["primitive_support"] = []
+    assert _check(model=model)["feasibility_status"] == status
+
+
+def test_union_does_not_claim_product_effect_coverage() -> None:
+    model = _model()
+    model["state_variables"]["part_location"] = {"scope": "part", "domain": ["M1 staging tray"]}
+    task = _task()
+    task["expected_end_state"]["part_location"] = "M1 staging tray"
+    support = _check(model=model, task=task)["primitive_support"]
+    assert support["covered_valuation_fields"] == ["resource_state"]
+    assert support["deferred_valuation_fields"] == ["part_location"]
+    assert all("part_location" not in row["valuation_coverage"] for row in support["matching_transitions"])
+
+
+def test_one_impossible_union_primitive_overrides_other_missing_evidence() -> None:
+    result = _check(evaluator=lambda primitive, params: {
+        "allowed": False,
+        "feasibility_status": "INFEASIBLE" if primitive == "release_part" else "NEEDS_CONTEXT",
+    })
+    assert result["feasibility_status"] == "INFEASIBLE"
+
+
+def _staging_validation(steps):
+    from cais_spade_llm.resources.robot.robot_primitives import robot_primitive_sequence_validator
+
+    return robot_primitive_sequence_validator(
+        outline_event={
+            "resource_jid": "ur5e-4@localhost", "part_name": "gear_large",
+            "expected_start_state": {"held_part": "gear_large", "part_location": "ur5e-4@localhost"},
+            "expected_end_state": {"held_part": None, "part_location": "M1 staging tray"},
+        },
+        primitive_steps=[], trace_metadata={"step_results": steps},
+        start_snapshot={"held_part": "gear_large"}, projected_snapshot={"held_part": None},
+    )
+
+
+def _placement_trace():
+    return [
+        {"primitive": "compute_place_targets", "event_fact_path": "event_facts.place_targets.gear_large",
+         "resolved_params": {"part_name": "gear_large", "destination_location": "M1 staging tray"}},
+        {"primitive": "move_cartesian", "resolved_params": {"x": 1.0, "y": 0.2, "z": 0.5},
+         "params": {axis: {"context_ref": f"event_facts.place_targets.gear_large.target_pose.{axis}"} for axis in ("x", "y", "z")},
+         "context_refs": [f"event_facts.place_targets.gear_large.target_pose.{axis}" for axis in ("x", "y", "z")]},
+        {"primitive": "release_part", "resolved_params": {"part_name": "gear_large"}},
+    ]
+
+
+def test_airborne_release_does_not_establish_staging() -> None:
+    findings = _staging_validation(_placement_trace()[-1:])
+    assert {row["constraint_code"] for row in findings} >= {"release_target_grounding_required", "trace_fact_required"}
+    assert not _staging_validation(_placement_trace())
+
+
+def test_move_away_invalidates_release_motion_witness() -> None:
+    steps = _placement_trace()
+    steps.insert(2, {"primitive": "move_relative", "resolved_params": {"dx": 0, "dy": 0, "dz": 0.4}})
+    findings = _staging_validation(steps)
+    assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target" for row in findings)
+
+
+def test_one_target_coordinate_cannot_ground_a_complete_release_pose() -> None:
+    steps = _placement_trace()
+    steps[1]["context_refs"] = steps[1]["context_refs"][:1]
+    steps[1]["params"].update(y=5.0, z=5.0)
+    assert _staging_validation(steps)
+
+
+def test_swapped_target_coordinates_cannot_establish_a_landing() -> None:
+    steps = _placement_trace()
+    params = steps[1]["params"]
+    params["y"], params["z"] = params["z"], params["y"]
+    assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target"
+               for row in _staging_validation(steps))
+
+
+def test_pick_target_motion_cannot_witness_placement_of_the_same_part() -> None:
+    steps = _placement_trace()
+    steps.insert(1, {
+        "primitive": "compute_pick_targets", "event_fact_path": "event_facts.pick_targets.gear_large",
+        "resolved_params": {"part_name": "gear_large"},
+    })
+    motion = steps[2]
+    motion["params"] = {axis: {"context_ref": f"event_facts.pick_targets.gear_large.target_pose.{axis}"} for axis in ("x", "y", "z")}
+    motion["context_refs"] = [value["context_ref"] for value in motion["params"].values()]
+    assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target"
+               for row in _staging_validation(steps))

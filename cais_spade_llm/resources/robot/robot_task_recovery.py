@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict
 from typing import Any
 
 from .robot_task_model import RobotTaskDefinition, RobotTaskGuard
@@ -171,10 +172,20 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
                 ),
                 "recovery_visible_steps": program.render_recovery_steps(),
                 "primitive_support": [
-                    {"primitive": step.op, "params": deepcopy(step.params)}
+                    {
+                        "primitive": step.op,
+                        "params": deepcopy(step.params),
+                        "when": [asdict(guard) for guard in step.when],
+                    }
                     for step in program.steps
                     if step.executor == "primitive"
                 ],
+                "composition_contract": {
+                    "entry_guards": [asdict(guard) for guard in program.entry_guards],
+                    "required_context_keys": list(program.required_context_keys),
+                    "effects": [asdict(effect) for effect in program.effects],
+                    "part_transition": deepcopy(program.part_transition),
+                },
                 "source": task.source,
             }
         )

@@ -3825,7 +3825,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                     "- `event_name` may be new, and the proposed transition need not be predefined. "
                     "Its intended resource condition must match a predefined successor. "
                     "The RA derives alternative primitive supports and requires feasible parameter "
-                    "assignments for every primitive in one alternative. Missing evidence requires revision."
+                    "assignments for every primitive in the union of all matching successor transitions. Missing evidence requires revision."
                 ),
                 (
                     "- Use only supplied `resource_jid` and `part_name` values. Location "

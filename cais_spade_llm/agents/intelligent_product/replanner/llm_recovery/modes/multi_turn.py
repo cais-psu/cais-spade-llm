@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from cais_spade_llm.agents.shared_information.llm_request_records import (
+    recorded_structured_call, recovery_request_directory,
+)
+
 import asyncio
 import inspect
 import json
@@ -5710,7 +5714,11 @@ async def execute_multi_turn_recovery(
                 )
                 llm_started_at = asyncio.get_running_loop().time()
                 response_task = asyncio.create_task(
-                    ask_llm_structured(
+                    recorded_structured_call(
+                        ask_llm_structured,
+                        directory=recovery_request_directory(prepared_recovery_request, current_phase),
+                        run_id=str((prepared_recovery_request.get("recovery_session") or {}).get("session_id") or ""),
+                        stage=current_phase, turn=turn_idx,
                         prompt=prompt_text,
                         response_format=response_schema,
                         include_agent_instructions=False,
@@ -5740,20 +5748,9 @@ async def execute_multi_turn_recovery(
                 expected_messages = [{"role": "user", "content": prompt_text}]
                 if llm_request.get("messages") != expected_messages:
                     llm_request = {
-                        "model": str(
-                            getattr(product_agent, "model", "")
-                            or getattr(product_agent, "llm_model", "")
-                        ).strip(),
-                        "messages": expected_messages,
-                        "reasoning_effort": str(
-                            getattr(product_agent, "reasoning_effort", "")
-                            or getattr(product_agent, "llm_reasoning_effort", "")
-                        ).strip(),
-                        "response_format": {
-                            "type": "json_schema",
-                            "json_schema": deepcopy(response_schema),
-                        },
-                        "response_source": "unknown",
+                        "capture_status": "not captured", "request_sent": None,
+                        "prepared_preview": {"messages": expected_messages, "response_format": response_schema},
+                        "preview_status": "not sent",
                     }
                 await _emit_progress(
                     session_state=session_state,

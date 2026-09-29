@@ -2141,6 +2141,8 @@ class CentralControllerAgent(LlmAgent):
                 if agent.safety_file is not None and not monitor_ready
                 else ""
             )
+            if getattr(agent.safety_monitor, "history_error", None) is not None:
+                validation_unavailable_reason = "CCA safety monitor history is unavailable"
             current_rules = [
                 deepcopy(rule)
                 for rule in agent.safety_rules

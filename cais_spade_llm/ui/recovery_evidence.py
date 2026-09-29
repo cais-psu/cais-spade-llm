@@ -21,15 +21,24 @@ def list_examples(root: Path = DEBUG_ROOT) -> list[dict[str, Any]]:
     examples = []
     for stage in STAGES:
         base = root / stage
-        folders = sorted({p.parent for pattern in ("*.json", "*.txt") for p in base.rglob(pattern)})
-        for folder in folders:
+        folders = set()
+        for pattern in ("*.json", "*.txt"):
+            for path in base.rglob(pattern):
+                parts = path.relative_to(base).parts
+                folder = (
+                    base.joinpath(*parts[: parts.index("requests")])
+                    if "requests" in parts
+                    else path.parent
+                )
+                folders.add(folder)
+        for folder in sorted(folders):
             contained_path(root, folder)
             identifier = str(folder.relative_to(root))
             examples.append(
                 {
                     "id": identifier,
                     "path": folder,
-                    "stages": {name: folder for name in STAGES if stage_records(folder, name)},
+                    "stages": {stage: folder} if stage_records(folder, stage) else {},
                     "label": identifier,
                     "scenario": "not recorded",
                     "status": "saved example",
@@ -47,6 +56,9 @@ def list_examples(root: Path = DEBUG_ROOT) -> list[dict[str, Any]]:
                     "label": f"{path.parent.name} · {metadata.get('scenario', 'not recorded')} · {metadata.get('status', 'not recorded')}",
                     "scenario": metadata.get("scenario", "not recorded"),
                     "status": metadata.get("status", "not recorded"),
+                    "response_source": metadata.get("response_source", "not recorded"),
+                    "assisted": metadata.get("assisted"),
+                    "evidence_source": metadata.get("evidence_source", "not recorded"),
                 }
             )
         except (OSError, ValueError, TypeError, AttributeError) as exc:
@@ -123,6 +135,7 @@ def stage_records(directory: Path, stage: str) -> list[Path]:
             if p.name == "recovery_safety_generation_result.json"
             or (p.name.startswith("recovery_safety_grounding_response_") and "latest" not in p.name)
         ]
+    chosen.extend(sorted((directory / "requests").glob("*/*_request.json")))
     if not chosen and stage == "recovery_outline" and directory.name == "recovery_outline":
         checkpoint = directory.parent / "outline_checkpoint.json"
         if checkpoint.is_file() and (directory.parent / "run.json").is_file():
@@ -139,7 +152,9 @@ def stage_records(directory: Path, stage: str) -> list[Path]:
     ]
 
 
-def read_stage_record(directory: Path, path: Path) -> dict[str, Any]:
+def read_stage_record(  # noqa: C901 - retain legacy and exact evidence with separate provenance
+    directory: Path, path: Path
+) -> dict[str, Any]:
     """Read a record, exact prompt references, and recorded validation rows."""
     path = contained_path(directory, path)
     payload = read_json_cached(path)
@@ -179,10 +194,16 @@ def read_stage_record(directory: Path, path: Path) -> dict[str, Any]:
     candidates = payload.get("candidate_evaluation_summary") or []
     if not isinstance(candidates, list) or any(not isinstance(row, dict) for row in candidates):
         raise ValueError("candidate_evaluation_summary must contain recorded candidate objects")
+    detailed_candidates = payload.get("candidate_validation_records") or candidates
     validations = list(payload.get("validation_stages") or [])
-    for candidate in candidates:
+    for candidate in detailed_candidates:
         for row in candidate.get("validation_stages") or []:
-            validations.append({"candidate_id": candidate.get("candidate_id"), **row})
+            validations.append(
+                {
+                    "candidate_id": candidate.get("candidate_id", candidate.get("candidate_index")),
+                    **row,
+                }
+            )
     rules = payload.get("all_rule_results") or payload.get("rules") or []
     trace = (
         payload.get("transition_trace")
@@ -197,6 +218,20 @@ def read_stage_record(directory: Path, path: Path) -> dict[str, Any]:
     for reference in payload.get("dfa_dot_files") or []:
         if isinstance(reference, str):
             linked.append((reference, resolve_reference(directory, reference)))
+    captures = []
+    record_refs = list(payload.get("request_record_paths") or [])
+    if payload.get("kind") == "provider_request":
+        record_refs = [str(p) for p in sorted(path.parent.glob("*.json"))]
+    for reference in record_refs:
+        # Exact records require an explicit contained reference, never a latest file
+        # or the guessed basename repair used for legacy explanatory artifacts.
+        try:
+            recorded_path = contained_path(directory, reference)
+            record = read_json_cached(recorded_path)
+        except (OSError, ValueError):
+            captures.append({"path": reference, "status": "not captured", "record": {}})
+            continue
+        captures.append({"path": str(recorded_path), "status": "captured", "record": record})
     return {
         "payload": payload,
         "response": response,
@@ -204,6 +239,8 @@ def read_stage_record(directory: Path, path: Path) -> dict[str, Any]:
         "trace": trace,
         "candidates": candidates,
         "validations": validations,
+        "validation_details": detailed_candidates,
+        "captures": captures,
         "rules": rules,
         "dfa": linked,
     }

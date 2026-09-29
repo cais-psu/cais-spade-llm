@@ -19,6 +19,7 @@ from spade.agent import Agent  # SPADE base class providing lifecycle hooks.
 from cais_spade_llm.function_analyzer import (
     FunctionAnalyzer,  # Introspects agent methods for tool schemas.
 )
+from cais_spade_llm.agents.shared_information.llm_request_records import RequestCaptureError, RequestRecords
 from cais_spade_llm.prompts import BASE_INSTRUCTIONS, PROMPT_MAS_AGENT, ROLE_BLOCKS
 from cais_spade_llm.utils.runtime_cleanup import cais_log_dir, install_action_log_handlers
 
@@ -435,21 +436,23 @@ class LlmAgent(Agent):
             "type": "json_schema",
             "json_schema": deepcopy(response_format),
         }
-        self._last_structured_request = {
+        request_summary = {
             "model": self.model,
             "messages": deepcopy(initial_messages),
             "reasoning_effort": self.reasoning_effort,
             "response_format": deepcopy(structured_response_format),
             "response_source": "live",
-            "request_sent": True,
+            "request_sent": False,
         }
         if tools:
-            self._last_structured_request["tools"] = deepcopy(tools)
+            request_summary["tools"] = deepcopy(tools)
+        self._last_structured_request = request_summary
 
         def _call() -> dict[str, Any]:
             msgs = deepcopy(initial_messages)
+            records = RequestRecords(request_summary)
 
-            for _ in range(max_tool_rounds + 1):
+            for tool_round in range(max_tool_rounds + 1):
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": msgs,
@@ -461,10 +464,15 @@ class LlmAgent(Agent):
 
                 back = 1.0
                 last_err: Exception | None = None
-                for _ in range(5):
+                for attempt in range(1, 6):
                     try:
-                        r = _client.chat.completions.create(**kwargs)
+                        r = records.submit(
+                            _client.chat.completions.create, kwargs,
+                            tool_round=tool_round, attempt=attempt,
+                        )
                         break
+                    except RequestCaptureError:
+                        raise
                     except BadRequestError as exc:
                         raise RuntimeError(
                             f"LLM call failed: {_structured_call_error_summary(exc)}"
@@ -500,11 +508,21 @@ class LlmAgent(Agent):
                             ],
                         }
                     )
-                    for tc in choice.tool_calls:
-                        result = tool_executor(
-                            tc.function.name,
-                            json.loads(tc.function.arguments),
-                        )
+                    for tool_index, tc in enumerate(choice.tool_calls):
+                        try:
+                            result = tool_executor(tc.function.name, json.loads(tc.function.arguments))
+                        except Exception as exc:  # noqa: BLE001 - record and propagate tool failures
+                            records.write(f"round{tool_round:02d}_tool{tool_index:02d}_error", {
+                                "kind": "tool_error", "tool_round": tool_round,
+                                "attempt": attempt, "tool_call_id": tc.id,
+                                "tool_name": tc.function.name, "error_type": type(exc).__name__,
+                            })
+                            raise
+                        records.write(f"round{tool_round:02d}_tool{tool_index:02d}", {
+                            "kind": "tool_result", "tool_round": tool_round,
+                            "attempt": attempt, "tool_call_id": tc.id,
+                            "content": json.dumps(result, default=str),
+                        })
                         msgs.append(
                             {
                                 "role": "tool",
@@ -515,7 +533,14 @@ class LlmAgent(Agent):
                     continue
 
                 # No tool calls — return the structured response.
-                return _parse_structured_json_text(choice.content or "{}")
+                try:
+                    return _parse_structured_json_text(choice.content or "{}")
+                except json.JSONDecodeError:
+                    records.write(f"round{tool_round:02d}_parse_error", {
+                        "kind": "parse_error", "tool_round": tool_round,
+                        "attempt": attempt, "error_type": "JSONDecodeError",
+                    })
+                    raise
 
             raise RuntimeError("Exceeded max tool rounds")
 

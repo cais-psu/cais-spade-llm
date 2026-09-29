@@ -1,5 +1,12 @@
 # Recovery framework: M1 and M2 layout
 
+**Document role: geometry and access reference.** Use the
+[implementation plan](IMPLEMENTATION_PLAN.md) for current milestones and
+[implementation history](IMPLEMENTATION_HISTORY.md) for dated acceptance.
+Earlier commissioning boundaries below apply to their recorded increment;
+the [resource-function reference](RESOURCE_FUNCTIONS_AND_PRIMITIVES.md)
+describes current execution support.
+
 **Current layout: compact M1/M2, 2026-09-29.** M1/M2 centres are 2.00 m apart, Conveyor is 4.20 m long, and Storage is closer. The overall horizontal span is 7.70 m. The saved scene, Gazebo world and navigation map use the coordinates below. Earlier implementation notes remain historical context. The [fresh recorded 11-part run](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/README.md) passed on 2026-09-29 with all placements valid, matching function/primitive traces and model transitions, and zero KMR equipment contacts.
 
 M1 and M2 use a `0.503 × 0.531 × 0.493 m` enclosure, based on the documented

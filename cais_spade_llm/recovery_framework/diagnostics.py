@@ -36,8 +36,12 @@ def write_record(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-def inspect_inputs(
-    context_path: Path, scenario_path: Path | None = None, *, root: Path = ROOT
+def inspect_inputs(  # noqa: C901, PLR0912, PLR0915 - validate the complete frozen input contract
+    context_path: Path,
+    scenario_path: Path | None = None,
+    *,
+    root: Path = ROOT,
+    response_source: str = "live",
 ) -> dict:
     """Validate saved task/resource references and fingerprint their exact inputs."""
     runtime_context = read_object(context_path)
@@ -53,6 +57,12 @@ def inspect_inputs(
 
     def reference(value: str, base: Path = root) -> Path:
         path = (base / value).resolve()
+        if (
+            root.resolve() != ROOT
+            and not path.is_relative_to(root.resolve())
+            and path.is_relative_to(ROOT)
+        ):
+            path = (root / path.relative_to(ROOT)).resolve()
         path.relative_to(root.resolve())
         if not path.is_file():
             raise ValueError(f"Input file is missing: {path}")
@@ -100,17 +110,78 @@ def inspect_inputs(
     settings = root / "cais_spade_llm/initialization/recovery_outline_experiment_settings.json"
     if settings.is_file():
         files.add(settings)
+    files.update(bundle_files["safety_logic_json"].parent.glob("*_dfa.dot"))
+    # Follow file references from manifests/configuration so target geometry and
+    # safety dependencies cannot change underneath a selected run.
+    pending = list(files)
+    visited: set[Path] = set()
+    suffixes = {
+        ".json",
+        ".dot",
+        ".yaml",
+        ".yml",
+        ".urdf",
+        ".srdf",
+        ".stl",
+        ".obj",
+        ".dae",
+        ".xacro",
+        ".sdf",
+    }
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        visited.add(path)
+        if path.suffix.lower() != ".json":
+            continue
+        values = [json.loads(path.read_text(encoding="utf-8"))]
+        while values:
+            value = values.pop()
+            if isinstance(value, dict):
+                values.extend(value.values())
+            elif isinstance(value, list):
+                values.extend(value)
+            elif isinstance(value, str) and Path(value).suffix.lower() in suffixes:
+                for base in (root, path.parent):
+                    try:
+                        dependency = reference(value, base)
+                    except ValueError:
+                        continue
+                    if dependency not in files:
+                        files.add(dependency)
+                        pending.append(dependency)
     hashes = {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(files)
     }
     hashes["runtime_context"] = hashlib.sha256(context_path.read_bytes()).hexdigest()
-    fingerprint = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+    generation_settings = {
+        "model": os.environ.get("CASE3_RECOVERY_MODEL")
+        or os.environ.get("CAIS_SPADE_LLM_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or "gpt-5.4",
+        "reasoning_effort": os.environ.get("CAIS_SPADE_REASONING_EFFORT")
+        or os.environ.get("OPENAI_REASONING_EFFORT")
+        or "medium",
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "files": hashes,
+                "generation_settings": generation_settings,
+                "response_source": response_source,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
     return {
         "runtime_context": runtime_context,
         "scenario": scenario_id,
         "files": hashes,
         "fingerprint": fingerprint,
+        "generation_settings": generation_settings,
+        "response_source": response_source,
         "context_source": str(context_path.resolve()),
         "scenario_source": str(expected.resolve()),
     }
@@ -118,7 +189,9 @@ def inspect_inputs(
 
 def validator_fingerprint(root: Path = ROOT) -> str:
     """Bind reusable acceptance to the exact validator and runner source files."""
-    paths = {root / "test/test_case3_recovery_dryrun.py"}
+    paths = set((root / "cais_spade_llm/recovery_framework").glob("*.py"))
+    paths.update((root / "cais_spade_llm/agents/shared_information").glob("*.py"))
+    paths.add(root / "cais_spade_llm/initialization/recovery_outline_experiment_settings.json")
     for directory in (
         "agents/intelligent_product/replanner/llm_recovery",
         "agents/central_controller",
@@ -165,6 +238,12 @@ def snapshot_inputs(directory: Path, inputs: dict, *, root: Path = ROOT) -> None
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / relative, target)
+    for relative, expected_hash in inputs["files"].items():
+        saved = destination / (
+            "runtime_context.json" if relative == "runtime_context" else relative
+        )
+        if hashlib.sha256(saved.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError("An input changed while creating the frozen snapshot")
     write_record(directory / "inputs.json", inputs)
 
 
@@ -207,6 +286,7 @@ class DiagnosticJobs:
         context_path: Path,
         scenario_path: Path,
         outline_checkpoint: Path | None = None,
+        replay_responses: Path | None = None,
     ) -> Path:
         """Validate explicit inputs, snapshot them, then launch an isolated test."""
         async with self.lock:
@@ -215,7 +295,11 @@ class DiagnosticJobs:
             if mode not in MODES:
                 raise ValueError("Unsupported recovery test mode")
             inputs = await asyncio.to_thread(
-                inspect_inputs, context_path, scenario_path, root=self.root
+                inspect_inputs,
+                context_path,
+                scenario_path,
+                root=self.root,
+                response_source="fixture_response_replay" if replay_responses else "live",
             )
             if outline_checkpoint:
                 if mode == "outline":
@@ -229,8 +313,20 @@ class DiagnosticJobs:
             directory = self.runs / identifier
             directory.mkdir(parents=True)
             await asyncio.to_thread(snapshot_inputs, directory, inputs, root=self.root)
+            if replay_responses is not None:
+                responses = json.loads(replay_responses.read_text(encoding="utf-8"))
+                if not isinstance(responses, list) or any(
+                    not isinstance(row, dict) for row in responses
+                ):
+                    raise ValueError("Replay responses must be a JSON array of response objects")
+                shutil.copyfile(replay_responses, directory / "replay_responses.json")
             record = {
                 "id": identifier,
+                "response_source": "fixture_response_replay" if replay_responses else "live",
+                "generation_settings": inputs["generation_settings"],
+                "operator_guidance": inputs["runtime_context"].get("recovery_feedback") or "",
+                "assisted": bool(inputs["runtime_context"].get("recovery_feedback")),
+                "evidence_source": inputs["runtime_context"].get("evidence_source", "synthetic"),
                 "scenario": inputs["scenario"],
                 "mode": mode,
                 "owner_pid": os.getpid(),
@@ -243,7 +339,8 @@ class DiagnosticJobs:
             write_record(directory / "run.json", record)
             command = [
                 sys.executable,
-                str(self.root / "test/test_case3_recovery_dryrun.py"),
+                "-m",
+                "cais_spade_llm.recovery_framework.scenario_runner",
                 "--mode",
                 mode,
                 "--runtime-context",
@@ -251,6 +348,8 @@ class DiagnosticJobs:
                 "--debug-root",
                 str(directory),
             ]
+            if replay_responses:
+                command.extend(["--replay-responses", str(directory / "replay_responses.json")])
             if outline_checkpoint:
                 shutil.copyfile(outline_checkpoint, directory / "source_outline_checkpoint.json")
                 command.extend(
@@ -264,7 +363,15 @@ class DiagnosticJobs:
                         cwd=self.root,
                         stdout=output,
                         stderr=asyncio.subprocess.STDOUT,
-                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                        env={
+                            **os.environ,
+                            "PYTHONUNBUFFERED": "1",
+                            "CAIS_RECOVERY_INPUT_ROOT": str(directory / "inputs"),
+                            "CASE3_RECOVERY_MODEL": inputs["generation_settings"]["model"],
+                            "CAIS_SPADE_REASONING_EFFORT": inputs["generation_settings"][
+                                "reasoning_effort"
+                            ],
+                        },
                         start_new_session=True,
                     )
             except OSError as exc:

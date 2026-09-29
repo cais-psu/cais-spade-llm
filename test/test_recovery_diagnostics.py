@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-import test_case3_recovery_dryrun as runner
+from cais_spade_llm.recovery_framework import scenario_runner as runner
 
 from cais_spade_llm.recovery_framework import diagnostics
 
@@ -169,7 +169,7 @@ def test_jobs_are_explicit_isolated_single_and_preserve_history(
         assert not jobs.runs.exists()
         output = await jobs.start("outline", CONTEXT, SCENARIO)
         command = launch.call_args.args
-        assert command[1].endswith("test/test_case3_recovery_dryrun.py")
+        assert command[1:3] == ("-m", "cais_spade_llm.recovery_framework.scenario_runner")
         assert "--runtime-context" in command and "--debug-root" in command
         assert launch.call_args.kwargs.get("shell") is None
         assert (output / "inputs/runtime_context.json").read_bytes() == CONTEXT.read_bytes()
@@ -260,3 +260,78 @@ def test_runner_prepares_selected_failure_context_without_model_work(tmp_path):
     assert prepared["failure_context_raw"]["failed_function_name"] == "move_home"
     assert product_agent.turn_log == []
     assert product_agent._scripted_responses == []
+
+
+def test_frozen_worker_rebinds_absolute_references_and_uses_only_saved_files(tmp_path, monkeypatch):
+    source = tmp_path / "source.json"
+    context = diagnostics.read_object(CONTEXT)
+    context["bundle_root"] = str(diagnostics.ROOT / context["bundle_root"])
+    context["product_geometry"] = str(diagnostics.ROOT / context["product_geometry"])
+    for snapshot in context["resource_snapshots"]:
+        snapshot["resource_config"] = str(diagnostics.ROOT / snapshot["resource_config"])
+    diagnostics.write_record(source, context)
+    inputs = diagnostics.inspect_inputs(source)
+    run = tmp_path / "run"
+    diagnostics.snapshot_inputs(run, inputs)
+    frozen = run / "inputs"
+    assert diagnostics.inspect_inputs(frozen / "runtime_context.json", root=frozen)["fingerprint"] == inputs["fingerprint"]
+    diagnostics.write_record(source, {**context, "goal_state": "changed after selection"})
+    monkeypatch.setattr(runner, "DATA_ROOT", frozen)
+    load = runner._load_json
+    accessed = []
+
+    def only_frozen(path):
+        assert path.is_relative_to(frozen), path
+        accessed.append(path)
+        return load(path)
+
+    monkeypatch.setattr(runner, "_load_json", only_frozen)
+    fixture, product_agent, _, prepared = asyncio.run(runner._prepare_recovery_dryrun_harness(
+        runtime_context_path=frozen / "runtime_context.json", debug_root=run / "artifacts",
+    ))
+    assert accessed
+    assert fixture["goal_state"] == context["goal_state"]
+    assert product_agent.turn_log == []
+    assert prepared["recovery_resources"]
+    for resource in product_agent._mock_recovery_validation_resources.values():
+        assert isinstance(resource, runner.SnapshotRecoveryRobot)
+        assert resource.get_recovery_snapshot().get("controller_ready") is None
+        with pytest.raises(RuntimeError, match="dispatch is disabled"):
+            resource.release_part()
+
+
+def test_replay_outline_cannot_be_reused_as_live_evidence(tmp_path):
+    source = tmp_path / "outline.json"
+    checkpoint = _checkpoint(source)
+    checkpoint["input_fingerprint"] = diagnostics.inspect_inputs(CONTEXT, response_source="fixture_response_replay")["fingerprint"]
+    diagnostics.write_record(source, checkpoint)
+    with pytest.raises(ValueError, match="inputs differ"):
+        diagnostics.load_outline_checkpoint(source, diagnostics.inspect_inputs(CONTEXT))
+
+
+def test_injection_target_is_not_promoted_to_an_observation():
+    context = diagnostics.read_object(CONTEXT)
+    plan = runner._load_json(runner._case3_paths(context)["plan"])
+    event = runner._build_live_style_failure_payload(plan, runtime_context=context)
+    assert "dropped_location" not in event["failure_context"].get("observations", {})
+    assert "gripper_force" not in event["failure_context"].get("observations", {})
+    context["failure_event"]["observations"] = {"dropped_location": {"x": 0.2, "y": 0.1, "z": 0.3}, "evidence_source": "observed"}
+    event = runner._build_live_style_failure_payload(plan, runtime_context=context)
+    assert event["failure_context"]["observations"]["dropped_location"] == context["failure_event"]["observations"]["dropped_location"]
+
+
+def test_live_diagnostics_require_saved_cca_history_and_running_evidence():
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    monitor = OnlineSafetyMonitor({"SAFE_1": 'digraph DFA { node [shape = doublecircle]; 2; node [shape = circle]; 1; init -> 1; 1 -> 2 [label="true"]; 2 -> 2 [label="true"]; }'}, [])
+    agent = runner.FakeProductAgent(tools_catalog=[], product_geometry={})
+    with pytest.raises(ValueError, match="safety_dfa_states"):
+        agent._saved_monitor_states(monitor)
+    agent._saved_safety_context = {"safety_dfa_states": {"SAFE_1": "2"}}
+    with pytest.raises(ValueError, match="running_aps"):
+        agent._saved_monitor_states(monitor)
+    agent._saved_safety_context["running_aps"] = []
+    assert agent._saved_monitor_states(monitor) == {"SAFE_1": "2"}
+    agent._saved_safety_context["history_error"] = {"reason": "malformed step"}
+    with pytest.raises(ValueError, match="history"):
+        agent._saved_monitor_states(monitor)

@@ -37,6 +37,7 @@ def recovery_validation_stage(  # noqa: PLR0913
     state_fingerprint: str = "",
     snapshot_fingerprint: str = "",
     mocked: bool = False,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one auditable validation-stage record."""
     row: dict[str, Any] = {
@@ -51,6 +52,16 @@ def recovery_validation_stage(  # noqa: PLR0913
         "snapshot_fingerprint": str(snapshot_fingerprint or "").strip(),
         "mocked": bool(mocked),
     }
+    if evidence is not None:
+        row["evidence"] = deepcopy(evidence)
+        unavailable = evidence.get("feasibility_status") == "NEEDS_CONTEXT" or any(
+            item.get("constraint_code") in {"resource_validation_unavailable", "safety_validation_unavailable"}
+            for item in row["findings"]
+        )
+        row["outcome"] = "unresolved" if unavailable else row["status"]
+        row["reason"] = evidence.get("reason") or "; ".join(
+            str(item["reason"]) for item in row["findings"] if item.get("reason")
+        )
     return row
 
 

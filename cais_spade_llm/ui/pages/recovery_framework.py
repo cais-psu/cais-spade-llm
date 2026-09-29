@@ -15,7 +15,9 @@ from cais_spade_llm.ui.project_navigation import bind_project_tabs
 from cais_spade_llm.ui.recovery_results import NOT_RECORDED, render_results
 
 _ROOT = Path(__file__).resolve().parents[3]
-_PAPER = _ROOT / "writing/Journal Paper 2 (recovery framework)/README.md"
+_DOCUMENTS = _ROOT / "writing/Journal Paper 2 (recovery framework)"
+_PAPER = _DOCUMENTS / "IMPLEMENTATION_PLAN.md"
+_FORMAL = _DOCUMENTS / "JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md"
 
 
 def _render_setup(bridge: SystemBridge) -> None:
@@ -24,15 +26,19 @@ def _render_setup(bridge: SystemBridge) -> None:
     lazy_file("Configured plant layout", _ROOT / "cais_spade_llm/initialization/recovery_framework_gazebo.json")
     ui.label("Planned paper experiments").classes("text-lg font-semibold")
     ui.label("The protocol below describes planned comparisons, not completed trials.").classes("text-sm text-slate-600")
-    for heading in ("Working Thesis", "Experiment Plan", "Neurosymbolic Selection Method"):
+    for heading, source, section_heading in (
+        ("Working Thesis", _PAPER, "Summary"),
+        ("Experiment Plan", _PAPER, "Experimental design"),
+        ("Neurosymbolic Selection Method", _FORMAL, "Neurosymbolic Selection Method"),
+    ):
         with ui.expansion(heading, icon="science").classes("w-full") as expansion:
             content = BackgroundSection()
 
-        def opened(e, heading=heading, content=content) -> None:
+        def opened(e, source=source, section_heading=section_heading, content=content) -> None:
             if not e.value:
                 return
             def read() -> str:
-                _, found, section = _PAPER.read_text(encoding="utf-8").partition(f"## {heading}\n")
+                _, found, section = source.read_text(encoding="utf-8").partition(f"## {section_heading}\n")
                 return section.split("\n## ", 1)[0] if found else NOT_RECORDED
             content.load(read, ui.markdown)
         expansion.on_value_change(opened)

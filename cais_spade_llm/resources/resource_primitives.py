@@ -151,6 +151,7 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
             "preconditions": preconditions,
             "capability_validator": "check_recovery_primitive_feasibility",
             "capability_constraints": deepcopy(frontmatter.get("capability_constraints") or {}),
+            "required_evidence": deepcopy(dict(profile.primitive_trace_fact_map or {}).get(primitive_name) or {}),
             "effects": effects,
             "primitive_kind": str(
                 dict(profile.primitive_kind_map or {}).get(primitive_name) or ""
@@ -313,6 +314,7 @@ def build_recovery_des_model(
             "requires_part_binding",
             "recovery_visible_steps",
             "primitive_support",
+            "composition_contract",
             "source",
         ):
             if key in raw_event:

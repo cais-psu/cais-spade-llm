@@ -1,5 +1,10 @@
 # Controller command reference for recovery primitives
 
+**Document role: controller binding reference.** Use the
+[implementation plan](IMPLEMENTATION_PLAN.md) for current work and
+[implementation history](IMPLEMENTATION_HISTORY.md) for dated project results.
+Device-command comparisons here do not establish implemented capabilities.
+
 This table identifies current Gazebo commands and comparable published device commands. The device references are vocabulary for the paper; they do not claim those devices were driven by this recovery framework.
 
 | Resource | Current Gazebo command | Published controller vocabulary | Current integration |
