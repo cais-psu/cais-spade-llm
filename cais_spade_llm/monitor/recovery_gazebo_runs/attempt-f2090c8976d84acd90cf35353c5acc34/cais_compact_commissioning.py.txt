@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+import copy
+import json
+import time
+from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+from cais_spade_llm.resources.robot.cartesian_waypoints import trajectory_samples
+
+
+def install_commissioning_check(output):
+    original = GazeboPickPlaceController._send_simulation_joint_trajectory
+
+    def send(controller, topic, trajectory):
+        if (controller.robot_name == 'ur5e-4'
+                and getattr(controller, '_robot_task_step', None) == ('pick_approach', 'move_above_part')
+                and list(trajectory.joint_names) == list(controller.arm_joint_names)):
+            settings = controller.controller_config['cartesian_motion']
+            previous = settings['avoid_collisions']
+            prior_validation = copy.deepcopy(getattr(controller, '_last_path_validation', None))
+            started = time.monotonic()
+            settings['avoid_collisions'] = True
+            try:
+                valid = controller._simulation_trajectory_is_collision_free(trajectory)
+                evidence = copy.deepcopy(controller._last_path_validation)
+            finally:
+                settings['avoid_collisions'] = previous
+            valid = bool(valid and evidence.get('checked_states', 0) > 0)
+            row = {'resource_id': controller.robot_name, 'step': ['pick_approach', 'move_above_part'],
+                   'checked_before_dispatch': True, 'valid': valid,
+                   'observed_at_unix': time.time(), 'wall_time_sec': time.monotonic()-started,
+                   'motion_path_validation': evidence, 'error': controller._last_failure_message if not valid else '',
+                   'joint_names': list(trajectory.joint_names),
+                   'joint_samples': list(trajectory_samples(trajectory)),
+                   'configuration_avoid_collisions': previous}
+            with (output/'ur5e-4_pick_rotation_checks.jsonl').open('a') as stream:
+                stream.write(json.dumps(row)+'\n')
+            if not valid:
+                return False
+            controller._last_path_validation = prior_validation
+        return original(controller, topic, trajectory)
+
+    GazeboPickPlaceController._send_simulation_joint_trajectory = send

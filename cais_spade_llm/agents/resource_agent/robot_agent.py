@@ -1129,25 +1129,35 @@ class RobotAgent(ResourceAgent):
     # Controller primitives available for recovery macro steps.
     _RECOVERY_PRIMITIVES = frozenset(
         {
-            "move_cartesian",
-            "move_pose",
-            "move_relative",
+            "detect_parts",
+            "compute_pick_targets",
+            "compute_place_targets",
             "move_to_named_pose",
-            "delay",
+            "move_cartesian",
+            "move_relative",
             "grasp_part",
             "release_part",
             "open_gripper",
             "close_gripper",
-            "detect_parts",
-            "localize_assembly_board_v1",
-            "compute_pick_targets",
-            "compute_place_targets",
             "attach_part",
             "detach_part",
-            "snap_part_to_slot",
-            "get_current_pose",
+            "move_joints",
+            "rotate_joint",
         }
     )
+    def recovery_execution_primitive_catalog(self) -> list[dict[str, Any]]:
+        """Filter Gazebo recovery commands by this robot's saved primitive catalog."""
+        rows = super().recovery_execution_primitive_catalog()
+        scene = getattr(self, "gazebo_program_scene", None)
+        if not isinstance(scene, dict) or "resource_programs" not in scene:
+            return rows
+        from cais_spade_llm.resources.gazebo_programs import validate_resource_programs
+
+        validate_resource_programs(scene)
+        catalog = scene["resource_programs"]["resources"][self.agent_name]["primitives"]
+        return [row for row in rows if catalog.get(row["name"], {}).get("status") == "executable"
+                and catalog[row["name"]].get("recovery_selectable") is True]
+
     _RECOVERY_OBSERVATION_PRIMITIVES = frozenset(
         {
             "detect_parts",
@@ -1169,6 +1179,12 @@ class RobotAgent(ResourceAgent):
 
         primitive_name = str(primitive or "").strip()
         normalized_params = dict(params or {})
+        scene = getattr(self, "gazebo_program_scene", None)
+        if isinstance(scene, dict) and "resource_programs" in scene:
+            from cais_spade_llm.resources.gazebo_programs import primitive_available
+
+            if not primitive_available(scene, self.agent_name, primitive_name, recovery=True):
+                return {"success": False, "message": f"Primitive unavailable in saved Gazebo catalog: {primitive_name}"}
         if primitive_name not in self._RECOVERY_OBSERVATION_PRIMITIVES:
             return {
                 "success": False,
@@ -1640,6 +1656,12 @@ class RobotAgent(ResourceAgent):
             primitive = step.get("primitive", "") if isinstance(step, dict) else ""
             raw_params = step.get("params", {}) if isinstance(step, dict) else {}
 
+            scene = getattr(self, "gazebo_program_scene", None)
+            if isinstance(scene, dict) and "resource_programs" in scene:
+                from cais_spade_llm.resources.gazebo_programs import primitive_available
+
+                if not primitive_available(scene, self.agent_name, primitive, recovery=True):
+                    return {"status": "failed", "content": f"Primitive unavailable in saved Gazebo catalog: {primitive}"}
             if primitive not in self._RECOVERY_PRIMITIVES:
                 msg = f"Unknown primitive '{primitive}' at step {step_idx} in macro '{macro_name}'"
                 self.logger.error("[Robot] %s", msg)
@@ -1700,7 +1722,6 @@ class RobotAgent(ResourceAgent):
                 # Inject real-time spatial context into the error so the LLM understands WHY it failed.
                 if primitive in (
                     "move_cartesian",
-                    "move_pose",
                     "move_relative",
                     "move_to_named_pose",
                     "attach_part",
@@ -1709,7 +1730,7 @@ class RobotAgent(ResourceAgent):
                     "release_part",
                 ):
                     try:
-                        pose_res = await self._execute_primitive("get_current_pose", {})
+                        pose_res = await asyncio.to_thread(self._controller.get_current_pose)
                         if pose_res and pose_res.get("success") and "pose" in pose_res:
                             pose = pose_res["pose"]
                             enhanced_msg += (
@@ -1947,6 +1968,19 @@ class RobotAgent(ResourceAgent):
 
     async def _execute_primitive(self, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
         """Execute a single controller primitive, handling dry_run and simulation modes."""
+        scene = getattr(self, "gazebo_program_scene", None)
+        if isinstance(scene, dict) and "resource_programs" in scene:
+            from cais_spade_llm.recovery_framework import ROOT
+            from cais_spade_llm.resources.gazebo_programs import (
+                current_program_revision, primitive_available, resource_program_revision,
+            )
+
+            if not primitive_available(scene, self.agent_name, primitive, recovery=False):
+                return {"success": False, "message": f"Primitive unavailable in saved Gazebo catalog: {primitive}"}
+            runtime = getattr(self, "environment_runtime", None)
+            scene_file = getattr(runtime, "scene_file", "")
+            if scene_file and current_program_revision(ROOT / scene_file) != resource_program_revision(scene):
+                return {"success": False, "message": "Stale Gazebo program revision"}
         if self.execution_mode == "dry_run":
             self.logger.debug("[Robot] dry_run primitive: %s", primitive)
             return {"success": True, "message": f"Simulated: {primitive}"}
@@ -1957,7 +1991,8 @@ class RobotAgent(ResourceAgent):
         if self._controller is None:
             return {"success": False, "message": "controller is not initialized"}
 
-        method = getattr(self._controller, primitive, None)
+        controller_method = "move_joints_recovery" if primitive == "move_joints" else primitive
+        method = getattr(self._controller, controller_method, None)
         if not callable(method):
             return {
                 "success": False,
@@ -2590,6 +2625,75 @@ class RobotAgent(ResourceAgent):
             }
         )
         return None
+
+    def check_recovery_primitive_feasibility(
+        self,
+        *,
+        primitive: str,
+        params: dict[str, Any],
+        task: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        part_context: dict[str, Any],
+        grounded_action: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Check a bound primitive against robot-owned capability evidence."""
+        from copy import deepcopy
+
+        del task
+        action = deepcopy(grounded_action)
+        action["function_name"] = primitive
+        target = dict(action.get("target") or {})
+        if primitive == "move_to_named_pose":
+            named_poses = (
+                recovery_snapshot.get("named_poses")
+                or self.static_capabilities.get("named_poses")
+                or []
+            )
+            if not named_poses or params.get("pose_name") not in named_poses:
+                return {
+                    "allowed": False,
+                    "feasibility_status": "INFEASIBLE" if named_poses else "NEEDS_CONTEXT",
+                    "constraint_code": (
+                        "named_pose_unavailable"
+                        if named_poses
+                        else "resource_validation_unavailable"
+                    ),
+                    "reason": "The bound pose_name has no declared named-pose support.",
+                    "evidence": {
+                        "pose_name": params.get("pose_name"),
+                        "named_poses": deepcopy(named_poses),
+                    },
+                }
+            target["named_pose"] = params["pose_name"]
+        elif primitive in {"move_cartesian", "move_pose"}:
+            target["pose"] = {key: params[key] for key in ("x", "y", "z") if key in params}
+        elif primitive in {"move_relative", "move_joints", "rotate_joint"}:
+            return {
+                "allowed": False,
+                "feasibility_status": "NEEDS_CONTEXT",
+                "constraint_code": "resource_validation_unavailable",
+                "reason": "Live robot-model planning is required for this primitive.",
+                "evidence": {"primitive": primitive, "params": deepcopy(params)},
+            }
+        action["target"] = target
+        result = self.check_recovery_physical_feasibility(
+            part_context=part_context,
+            recovery_snapshot=recovery_snapshot,
+            grounded_action=action,
+        )
+        return {
+            **result,
+            "feasibility_status": (
+                "FEASIBLE"
+                if result.get("allowed") is True
+                else result.get("feasibility_status")
+                or (
+                    "NEEDS_CONTEXT"
+                    if result.get("constraint_code") == "resource_validation_unavailable"
+                    else "INFEASIBLE"
+                )
+            ),
+        }
 
     def check_recovery_physical_feasibility(  # noqa: C901
         self,

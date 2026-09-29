@@ -1,0 +1,7114 @@
+name: "KMR"
+id: 910
+is_static: false
+pose {
+  position {
+    x: -5.54
+    y: 2.13
+    z: 0
+  }
+  orientation {
+    x: 0
+    y: 0
+    z: 0.70710807985947366
+    w: 0.70710548251123639
+  }
+}
+joint {
+  name: "KMR::joint_a1"
+  id: 1055
+  angle: -7.9656693685592472e-08
+  type: REVOLUTE
+  parent: "KMR::KMR_base_link"
+  parent_id: 911
+  child: "KMR::iiwa_link_1"
+  child_id: 981
+  pose {
+    position {
+      x: 4.163336342344337e-17
+      y: 2.7755575615628914e-17
+      z: 0
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 0
+      z: 1
+    }
+    limit_lower: -2.9668
+    limit_upper: 2.9668
+    limit_effort: 320
+    limit_velocity: 1.4834
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::joint_a2"
+  id: 1056
+  angle: 0.26379006890547974
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_1"
+  parent_id: 981
+  child: "KMR::iiwa_link_2"
+  child_id: 986
+  pose {
+    position {
+      x: 3.3556057238426362e-17
+      y: 2.7755575615628914e-17
+      z: -1.1102230246251565e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 1
+      z: 0
+    }
+    limit_lower: -2.0942
+    limit_upper: 2.0942
+    limit_effort: 320
+    limit_velocity: 1.4834
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::joint_a3"
+  id: 1057
+  angle: 1.1232119589976719e-07
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_2"
+  parent_id: 986
+  child: "KMR::iiwa_link_3"
+  child_id: 991
+  pose {
+    position {
+      x: 1.3877787807814457e-17
+      y: 2.7755575615628914e-17
+      z: 0
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 0
+      z: 1
+    }
+    limit_lower: -2.9668
+    limit_upper: 2.9668
+    limit_effort: 176
+    limit_velocity: 1.7452
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::joint_a4"
+  id: 1058
+  angle: -1.0886704491781181
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_3"
+  parent_id: 991
+  child: "KMR::iiwa_link_4"
+  child_id: 996
+  pose {
+    position {
+      x: 2.1955093992831465e-17
+      y: 2.7755575615628914e-17
+      z: 5.5511151231257827e-17
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: -1
+      z: 0
+    }
+    limit_lower: -2.0942
+    limit_upper: 2.0942
+    limit_effort: 176
+    limit_velocity: 1.3089
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::joint_a5"
+  id: 1059
+  angle: -3.01723517281971e-08
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_4"
+  parent_id: 996
+  child: "KMR::iiwa_link_5"
+  child_id: 1001
+  pose {
+    position {
+      x: 4.163336342344337e-17
+      y: 2.7755575615628914e-17
+      z: 2.2204460492503131e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 0
+      z: 1
+    }
+    limit_lower: -2.9668
+    limit_upper: 2.9668
+    limit_effort: 110
+    limit_velocity: 2.2688
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::joint_a6"
+  id: 1060
+  angle: 1.7891321353164003
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_5"
+  parent_id: 1001
+  child: "KMR::iiwa_link_6"
+  child_id: 1006
+  pose {
+    position {
+      x: 4.163336342344337e-17
+      y: 2.7755575615628914e-17
+      z: 1.1102230246251565e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 1
+      z: 0
+    }
+    limit_lower: -2.0942
+    limit_upper: 2.0942
+    limit_effort: 40
+    limit_velocity: 2.356
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::joint_a7"
+  id: 1061
+  angle: 2.2015775869022036e-08
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_6"
+  parent_id: 1006
+  child: "KMR::iiwa_link_7"
+  child_id: 1011
+  pose {
+    position {
+      x: 4.163336342344337e-17
+      y: 2.7755575615628914e-17
+      z: 2.2204460492503131e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 0
+      z: 1
+    }
+    limit_lower: -3.0541
+    limit_upper: 3.0541
+    limit_effort: 40
+    limit_velocity: 2.356
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::KMR_rg2_finger_width"
+  id: 1062
+  angle: 0.1099999999999999
+  type: PRISMATIC
+  parent: "KMR::iiwa_link_7"
+  parent_id: 1011
+  child: "KMR::KMR_rg2_finger_width_mock_link"
+  child_id: 1024
+  pose {
+    position {
+      x: 4.163336342344337e-17
+      y: 2.7755575615628914e-17
+      z: 5.5511151231257827e-17
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 0
+      y: 0
+      z: 1
+    }
+    limit_lower: 0.015
+    limit_upper: 0.11
+    limit_effort: 40
+    limit_velocity: 0.127
+    damping: 0
+    friction: 0
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::rg2_finger_joint"
+  id: 1063
+  angle: -0.35681945000000553
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_7"
+  parent_id: 1011
+  child: "KMR::rg2_left_outer_knuckle"
+  child_id: 1025
+  pose {
+    position {
+      x: 4.163336342344337e-17
+      y: 5.5511151231257827e-17
+      z: 5.5511151231257827e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: -1
+      y: 0
+      z: 0
+    }
+    limit_lower: -0.558505
+    limit_upper: 0.785398
+    limit_effort: 1000
+    limit_velocity: 100
+    damping: 0
+    friction: 3
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::rg2_left_inner_finger_joint"
+  id: 1064
+  angle: -0.35681945000000548
+  type: REVOLUTE
+  parent: "KMR::rg2_left_outer_knuckle"
+  parent_id: 1025
+  child: "KMR::rg2_left_inner_finger"
+  child_id: 1030
+  pose {
+    position {
+      x: 2.7755575615628914e-17
+      y: 1.3877787807814457e-17
+      z: -1.2490009027033011e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 1
+      y: 0
+      z: 0
+    }
+    limit_lower: -0.872665
+    limit_upper: 0.872665
+    limit_effort: 1000
+    limit_velocity: 100
+    damping: 0
+    friction: 3
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::rg2_left_inner_knuckle_joint"
+  id: 1065
+  angle: 0.35681945000000503
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_7"
+  parent_id: 1011
+  child: "KMR::rg2_left_inner_knuckle"
+  child_id: 1035
+  pose {
+    position {
+      x: 1.3877787807814457e-17
+      y: 1.8214596497756474e-17
+      z: 8.3266726846886741e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 1
+      y: 0
+      z: 0
+    }
+    limit_lower: -0.785398
+    limit_upper: 0.785398
+    limit_effort: 1000
+    limit_velocity: 100
+    damping: 0
+    friction: 3
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::rg2_right_inner_knuckle_joint"
+  id: 1066
+  angle: 0.3568194500000379
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_7"
+  parent_id: 1011
+  child: "KMR::rg2_right_inner_knuckle"
+  child_id: 1040
+  pose {
+    position {
+      x: 5.9687639083597267e-17
+      y: -3.8163916471489756e-17
+      z: 8.3266726846886741e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 5.017929058652882e-17
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 1
+      y: 0
+      z: 0
+    }
+    limit_lower: -0.785398
+    limit_upper: 0.785398
+    limit_effort: 1000
+    limit_velocity: 100
+    damping: 0
+    friction: 3
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::rg2_right_outer_knuckle_joint"
+  id: 1067
+  angle: 0.35681945000001125
+  type: REVOLUTE
+  parent: "KMR::iiwa_link_7"
+  parent_id: 1011
+  child: "KMR::rg2_right_outer_knuckle"
+  child_id: 1045
+  pose {
+    position {
+      x: -2.8579202660270413e-17
+      y: 2.7755575615628914e-17
+      z: 4.9960036108132044e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: -5.017929058652882e-17
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 1
+      y: 0
+      z: 0
+    }
+    limit_lower: -0.785398
+    limit_upper: 0.785398
+    limit_effort: 1000
+    limit_velocity: 100
+    damping: 0
+    friction: 3
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+joint {
+  name: "KMR::rg2_right_inner_finger_joint"
+  id: 1068
+  angle: -0.35681945000001164
+  type: REVOLUTE
+  parent: "KMR::rg2_right_outer_knuckle"
+  parent_id: 1045
+  child: "KMR::rg2_right_inner_finger"
+  child_id: 1050
+  pose {
+    position {
+      x: 5.5511151231257827e-17
+      y: -4.163336342344337e-17
+      z: 3.1918911957973251e-16
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  axis1 {
+    xyz {
+      x: 1
+      y: 0
+      z: 0
+    }
+    limit_lower: -0.872665
+    limit_upper: 0.872665
+    limit_effort: 1000
+    limit_velocity: 100
+    damping: 0
+    friction: 3
+    use_parent_model_frame: false
+    xyz_expressed_in: ""
+  }
+}
+link {
+  id: 911
+  name: "KMR::KMR_base_link"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 405
+    pose {
+      position {
+        x: -0.003086
+        y: -0.001235
+        z: 0.355185
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 21.0105
+    ixy: -0.123457
+    ixz: 0.518519
+    iyy: 56.3898
+    iyz: 0.207407
+    izz: 61.558
+  }
+  pose {
+    position {
+      x: 0
+      y: 0
+      z: 0
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0
+      w: 1
+    }
+  }
+  visual {
+    name: "KMR::KMR_base_link"
+    id: 911
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__mobile_platform_lower_visual"
+    id: 912
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0.29
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 1.08
+          y: 0.63
+          z: 0.46
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__mobile_platform_upper_visual_1"
+    id: 913
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0.585
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 1
+          y: 0.55
+          z: 0.23
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.76
+        g: 0.78
+        b: 0.8
+        a: 1
+      }
+      diffuse {
+        r: 0.76
+        g: 0.78
+        b: 0.8
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__top_deck_visual_2"
+    id: 914
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0.695
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 0.96
+          y: 0.53
+          z: 0.01
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.19
+        g: 0.21
+        b: 0.23
+        a: 1
+      }
+      diffuse {
+        r: 0.19
+        g: 0.21
+        b: 0.23
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__clear_deck_visual_3"
+    id: 915
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.255
+        y: 0
+        z: 0.696
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 0.43
+          y: 0.49
+          z: 0.008
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.6
+        g: 0.62
+        b: 0.64
+        a: 1
+      }
+      diffuse {
+        r: 0.6
+        g: 0.62
+        b: 0.64
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__iiwa_mounting_plate_visual_4"
+    id: 916
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.25
+        y: 0
+        z: 0.689
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.022
+      }
+    }
+    material {
+      ambient {
+        r: 0.19
+        g: 0.21
+        b: 0.23
+        a: 1
+      }
+      diffuse {
+        r: 0.19
+        g: 0.21
+        b: 0.23
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__left_KUKA_panel_visual_5"
+    id: 917
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: 0.316
+        z: 0.4
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 0.78
+          y: 0.012
+          z: 0.2
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.96
+        g: 0.36
+        b: 0.03
+        a: 1
+      }
+      diffuse {
+        r: 0.96
+        g: 0.36
+        b: 0.03
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__right_KUKA_panel_visual_6"
+    id: 918
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: -0.316
+        z: 0.4
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 0.78
+          y: 0.012
+          z: 0.2
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.96
+        g: 0.36
+        b: 0.03
+        a: 1
+      }
+      diffuse {
+        r: 0.96
+        g: 0.36
+        b: 0.03
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__left_RGB_LED_band_visual_7"
+    id: 919
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: 0.323
+        z: 0.535
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 0.88
+          y: 0.008
+          z: 0.025
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.14
+        g: 0.58
+        b: 0.92
+        a: 1
+      }
+      diffuse {
+        r: 0.14
+        g: 0.58
+        b: 0.92
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__right_RGB_LED_band_visual_8"
+    id: 920
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0
+        y: -0.323
+        z: 0.535
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 0.88
+          y: 0.008
+          z: 0.025
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.14
+        g: 0.58
+        b: 0.92
+        a: 1
+      }
+      diffuse {
+        r: 0.14
+        g: 0.58
+        b: 0.92
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__front_safety_scanner_visual_9"
+    id: 921
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.56
+        y: 0
+        z: 0.22
+      }
+      orientation {
+        x: 5.93570830084467e-12
+        y: 0.70710901804279691
+        z: 5.93570830084467e-12
+        w: 0.70710454432322223
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.105
+        length: 0.07
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__rear_safety_scanner_visual_10"
+    id: 922
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.56
+        y: 0
+        z: 0.22
+      }
+      orientation {
+        x: 5.93570830084467e-12
+        y: 0.70710901804279691
+        z: 5.93570830084467e-12
+        w: 0.70710454432322223
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.105
+        length: 0.07
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__front_safety_scanner_window_visual_11"
+    id: 923
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.598
+        y: 0
+        z: 0.22
+      }
+      orientation {
+        x: 5.93570830084467e-12
+        y: 0.70710901804279691
+        z: 5.93570830084467e-12
+        w: 0.70710454432322223
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.072
+        length: 0.004
+      }
+    }
+    material {
+      ambient {
+        r: 0.12
+        g: 0.62
+        b: 0.78
+        a: 1
+      }
+      diffuse {
+        r: 0.12
+        g: 0.62
+        b: 0.78
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__rear_safety_scanner_window_visual_12"
+    id: 924
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.598
+        y: 0
+        z: 0.22
+      }
+      orientation {
+        x: 5.93570830084467e-12
+        y: 0.70710901804279691
+        z: 5.93570830084467e-12
+        w: 0.70710454432322223
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.072
+        length: 0.004
+      }
+    }
+    material {
+      ambient {
+        r: 0.12
+        g: 0.62
+        b: 0.78
+        a: 1
+      }
+      diffuse {
+        r: 0.12
+        g: 0.62
+        b: 0.78
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__emergency_stop_left_visual_13"
+    id: 925
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.4
+        y: 0.326
+        z: 0.59
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.027
+        length: 0.04
+      }
+    }
+    material {
+      ambient {
+        r: 0.85
+        g: 0.02
+        b: 0.02
+        a: 1
+      }
+      diffuse {
+        r: 0.85
+        g: 0.02
+        b: 0.02
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__emergency_stop_right_visual_14"
+    id: 926
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.4
+        y: -0.326
+        z: 0.59
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.027
+        length: 0.04
+      }
+    }
+    material {
+      ambient {
+        r: 0.85
+        g: 0.02
+        b: 0.02
+        a: 1
+      }
+      diffuse {
+        r: 0.85
+        g: 0.02
+        b: 0.02
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__led_sound_buzzer_visual_15"
+    id: 927
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.43
+        y: 0.22
+        z: 0.68
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.022
+        length: 0.04
+      }
+    }
+    material {
+      ambient {
+        r: 0.96
+        g: 0.36
+        b: 0.03
+        a: 1
+      }
+      diffuse {
+        r: 0.96
+        g: 0.36
+        b: 0.03
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_1_visual_16"
+    id: 928
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.43
+        y: 0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_2_visual_17"
+    id: 929
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.15
+        y: 0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_3_visual_18"
+    id: 930
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.15
+        y: 0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_4_visual_19"
+    id: 931
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.43
+        y: 0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_5_visual_20"
+    id: 932
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.43
+        y: -0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_6_visual_21"
+    id: 933
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.15
+        y: -0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_7_visual_22"
+    id: 934
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.15
+        y: -0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__ultrasonic_8_visual_23"
+    id: 935
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.43
+        y: -0.326
+        z: 0.34
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: SPHERE
+      sphere {
+        radius: 0.018
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_visual_24"
+    id: 936
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.36
+        y: 0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_roller_1_visual_25"
+    id: 937
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.425
+        y: 0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_roller_2_visual_26"
+    id: 938
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.295
+        y: 0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_roller_3_visual_27"
+    id: 939
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.425
+        y: 0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_roller_4_visual_28"
+    id: 940
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.295
+        y: 0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_visual_29"
+    id: 941
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.36
+        y: -0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_roller_1_visual_30"
+    id: 942
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.425
+        y: -0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_roller_2_visual_31"
+    id: 943
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.295
+        y: -0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_roller_3_visual_32"
+    id: 944
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.425
+        y: -0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_roller_4_visual_33"
+    id: 945
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: 0.295
+        y: -0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_visual_34"
+    id: 946
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.36
+        y: 0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_roller_1_visual_35"
+    id: 947
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.295
+        y: 0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_roller_2_visual_36"
+    id: 948
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.425
+        y: 0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_roller_3_visual_37"
+    id: 949
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.295
+        y: 0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_roller_4_visual_38"
+    id: 950
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.425
+        y: 0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_visual_39"
+    id: 951
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.36
+        y: -0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_roller_1_visual_40"
+    id: 952
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.295
+        y: -0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_roller_2_visual_41"
+    id: 953
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.425
+        y: -0.348
+        z: 0.205
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_roller_3_visual_42"
+    id: 954
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.295
+        y: -0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: -0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_roller_4_visual_43"
+    id: 955
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.425
+        y: -0.348
+        z: 0.065
+      }
+      orientation {
+        x: 0
+        y: 0.38268335688530941
+        z: 0
+        w: 0.92387956377603186
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.012
+        length: 0.105
+      }
+    }
+    material {
+      ambient {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+      diffuse {
+        r: 0.48
+        g: 0.5
+        b: 0.52
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__iiwa_link_0_visual_44"
+    id: 956
+    parent_name: "KMR::KMR_base_link"
+    parent_id: 911
+    pose {
+      position {
+        x: -0.25
+        y: 0
+        z: 0.7
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0.70710807985947366
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/base_link.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 957
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__mobile_platform_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0.35
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: BOX
+      box {
+        size {
+          x: 1.08
+          y: 0.63
+          z: 0.7
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__mobile_platform_collision"
+      id: 957
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: 0
+          y: 0
+          z: 0.35
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__mobile_platform_collision__COLLISION_VISUAL__"
+      id: 958
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: 0
+          y: 0
+          z: 0.35
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: BOX
+        box {
+          size {
+            x: 1.08
+            y: 0.63
+            z: 0.7
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 960
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__front_safety_scanner_collision_1"
+    laser_retro: 0
+    pose {
+      position {
+        x: 0.56
+        y: 0
+        z: 0.22
+      }
+      orientation {
+        x: 5.93570830084467e-12
+        y: 0.70710901804279691
+        z: 5.93570830084467e-12
+        w: 0.70710454432322223
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.105
+        length: 0.07
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__front_safety_scanner_collision_1"
+      id: 960
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: 0.56
+          y: 0
+          z: 0.22
+        }
+        orientation {
+          x: 5.93570830084467e-12
+          y: 0.70710901804279691
+          z: 5.93570830084467e-12
+          w: 0.70710454432322223
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__front_safety_scanner_collision_1__COLLISION_VISUAL__"
+      id: 961
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: 0.56
+          y: 0
+          z: 0.22
+        }
+        orientation {
+          x: 5.93570830084467e-12
+          y: 0.70710901804279691
+          z: 5.93570830084467e-12
+          w: 0.70710454432322223
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.105
+          length: 0.07
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 963
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__rear_safety_scanner_collision_2"
+    laser_retro: 0
+    pose {
+      position {
+        x: -0.56
+        y: 0
+        z: 0.22
+      }
+      orientation {
+        x: 5.93570830084467e-12
+        y: 0.70710901804279691
+        z: 5.93570830084467e-12
+        w: 0.70710454432322223
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.105
+        length: 0.07
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__rear_safety_scanner_collision_2"
+      id: 963
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: -0.56
+          y: 0
+          z: 0.22
+        }
+        orientation {
+          x: 5.93570830084467e-12
+          y: 0.70710901804279691
+          z: 5.93570830084467e-12
+          w: 0.70710454432322223
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__rear_safety_scanner_collision_2__COLLISION_VISUAL__"
+      id: 964
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: -0.56
+          y: 0
+          z: 0.22
+        }
+        orientation {
+          x: 5.93570830084467e-12
+          y: 0.70710901804279691
+          z: 5.93570830084467e-12
+          w: 0.70710454432322223
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.105
+          length: 0.07
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 966
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_collision_3"
+    laser_retro: 0
+    pose {
+      position {
+        x: 0.36
+        y: 0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_collision_3"
+      id: 966
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: 0.36
+          y: 0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_collision_3__COLLISION_VISUAL__"
+      id: 967
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: 0.36
+          y: 0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.125
+          length: 0.024
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 969
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_collision_4"
+    laser_retro: 0
+    pose {
+      position {
+        x: 0.36
+        y: -0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_collision_4"
+      id: 969
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: 0.36
+          y: -0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_collision_4__COLLISION_VISUAL__"
+      id: 970
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: 0.36
+          y: -0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.125
+          length: 0.024
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 972
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_collision_5"
+    laser_retro: 0
+    pose {
+      position {
+        x: -0.36
+        y: 0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_collision_5"
+      id: 972
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: -0.36
+          y: 0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_collision_5__COLLISION_VISUAL__"
+      id: 973
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: -0.36
+          y: 0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.125
+          length: 0.024
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 975
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_collision_6"
+    laser_retro: 0
+    pose {
+      position {
+        x: -0.36
+        y: -0.348
+        z: 0.135
+      }
+      orientation {
+        x: 0.70710807985947366
+        y: 0
+        z: 0
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.125
+        length: 0.024
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_collision_6"
+      id: 975
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: -0.36
+          y: -0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_collision_6__COLLISION_VISUAL__"
+      id: 976
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: -0.36
+          y: -0.348
+          z: 0.135
+        }
+        orientation {
+          x: 0.70710807985947366
+          y: 0
+          z: 0
+          w: 0.70710548251123639
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.125
+          length: 0.024
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 978
+    name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__iiwa_link_0_collision_7"
+    laser_retro: 0
+    pose {
+      position {
+        x: -0.25
+        y: 0
+        z: 0.7
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0.70710807985947366
+        w: 0.70710548251123639
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/base_link.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__iiwa_link_0_collision_7"
+      id: 978
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      pose {
+        position {
+          x: -0.25
+          y: 0
+          z: 0.7
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0.70710807985947366
+          w: 0.70710548251123639
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__iiwa_link_0_collision_7__COLLISION_VISUAL__"
+      id: 979
+      parent_name: "KMR::KMR_base_link"
+      parent_id: 911
+      cast_shadows: false
+      pose {
+        position {
+          x: -0.25
+          y: 0
+          z: 0.7
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0.70710807985947366
+          w: 0.70710548251123639
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/base_link.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  canonical: true
+  enable_wind: false
+}
+link {
+  id: 981
+  name: "KMR::iiwa_link_1"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 4
+    pose {
+      position {
+        x: 0
+        y: -0.03
+        z: 0.12
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.1
+    ixy: 0
+    ixz: 0
+    iyy: 0.09
+    iyz: 0
+    izz: 0.02
+  }
+  pose {
+    position {
+      x: -0.24999999999999992
+      y: -9.71445146547012e-17
+      z: 0.7
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0.70710805169663049
+      w: 0.7071055106741817
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_1"
+    id: 981
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.24999999999999992
+        y: -9.71445146547012e-17
+        z: 0.7
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0.70710805169663049
+        w: 0.7071055106741817
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_1::iiwa_link_1_visual"
+    id: 982
+    parent_name: "KMR::iiwa_link_1"
+    parent_id: 981
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_1.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 983
+    name: "KMR::iiwa_link_1::iiwa_link_1_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_1.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_1::iiwa_link_1_collision"
+      id: 983
+      parent_name: "KMR::iiwa_link_1"
+      parent_id: 981
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_1::iiwa_link_1_collision__COLLISION_VISUAL__"
+      id: 984
+      parent_name: "KMR::iiwa_link_1"
+      parent_id: 981
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_1.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 986
+  name: "KMR::iiwa_link_2"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 4
+    pose {
+      position {
+        x: 0.0003
+        y: 0.059
+        z: 0.042
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.05
+    ixy: 0
+    ixz: 0
+    iyy: 0.018
+    iyz: 0
+    izz: 0.044
+  }
+  pose {
+    position {
+      x: -0.24999999843321286
+      y: -0.00043599999999686945
+      z: 1.06
+    }
+    orientation {
+      x: -0.092993867740682593
+      y: 0.092993533563317535
+      z: 0.70096643096287647
+      w: 0.70096391201059949
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_2"
+    id: 986
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.24999999843321286
+        y: -0.00043599999999686945
+        z: 1.06
+      }
+      orientation {
+        x: -0.092993867740682593
+        y: 0.092993533563317535
+        z: 0.70096643096287647
+        w: 0.70096391201059949
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_2::iiwa_link_2_visual"
+    id: 987
+    parent_name: "KMR::iiwa_link_2"
+    parent_id: 986
+    pose {
+      position {
+        x: 1.3877787807814457e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_2.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 988
+    name: "KMR::iiwa_link_2::iiwa_link_2_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 1.3877787807814457e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_2.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_2::iiwa_link_2_collision"
+      id: 988
+      parent_name: "KMR::iiwa_link_2"
+      parent_id: 986
+      pose {
+        position {
+          x: 1.3877787807814457e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_2::iiwa_link_2_collision__COLLISION_VISUAL__"
+      id: 989
+      parent_name: "KMR::iiwa_link_2"
+      parent_id: 986
+      cast_shadows: false
+      pose {
+        position {
+          x: 1.3877787807814457e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_2.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 991
+  name: "KMR::iiwa_link_3"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 3
+    pose {
+      position {
+        x: 0
+        y: 0.03
+        z: 0.13
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.08
+    ixy: 0
+    ixz: 0
+    iyy: 0.075
+    iyz: 0
+    izz: 0.01
+  }
+  pose {
+    position {
+      x: -0.24999999843321286
+      y: -0.00043599999999686945
+      z: 1.06
+    }
+    orientation {
+      x: -0.0929938625181092
+      y: 0.092993538785907839
+      z: 0.70096647032942816
+      w: 0.70096387264390447
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_3"
+    id: 991
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.24999999843321286
+        y: -0.00043599999999686945
+        z: 1.06
+      }
+      orientation {
+        x: -0.0929938625181092
+        y: 0.092993538785907839
+        z: 0.70096647032942816
+        w: 0.70096387264390447
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_3::iiwa_link_3_visual"
+    id: 992
+    parent_name: "KMR::iiwa_link_3"
+    parent_id: 991
+    pose {
+      position {
+        x: 1.3877787807814457e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_3.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 993
+    name: "KMR::iiwa_link_3::iiwa_link_3_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 1.3877787807814457e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_3.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_3::iiwa_link_3_collision"
+      id: 993
+      parent_name: "KMR::iiwa_link_3"
+      parent_id: 991
+      pose {
+        position {
+          x: 1.3877787807814457e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_3::iiwa_link_3_collision__COLLISION_VISUAL__"
+      id: 994
+      parent_name: "KMR::iiwa_link_3"
+      parent_id: 991
+      cast_shadows: false
+      pose {
+        position {
+          x: 1.3877787807814457e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_3.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 996
+  name: "KMR::iiwa_link_4"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 2.7
+    pose {
+      position {
+        x: 0
+        y: 0.067
+        z: 0.034
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.03
+    ixy: 0
+    ixz: 0
+    iyy: 0.01
+    iyz: 0
+    izz: 0.029
+  }
+  pose {
+    position {
+      x: -0.25000039352922027
+      y: 0.10949629833250728
+      z: 1.4653579651105608
+    }
+    orientation {
+      x: -0.44254876282841749
+      y: 0.44254714067449863
+      z: 0.55150017544074381
+      w: 0.55149812083876737
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_4"
+    id: 996
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.25000039352922027
+        y: 0.10949629833250728
+        z: 1.4653579651105608
+      }
+      orientation {
+        x: -0.44254876282841749
+        y: 0.44254714067449863
+        z: 0.55150017544074381
+        w: 0.55149812083876737
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_4::iiwa_link_4_visual"
+    id: 997
+    parent_name: "KMR::iiwa_link_4"
+    parent_id: 996
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 2.2204460492503131e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_4.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 998
+    name: "KMR::iiwa_link_4::iiwa_link_4_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 2.2204460492503131e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_4.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_4::iiwa_link_4_collision"
+      id: 998
+      parent_name: "KMR::iiwa_link_4"
+      parent_id: 996
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 2.2204460492503131e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_4::iiwa_link_4_collision__COLLISION_VISUAL__"
+      id: 999
+      parent_name: "KMR::iiwa_link_4"
+      parent_id: 996
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 2.2204460492503131e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_4.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1001
+  name: "KMR::iiwa_link_5"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 1.7
+    pose {
+      position {
+        x: 0.0001
+        y: 0.021
+        z: 0.076
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.02
+    ixy: 0
+    ixz: 0
+    iyy: 0.018
+    iyz: 0
+    izz: 0.005
+  }
+  pose {
+    position {
+      x: -0.25000039352922032
+      y: 0.10949629833250819
+      z: 1.4653579651105866
+    }
+    orientation {
+      x: -0.44254876950475847
+      y: 0.44254713399812728
+      z: 0.55150016712074845
+      w: 0.55149812915879814
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_5"
+    id: 1001
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.25000039352922032
+        y: 0.10949629833250819
+        z: 1.4653579651105866
+      }
+      orientation {
+        x: -0.44254876950475847
+        y: 0.44254713399812728
+        z: 0.55150016712074845
+        w: 0.55149812915879814
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_5::iiwa_link_5_visual"
+    id: 1002
+    parent_name: "KMR::iiwa_link_5"
+    parent_id: 1001
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 2.2204460492503131e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_5.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1003
+    name: "KMR::iiwa_link_5::iiwa_link_5_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 2.2204460492503131e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_5.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_5::iiwa_link_5_collision"
+      id: 1003
+      parent_name: "KMR::iiwa_link_5"
+      parent_id: 1001
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 2.2204460492503131e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_5::iiwa_link_5_collision__COLLISION_VISUAL__"
+      id: 1004
+      parent_name: "KMR::iiwa_link_5"
+      parent_id: 1001
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 2.2204460492503131e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_5.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1006
+  name: "KMR::iiwa_link_6"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 1.8
+    pose {
+      position {
+        x: 0
+        y: 0.0006
+        z: 0.0004
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.025
+    ixy: 0
+    ixz: 0
+    iyy: 0.0136
+    iyz: 0
+    izz: 0.0247
+  }
+  pose {
+    position {
+      x: -0.25000183663034065
+      y: 0.50000000777425
+      z: 1.5520000617511971
+    }
+    orientation {
+      x: -0.70710808772378586
+      y: 0.707105474646895
+      z: 7.2676024227229649e-12
+      w: 1.2694799889473232e-10
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_6"
+    id: 1006
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.25000183663034065
+        y: 0.50000000777425
+        z: 1.5520000617511971
+      }
+      orientation {
+        x: -0.70710808772378586
+        y: 0.707105474646895
+        z: 7.2676024227229649e-12
+        w: 1.2694799889473232e-10
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_6::iiwa_link_6_visual"
+    id: 1007
+    parent_name: "KMR::iiwa_link_6"
+    parent_id: 1006
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 2.2204460492503131e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_6.dae"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1008
+    name: "KMR::iiwa_link_6::iiwa_link_6_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 2.2204460492503131e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_6.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_6::iiwa_link_6_collision"
+      id: 1008
+      parent_name: "KMR::iiwa_link_6"
+      parent_id: 1006
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 2.2204460492503131e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_6::iiwa_link_6_collision__COLLISION_VISUAL__"
+      id: 1009
+      parent_name: "KMR::iiwa_link_6"
+      parent_id: 1006
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 2.2204460492503131e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_6.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1011
+  name: "KMR::iiwa_link_7"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 1.25857
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0.121162
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.0176653
+    ixy: 0
+    ixz: 0
+    iyy: 0.0176653
+    iyz: 0
+    izz: 0.01101
+  }
+  pose {
+    position {
+      x: -0.25000183663034065
+      y: 0.50000000777425
+      z: 1.5520000617511971
+    }
+    orientation {
+      x: -0.70710807994004787
+      y: 0.70710548243066174
+      z: 7.5804836318091877e-12
+      w: 1.2726087803505936e-10
+    }
+  }
+  visual {
+    name: "KMR::iiwa_link_7"
+    id: 1011
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.25000183663034065
+        y: 0.50000000777425
+        z: 1.5520000617511971
+      }
+      orientation {
+        x: -0.70710807994004787
+        y: 0.70710548243066174
+        z: 7.5804836318091877e-12
+        w: 1.2726087803505936e-10
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::iiwa_link_7::iiwa_link_7_visual"
+    id: 1012
+    parent_name: "KMR::iiwa_link_7"
+    parent_id: 1011
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0.070000000000000229
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/visual/link_7_2.stl"
+        scale {
+          x: 0.001
+          y: 0.001
+          z: 0.001
+        }
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_adapter_visual_1"
+    id: 1013
+    parent_name: "KMR::iiwa_link_7"
+    parent_id: 1011
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0.16400000000000023
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.025
+        length: 0.02
+      }
+    }
+    material {
+      ambient {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.08
+        g: 0.09
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  visual {
+    name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_base_link_visual_2"
+    id: 1014
+    parent_name: "KMR::iiwa_link_7"
+    parent_id: 1011
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0.17400000000000021
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/base_link.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+      diffuse {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1015
+    name: "KMR::iiwa_link_7::iiwa_link_7_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0.070000000000000229
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_7_2.stl"
+        scale {
+          x: 0.001
+          y: 0.001
+          z: 0.001
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_7::iiwa_link_7_collision"
+      id: 1015
+      parent_name: "KMR::iiwa_link_7"
+      parent_id: 1011
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0.070000000000000229
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_7::iiwa_link_7_collision__COLLISION_VISUAL__"
+      id: 1016
+      parent_name: "KMR::iiwa_link_7"
+      parent_id: 1011
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0.070000000000000229
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/lbr_iiwa_14_r820/collision/link_7_2.stl"
+          scale {
+            x: 0.001
+            y: 0.001
+            z: 0.001
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 1018
+    name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_adapter_collision_1"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0.16400000000000023
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: CYLINDER
+      cylinder {
+        radius: 0.025
+        length: 0.02
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_adapter_collision_1"
+      id: 1018
+      parent_name: "KMR::iiwa_link_7"
+      parent_id: 1011
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0.16400000000000023
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_adapter_collision_1__COLLISION_VISUAL__"
+      id: 1019
+      parent_name: "KMR::iiwa_link_7"
+      parent_id: 1011
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0.16400000000000023
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: CYLINDER
+        cylinder {
+          radius: 0.025
+          length: 0.02
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  collision {
+    id: 1021
+    name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_base_link_collision_2"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 2.7755575615628914e-17
+        z: 0.17400000000000021
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/base_link.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_base_link_collision_2"
+      id: 1021
+      parent_name: "KMR::iiwa_link_7"
+      parent_id: 1011
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0.17400000000000021
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_base_link_collision_2__COLLISION_VISUAL__"
+      id: 1022
+      parent_name: "KMR::iiwa_link_7"
+      parent_id: 1011
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 2.7755575615628914e-17
+          z: 0.17400000000000021
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/base_link.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1024
+  name: "KMR::KMR_rg2_finger_width_mock_link"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.01
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.0001
+    ixy: 0
+    ixz: 0
+    iyy: 0.0001
+    iyz: 0
+    izz: 0.0001
+  }
+  pose {
+    position {
+      x: -0.2500018365822731
+      y: 0.50000000782815346
+      z: 1.2680000617511973
+    }
+    orientation {
+      x: -0.70710807994004787
+      y: 0.70710548243066174
+      z: 7.5804836318091877e-12
+      w: 1.2726087803505936e-10
+    }
+  }
+  visual {
+    name: "KMR::KMR_rg2_finger_width_mock_link"
+    id: 1024
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.2500018365822731
+        y: 0.50000000782815346
+        z: 1.2680000617511973
+      }
+      orientation {
+        x: -0.70710807994004787
+        y: 0.70710548243066174
+        z: 7.5804836318091877e-12
+        w: 1.2726087803505936e-10
+      }
+    }
+    type: LINK
+  }
+  enable_wind: false
+}
+link {
+  id: 1025
+  name: "KMR::rg2_left_outer_knuckle"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.05
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.001
+    ixy: 0
+    ixz: 0
+    iyy: 0.001
+    iyz: 0
+    izz: 0.001
+  }
+  pose {
+    position {
+      x: -0.23282383657971531
+      y: 0.50000007093338339
+      z: 1.2522030617529416
+    }
+    orientation {
+      x: -0.69588426287122129
+      y: 0.69588170661551307
+      z: -0.12548630874073816
+      w: 0.12548676983922344
+    }
+  }
+  visual {
+    name: "KMR::rg2_left_outer_knuckle"
+    id: 1025
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.23282383657971531
+        y: 0.50000007093338339
+        z: 1.2522030617529416
+      }
+      orientation {
+        x: -0.69588426287122129
+        y: 0.69588170661551307
+        z: -0.12548630874073816
+        w: 0.12548676983922344
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::rg2_left_outer_knuckle::rg2_left_outer_knuckle_visual"
+    id: 1026
+    parent_name: "KMR::rg2_left_outer_knuckle"
+    parent_id: 1025
+    pose {
+      position {
+        x: 2.7755575615628914e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/outer_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+      diffuse {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1027
+    name: "KMR::rg2_left_outer_knuckle::rg2_left_outer_knuckle_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 2.7755575615628914e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/outer_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::rg2_left_outer_knuckle::rg2_left_outer_knuckle_collision"
+      id: 1027
+      parent_name: "KMR::rg2_left_outer_knuckle"
+      parent_id: 1025
+      pose {
+        position {
+          x: 2.7755575615628914e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::rg2_left_outer_knuckle::rg2_left_outer_knuckle_collision__COLLISION_VISUAL__"
+      id: 1028
+      parent_name: "KMR::rg2_left_outer_knuckle"
+      parent_id: 1025
+      cast_shadows: false
+      pose {
+        position {
+          x: 2.7755575615628914e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/outer_knuckle.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1030
+  name: "KMR::rg2_left_inner_finger"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.05
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.001
+    ixy: 0
+    ixz: 0
+    iyy: 0.001
+    iyz: 0
+    izz: 0.001
+  }
+  pose {
+    position {
+      x: -0.18239057175675619
+      y: 0.50000025620076816
+      z: 1.2302600539319291
+    }
+    orientation {
+      x: -0.70710807994004787
+      y: 0.70710548243066174
+      z: 7.5804644626150758e-12
+      w: 1.272608972041831e-10
+    }
+  }
+  visual {
+    name: "KMR::rg2_left_inner_finger"
+    id: 1030
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.18239057175675619
+        y: 0.50000025620076816
+        z: 1.2302600539319291
+      }
+      orientation {
+        x: -0.70710807994004787
+        y: 0.70710548243066174
+        z: 7.5804644626150758e-12
+        w: 1.272608972041831e-10
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::rg2_left_inner_finger::rg2_left_inner_finger_visual"
+    id: 1031
+    parent_name: "KMR::rg2_left_inner_finger"
+    parent_id: 1030
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 5.5511151231257827e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/inner_finger.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.1
+        g: 0.1
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.1
+        g: 0.1
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1032
+    name: "KMR::rg2_left_inner_finger::rg2_left_inner_finger_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 4.163336342344337e-17
+        y: 5.5511151231257827e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_finger.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::rg2_left_inner_finger::rg2_left_inner_finger_collision"
+      id: 1032
+      parent_name: "KMR::rg2_left_inner_finger"
+      parent_id: 1030
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 5.5511151231257827e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::rg2_left_inner_finger::rg2_left_inner_finger_collision__COLLISION_VISUAL__"
+      id: 1033
+      parent_name: "KMR::rg2_left_inner_finger"
+      parent_id: 1030
+      cast_shadows: false
+      pose {
+        position {
+          x: 4.163336342344337e-17
+          y: 5.5511151231257827e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_finger.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1035
+  name: "KMR::rg2_left_inner_knuckle"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.05
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.001
+    ixy: 0
+    ixz: 0
+    iyy: 0.001
+    iyz: 0
+    izz: 0.001
+  }
+  pose {
+    position {
+      x: -0.24232383657685846
+      y: 0.50000003603890153
+      z: 1.2357030617508071
+    }
+    orientation {
+      x: -0.69588426287122129
+      y: 0.69588170661551307
+      z: -0.12548630874073816
+      w: 0.12548676983922344
+    }
+  }
+  visual {
+    name: "KMR::rg2_left_inner_knuckle"
+    id: 1035
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.24232383657685846
+        y: 0.50000003603890153
+        z: 1.2357030617508071
+      }
+      orientation {
+        x: -0.69588426287122129
+        y: 0.69588170661551307
+        z: -0.12548630874073816
+        w: 0.12548676983922344
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::rg2_left_inner_knuckle::rg2_left_inner_knuckle_visual"
+    id: 1036
+    parent_name: "KMR::rg2_left_inner_knuckle"
+    parent_id: 1035
+    pose {
+      position {
+        x: 1.3877787807814457e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/inner_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+      diffuse {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1037
+    name: "KMR::rg2_left_inner_knuckle::rg2_left_inner_knuckle_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 1.3877787807814457e-17
+        y: 2.7755575615628914e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::rg2_left_inner_knuckle::rg2_left_inner_knuckle_collision"
+      id: 1037
+      parent_name: "KMR::rg2_left_inner_knuckle"
+      parent_id: 1035
+      pose {
+        position {
+          x: 1.3877787807814457e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::rg2_left_inner_knuckle::rg2_left_inner_knuckle_collision__COLLISION_VISUAL__"
+      id: 1038
+      parent_name: "KMR::rg2_left_inner_knuckle"
+      parent_id: 1035
+      cast_shadows: false
+      pose {
+        position {
+          x: 1.3877787807814457e-17
+          y: 2.7755575615628914e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_knuckle.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1040
+  name: "KMR::rg2_right_inner_knuckle"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.05
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.001
+    ixy: 0
+    ixz: 0
+    iyy: 0.001
+    iyz: 0
+    izz: 0.001
+  }
+  pose {
+    position {
+      x: -0.25767983657675464
+      y: 0.4999999796296648
+      z: 1.2357030617479823
+    }
+    orientation {
+      x: 0.69588078331669612
+      y: 0.69588518620789575
+      z: -0.1254869360837228
+      w: -0.1254861422598671
+    }
+  }
+  visual {
+    name: "KMR::rg2_right_inner_knuckle"
+    id: 1040
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.25767983657675464
+        y: 0.4999999796296648
+        z: 1.2357030617479823
+      }
+      orientation {
+        x: 0.69588078331669612
+        y: 0.69588518620789575
+        z: -0.1254869360837228
+        w: -0.1254861422598671
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::rg2_right_inner_knuckle::rg2_right_inner_knuckle_visual"
+    id: 1041
+    parent_name: "KMR::rg2_right_inner_knuckle"
+    parent_id: 1040
+    pose {
+      position {
+        x: 5.5511151231257827e-17
+        y: -1.1102230246251565e-16
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/inner_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+      diffuse {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1042
+    name: "KMR::rg2_right_inner_knuckle::rg2_right_inner_knuckle_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 5.5511151231257827e-17
+        y: -1.1102230246251565e-16
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::rg2_right_inner_knuckle::rg2_right_inner_knuckle_collision"
+      id: 1042
+      parent_name: "KMR::rg2_right_inner_knuckle"
+      parent_id: 1040
+      pose {
+        position {
+          x: 5.5511151231257827e-17
+          y: -1.1102230246251565e-16
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::rg2_right_inner_knuckle::rg2_right_inner_knuckle_collision__COLLISION_VISUAL__"
+      id: 1043
+      parent_name: "KMR::rg2_right_inner_knuckle"
+      parent_id: 1040
+      cast_shadows: false
+      pose {
+        position {
+          x: 5.5511151231257827e-17
+          y: -1.1102230246251565e-16
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_knuckle.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1045
+  name: "KMR::rg2_right_outer_knuckle"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.05
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.001
+    ixy: 0
+    ixz: 0
+    iyy: 0.001
+    iyz: 0
+    izz: 0.001
+  }
+  pose {
+    position {
+      x: -0.26717983657948369
+      y: 0.49999994472891962
+      z: 1.2522030617468509
+    }
+    orientation {
+      x: -0.695882629908013
+      y: -0.69588333962336535
+      z: 0.12548660309461834
+      w: 0.12548647525017692
+    }
+  }
+  visual {
+    name: "KMR::rg2_right_outer_knuckle"
+    id: 1045
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.26717983657948369
+        y: 0.49999994472891962
+        z: 1.2522030617468509
+      }
+      orientation {
+        x: -0.695882629908013
+        y: -0.69588333962336535
+        z: 0.12548660309461834
+        w: 0.12548647525017692
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::rg2_right_outer_knuckle::rg2_right_outer_knuckle_visual"
+    id: 1046
+    parent_name: "KMR::rg2_right_outer_knuckle"
+    parent_id: 1045
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 4.4408920985006262e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/outer_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+      diffuse {
+        r: 0.8
+        g: 0.8
+        b: 0.8
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1047
+    name: "KMR::rg2_right_outer_knuckle::rg2_right_outer_knuckle_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 4.4408920985006262e-16
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/outer_knuckle.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::rg2_right_outer_knuckle::rg2_right_outer_knuckle_collision"
+      id: 1047
+      parent_name: "KMR::rg2_right_outer_knuckle"
+      parent_id: 1045
+      pose {
+        position {
+          x: 0
+          y: 0
+          z: 4.4408920985006262e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::rg2_right_outer_knuckle::rg2_right_outer_knuckle_collision__COLLISION_VISUAL__"
+      id: 1048
+      parent_name: "KMR::rg2_right_outer_knuckle"
+      parent_id: 1045
+      cast_shadows: false
+      pose {
+        position {
+          x: 0
+          y: 0
+          z: 4.4408920985006262e-16
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/outer_knuckle.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+link {
+  id: 1050
+  name: "KMR::rg2_right_inner_finger"
+  self_collide: false
+  gravity: false
+  kinematic: true
+  enabled: true
+  inertial {
+    mass: 0.05
+    pose {
+      position {
+        x: 0
+        y: 0
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    ixx: 0.001
+    ixy: 0
+    ixz: 0
+    iyy: 0.001
+    iyz: 0
+    izz: 0.001
+  }
+  pose {
+    position {
+      x: -0.31761310139532822
+      y: 0.49999989329906164
+      z: 1.2302600539087567
+    }
+    orientation {
+      x: -0.70710642061743123
+      y: -0.70710714175548
+      z: -1.2694798741494977e-10
+      w: 7.2677709120819086e-12
+    }
+  }
+  visual {
+    name: "KMR::rg2_right_inner_finger"
+    id: 1050
+    parent_name: "KMR"
+    parent_id: 910
+    pose {
+      position {
+        x: -0.31761310139532822
+        y: 0.49999989329906164
+        z: 1.2302600539087567
+      }
+      orientation {
+        x: -0.70710642061743123
+        y: -0.70710714175548
+        z: -1.2694798741494977e-10
+        w: 7.2677709120819086e-12
+      }
+    }
+    type: LINK
+  }
+  visual {
+    name: "KMR::rg2_right_inner_finger::rg2_right_inner_finger_visual"
+    id: 1051
+    parent_name: "KMR::rg2_right_inner_finger"
+    parent_id: 1050
+    pose {
+      position {
+        x: 2.7755575615628914e-17
+        y: -5.5511151231257827e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/visual/inner_finger.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    material {
+      ambient {
+        r: 0.1
+        g: 0.1
+        b: 0.1
+        a: 1
+      }
+      diffuse {
+        r: 0.1
+        g: 0.1
+        b: 0.1
+        a: 1
+      }
+    }
+    is_static: false
+    scale {
+      x: 1
+      y: 1
+      z: 1
+    }
+    type: VISUAL
+  }
+  collision {
+    id: 1052
+    name: "KMR::rg2_right_inner_finger::rg2_right_inner_finger_collision"
+    laser_retro: 0
+    pose {
+      position {
+        x: 2.7755575615628914e-17
+        y: -5.5511151231257827e-17
+        z: 0
+      }
+      orientation {
+        x: 0
+        y: 0
+        z: 0
+        w: 1
+      }
+    }
+    geometry {
+      type: MESH
+      mesh {
+        filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_finger.stl"
+        scale {
+          x: 1
+          y: 1
+          z: 1
+        }
+      }
+    }
+    surface {
+      friction {
+        mu: 1
+        mu2: 1
+        fdir1 {
+          x: 0
+          y: 0
+          z: 0
+        }
+        slip1: 0
+        slip2: 0
+        torsional {
+          coefficient: 1
+          use_patch_radius: true
+          patch_radius: 0
+          surface_radius: 0
+          ode {
+            slip: 0
+          }
+        }
+      }
+      restitution_coefficient: 0
+      bounce_threshold: 100000
+      soft_cfm: 0
+      soft_erp: 0.2
+      kp: 1000000000000
+      kd: 1
+      max_vel: 0.01
+      min_depth: 0
+      collide_without_contact: false
+      collide_without_contact_bitmask: 1
+      collide_bitmask: 65535
+      elastic_modulus: 0
+    }
+    visual {
+      name: "KMR::rg2_right_inner_finger::rg2_right_inner_finger_collision"
+      id: 1052
+      parent_name: "KMR::rg2_right_inner_finger"
+      parent_id: 1050
+      pose {
+        position {
+          x: 2.7755575615628914e-17
+          y: -5.5511151231257827e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      type: COLLISION
+    }
+    visual {
+      name: "KMR::rg2_right_inner_finger::rg2_right_inner_finger_collision__COLLISION_VISUAL__"
+      id: 1053
+      parent_name: "KMR::rg2_right_inner_finger"
+      parent_id: 1050
+      cast_shadows: false
+      pose {
+        position {
+          x: 2.7755575615628914e-17
+          y: -5.5511151231257827e-17
+          z: 0
+        }
+        orientation {
+          x: 0
+          y: 0
+          z: 0
+          w: 1
+        }
+      }
+      geometry {
+        type: MESH
+        mesh {
+          filename: "model://cais_lab_robotics/models/KMR/meshes/rg2/collision/inner_finger.stl"
+          scale {
+            x: 1
+            y: 1
+            z: 1
+          }
+        }
+      }
+      material {
+        script {
+          uri: "file://media/materials/scripts/gazebo.material"
+          name: "Gazebo/OrangeTransparent"
+        }
+      }
+      is_static: false
+      type: COLLISION
+    }
+  }
+  enable_wind: false
+}
+visual {
+  name: "KMR"
+  id: 910
+  parent_name: "default"
+  parent_id: 1
+  pose {
+    position {
+      x: -5.54
+      y: 2.13
+      z: 0
+    }
+    orientation {
+      x: 0
+      y: 0
+      z: 0.70710807985947366
+      w: 0.70710548251123639
+    }
+  }
+  type: MODEL
+}
+scale {
+  x: 1
+  y: 1
+  z: 1
+}
+self_collide: false
+enable_wind: false
+plugin {
+  name: "KMR_gazebo_ros2_control"
+  filename: "libgazebo_ros2_control.so"
+  innerxml: "<ros>\n  <namespace>/KMR</namespace>\n</ros>\n<robot_param>robot_description</robot_param>\n<robot_param_node>robot_state_publisher</robot_param_node>\n<parameters>/home/jongh/ros2_ws/install/cais_lab_robotics/share/cais_lab_robotics/config/recovery_framework_kmr_controllers.yaml</parameters>\n"
+}
+plugin {
+  name: "KMR_planar_move"
+  filename: "libgazebo_ros_planar_move.so"
+  innerxml: "<ros>\n  <namespace>/KMR</namespace>\n  <qos>\n    <topic name=\'cmd_vel\'>\n      <subscription>\n        <reliability>best_effort</reliability>\n        <history depth=\'1\'>keep_last</history>\n      </subscription>\n    </topic>\n  </qos>\n</ros>\n<update_rate>100</update_rate>\n<publish_rate>50</publish_rate>\n<publish_odom>1</publish_odom>\n<publish_odom_tf>0</publish_odom_tf>\n<odometry_frame>world</odometry_frame>\n<robot_base_frame>KMR_base_link</robot_base_frame>\n<covariance_x>0.0001</covariance_x>\n<covariance_y>0.0001</covariance_y>\n<covariance_yaw>0.001</covariance_yaw>\n"
+}
+plugin {
+  name: "KMR_rigid_base_motion"
+  filename: "libcais_kmr_rigid_base_motion.so"
+  innerxml: ""
+}
+plugin {
+  name: "KMR_rg2_left_outer_mimic"
+  filename: "libgazebo_mimic_joint_plugin.so"
+  innerxml: "<joint>KMR_rg2_finger_width</joint>\n<mimicJoint>rg2_finger_joint</mimicJoint>\n<multiplier>-10.383795</multiplier>\n<offset>0.785398</offset>\n<sensitiveness>0.003</sensitiveness>\n<maxEffort>3.0</maxEffort>\n"
+}
+plugin {
+  name: "KMR_rg2_right_outer_mimic"
+  filename: "libgazebo_mimic_joint_plugin.so"
+  innerxml: "<joint>rg2_finger_joint</joint>\n<mimicJoint>rg2_right_outer_knuckle_joint</mimicJoint>\n<multiplier>-1</multiplier>\n<offset>0</offset>\n<sensitiveness>0.003</sensitiveness>\n<maxEffort>3.0</maxEffort>\n"
+}
+plugin {
+  name: "KMR_rg2_left_inner_knuckle_mimic"
+  filename: "libgazebo_mimic_joint_plugin.so"
+  innerxml: "<joint>rg2_finger_joint</joint>\n<mimicJoint>rg2_left_inner_knuckle_joint</mimicJoint>\n<multiplier>-1</multiplier>\n<offset>0</offset>\n<sensitiveness>0.003</sensitiveness>\n<maxEffort>3.0</maxEffort>\n"
+}
+plugin {
+  name: "KMR_rg2_right_inner_knuckle_mimic"
+  filename: "libgazebo_mimic_joint_plugin.so"
+  innerxml: "<joint>rg2_finger_joint</joint>\n<mimicJoint>rg2_right_inner_knuckle_joint</mimicJoint>\n<multiplier>-1</multiplier>\n<offset>0</offset>\n<sensitiveness>0.003</sensitiveness>\n<maxEffort>3.0</maxEffort>\n"
+}
+plugin {
+  name: "KMR_rg2_left_inner_finger_mimic"
+  filename: "libgazebo_mimic_joint_plugin.so"
+  innerxml: "<joint>rg2_finger_joint</joint>\n<mimicJoint>rg2_left_inner_finger_joint</mimicJoint>\n<multiplier>1</multiplier>\n<offset>0</offset>\n<sensitiveness>0.003</sensitiveness>\n<maxEffort>3.0</maxEffort>\n"
+}
+plugin {
+  name: "KMR_rg2_right_inner_finger_mimic"
+  filename: "libgazebo_mimic_joint_plugin.so"
+  innerxml: "<joint>rg2_finger_joint</joint>\n<mimicJoint>rg2_right_inner_finger_joint</mimicJoint>\n<multiplier>1</multiplier>\n<offset>0</offset>\n<sensitiveness>0.003</sensitiveness>\n<maxEffort>3.0</maxEffort>\n"
+}
+

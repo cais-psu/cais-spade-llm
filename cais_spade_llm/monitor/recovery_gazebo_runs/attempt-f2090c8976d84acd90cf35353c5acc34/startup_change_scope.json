@@ -1,0 +1,33 @@
+{
+  "checked_at_unix": 1790706061.2252522,
+  "scene_changes": [
+    {
+      "path": "KMR.parked_arm_configuration",
+      "before": [
+        0.0,
+        -0.07,
+        0.0,
+        -1.62,
+        0.0,
+        0.54,
+        0.0
+      ],
+      "after": [
+        -7.965669315561509e-08,
+        0.26379006890547957,
+        1.1232119596294415e-07,
+        -1.0886704491781178,
+        -3.0172351081028154e-08,
+        1.7891321353164003,
+        2.201577622499959e-08
+      ]
+    },
+    {
+      "path": "KMR.parked_pose_role",
+      "before": "Storage pick-ready and base-safe home",
+      "after": "Raised transport pose and base-safe home"
+    }
+  ],
+  "resource_programs_unchanged": true,
+  "changed_protected_files": []
+}

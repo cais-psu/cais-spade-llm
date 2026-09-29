@@ -1842,7 +1842,7 @@ def test_saved_waypoints_for_every_configured_robot_and_home_policy():
         assert len(robot['initial_joint_positions']) == 6
     assert scene['KMR']['task_execution']['cartesian_motion_only'] is True
     assert 'saved_waypoints_file' not in scene['KMR']['task_execution']['cartesian_waypoints']
-    assert scene['KMR']['task_execution']['avoid_collisions'] is False
+    assert scene['KMR']['task_execution']['avoid_collisions'] is True
 
 
 def test_prepared_recording_covers_configured_parts_and_observed_home_joints():
@@ -2183,6 +2183,38 @@ def test_cartesian_home_waits_for_observed_stability_without_repeating_motion(fe
     assert controller._get_arm_joint_positions.call_count == (0 if feedback == 'stopped' else 2)
 
 
+def test_cartesian_home_reuses_fk_target_without_repeating_service_request():
+    """Repeated home moves keep fresh motion checks without another FK lookup."""
+    pytest.importorskip('moveit_msgs.srv')
+    pose = SimpleNamespace(position=SimpleNamespace(x=.2, y=.1, z=1.5), orientation=object())
+    response = SimpleNamespace(
+        error_code=SimpleNamespace(val=1), pose_stamped=[SimpleNamespace(pose=pose)],
+    )
+    observed_targets = []
+
+    def move_to_target(x, y, z, orientation, label):
+        observed_targets.append((x, y, z, label))
+        return True
+
+    controller = SimpleNamespace(
+        _home_fk_client=Mock(), arm_joint_names=['joint'], ee_link='tool0', frame_id='world',
+        _wait_future=Mock(return_value=response),
+        _move_xy_direct=Mock(side_effect=move_to_target),
+        _motion_pending=lambda _duration: lambda: True,
+        _get_arm_joint_positions=Mock(return_value=([.5], [])),
+        _fresh_stable_joint_target=Mock(return_value=True),
+    )
+    assert GazeboPickPlaceController._move_configuration_cartesian(controller, [.5])
+    assert GazeboPickPlaceController._move_configuration_cartesian(controller, [.5])
+    assert observed_targets == [(.2, .1, 1.5, 'Cartesian home')] * 2
+    assert controller._home_fk_client.call_async.call_count == 1
+    assert controller._wait_future.call_count == 1
+    assert controller._wait_future.call_args.kwargs['timeout_sec'] == 15.
+    assert controller._fresh_stable_joint_target.call_count == 2
+    assert GazeboPickPlaceController._move_configuration_cartesian(controller, [.6])
+    assert controller._home_fk_client.call_async.call_count == 2
+
+
 def test_return_rotates_at_saved_endpoint_without_repeating_the_clearance_route():
     from cais_spade_llm.resources.robot.cartesian_waypoints import fixed_orientation_waypoints
 
@@ -2251,7 +2283,7 @@ def test_ur1_ur2_direct_home_and_next_pick_skip_subtolerance_turn():
         assert controller._cartesian_move.call_args.kwargs['waypoints'] == []
 
 
-@pytest.mark.parametrize('robot,x', [('ur5e-1', -6.08), ('ur5e-2', -2.68)])
+@pytest.mark.parametrize('robot,x', [('ur5e-1', -4.13), ('ur5e-2', -2.13)])
 def test_machine_pick_retreat_lifts_before_withdrawing_to_saved_clearance(robot, x):
     from cais_spade_llm.recovery_framework import SCENE_PATH, read_json
 
@@ -2368,3 +2400,68 @@ def test_fresh_tool_tf_endpoint_rejects_stale_feedback_and_hardware(mode, age, a
     assert (pose is not None) is accepted
     if pose is not None:
         assert pose.position.z == 1.4 and pose.orientation.y == 1.
+
+
+def test_explicit_cartesian_timing_preserves_samples_at_a_bounded_joint():
+    from cais_spade_llm.resources.robot.cartesian_waypoints import _segment_timing, _coefficients, _extrema
+
+    names = ['joint_a7']
+    limits = {'joint_a7': {'lower': -3.0541, 'upper': 3.0541, 'velocity': 1., 'acceleration': 2.}}
+    positions = [[3.05], [3.05409997], [3.05409974], [3.053]]
+    rows = _segment_timing(positions, names, limits)
+    assert [row['positions'] for row in rows] == positions
+    for left, right in zip(rows, rows[1:]):
+        assert max(_extrema(_coefficients(left, right, 0))) <= 3.0541 + 1e-9
+
+
+@pytest.mark.parametrize('part_y', [-.58, -.50, -.42])
+@pytest.mark.parametrize('step', [('pick_approach', 'move_above_part'),
+                                  ('place_approach', 'move_above_destination')])
+def test_ur5e_4_pick_rotation_holds_measured_xyz_and_keeps_placement_route(part_y, step):
+    from cais_spade_llm.recovery_framework import SCENE_PATH, read_json
+
+    robots = read_json(SCENE_PATH)['robots']
+    settings = next(r['cartesian_motion'] for r in robots if r['resource_id'] == 'ur5e-4')
+    assert settings['home_preserve_orientation'] is True
+    assert [r['resource_id'] for r in robots
+            if r['cartesian_motion'].get('pick_rotation_at_current_pose')] == ['ur5e-4']
+    start = [.4994, -.5, 1.5011]
+    before = SimpleNamespace(x=math.sin(.45), y=math.cos(.45), z=0., w=0.)
+    target = SimpleNamespace(x=0., y=1., z=0., w=0.)
+    controller = SimpleNamespace(
+        execution_mode='simulation', robot_name='ur5e-4',
+        controller_config={'cartesian_motion': settings}, _robot_task_step=step,
+        _get_ee_pose=lambda: SimpleNamespace(
+            position=SimpleNamespace(**dict(zip(('x', 'y', 'z'), start))), orientation=before),
+        _make_pose=lambda x, y, z, q: (x, y, z, q),
+        _cartesian_move=Mock(return_value=True),
+    )
+    assert GazeboPickPlaceController._move_xy_direct(
+        controller, .44, part_y, start[2], target, 'move_cartesian')
+    call = controller._cartesian_move.call_args
+    poses = call.kwargs['waypoints']
+    assert len(poses) > 1
+    rotation = start if step[0] == 'pick_approach' else settings['rotation_waypoint']
+    assert all(list(p[:3]) == rotation for p in poses)
+    assert call.args[0][:3] == (.44, part_y, start[2])
+    assert abs(poses[-1][3].y - 1.) < 1e-9
+
+
+@pytest.mark.parametrize('failure', ['missing_pose', 'nonfinite_pose', 'trajectory_rejected'])
+def test_ur5e_4_pick_rotation_rejects_invalid_start_or_trajectory(failure):
+    before = SimpleNamespace(x=1., y=0., z=0., w=0.)
+    pose = SimpleNamespace(position=SimpleNamespace(
+        x=math.nan if failure == 'nonfinite_pose' else .5, y=-.5, z=1.5), orientation=before)
+    controller = SimpleNamespace(
+        execution_mode='simulation', robot_name='ur5e-4',
+        controller_config={'cartesian_motion': {'only': True,
+                           'pick_rotation_at_current_pose': True}},
+        _robot_task_step=('pick_approach', 'move_above_part'),
+        _get_ee_pose=lambda: None if failure == 'missing_pose' else pose,
+        _make_pose=lambda x, y, z, q: (x, y, z, q),
+        _cartesian_move=Mock(return_value=False),
+    )
+    assert not GazeboPickPlaceController._move_xy_direct(
+        controller, .44, -.58, 1.5, SimpleNamespace(x=0., y=1., z=0., w=0.), 'move_cartesian')
+    if failure != 'trajectory_rejected':
+        controller._cartesian_move.assert_not_called()

@@ -17,11 +17,15 @@ from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH, fingerprint
 from cais_spade_llm.recovery_framework.geometry import collision_boxes, compose, quaternion, rotate
-from cais_spade_llm.recovery_framework.kmr_tasks import capability_decompositions, delivery_bindings, execute_composition
+from cais_spade_llm.recovery_framework.kmr_tasks import (
+    KMR_LOCATION_TASK, KMR_LOCATION_VARIANTS, KMR_MOVE_VARIANTS,
+    capability_decompositions, delivery_bindings, execute_composition,
+)
 from cais_spade_llm.recovery_framework.kmr_motion import (
     bounded_joints, joint_limits, retime_trajectory, trajectory_cost,
 )
 from cais_spade_llm.resources.robot.simulation_timing import MotionDeadline
+from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
 
 _log = logging.getLogger(__name__)
 _SCENE_IDENTITY_PARAMETERS = (
@@ -107,28 +111,45 @@ def _nearest_pick_orientation(observed: list[float], choices: list[list[float]],
 
 
 def storage_home(scene: dict, order: dict) -> dict:
-    """Use a saved downward pickup posture above the configured Storage home dock."""
-    storage = scene['Storage']
-    dock = storage['KMR_docking_pose']
-    candidates = list(dict.fromkeys([*order['parts'], *storage['slots']]))
-    for part in candidates:
-        pickup = storage['KMR_pick_docking_poses'].get(part)
-        if pickup is None or math.dist(pickup[:2], dock[:2]) > .001:
-            continue
-        if abs(math.atan2(math.sin(pickup[2] - dock[5]), math.cos(pickup[2] - dock[5]))) > .001:
-            continue
-        config = scene['KMR']['task_execution']
-        target = [*storage['slots'][part][:3], *config['pick_orientation_xyzw']]
-        target[2] += config['grasp_height_m'] + storage['KMR_pick_approach_clearance_m'][part]
-        return {'part_name': part, 'joints': list(storage['KMR_pick_arm_configurations'][part]),
-                'tcp_pose': target}
-    raise ValueError('Storage has no configured downward home posture at its home dock')
+    """Describe the configured transport position at Storage, independent of part order."""
+    dock = scene['Storage']['KMR_docking_pose']
+    config = scene['KMR']['task_execution']
+    offset = config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m']
+    target = compose([*dock[:3], *quaternion(dock[3:])], [*offset, 0., 0., 0., 1.])
+    return {'part_name': None, 'position_in_base_frame_m': list(offset),
+            'tcp_pose': [*target[:3], *config['pick_orientation_xyzw']]}
 
 
 def inverse(pose: list[float]) -> list[float]:
     """Invert an xyz/xyzw rigid transform."""
     q = [-pose[3], -pose[4], -pose[5], pose[6]]
     return [*rotate(q, [-v for v in pose[:3]]), *q]
+
+
+def _base_yaw(pose: list[float]) -> float:
+    """Read the KMR base yaw from an observed xyz/xyzw Gazebo pose."""
+    qx, qy, qz, qw = pose[3:]
+    return math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+
+
+def _at_dock(observed: list[float], target: list[float], *, tolerance: float = .035) -> bool:
+    """Check the configured dock position and yaw against the observed base."""
+    target_yaw = target[2] if len(target) == 3 else target[5]
+    yaw_error = _base_yaw(observed) - target_yaw
+    return (math.dist(observed[:2], target[:2]) <= tolerance
+            and abs(math.atan2(math.sin(yaw_error), math.cos(yaw_error))) <= .035)
+
+
+def _transport_attachment_check(
+    expected: list[float], actual: list[float] | None,
+) -> tuple[bool, float | None, float]:
+    """Check the same strict Gazebo attachment tolerance during and after motion."""
+    tolerance = .008
+    if actual is None or len(actual) != 7:
+        return False, None, tolerance
+    distance = math.dist(actual[:3], expected[:3])
+    orientation = abs(sum(a * b for a, b in zip(actual[3:], expected[3:], strict=True)))
+    return distance <= tolerance and orientation >= .995, distance, tolerance
 
 
 def run(request: dict, session: dict | None = None) -> dict:
@@ -139,14 +160,14 @@ def run(request: dict, session: dict | None = None) -> dict:
     from builtin_interfaces.msg import Duration
     from control_msgs.action import FollowJointTrajectory
     from gazebo_msgs.srv import GetEntityState
-    from geometry_msgs.msg import Pose
+    from geometry_msgs.msg import Pose, Pose2D
     from linkattacher_msgs.srv import AttachLink, DetachLink
     from moveit_msgs.msg import (
         AttachedCollisionObject, CollisionObject, Constraints, JointConstraint,
         OrientationConstraint, PlanningScene, PlanningSceneComponents, PositionConstraint, RobotState, RobotTrajectory,
     )
     from moveit_msgs.srv import (
-        ApplyPlanningScene, GetCartesianPath, GetMotionPlan, GetPositionFK, GetStateValidity, GetPlanningScene,
+        ApplyPlanningScene, GetCartesianPath, GetMotionPlan, GetPositionFK, GetPositionIK, GetStateValidity, GetPlanningScene,
     )
     from rcl_interfaces.srv import GetParameters
     from rclpy.action import ActionClient
@@ -160,7 +181,7 @@ def run(request: dict, session: dict | None = None) -> dict:
     from tf2_ros import Buffer, TransformListener
     from trajectory_msgs.msg import JointTrajectoryPoint
     from unique_identifier_msgs.msg import UUID
-    from cais_lab_robotics.action import DockKMR
+    from cais_lab_robotics.action import MoveBaseKMR
 
     persistent = session is not None
     session = session if session is not None else {}
@@ -182,11 +203,14 @@ def run(request: dict, session: dict | None = None) -> dict:
         raise ValueError('Collision-check bypass requires Gazebo simulation')
     pending = request.get('pending', {})
     mode = request.get('mode')
-    name = pending.get('event_name')
-    parameters = pending.get('parameters', {})
+    name = pending.get('event_name') or request.get('function_name')
+    parameters = pending.get('parameters') or request.get('function_parameters') or {}
     valuation = request.get('valuation', {})
     held_part = valuation.get('KMR', {}).get('held_part')
-    part = parameters.get('part_name') or held_part or pending.get('part_name') or config['part_name']
+    part = (parameters.get('part_name') or request.get('primitive_parameters', {}).get('part_name')
+            or held_part or pending.get('part_name'))
+    if part is None and mode in {'probe', 'task', 'environment_task'}:
+        part = config['part_name']
     part_geometry = request.get('geometry', {}).get(part, {})
     if part_geometry.get('dimensions_m'):
         config['part_dimensions_m'] = list(part_geometry['dimensions_m'])
@@ -202,7 +226,7 @@ def run(request: dict, session: dict | None = None) -> dict:
                 for row in scene['machines']
                 if part in row.get('nominal_parts', [])
             ),
-            'M1',
+            'M1' if part is not None and mode == 'probe' else None,
         )
     )
     source_resource = parameters.get('source_resource') or valuation.get('KMR', {}).get(
@@ -354,6 +378,49 @@ def run(request: dict, session: dict | None = None) -> dict:
             operations.append({'operation': name, 'success': True, 'read_attempts': attempts})
         return response
 
+    def service_batch(kind, name, payloads):
+        """Read independent states with at most four outstanding ROS queries."""
+        if name not in clients:
+            clients[name] = node.create_client(kind, name)
+        client = clients[name]
+        spin_until(client.service_is_ready, 30., f'{name} discovery')
+        pending = deque()
+        queries = iter(payloads)
+        responses = []
+        exhausted = False
+        try:
+            while pending or not exhausted:
+                if stopped:
+                    raise InterruptedError('Stop System cancelled KMR state validation')
+                while len(pending) < 4 and not exhausted:
+                    try:
+                        query = next(queries)
+                    except StopIteration:
+                        exhausted = True
+                    else:
+                        pending.append((query, client.call_async(query)))
+                if not pending:
+                    break
+                query, future = pending[0]
+                try:
+                    spin_until(future.done, 5., f'{name} response')
+                except TimeoutError:
+                    client.remove_pending_request(future)
+                    future.cancel()
+                    response = service(kind, name, query, timeout=25., retry_read=True)
+                else:
+                    response = future.result()
+                if response is None:
+                    raise RuntimeError(f'{name} returned no response')
+                pending.popleft()
+                responses.append(response)
+        finally:
+            for _query, future in pending:
+                if not future.done():
+                    client.remove_pending_request(future)
+                    future.cancel()
+        return responses
+
     def action(kind, name, goal, timeout=120., while_active=None):
         nonlocal first_motion_at_unix
         if name not in action_clients:
@@ -371,7 +438,7 @@ def run(request: dict, session: dict | None = None) -> dict:
                                      remaining_yaw_rad=value.remaining_yaw_rad)
         action_started = time.monotonic()
         simulation_started = node.get_clock().now().nanoseconds/1e9
-        if kind is DockKMR:
+        if kind is MoveBaseKMR:
             base_motion_samples.clear()
         pending = client.send_goal_async(goal, goal_uuid=goal_id, feedback_callback=feedback)
         entry = (name, goal_id, pending)
@@ -403,7 +470,26 @@ def run(request: dict, session: dict | None = None) -> dict:
         if points:
             duration = points[-1].time_from_start
             progress_timeout = duration.sec + duration.nanosec / 1e9 + 5.
-        spin_until(future.done, timeout, progress_timeout=progress_timeout)
+        try:
+            spin_until(future.done, timeout, name, progress_timeout=progress_timeout)
+        except (TimeoutError, InterruptedError) as exc:
+            failed = {
+                'operation': name, 'success': False, 'goal_id': bytes(goal_id.uuid).hex(),
+                'status': 'canceled' if isinstance(exc, InterruptedError) else 'timed_out',
+                'message': str(exc), 'dispatch_wall_time_sec': accepted_at-action_started,
+                'controller_execution_wall_time_sec': time.monotonic()-accepted_at,
+                'wall_time_sec': time.monotonic()-action_started,
+                'simulation_time_sec': node.get_clock().now().nanoseconds/1e9-simulation_started,
+            }
+            if kind is MoveBaseKMR:
+                failed.update(
+                    feedback=deepcopy(last_feedback), base_motion_status=deepcopy(base_motion_status),
+                    base_motion_samples=[{'received_after_action_start_sec': received-action_started,
+                                          **deepcopy(sample)} for received, sample in base_motion_samples],
+                )
+            operations.append(failed)
+            # Keep the accepted handle registered for the worker's cancellation cleanup.
+            raise
         response = future.result()
         active_goals.remove(handle)
         code = getattr(response.result, 'error_code', None)
@@ -417,7 +503,7 @@ def run(request: dict, session: dict | None = None) -> dict:
                            'controller_execution_wall_time_sec': time.monotonic()-accepted_at,
                            'wall_time_sec': time.monotonic()-action_started,
                            'simulation_time_sec': node.get_clock().now().nanoseconds/1e9-simulation_started})
-        if kind is DockKMR:
+        if kind is MoveBaseKMR:
             operations[-1].update(
                 feedback=deepcopy(last_feedback), base_motion_status=deepcopy(base_motion_status),
                 base_motion_samples=[{'received_after_action_start_sec': received - action_started,
@@ -513,7 +599,7 @@ def run(request: dict, session: dict | None = None) -> dict:
         empty_return = (mode == 'environment_task' and name == 'move_to_resource'
                         and held_part is None)
         initialize = not session.get('collision_scene_installed') or mode != 'environment_task'
-        observed_parts = component_parts if initialize else ([] if empty_return else [part])
+        observed_parts = component_parts if initialize else ([] if empty_return or part is None else [part])
         part_poses = {part_name: entity(part_name) for part_name in observed_parts}
         from cais_spade_llm.recovery_framework.part_collision import collision_object
 
@@ -524,7 +610,7 @@ def run(request: dict, session: dict | None = None) -> dict:
             components=PlanningSceneComponents(components=PlanningSceneComponents.WORLD_OBJECT_NAMES)),
             retry_read=True).scene.world.collision_objects
         existing_ids = {obj.id for obj in existing}
-        excluded_prefix = None if empty_return else part + '/'
+        excluded_prefix = None if empty_return or part is None else part + '/'
         released_objects = sorted(set(observed_parts).intersection(existing_ids))
         planning_scene.world.collision_objects = [
             CollisionObject(id=identifier, operation=CollisionObject.REMOVE)
@@ -603,12 +689,12 @@ def run(request: dict, session: dict | None = None) -> dict:
             middle = config['cartesian_waypoints'].get('transfer_orientation_waypoint_xyzw_in_base_frame')
             if middle is not None:
                 middle = compose(entity('KMR'), [0., 0., 0., *middle])[3:]
-            targets = fixed_orientation_waypoints(
-                start, target, [pose[:3] for pose in (waypoints or [])],
-                rotation_point=transport_pose()[:3],
-                angular_step=config['cartesian_waypoints'].get('angular_step_rad', .05),
-                rotation_midpoint=middle,
-            ) or [list(target)]
+            targets = (deepcopy([*waypoints, target]) if waypoints else
+                       fixed_orientation_waypoints(
+                           start, target, [], rotation_point=transport_pose()[:3],
+                           angular_step=config['cartesian_waypoints'].get('angular_step_rad', .05),
+                           rotation_midpoint=middle,
+                       )) or [list(target)]
             waypoints, target = targets[:-1], targets[-1]
             if any(pose is None or len(pose) != 7 or not all(math.isfinite(v) for v in pose)
                    or not math.isclose(sum(v*v for v in pose[3:]), 1., abs_tol=1e-5)
@@ -617,7 +703,51 @@ def run(request: dict, session: dict | None = None) -> dict:
             if any(rotate(pose[3:], [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad'])
                    for pose in [start, *targets]):
                 raise ValueError('KMR Cartesian waypoints must keep the gripper downward')
-        if cartesian or config.get('cartesian_motion_only'):
+        if config.get('cartesian_motion_only'):
+            from cais_spade_llm.resources.robot.cartesian_waypoints import resolve_waypoints, robot_trajectory
+
+            settings = config['cartesian_waypoints']
+            avoid_collisions = config.get('avoid_collisions') is not False
+            def solve_ik(pose, seed):
+                if stopped:
+                    raise InterruptedError('Stop System cancelled KMR Cartesian preparation')
+                query = GetPositionIK.Request()
+                query.ik_request.group_name = config['planning_group']
+                query.ik_request.ik_link_name = config['tcp_link']
+                query.ik_request.robot_state = updated_state(state, kmr['arm_joint_names'], seed)
+                query.ik_request.avoid_collisions = avoid_collisions
+                query.ik_request.timeout.nanosec = 100_000_000
+                query.ik_request.pose_stamped.header.frame_id = 'world'
+                query.ik_request.pose_stamped.pose = pose_message(pose)
+                query.ik_request.constraints.joint_constraints = [JointConstraint(
+                    joint_name=name, position=value,
+                    tolerance_above=settings['max_joint_step_rad'],
+                    tolerance_below=settings['max_joint_step_rad'], weight=1.,
+                ) for name, value in zip(kmr['arm_joint_names'], seed, strict=True)]
+                result = service(GetPositionIK, '/compute_ik', query, retry_read=True)
+                if result.error_code.val != 1:
+                    raise ValueError(f'KMR Cartesian waypoint IK failed: {result.error_code.val}')
+                observed = dict(zip(result.solution.joint_state.name, result.solution.joint_state.position))
+                return [observed[name] for name in kmr['arm_joint_names']]
+
+            # Humble's Cartesian service time-parameterizes before returning its
+            # states and does not enforce the request's absolute jump threshold.
+            # Resolve the declared poses ourselves so a branch jump is rejected
+            # before interpolation can turn it into an unintended arm detour.
+            rows = resolve_waypoints(
+                start_pose=start, start_joints=initial, waypoints=targets,
+                names=kmr['arm_joint_names'], limits=limits, solve_ik=solve_ik,
+                linear_step=settings['linear_step_m'],
+                angular_step=settings.get('angular_step_rad', .05),
+                maximum_joint_step=settings['max_joint_step_rad'],
+            )
+            trajectory = robot_trajectory(kmr['arm_joint_names'], rows)
+            info = {'operation': 'cartesian_path', 'success': True, 'target': deepcopy(target),
+                    'avoid_collisions': avoid_collisions, 'collision_checks_bypassed': not avoid_collisions,
+                    'fraction': 1., 'error_code': 1, 'waypoint_count': len(targets),
+                    'joint_target': None, 'ik_samples': len(rows)}
+            planning_seconds += time.monotonic()-planning_started
+        elif cartesian:
             query = GetCartesianPath.Request()
             query.header.frame_id = 'world'
             query.group_name = config['planning_group']
@@ -628,15 +758,6 @@ def run(request: dict, session: dict | None = None) -> dict:
             query.jump_threshold = 2.
             query.revolute_jump_threshold = .35
             query.avoid_collisions = config.get('avoid_collisions') is not False
-            if config.get('cartesian_motion_only'):
-                settings = config['cartesian_waypoints']
-                query.max_step = float(settings['linear_step_m'])
-                query.revolute_jump_threshold = float(settings['max_joint_step_rad'])
-                query.jump_threshold = 0.
-                if (not math.isfinite(query.max_step) or query.max_step <= 0
-                        or not math.isfinite(query.revolute_jump_threshold)
-                        or query.revolute_jump_threshold <= 0):
-                    raise ValueError('Invalid KMR Cartesian waypoint spacing')
             if hold_arm_base:
                 values = dict(zip(state.joint_state.name, state.joint_state.position))
                 query.path_constraints.joint_constraints = [JointConstraint(
@@ -717,19 +838,35 @@ def run(request: dict, session: dict | None = None) -> dict:
                    for left, right in zip(points, points[1:])
                    for a, b in zip(left.positions, right.positions, strict=True)):
                 raise ValueError('KMR Cartesian trajectory has an IK joint discontinuity')
-            checked = 0
-            samples = (trajectory_samples(trajectory.joint_trajectory)
-                       if config.get('avoid_collisions') is not False else ())
-            for positions in samples:
+            checked, cartesian_checked, maximum_error = 0, 0, 0.
+            validity_queries = []
+            for positions in trajectory_samples(trajectory.joint_trajectory, maximum_joint_step=.02):
                 if stopped:
                     raise InterruptedError('Stop System cancelled KMR waypoint validation')
-                query = GetStateValidity.Request(group_name=config['planning_group'],
-                    robot_state=updated_state(state, kmr['arm_joint_names'], positions))
-                valid = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
+                pose = configuration_pose(state, positions)
+                if rotate(pose[3:], [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad']):
+                    raise ValueError('KMR controller interpolation leaves the downward Cartesian orientation')
+                distances = []
+                for left, right in zip([start, *targets], targets):
+                    direction = [b-a for a, b in zip(left[:3], right[:3])]
+                    length_squared = sum(value*value for value in direction)
+                    fraction = (max(0., min(1., sum((pose[i]-left[i])*direction[i] for i in range(3))
+                                            / length_squared)) if length_squared else 0.)
+                    distances.append(math.dist(pose[:3], [left[i]+fraction*direction[i] for i in range(3)]))
+                maximum_error = max(maximum_error, min(distances))
+                if maximum_error > config['position_tolerance_m']:
+                    raise ValueError('KMR controller interpolation leaves the declared Cartesian path')
+                cartesian_checked += 1
+                if config.get('avoid_collisions') is not False:
+                    query = GetStateValidity.Request(group_name=config['planning_group'],
+                        robot_state=updated_state(state, kmr['arm_joint_names'], positions))
+                    validity_queries.append(query)
+            for valid in service_batch(GetStateValidity, '/check_state_validity', validity_queries) if validity_queries else ():
                 if not valid.valid:
                     raise ValueError(f'KMR waypoint motion is obstructed: {[(c.contact_body_1, c.contact_body_2) for c in valid.contacts]}')
                 checked += 1
             info.update(dynamic_target=True, checked_states=checked,
+                        checked_cartesian_states=cartesian_checked, maximum_path_error_m=maximum_error,
                         observed_start_pose=deepcopy(start), waypoints=deepcopy(targets))
         info['planning_wall_time_sec'] = time.monotonic()-planning_started
         info['trajectory'] = {
@@ -776,8 +913,10 @@ def run(request: dict, session: dict | None = None) -> dict:
     def move(target=None, joints=None, cartesian=False):
         execute_plan(plan_motion(observed_state(), target=target, joints=joints, cartesian=cartesian))
 
-    def move_cartesian(target):
-        """Execute a complete path with fixed TCP orientation and configured checks."""
+    def move_cartesian(target, waypoints=None, seed=None):
+        """Execute an observed Cartesian path through optional saved waypoints."""
+        if waypoints is not None or seed is not None:
+            return move_to_pose(target, seed=seed, waypoints=waypoints)
         current = tcp()
         if abs(sum(a * b for a, b in zip(current[3:], target[3:]))) < math.cos(
             config['orientation_tolerance_rad'] / 2
@@ -788,6 +927,10 @@ def run(request: dict, session: dict | None = None) -> dict:
                 'avoid_collisions': config.get('avoid_collisions') is not False,
                 'collision_checks_bypassed': config.get('avoid_collisions') is False}
 
+    def move_joints(joints):
+        """Move all seven arm joints to bounded absolute targets."""
+        return move_to_configuration(joints)
+
     def move_to_configuration(joints, hold_arm_base=False):
         measured = dict(zip((state := fresh_state()).name, state.position))
         if any(abs(measured[name] - value) > .005
@@ -795,20 +938,36 @@ def run(request: dict, session: dict | None = None) -> dict:
             execute_plan(plan_motion(observed_state(), joints=joints, hold_arm_base=hold_arm_base))
         return {'success': True, 'joints': list(joints), 'tcp_pose': tcp()}
 
+    def move_to_named_pose(pose_name):
+        """Move to a saved KMR arm pose while retaining the observed orientation."""
+        if pose_name == 'home':
+            return move_home()
+        if pose_name != 'transport':
+            raise ValueError('Unknown KMR arm pose')
+        selected = compute_pick_dock_pose()
+        return move_to_pose(selected['transport'], waypoints=selected['waypoints'])
+
+    def move_relative(offset):
+        """Move the TCP by a measured world-frame Cartesian offset."""
+        if (not isinstance(offset, list) or len(offset) != 3
+                or not all(isinstance(value, (int, float)) and math.isfinite(value)
+                           for value in offset)):
+            raise ValueError('KMR move_relative requires three finite distances')
+        current = tcp()
+        target = [*(value + distance for value, distance in zip(current[:3], offset)),
+                  *current[3:]]
+        return move_cartesian(target)
+
+    def detect_parts():
+        """Return fresh Gazebo poses of configured Storage parts."""
+        return {'parts': {name: entity(name) for name in scene['Storage']['slots']}}
+
     def move_home():
         if valuation.get('KMR', {}).get('held_part') is not None or (request.get('custody') or {}).get('attached') is True:
             raise ValueError('KMR downward home requires an empty gripper')
-        dock_pose = scene['Storage']['KMR_docking_pose']
-        base_pose = entity('KMR')
-        dock_orientation = quaternion(dock_pose[3:])
-        if (math.dist(base_pose[:2], dock_pose[:2]) > .035
-                or abs(sum(a * b for a, b in zip(base_pose[3:], dock_orientation))) < math.cos(.035 / 2)):
-            raise ValueError('KMR downward home requires the observed Storage dock')
         home = storage_home(scene, request['inputs']['product_order'])
         current = tcp()
-        if rotate(current[3:], [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad']):
-            raise ValueError('KMR empty home requires a downward observed gripper')
-        target = [*home['tcp_pose'][:3], *current[3:]]
+        target = transport_pose(current)
         gripper(kmr['gripper_stroke_m'])
         before = len(operations)
         move_to_pose(target)
@@ -826,7 +985,7 @@ def run(request: dict, session: dict | None = None) -> dict:
                 or error > .005):
             raise ValueError('KMR downward home endpoint was not observed')
         observation = {'operation': 'observed_storage_home', 'success': True,
-                       'home_pose_observed': True, 'downward_facing': True,
+                       'home_pose_observed': True, 'downward_facing': True, 'arm_parked': True,
                        'tcp_pose': actual, 'target': home, 'max_joint_error_rad': error,
                        'gripper_open': abs(joints[kmr['gripper_joint']] - kmr['gripper_stroke_m']) <= .006}
         if not observation['gripper_open']:
@@ -844,15 +1003,22 @@ def run(request: dict, session: dict | None = None) -> dict:
         execute_plan(plan_motion(observed_state(), target=target, cartesian=True, waypoints=waypoints))
         return {'success': True, 'tcp_pose': tcp(), 'motion_method': 'Cartesian waypoints'}
 
-    def rotate_arm_base(joint_a1):
-        """Turn only joint_a1 after validating the complete arm and held-part sweep."""
+    def rotate_joint(joint_name, delta_deg):
+        """Rotate one selected arm joint while holding the other six joints."""
         state = observed_state()
         values = dict(zip(state.joint_state.name, state.joint_state.position))
         initial = [values[name] for name in kmr['arm_joint_names']]
-        delta = joint_a1 - initial[0]
+        if joint_name not in kmr['arm_joint_names'] or not isinstance(delta_deg, (int, float)) or not math.isfinite(delta_deg):
+            raise ValueError('KMR rotate_joint needs a configured joint and finite delta_deg')
+        selected = kmr['arm_joint_names'].index(joint_name)
+        delta = math.radians(delta_deg)
+        final = initial.copy()
+        final[selected] += delta
+        if not bounded_joints(kmr['arm_joint_names'], final, limits):
+            raise ValueError('KMR rotate_joint exceeds a configured joint limit')
         if config.get('cartesian_motion_only'):
             raise ValueError('Use the computed downward transfer waypoints for KMR arm motion')
-        bound = limits[kmr['arm_joint_names'][0]]
+        bound = limits[joint_name]
         duration = max(.05, 1.875 * abs(delta) / bound['velocity'],
                        math.sqrt(5.774 * abs(delta) / bound['acceleration']))
         count = max(1, math.ceil(1.875 * abs(delta) / .02))
@@ -861,31 +1027,35 @@ def run(request: dict, session: dict | None = None) -> dict:
         for index in range(count + 1):
             positions = initial.copy()
             u = index / count
-            positions[0] += delta * (10*u**3 - 15*u**4 + 6*u**5)
+            positions[selected] += delta * (10*u**3 - 15*u**4 + 6*u**5)
             query = GetStateValidity.Request(group_name=config['planning_group'])
             query.robot_state = updated_state(state, kmr['arm_joint_names'], positions)
             response = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
             if not response.valid:
                 contacts = [(item.contact_body_1, item.contact_body_2) for item in response.contacts]
-                raise ValueError(f'joint_a1 turn intersects geometry: {contacts}')
+                raise ValueError(f'{joint_name} turn intersects geometry: {contacts}')
             velocity = delta * (30*u**2 - 60*u**3 + 30*u**4) / duration
             acceleration = delta * (60*u - 180*u**2 + 120*u**3) / duration**2
             sec, nanosec = divmod(round(duration * u * 1e9), 1_000_000_000)
+            velocities = [0.] * len(initial)
+            accelerations = [0.] * len(initial)
+            velocities[selected] = velocity
+            accelerations[selected] = acceleration
             trajectory.joint_trajectory.points.append(JointTrajectoryPoint(
-                positions=positions, velocities=[velocity, *([0.] * 6)],
-                accelerations=[acceleration, *([0.] * 6)],
+                positions=positions, velocities=velocities,
+                accelerations=accelerations,
                 time_from_start=Duration(sec=sec, nanosec=nanosec)))
         retime_trajectory(trajectory.joint_trajectory, limits,
                           config['velocity_scaling'], config['acceleration_scaling'])
-        info = {'operation': 'rotate_arm_base', 'success': True, 'target': None,
+        info = {'operation': 'rotate_joint', 'success': True, 'target': None,
                 'avoid_collisions': True, 'checked_states': count + 1,
-                'joint_a1': joint_a1, 'trajectory': {
+                'joint_name': joint_name, 'delta_deg': delta_deg, 'trajectory': {
                     'joint_names': list(kmr['arm_joint_names']),
                     'points': [{'positions': list(point.positions),
                                 'time_from_start': point.time_from_start.sec + point.time_from_start.nanosec / 1e9}
                                for point in trajectory.joint_trajectory.points]}}
         execute_plan((trajectory, info))
-        return {'success': True, 'joint_a1': joint_a1, 'tcp_pose': tcp()}
+        return {'success': True, 'joint_name': joint_name, 'joints': final, 'tcp_pose': tcp()}
 
     def planned_attachment(state, grasp_pose, part_pose):
         result = updated_state(state, [kmr['gripper_joint']], [config['closed_gripper_width_m']])
@@ -893,7 +1063,7 @@ def run(request: dict, session: dict | None = None) -> dict:
         center = compose(part_pose, [
             0.,
             0.,
-            config['part_dimensions_m'][2] / 2 + support_allowance,
+            config['part_dimensions_m'][2] / 2 + support_allowance / 2,
             0.,
             0.,
             0.,
@@ -902,7 +1072,11 @@ def run(request: dict, session: dict | None = None) -> dict:
         attached = AttachedCollisionObject()
         attached.link_name = config['tcp_link']
         attached.touch_links = [config['tcp_link'], 'rg2_base_link', 'rg2_left_inner_finger', 'rg2_right_inner_finger']
-        attached.object = box_object(part, compose(inverse(grasp_pose), center), config['part_dimensions_m'])
+        size = list(config['part_dimensions_m'])
+        if not 0. <= support_allowance < size[2]:
+            raise ValueError('Invalid KMR attachment support contact allowance')
+        size[2] -= support_allowance
+        attached.object = box_object(part, compose(inverse(grasp_pose), center), size)
         attached.object.header.frame_id = config['tcp_link']
         result.attached_collision_objects = [attached]
         return result
@@ -930,13 +1104,7 @@ def run(request: dict, session: dict | None = None) -> dict:
         nonlocal planning_seconds
         before = time.monotonic()
         route = route if route is not None else route_between(source_resource, target_resource)
-        if config.get('avoid_collisions') is False:
-            return {'operation': 'validated_transport_sweep', 'success': True,
-                    'transport_sweep_validated': False, 'collision_checks_bypassed': True,
-                    'checked_states': 0, 'route': deepcopy(route), 'arm_configuration': [
-                        dict(zip(state.joint_state.name, state.joint_state.position))[name]
-                        for name in kmr['arm_joint_names']]}
-        checked = 0
+        queries, poses = [], []
         for start, end in zip(route, route[1:]):
             steps = max(1, math.ceil(math.dist(start[:2], end[:2])/config['transport_sample_step_m']),
                         math.ceil(abs(end[2] - start[2]) / .05))
@@ -944,11 +1112,14 @@ def run(request: dict, session: dict | None = None) -> dict:
                 pose = [a+(b-a)*index/steps for a, b in zip(start, end)]
                 query = GetStateValidity.Request(group_name=config['planning_group'])
                 query.robot_state = updated_state(state, ['KMR_base_x_joint', 'KMR_base_y_joint', 'KMR_base_yaw_joint'], pose)
-                response = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
-                if not response.valid:
-                    collisions = [(c.contact_body_1, c.contact_body_2) for c in response.contacts]
-                    raise ValueError(f'KMR arm/gripper/part transport sweep is obstructed at {pose}: {collisions}')
-                checked += 1
+                queries.append(query)
+                poses.append(pose)
+        checked = 0
+        for pose, response in zip(poses, service_batch(GetStateValidity, '/check_state_validity', queries), strict=True):
+            if not response.valid:
+                collisions = [(c.contact_body_1, c.contact_body_2) for c in response.contacts]
+                raise ValueError(f'KMR arm/gripper/part transport sweep is obstructed at {pose}: {collisions}')
+            checked += 1
         planning_seconds += time.monotonic()-before
         return {'operation': 'validated_transport_sweep', 'success': True,
                 'transport_sweep_validated': True, 'collision_checks_bypassed': False,
@@ -1007,16 +1178,19 @@ def run(request: dict, session: dict | None = None) -> dict:
                            'stamp': joint_stamps[kmr['gripper_joint']]})
 
     def confirm_carrying():
-        configuration = (request.get('custody') or {}).get('carrying_arm_configuration')
-        if not isinstance(configuration, list) or not bounded_joints(kmr['arm_joint_names'], configuration, limits):
-            raise ValueError('No acknowledged carrying arm configuration')
-        def reached():
-            fresh_state()
-            return all(abs(joint_values[name]-target) <= .02 for name, target in zip(
-                kmr['arm_joint_names'], configuration))
-        spin_until(reached, 5., 'arm feedback at carrying configuration')
+        state = fresh_state()
+        values = dict(zip(state.name, state.position))
+        configuration = [values[name] for name in kmr['arm_joint_names']]
+        if not bounded_joints(kmr['arm_joint_names'], configuration, limits):
+            raise ValueError('Measured KMR carrying configuration exceeds joint limits')
+        measured = tcp()
+        target = transport_pose(measured)
+        if math.dist(measured[:3], target[:3]) > .015:
+            raise ValueError('KMR carrying TCP has not reached the configured transport posture')
         operations.append({'operation': 'observed_carrying', 'success': True,
-                           'joints': {name: joint_values[name] for name in kmr['arm_joint_names']}})
+                           'joints': dict(zip(kmr['arm_joint_names'], configuration)),
+                           'tcp_pose': measured})
+        return configuration
 
     def attach(enabled):
         kind = AttachLink if enabled else DetachLink
@@ -1034,23 +1208,94 @@ def run(request: dict, session: dict | None = None) -> dict:
         attached_object.link_name = config['tcp_link']
         attached_object.touch_links = [config['tcp_link'], 'rg2_base_link', 'rg2_left_inner_finger', 'rg2_right_inner_finger']
         observed = entity(part)
-        center = compose(observed, [0., 0., config['part_dimensions_m'][2]/2, 0., 0., 0., 1.])
-        attached_object.object = box_object(part, center, config['part_dimensions_m'])
+        size = list(config['part_dimensions_m'])
+        allowance = float(config['attachment_support_contact_allowance_m']) if attached else 0.
+        if not 0. <= allowance < size[2]:
+            raise ValueError('Invalid KMR attachment support contact allowance')
+        center = compose(observed, [0., 0., (size[2]+allowance)/2, 0., 0., 0., 1.])
+        size[2] -= allowance
+        attached_object.object = box_object(part, center, size)
         if not attached:
             attached_object.object.operation = CollisionObject.REMOVE
-            planning_scene.world.collision_objects = [box_object(part, center, config['part_dimensions_m'])]
+            planning_scene.world.collision_objects = [box_object(part, center, size)]
         planning_scene.robot_state.attached_collision_objects = [attached_object]
         apply(planning_scene)
 
+    def attach_part(part_name=None):
+        if part is None or (part_name is not None and part_name != part):
+            raise ValueError('KMR attach_part requires the bound observed part')
+        values = dict(zip((state := fresh_state()).name, state.position))
+        if abs(values[kmr['gripper_joint']] - config['closed_gripper_width_m']) > .006:
+            raise ValueError('KMR attach_part requires the observed closed gripper')
+        if math.dist(tcp()[:3], entity(part)[:3]) > .06:
+            raise ValueError('KMR attach_part requires the part at the gripper')
+        attach(True)
+        part_collision(True)
+        return {'attached': True, 'held_part': part,
+                'grasp_transform': compose(inverse(tcp()), entity(part))}
+
+    def detach_part():
+        values = dict(zip((state := fresh_state()).name, state.position))
+        if abs(values[kmr['gripper_joint']] - kmr['gripper_stroke_m']) > .006:
+            raise ValueError('KMR detach_part requires the observed open gripper')
+        attach(False)
+        part_collision(False)
+        return {'attached': False, 'held_part': None}
+
+    def grasp_part(initial=None, part_name=None):
+        if part is None or (part_name is not None and part_name != part):
+            raise ValueError('KMR grasp_part requires the bound observed part')
+        observed = entity(part)
+        if initial is not None and math.dist(observed[:3], initial[:3]) > .01:
+            raise ValueError('Part moved before grasp')
+        if math.dist(tcp()[:3], observed[:3]) > .06:
+            raise ValueError('KMR grasp requires the part at the gripper')
+        gripper(config['closed_gripper_width_m'])
+        transform = observe_grasp(observed)
+        attach_part()
+        return {'grasp_transform': transform, 'attached': True,
+                'held_part': part, 'gripper_state': 'closed'}
+
+    def release_part(transform=None):
+        transform = transform or (request.get('custody') or {}).get('grasp_transform')
+        if not isinstance(transform, list) or len(transform) != 7:
+            raise ValueError('KMR release requires an acknowledged grasp transform')
+        custody(transform)
+        gripper(kmr['gripper_stroke_m'])
+        detach_part()
+        return {'attached': False, 'held_part': None, 'gripper_state': 'open'}
+
     def custody(transform):
-        measured = entity(part)
-        predicted = compose(tcp(), transform)
-        if math.dist(measured[:3], predicted[:3]) > .008:
-            raise ValueError('Gazebo part does not follow the held-part transform')
-        if abs(sum(a*b for a, b in zip(measured[3:], predicted[3:]))) < .995:
-            raise ValueError('Gazebo held part orientation changed')
-        operations.append({'operation': 'observed_custody', 'success': True, 'part_pose': measured, 'tcp_pose': tcp()})
-        return measured
+        observation = {'operation': 'observed_custody', 'success': False, 'checked_samples': 0}
+
+        def matches():
+            measured = entity(part)
+            measured_tcp = tcp()
+            predicted = compose(measured_tcp, transform)
+            position_error = math.dist(measured[:3], predicted[:3])
+            orientation_dot = abs(sum(
+                a * b for a, b in zip(measured[3:], predicted[3:], strict=True)
+            ))
+            observation.update(
+                checked_samples=observation['checked_samples'] + 1,
+                part_pose=measured, tcp_pose=measured_tcp,
+                predicted_part_pose=predicted, position_error_m=position_error,
+                orientation_dot=orientation_dot,
+            )
+            return position_error <= .008 and orientation_dot >= .995
+
+        try:
+            spin_until(matches, 2., 'held-part transform')
+        except TimeoutError as exc:
+            operations.append(observation)
+            raise ValueError(
+                'Gazebo part does not follow the held-part transform: '
+                f"position error {observation.get('position_error_m')} m, "
+                f"orientation dot {observation.get('orientation_dot')}"
+            ) from exc
+        observation['success'] = True
+        operations.append(observation)
+        return observation['part_pose']
 
     def serialize(value):
         if isinstance(value, dict):
@@ -1083,75 +1328,154 @@ def run(request: dict, session: dict | None = None) -> dict:
         custody(transform)
         return transform
 
-    def dock(target_resource, transform):
+    def dispatch_base_move(target_pose, waypoints):
+        """Call the coordinate base controller and verify its exact endpoint."""
+        goal = MoveBaseKMR.Goal()
+        goal.target_pose = Pose2D(x=float(target_pose[0]), y=float(target_pose[1]),
+                                  theta=float(target_pose[2]))
+        goal.waypoints = [Pose2D(x=float(row[0]), y=float(row[1]),
+                                 theta=float(row[2])) for row in waypoints]
+        action(MoveBaseKMR, '/KMR/move_base', goal, 240.)
+        arrived = entity('KMR')
+        if not _at_dock(arrived, target_pose, tolerance=.005):
+            raise ValueError('KMR base stopped outside the requested pose')
+        return [arrived[0], arrived[1], _base_yaw(arrived)]
+
+    def move_base(target_pose, waypoints=None, transform=None):
+        """Move the measured base through a checked route with observed arm state."""
         nonlocal transport_timer
-        if target_resource not in {'M1', 'M2'}:
+        if (not isinstance(target_pose, list) or len(target_pose) != 3
+                or not all(isinstance(value, (int, float)) and math.isfinite(value)
+                           for value in target_pose)):
+            raise ValueError('KMR move_base requires a finite world-frame target pose')
+        waypoints = [] if waypoints is None else waypoints
+        if (not isinstance(waypoints, list)
+                or any(not isinstance(pose, list) or len(pose) != 3
+                       or not all(isinstance(value, (int, float)) and math.isfinite(value)
+                                  for value in pose)
+                       for pose in waypoints)):
+            raise ValueError('KMR move_base requires finite world-frame waypoints')
+        current = entity('KMR')
+        route = [[current[0], current[1], _base_yaw(current)],
+                 *deepcopy(waypoints), list(target_pose)]
+
+        def matches(configured):
+            yaw = configured[2] if len(configured) == 3 else configured[5]
+            return (math.dist(target_pose[:2], configured[:2]) <= .001
+                    and abs(math.atan2(math.sin(target_pose[2] - yaw),
+                                       math.cos(target_pose[2] - yaw))) <= .001)
+
+        pickup_pose = scene['Storage']['KMR_pick_docking_poses'].get(part)
+        pickup_target = pickup_pose is not None and matches(pickup_pose)
+        endpoints = {'Storage': scene['Storage']['KMR_docking_pose'],
+                     **{row['resource_id']: row['KMR_docking_pose'] for row in scene['machines']}}
+        destination = next((rid for rid, pose in endpoints.items() if matches(pose)), None)
+        if pickup_target and (destination != 'Storage' or name == 'pick_approach'):
+            if held_part is not None:
+                raise ValueError('Storage pickup requires an empty KMR')
+            home = scene['Storage']['KMR_docking_pose']
+            if not (_at_dock(current, home) or _at_dock(current, pickup_pose)):
+                raise ValueError('Storage pickup requires the configured Storage route')
+            acknowledgement = authorize_empty_transport(route=route)
+            operations.append({'operation': 'validated_empty_transport_route',
+                               'success': True, 'route': route,
+                               'controller_acknowledgement': acknowledgement})
+            arrived = ([current[0], current[1], _base_yaw(current)]
+                       if _at_dock(current, pickup_pose, tolerance=.005)
+                       else dispatch_base_move(target_pose, waypoints))
+            if not _at_dock(entity('KMR'), pickup_pose):
+                raise ValueError('KMR did not reach the configured Storage pickup pose')
+            return {'resource_location': 'Storage', 'base_pose': arrived,
+                    'attached': False, 'pickup_dock': f'Storage/{part}'}
+
+        if transform is None:
+            if held_part is not None:
+                raise ValueError('Empty KMR travel requires no held part')
+            if destination is None and mode != 'function' and mode != 'primitive':
+                raise ValueError('KMR target is not a configured destination')
+            acknowledgement = authorize_empty_transport(route=route)
+            operations.append({'operation': 'validated_empty_transport_route',
+                               'success': True, 'route': route,
+                               'controller_acknowledgement': acknowledgement})
+            arrived = ([current[0], current[1], _base_yaw(current)]
+                       if _at_dock(current, target_pose, tolerance=.005)
+                       else dispatch_base_move(target_pose, waypoints))
+            return {'resource_location': destination, 'base_pose': arrived,
+                    'attached': False, 'arm_parked': True}
+
+        if destination not in {'M1', 'M2'} and mode not in {'function', 'primitive'}:
             raise ValueError('Loaded KMR delivery target must be M1 or M2')
         custody(transform)
-        # Relative Gazebo observations share one physics timestamp,
-        # avoiding a moving-base mismatch between service and TF samples.
-        custody_query = GetEntityState.Request(
-            name=part, reference_frame='KMR::'+config['attach_link'],
+        configuration = confirm_carrying()
+        sweep = validate_transport(observed_state(), route=route)
+        operations.append(sweep)
+        relative_query = GetEntityState.Request(
+            name=part, reference_frame='KMR::' + config['attach_link'],
         )
-        relative = service(GetEntityState, config['services']['get_state'], custody_query, retry_read=True)
+        relative = service(GetEntityState, config['services']['get_state'],
+                           relative_query, retry_read=True)
         if not relative.success:
-            raise ValueError('Cannot observe KMR transport custody relative to the attachment link')
+            raise ValueError('Cannot observe the part relative to the KMR attachment link')
         expected_relative = pose_values(relative.state.pose)
-        transport_configuration = (request.get('custody') or {}).get('carrying_arm_configuration')
-        if not any(row.get('operation') == 'validated_transport_sweep' and row.get('success')
-                   for row in operations):
-            operations.append(validate_transport(observed_state()))
-        transport_posture = {'carrying_arm_configuration': transport_configuration,
-                             'transport_sweep_validated': config.get('avoid_collisions') is not False,
-                             'collision_checks_bypassed': config.get('avoid_collisions') is False}
+        posture = {'carrying_arm_configuration': configuration,
+                   'transport_sweep_validated': sweep['transport_sweep_validated'],
+                   'collision_checks_bypassed': sweep['collision_checks_bypassed']}
         custody_evidence = {'operation': 'observed_transport_custody', 'success': True,
-                            'checked_samples': 1, 'reference_frame': custody_query.reference_frame,
+                            'checked_samples': 1, 'reference_frame': relative_query.reference_frame,
                             'expected_relative_pose': expected_relative.copy()}
         operations.append(custody_evidence)
         custody_id = uuid4().hex
         custody_client = clients[config['services']['get_state']]
-        custody_future = custody_client.call_async(custody_query)
+        custody_future = custody_client.call_async(relative_query)
+
         def publish_custody():
             nonlocal custody_future
             if not custody_future.done():
                 return
             measured = custody_future.result()
             actual = pose_values(measured.state.pose) if measured and measured.success else None
-            matches = bool(actual and math.dist(actual[:3], expected_relative[:3]) <= .008
-                           and abs(sum(a*b for a, b in zip(actual[3:], expected_relative[3:]))) >= .995)
-            custody_evidence.update(success=matches, last_relative_pose=actual,
-                                    checked_samples=custody_evidence['checked_samples']+1)
-            payload = {**probe, **transport_posture, 'part_name': part, 'attached': matches, 'custody_id': custody_id}
+            matches, distance, tolerance = _transport_attachment_check(
+                expected_relative, actual,
+            )
+            custody_evidence.update(
+                success=matches, last_relative_pose=actual,
+                relative_error_m=distance, allowed_relative_error_m=tolerance,
+                checked_samples=custody_evidence['checked_samples'] + 1,
+            )
+            payload = {**probe, **posture, 'part_name': part,
+                       'attached': matches, 'custody_id': custody_id}
             if matches:
-                custody_future = custody_client.call_async(custody_query)
+                custody_future = custody_client.call_async(relative_query)
             else:
-                payload['error'] = 'held part moved relative to the attachment link'
+                payload['error'] = 'Held part moved relative to KMR attachment link'
                 transport_timer.cancel()
             transport.publish(String(data=json.dumps(payload)))
+
         transport_timer = node.create_timer(
             .1, publish_custody, clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         transport.publish(String(data=json.dumps({
-            **probe, **transport_posture, 'part_name': part, 'attached': True, 'custody_id': custody_id,
+            **probe, **posture, 'part_name': part,
+            'attached': True, 'custody_id': custody_id,
         })))
-        # DDS can deliver the action goal before the custody topic. Wait for
-        # this controller's guarded acknowledgement, not an arbitrary delay.
         spin_until(lambda: base_motion_status.get('transport_custody_ack') == {
             'custody_id': custody_id, 'arm_parked': True,
-        }, 2.)
+        }, 2., 'KMR transport acknowledgement')
         custody_evidence['controller_acknowledgement'] = deepcopy(
             base_motion_status['transport_custody_ack'],
         )
-        action(
-            DockKMR,
-            kmr['docking_action'],
-            DockKMR.Goal(target_resource=target_resource),
-            180.,
-        )
+        arrived = ([current[0], current[1], _base_yaw(current)]
+                   if _at_dock(current, target_pose, tolerance=.005)
+                   else dispatch_base_move(target_pose, waypoints))
+        custody(transform)
+        return {'resource_location': destination, 'base_pose': arrived,
+                'part_location': 'KMR', 'attached': True, 'arm_parked': True,
+                'grasp_transform': transform,
+                'carrying_arm_configuration': configuration}
 
     def observe_dock(transform):
         custody(transform)
-        if math.dist(entity('KMR')[:2], machine['KMR_docking_pose'][:2]) > .035:
+        if not _at_dock(entity('KMR'), machine['KMR_docking_pose']):
             raise ValueError(f'KMR docking position disagrees with {target_resource}')
         return dict(part_location='KMR', attached=True, arm_parked=True,
                     resource_location=target_resource, grasp_transform=transform,
@@ -1175,7 +1499,8 @@ def run(request: dict, session: dict | None = None) -> dict:
         settings = config['cartesian_waypoints']
         waypoints = downward_transfer_waypoints(start, target, mount, settings)
         middle = settings.get('transfer_orientation_waypoint_xyzw_in_base_frame')
-        if middle and waypoints and abs(sum(a*b for a,b in zip(start[3:], target[3:]))) < .01:
+        if (middle and waypoints and abs(sum(a*b for a,b in zip(start[3:], target[3:])))
+                < math.sin(kmr['base_control']['yaw_tolerance_rad'] + config['orientation_tolerance_rad'])):
             # The saved midpoint fixes the downward yaw direction of a half turn.
             middle = compose(base, [0., 0., 0., *middle])[3:]
             half = len(waypoints)//2
@@ -1188,7 +1513,7 @@ def run(request: dict, session: dict | None = None) -> dict:
         return waypoints
 
     def compute_place_targets(transform):
-        if math.dist(entity('KMR')[:2], machine['KMR_docking_pose'][:2]) > .035:
+        if not _at_dock(entity('KMR'), machine['KMR_docking_pose']):
             raise ValueError(f'KMR is not docked at {target_resource}')
         for peg in component_parts:
             if peg != part and math.dist(entity(peg)[:3], fixture[:3]) < .08:
@@ -1203,10 +1528,81 @@ def run(request: dict, session: dict | None = None) -> dict:
                           config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2])
         retreat = target.copy()
         retreat[2] = max(target[2] + config['release_offsets_m'][0][2], approach[2])
-        transport = transport_pose(retreat)
+        # Return the empty arm to the observed pre-placement orientation, so
+        # successive transfers do not accumulate wrist turns at a joint limit.
+        transport = transport_pose()
         return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
                 'transfer_waypoints': transfer_waypoints(tcp(), approach), 'transport': transport,
                 'withdraw_waypoints': transfer_waypoints(retreat, transport)}
+
+    def compute_pick_dock_pose():
+        transport_target = transport_pose()
+        return {
+            'transport': transport_target,
+            'waypoints': transfer_waypoints(tcp(), transport_target),
+            'pickup_dock': f'Storage/{part}',
+        }
+
+    def observe_pick_approach(targets):
+        pickup_dock = scene['Storage']['KMR_pick_docking_poses'][part]
+        if not _at_dock(entity('KMR'), pickup_dock):
+            raise ValueError('KMR pickup dock changed before pick_part')
+        if math.dist(tcp()[:3], targets['approach'][:3]) > .015:
+            raise ValueError('KMR TCP did not reach the pick approach')
+        if abs(joint_values[kmr['gripper_joint']] - kmr['gripper_stroke_m']) > .006:
+            raise ValueError('KMR gripper is not open at pick approach')
+        if math.dist(entity(part)[:3], initial[:3]) > .01:
+            raise ValueError('Storage part moved during pick approach')
+        return {'part_location': 'Storage', 'attached': False,
+                'resource_location': 'Storage', 'approach_observed': True,
+                'pick_targets': deepcopy(targets)}
+
+    def confirm_pick_approach(previous):
+        if previous.get('approach_observed') is not True or previous.get('attached') is not False:
+            raise ValueError('pick_approach was not acknowledged')
+        targets = previous.get('pick_targets')
+        current = compute_pick_targets(initial)
+        if not isinstance(targets, dict) or math.dist(targets['target'][:3], current['target'][:3]) > .01:
+            raise ValueError('Pick target changed after pick_approach')
+        if math.dist(tcp()[:3], current['approach'][:3]) > .015:
+            raise ValueError('KMR left the observed pick approach')
+        return current
+
+    def observe_place_approach(targets, transform):
+        custody(transform)
+        if not _at_dock(entity('KMR'), machine['KMR_docking_pose']):
+            raise ValueError('KMR left the configured machine dock')
+        if math.dist(tcp()[:3], targets['approach'][:3]) > .015:
+            raise ValueError('KMR TCP did not reach the place approach')
+        return {'part_location': 'KMR', 'attached': True,
+                'resource_location': target_resource, 'approach_observed': True,
+                'grasp_transform': deepcopy(transform), 'place_targets': deepcopy(targets)}
+
+    def confirm_place_approach(previous):
+        if previous.get('approach_observed') is not True or previous.get('attached') is not True:
+            raise ValueError('place_approach was not acknowledged')
+        transform = previous.get('grasp_transform')
+        if not isinstance(transform, list) or len(transform) != 7:
+            raise ValueError('place_approach lacks observed grasp transform')
+        custody(transform)
+        targets = previous.get('place_targets')
+        current = compute_place_targets(transform)
+        if not isinstance(targets, dict) or math.dist(targets['target'][:3], current['target'][:3]) > .01:
+            raise ValueError('Place target changed after place_approach')
+        if math.dist(tcp()[:3], targets['approach'][:3]) > .015:
+            raise ValueError('KMR left the observed place approach')
+        return {'targets': targets, 'transform': transform}
+
+    def observe_empty_dock(target_resource, home=None):
+        expected = (scene['Storage']['KMR_docking_pose'] if target_resource == 'Storage'
+                    else next(row['KMR_docking_pose'] for row in scene['machines']
+                              if row['resource_id'] == target_resource))
+        if not _at_dock(entity('KMR'), expected):
+            raise ValueError(f'KMR empty return did not arrive at {target_resource}')
+        return {'part_name': None, 'attached': False,
+                'arm_parked': home is None or home.get('arm_parked') is True,
+                'transport_arm_parked': True, 'resource_location': target_resource,
+                'home_observation': home}
 
     def observe_release(destination):
         measured = entity(part)
@@ -1243,6 +1639,37 @@ def run(request: dict, session: dict | None = None) -> dict:
                 'seed': list(scene['Storage']['KMR_pick_arm_configurations'][part]),
                 'carrying': list(config['carrying_arm_configuration'])}
 
+    def check_startup_pose():
+        """Require the measured parked arm and collision clearance before production."""
+        state = observed_state()
+        values = dict(zip(state.joint_state.name, state.joint_state.position))
+        expected = kmr['parked_arm_configuration']
+        if not bounded_joints(kmr['arm_joint_names'], expected, limits):
+            raise ValueError('KMR startup parked configuration exceeds joint limits')
+        measured = [values[joint] for joint in kmr['arm_joint_names']]
+        if not bounded_joints(kmr['arm_joint_names'], measured, limits):
+            raise ValueError('KMR startup measured joints are invalid')
+        joint_error = max(abs(a-b) for a, b in zip(measured, expected, strict=True))
+        if joint_error > .005:
+            raise ValueError('KMR startup joints do not match the configured parked arm')
+        actual = tcp()
+        if len(actual) != 7 or not all(math.isfinite(value) for value in actual):
+            raise ValueError('KMR startup TCP observation is invalid')
+        target = transport_pose(actual)
+        position_error = math.dist(actual[:3], target[:3])
+        if position_error > config['position_tolerance_m']:
+            raise ValueError('KMR startup TCP is not at the configured transport position')
+        query = GetStateValidity.Request(group_name=config['planning_group'], robot_state=state)
+        response = service(GetStateValidity, '/check_state_validity', query, retry_read=True)
+        if not response.valid:
+            contacts = [(c.contact_body_1, c.contact_body_2) for c in response.contacts]
+            raise ValueError(f'KMR startup arm/gripper clearance is invalid: {contacts}')
+        return {'operation': 'initial_arm_pose', 'success': True,
+                'joints': measured, 'target_joints': list(expected),
+                'tcp_pose': actual, 'target_tcp_pose': target,
+                'max_joint_error_rad': joint_error, 'position_error_m': position_error,
+                'checked_states': 1, 'collision_checks_bypassed': False}
+
     def check_primitive():
         if stopped:
             raise InterruptedError('Stop System cancelled KMR execution')
@@ -1273,19 +1700,19 @@ def run(request: dict, session: dict | None = None) -> dict:
         # The base controller's parameter service can precede the spawned arm
         # controllers. Startup may wait; task-time freshness requirements stay unchanged.
         fresh_state(timeout=120. if request['mode'] == 'probe' else 45.)
-        initial = entity(part)
+        initial = entity(part) if part is not None else None
         base = entity('KMR')
         machine = next(
-            row for row in scene['machines'] if row['resource_id'] == target_resource
-        ) if target_resource in {'M1', 'M2'} else None
-        if machine is None:
-            machine = next(row for row in scene['machines'] if row['resource_id'] == 'M1')
-        fixture = machine['workholding_pose']
-        operations.append({
-            'operation': 'observed_scene', 'success': True, 'part_pose': initial,
-            'KMR_pose': base, f'{machine["resource_id"]}_pose': entity(machine['resource_id']),
-        })
-        if mode == 'probe' or (name == 'pick_part' and mode != 'primitive'):
+            (row for row in scene['machines'] if row['resource_id'] == target_resource),
+            None,
+        )
+        fixture = machine['workholding_pose'] if machine is not None else None
+        observed_scene = {'operation': 'observed_scene', 'success': True,
+                          'part_pose': initial, 'KMR_pose': base}
+        if machine is not None:
+            observed_scene[f'{machine["resource_id"]}_pose'] = entity(machine['resource_id'])
+        operations.append(observed_scene)
+        if mode == 'probe' or (name in {'pick_approach', 'pick_part'} and mode != 'primitive'):
             if math.dist(initial[:3], scene['Storage']['slots'][part][:3]) > .012:
                 raise ValueError('Part is not in its initial Storage slot; explicitly reset Gazebo before repeating')
             storage_docks = [scene['Storage']['KMR_docking_pose'],
@@ -1298,42 +1725,17 @@ def run(request: dict, session: dict | None = None) -> dict:
                 for peg in component_parts:
                     if math.dist(entity(peg)[:3], fixture[:3]) < .08:
                         raise ValueError(f'{machine["resource_id"]} workholding is occupied')
-        if mode == 'environment_task' and name == 'pick_part':
-            pick_pose = dict(
-                scene['Storage'].get('KMR_pick_docking_poses') or {}
-            ).get(part)
-            if pick_pose is None:
-                raise ValueError(f'No configured KMR Storage pickup dock for {part}')
-            if math.dist(base[:2], pick_pose[:2]) > .01:
-                move_to_pose(transport_pose(), waypoints=transfer_waypoints(tcp(), transport_pose()))
-                authorize_empty_transport(route=[[base[0], base[1], scene['Storage']['KMR_docking_pose'][5]], list(pick_pose)])
-                action(
-                    DockKMR,
-                    kmr['docking_action'],
-                    DockKMR.Goal(target_resource=f'Storage/{part}'),
-                    180.,
-                )
-                base = entity('KMR')
-                if math.dist(base[:2], pick_pose[:2]) > .035:
-                    raise ValueError(f'KMR did not reach the configured Storage pickup dock for {part}')
-                operations.append({
-                    'operation': 'observed_storage_pick_dock',
-                    'success': True,
-                    'part_name': part,
-                    'KMR_pose': base,
-                    'configured_pose': list(pick_pose),
-                })
         if mode == 'probe':
             core_services = (
                 (GetPositionFK, '/compute_fk'),
+                (GetPositionIK, '/compute_ik'),
                 (GetCartesianPath, config['services']['cartesian_path']),
                 (ApplyPlanningScene, config['services']['apply_scene']),
                 (GetEntityState, config['services']['get_state']),
                 (AttachLink, config['services']['attach']),
                 (DetachLink, config['services']['detach']),
             )
-            if config.get('avoid_collisions') is not False:
-                core_services += ((GetStateValidity, '/check_state_validity'),)
+            core_services += ((GetStateValidity, '/check_state_validity'),)
             if not config.get('cartesian_motion_only'):
                 core_services += ((GetMotionPlan, config['services']['motion_plan']),)
             ready_services = []
@@ -1349,7 +1751,7 @@ def run(request: dict, session: dict | None = None) -> dict:
             for kind, endpoint in (
                 (FollowJointTrajectory, kmr['arm_controller']+'/follow_joint_trajectory'),
                 (FollowJointTrajectory, kmr['gripper_controller']+'/follow_joint_trajectory'),
-                (DockKMR, kmr['docking_action']),
+                (MoveBaseKMR, '/KMR/move_base'),
             ):
                 if endpoint not in action_clients:
                     action_clients[endpoint] = ActionClient(node, kind, endpoint)
@@ -1362,12 +1764,13 @@ def run(request: dict, session: dict | None = None) -> dict:
                 'actions': [
                     kmr['arm_controller']+'/follow_joint_trajectory',
                     kmr['gripper_controller']+'/follow_joint_trajectory',
-                    kmr['docking_action'],
+                    '/KMR/move_base',
                 ],
             })
         install_scene()
         if mode == 'probe':
-            node.get_logger().info('[KMR] All services/actions ready; fresh joint feedback and scene identity verified.')
+            operations.append(check_startup_pose())
+            node.get_logger().info('[KMR] All services/actions ready; fresh joint feedback, startup pose, clearance, and scene identity verified.')
             return {'status': 'completed', **probe, 'operations': operations, 'part_pose': initial,
                     'KMR_pose': base, 'timing': timings()}
         if mode == 'validate_pickup':
@@ -1389,95 +1792,51 @@ def run(request: dict, session: dict | None = None) -> dict:
             return {'status': 'completed', 'part_name': part, 'neighbors_present': component_parts,
                     'targets': targets, 'descend': descend[1], 'lift': lift[1],
                     'transport': sweep, 'timing': timings()}
-        if (
-            mode == 'environment_task'
-            and name == 'move_to_resource'
-            and valuation.get('KMR', {}).get('held_part') is None
-        ):
-            route = route_between(source_resource, target_resource)
-            authorize_empty_transport(route=route)
-            operations.append({
-                'operation': 'validated_empty_transport_route', 'success': True,
-                'route': route,
-                'arm_parked': True,
-                'controller_acknowledgement': deepcopy(
-                    base_motion_status['transport_custody_ack']
-                ),
-            })
-            action(
-                DockKMR,
-                kmr['docking_action'],
-                DockKMR.Goal(target_resource=target_resource),
-                180.,
-            )
-            expected_pose = (
-                scene['Storage']['KMR_docking_pose']
-                if target_resource == 'Storage'
-                else next(
-                    row['KMR_docking_pose']
-                    for row in scene['machines']
-                    if row['resource_id'] == target_resource
-                )
-            )
-            if math.dist(entity('KMR')[:2], expected_pose[:2]) > .035:
-                raise ValueError(f'KMR empty return did not arrive at {target_resource}')
-            home_observation = None
-            if target_resource == 'Storage':
-                home_record = {'resource_id': 'KMR', 'function_name': name,
-                               'task_id': pending.get('task_id'), 'primitive': 'move_home',
-                               'parameters': {}, 'status': 'running'}
-                primitive_results.append(home_record)
-                try:
-                    home_observation = move_home()
-                    home_record.update(status='completed', result=deepcopy(home_observation))
-                except (RuntimeError, ValueError, TypeError, KeyError, TimeoutError, InterruptedError) as exc:
-                    home_record.update(status='failed', error=str(exc))
-                    raise
-            observation = {
-                **probe, 'part_name': None, 'operations': operations,
-                'primitive_results': primitive_results, 'home_observation': home_observation,
-                'controllers_succeeded': True, 'resource_location': target_resource,
-                'attached': False, 'arm_parked': home_observation is None,
-                'transport_arm_parked': True, 'timing': timings(),
-            }
-            return {
-                'status': 'completed', 'resource_id': 'KMR', 'event_name': name,
-                'task_id': pending.get('task_id'), 'observations': observation,
-                'timing': observation['timing'],
-            }
         observation = {**probe, 'part_name': part, 'operations': operations,
                        'primitive_results': primitive_results,
-                       'composition': capability_decompositions(function_name=name)}
+                       'composition': capability_decompositions(function_name=name, scene=scene)}
         if mode == 'environment_task':
-            if name not in {'pick_part', 'move_to_resource', 'place_release'}:
+            if name not in {'pick_approach', 'pick_part', 'move_to_resource',
+                             'place_approach', 'place_release'}:
                 raise ValueError('Unsupported environmental KMR event')
-            if name == 'pick_part' and parameters.get('origin_resource_location') != 'Storage':
+            if name in {'pick_approach', 'pick_part'} and parameters.get('origin_resource_location') != 'Storage':
                 raise ValueError('KMR pickup must use Storage')
-            if name == 'place_release' and parameters.get('destination_location') not in {'M1', 'M2'}:
+            if name in {'place_approach', 'place_release'} and parameters.get('destination_location') not in {'M1', 'M2'}:
                 raise ValueError('KMR release must use M1 or M2')
+        elif mode == 'function':
+            if name != 'move_to_location' or set(parameters) != {'x', 'y', 'yaw'}:
+                raise ValueError('Unsupported KMR coordinate function or arguments')
+            if not all(isinstance(parameters[key], (int, float)) and math.isfinite(parameters[key])
+                       for key in ('x', 'y', 'yaw')):
+                raise ValueError('KMR coordinate function requires finite x, y, yaw')
         elif mode != 'primitive':
             expected = delivery_bindings(part)
             if (name not in expected or json.dumps(parameters, sort_keys=True)
                     != json.dumps(expected[name], sort_keys=True)):
                 raise ValueError('Unsupported KMR delivery task or parameters')
         primitives = {
+            'detect_parts': detect_parts,
+            'compute_pick_targets': compute_pick_targets,
+            'compute_place_targets': compute_place_targets,
+            'move_to_named_pose': move_to_named_pose,
+            'move_cartesian': move_cartesian,
+            'move_relative': move_relative,
+            'move_joints': move_joints,
+            'rotate_joint': rotate_joint,
             'open_gripper': lambda: gripper(kmr['gripper_stroke_m']),
             'close_gripper': lambda: gripper(config['closed_gripper_width_m']),
-            'compute_pick_targets': compute_pick_targets,
-            'move_to_pose': move_to_pose, 'move_to_configuration': move_to_configuration,
-            'move_home': move_home,
-            'rotate_arm_base': rotate_arm_base,
-            'observe_grasp': observe_grasp, 'attach_part': lambda: attach(True),
-            'detach_part': lambda: attach(False), 'part_collision': part_collision,
-            'custody': custody, 'confirm_carrying': confirm_carrying,
-            'observe_carrying': observe_carrying, 'observe_custody': observe_custody,
-            'validate_transport': lambda: operations.append(validate_transport(observed_state())),
-            'dock': dock, 'observe_dock': observe_dock, 'compute_place_targets': compute_place_targets,
-            'move_cartesian': move_cartesian,
-            'observe_release': observe_release,
+            'grasp_part': grasp_part,
+            'release_part': release_part,
+            'attach_part': attach_part,
+            'detach_part': detach_part,
+            'move_base': move_base,
         }
         if mode == 'primitive':
             primitive = request.get('primitive')
+            if 'resource_programs' in scene:
+                catalog = scene['resource_programs']['resources']['KMR']['primitives']
+                if catalog.get(primitive, {}).get('status') != 'executable' or not catalog[primitive].get('recovery_selectable'):
+                    raise ValueError(f'KMR primitive is unavailable for recovery: {primitive}')
             if primitive not in primitives:
                 raise ValueError(f'Unknown KMR primitive: {primitive}')
             params = request.get('primitive_parameters', {})
@@ -1497,14 +1856,67 @@ def run(request: dict, session: dict | None = None) -> dict:
             return {'status': 'completed', 'resource_id': 'KMR', 'primitive': primitive,
                     'result': serialize(output), 'primitive_results': primitive_results,
                     'operations': operations, 'timing': timings()}
-        observation.update(execute_composition(
-            name, arguments=parameters,
-            state={'initial': initial, 'previous': request.get('custody') or {},
-                   'task_id': pending.get('task_id')},
+        empty_move = (
+            name == 'move_to_resource'
+            and held_part is None
+            and (request.get('custody') or {}).get('attached') is not True
+        )
+        variant = 'empty_return' if empty_move and target_resource == 'Storage' else 'empty' if empty_move else ''
+        if name == 'move_to_location':
+            variant = 'carrying' if held_part is not None else ''
+            definition = (saved_robot_definition(scene, 'KMR', name, variant=variant)
+                          if 'resource_programs' in scene else
+                          KMR_LOCATION_VARIANTS[variant] if variant else KMR_LOCATION_TASK)
+        else:
+            definition = (
+                saved_robot_definition(scene, 'KMR', name, variant=variant)
+                if 'resource_programs' in scene else KMR_MOVE_VARIANTS[variant] if variant else None
+            )
+        previous = deepcopy(request.get('custody') or {})
+        if name == 'pick_part':
+            previous['pick_targets'] = confirm_pick_approach(previous)
+        elif name == 'place_approach':
+            observe_custody(previous)
+        elif name == 'place_release':
+            checked = confirm_place_approach(previous)
+            previous['place_targets'] = checked['targets']
+            previous['grasp_transform'] = checked['transform']
+        state = {'initial': initial, 'previous': previous,
+                 'task_id': pending.get('task_id')}
+        if name == 'pick_approach':
+            state['pickup_pose'] = list(scene['Storage']['KMR_pick_docking_poses'][part])
+            state['pickup_waypoints'] = []
+        elif name == 'move_to_resource':
+            pose = (scene['Storage']['KMR_docking_pose'] if target_resource == 'Storage'
+                    else next(row['KMR_docking_pose'] for row in scene['machines']
+                              if row['resource_id'] == target_resource))
+            state['base_target_pose'] = [pose[0], pose[1], pose[5]]
+            state['base_waypoints'] = route_between(source_resource, target_resource)[1:-1]
+        elif name == 'move_to_location':
+            state['base_target_pose'] = [parameters[key] for key in ('x', 'y', 'yaw')]
+            state['base_waypoints'] = []
+        outputs = execute_composition(
+            name, arguments=parameters, state=state,
             primitives=primitives, records=primitive_results, operations=operations,
             now=lambda: node.get_clock().now().nanoseconds/1e9,
             check=check_primitive, serialize=serialize, planning_time=lambda: planning_seconds,
-        ))
+            definition=definition,
+        )
+        if name == 'pick_approach':
+            observation.update(observe_pick_approach(outputs['pick']))
+        elif name == 'pick_part':
+            observation.update(observe_carrying(outputs['grasp']['grasp_transform']))
+        elif name == 'move_to_resource':
+            if empty_move:
+                observation.update(observe_empty_dock(target_resource, outputs.get('home')))
+            else:
+                observation.update(observe_dock(previous['grasp_transform']))
+        elif name == 'place_approach':
+            observation.update(observe_place_approach(outputs['place'], previous['grasp_transform']))
+        elif name == 'place_release':
+            observation.update(observe_release(previous['place_targets']['destination']))
+        elif name == 'move_to_location':
+            observation.update(outputs['transport'])
         observation['controllers_succeeded'] = True
         observation['timing'] = timings()
         node.get_logger().info(f'[KMR] {name} completed: part={part}; task={pending.get("task_id")}')

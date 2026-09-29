@@ -1,0 +1,260 @@
+{"stage": "setup_validated", "time": 1790705652.5608516, "output": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34", "parts": ["gear_small", "gear_medium", "gear_large", "KET4_Square_4mm", "KET8_Square_8mm", "KET12_Square_12mm", "KET16_Square_16mm", "RGOCG4-50_Round_4mm", "RGOCG8-50_8mm", "RGOCG12-50_12mm", "RGOCG16-50_16mm"]}
+{"stage": "gazebo_launch", "time": 1790705654.6333337, "error": null}
+{"stage": "gazebo_wait", "time": 1790705657.515343, "reason": "Simulation startup is not done yet. Waiting for core services: /compute_cartesian_path, /ATTACHLINK, /DETACHLINK"}
+{"stage": "gazebo_wait", "time": 1790705665.9684627, "reason": "Simulation startup is not done yet. Waiting for core services: /compute_cartesian_path"}
+{"stage": "gazebo_ready", "time": 1790705684.3695207}
+[INFO] [1790705688.459956194] [ur5e_1_workflow_controller]: [ur5e-1] Controller initialized (execution_mode=simulation)
+[INFO] [1790705688.460291878] [ur5e_1_workflow_controller]: Waiting for services/actions...
+[INFO] [1790705689.317398197] [ur5e_1_workflow_controller]: All services ready.
+[INFO] [1790705689.379325749] [ur5e_2_workflow_controller]: [ur5e-2] Controller initialized (execution_mode=simulation)
+[INFO] [1790705689.379607455] [ur5e_2_workflow_controller]: Waiting for services/actions...
+[INFO] [1790705689.483609850] [ur5e_2_workflow_controller]: All services ready.
+[INFO] [1790705689.568497060] [ur5e_3_workflow_controller]: [ur5e-3] Controller initialized (execution_mode=simulation)
+[INFO] [1790705689.568770531] [ur5e_3_workflow_controller]: Waiting for services/actions...
+[INFO] [1790705689.626090272] [ur5e_3_workflow_controller]: All services ready.
+[INFO] [1790705689.737396281] [ur5e_4_workflow_controller]: [ur5e-4] Controller initialized (execution_mode=simulation)
+[INFO] [1790705689.737778935] [ur5e_4_workflow_controller]: Waiting for services/actions...
+[INFO] [1790705689.740914333] [ur5e_4_workflow_controller]: All services ready.
+{"stage": "render_frame", "time": 1790705710.3814263, "stage_name": "preflight", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/preflight_frame.png", "size": [999, 1908, 3]}
+{"stage": "render_preflight_waiting", "time": 1790705710.3833518, "marker": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/render_approved"}
+{"stage": "render_frame", "time": 1790705739.2267725, "stage_name": "approved", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/approved_frame.png", "size": [999, 1908, 3]}
+2026-09-29 14:15:54,714 - agent:ur5e-1 - INFO - [Robot] Using prewarmed controller for ur5e-1
+2026-09-29 14:15:54,715 - agent:ur5e-1 - INFO - RobotAgent 'ur5e-1' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-09-29 14:15:54,717 - agent:ur5e-2 - INFO - [Robot] Using prewarmed controller for ur5e-2
+2026-09-29 14:15:54,717 - agent:ur5e-2 - INFO - RobotAgent 'ur5e-2' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-09-29 14:15:54,721 - agent:ur5e-3 - INFO - [Robot] Using prewarmed controller for ur5e-3
+2026-09-29 14:15:54,726 - agent:ur5e-3 - INFO - RobotAgent 'ur5e-3' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-09-29 14:15:54,728 - agent:ur5e-4 - INFO - [Robot] Using prewarmed controller for ur5e-4
+2026-09-29 14:15:54,729 - agent:ur5e-4 - INFO - RobotAgent 'ur5e-4' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-09-29 14:15:54,742 - agent:assembly_board-v1 - INFO - [Product] Loaded geometry for env='gazebo' from cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json
+2026-09-29 14:15:54,743 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-09-29 14:15:54,920 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=cais_spade_llm/specification/safety/safety_none.txt
+2026-09-29 14:15:56,354 - agent:M1 - INFO - [ready] recovery-resource-5@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:15:56,794 - agent:ur5e-3 - INFO - [ready] recovery-resource-3@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert'])
+2026-09-29 14:15:57,008 - agent:KMR - INFO - [ready] recovery-resource-8@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:15:57,018 - agent:M2 - INFO - [ready] recovery-resource-6@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:15:58,744 - agent:ur5e-1 - INFO - [ready] recovery-resource-1@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home'])
+2026-09-29 14:15:58,959 - agent:ur5e-4 - INFO - [ready] recovery-resource-4@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert'])
+2026-09-29 14:15:59,168 - agent:Storage - INFO - [ready] recovery-resource-7@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:15:59,182 - agent:Buffer For Machined parts - INFO - [ready] recovery-resource-10@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:15:59,186 - agent:ur5e-2 - INFO - [ready] recovery-resource-2@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home'])
+2026-09-29 14:16:00,487 - agent:Exit - INFO - [ready] recovery-resource-12@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:16:00,493 - agent:Conveyor - INFO - [ready] recovery-resource-9@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:16:00,494 - agent:3D Printing Station - INFO - [ready] recovery-resource-11@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:16:00,957 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-09-29 14:16:00,958 - agent:cca - INFO - [CCA] setup completed.
+2026-09-29 14:16:00,958 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from cais_spade_llm/specification/safety/safety_none.txt
+2026-09-29 14:16:00,961 - agent:cca - INFO - [SafetyLogic] Loaded structured safety rules from /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-09-29 14:16:00,962 - agent:cca - INFO - [CCA] Loaded cached safety logic from cais_spade_llm/safety/cca_safety_logic.json (rules=0).
+2026-09-29 14:16:00,962 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 0 rules.
+2026-09-29 14:16:01,423 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+[INFO] [1790705767.957433882] [KMR_delivery_worker]: [KMR] Controller initialized (execution_mode=simulation)
+[INFO] [1790705768.032052728] [KMR_delivery_worker]: [KMR] probe: part=KET4_Square_4mm; target=M1
+[INFO] [1790705768.034021844] [KMR_delivery_worker]: [KMR] Waiting for services/actions and fresh joint feedback...
+[INFO] [1790705779.820136460] [KMR_delivery_worker]: [KMR] All services/actions ready; fresh joint feedback, startup pose, clearance, and scene identity verified.
+wrote 0 capability rows to /home/jongh/projects/cais-spade-llm/cais_spade_llm/initialization/tools.json
+{"stage": "system_started", "time": 1790705780.0382311, "running": true, "error": null}
+{"stage": "workflow", "time": 1790705781.5258853, "status": [["executing", 0]], "transitions": [3]}
+[INFO] [1790705781.719638760] [KMR_delivery_worker]: [KMR] pick_approach: part=KET4_Square_4mm; target=M1
+[INFO] [1790705783.193176148] [ur5e_4_workflow_controller]: [ComputePickTargets] part=gear_small current=(0.499, -0.500, 1.501) target=(0.440, -0.580, 1.110) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.115 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.333 tcp_offset_z=-0.218
+[INFO] [1790705790.873294345] [KMR_delivery_worker]: [KMR] pick_approach completed: part=KET4_Square_4mm; task=environment_5
+[INFO] [1790705791.219675116] [KMR_delivery_worker]: [KMR] pick_part: part=KET4_Square_4mm; target=M1
+[INFO] [1790705794.123026277] [ur5e_4_workflow_controller]: Gripper: CLOSE (position=0.022)
+[INFO] [1790705808.181442067] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET4_Square_4mm; task=environment_7
+[INFO] [1790705808.464015837] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET4_Square_4mm; target=M1
+[INFO] [1790705819.102732519] [ur5e_4_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790705827.025277232] [ur5e_4_workflow_controller]: snap_to_slot stabilized gear_small at (0.029, 0.145, 1.039)
+[INFO] [1790705829.745512004] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET4_Square_4mm; task=environment_10
+[INFO] [1790705830.074700590] [KMR_delivery_worker]: [KMR] place_approach: part=KET4_Square_4mm; target=M1
+{"stage": "workflow", "time": 1790705832.2404354, "status": [["executing", 1]], "transitions": [11]}
+[INFO] [1790705836.490202643] [ur5e_4_workflow_controller]: [ComputePickTargets] part=gear_medium current=(0.499, -0.500, 1.501) target=(0.440, -0.500, 1.110) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.115 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.333 tcp_offset_z=-0.218
+[INFO] [1790705847.054854061] [ur5e_4_workflow_controller]: Gripper: CLOSE (position=0.042)
+[INFO] [1790705862.114940050] [KMR_delivery_worker]: [KMR] place_approach completed: part=KET4_Square_4mm; task=environment_13
+[INFO] [1790705862.665400567] [KMR_delivery_worker]: [KMR] place_release: part=KET4_Square_4mm; target=M1
+[INFO] [1790705862.912182128] [ur5e_4_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790705870.184653396] [ur5e_4_workflow_controller]: snap_to_slot stabilized gear_medium at (-0.001, 0.145, 1.039)
+{"stage": "workflow", "time": 1790705872.8293839, "status": [["executing", 2]], "transitions": [17]}
+[INFO] [1790705877.716083978] [ur5e_4_workflow_controller]: [ComputePickTargets] part=gear_large current=(0.499, -0.500, 1.501) target=(0.440, -0.420, 1.110) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.115 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.333 tcp_offset_z=-0.218
+[INFO] [1790705884.977827535] [ur5e_4_workflow_controller]: Gripper: CLOSE (position=0.062)
+[INFO] [1790705893.184649126] [KMR_delivery_worker]: [KMR] place_release completed: part=KET4_Square_4mm; task=environment_18
+[INFO] [1790705894.415031188] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790705898.757994796] [ur5e_4_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790705904.479994827] [ur5e_4_workflow_controller]: snap_to_slot stabilized gear_large at (-0.051, 0.145, 1.039)
+[INFO] [1790705906.027380887] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_24
+{"stage": "workflow", "time": 1790705908.4767709, "status": [["executing", 3]], "transitions": [25]}
+[INFO] [1790705912.612726402] [KMR_delivery_worker]: [KMR] pick_approach: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790705915.068280588] [ur5e_1_workflow_controller]: [ComputePickTargets] part=KET4_Square_4mm current=(-4.348, 0.699, 1.277) target=(-4.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790705917.023962370] [KMR_delivery_worker]: [KMR] pick_approach completed: part=RGOCG4-50_Round_4mm; task=environment_27
+[INFO] [1790705917.934979718] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790705922.133424881] [ur5e_1_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790705926.415730536] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG4-50_Round_4mm; task=environment_29
+[INFO] [1790705927.492251763] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790705936.249215106] [ur5e_1_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790705964.406071878] [ur5e_3_workflow_controller]: [ComputePickTargets] part=KET4_Square_4mm current=(0.401, 0.202, 1.498) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.498 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790705965.614007185] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG4-50_Round_4mm; task=environment_31
+[INFO] [1790705965.931444928] [KMR_delivery_worker]: [KMR] place_approach: part=RGOCG4-50_Round_4mm; target=M2
+[INFO] [1790705971.441265824] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790705979.086722410] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790705982.678251596] [ur5e_3_workflow_controller]: snap_to_slot stabilized KET4_Square_4mm at (-0.001, -0.005, 1.024)
+[INFO] [1790705983.074488390] [KMR_delivery_worker]: [KMR] place_approach completed: part=RGOCG4-50_Round_4mm; task=environment_41
+[INFO] [1790705983.538369973] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG4-50_Round_4mm; target=M2
+{"stage": "workflow", "time": 1790705985.49965, "status": [["executing", 4]], "transitions": [44]}
+[INFO] [1790706012.100960305] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG4-50_Round_4mm; task=environment_45
+[INFO] [1790706013.703782491] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706030.973756291] [ur5e_2_workflow_controller]: [ComputePickTargets] part=RGOCG4-50_Round_4mm current=(-2.348, 0.699, 1.277) target=(-2.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706043.123207328] [ur5e_2_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706060.956010504] [ur5e_2_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706064.346157264] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_48
+[INFO] [1790706071.396972977] [KMR_delivery_worker]: [KMR] pick_approach: part=KET8_Square_8mm; target=M1
+[WARN] [1790706073.827333000] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (1/3)
+[WARN] [1790706079.426831181] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (2/3)
+[INFO] [1790706086.708386381] [ur5e_3_workflow_controller]: [ComputePickTargets] part=RGOCG4-50_Round_4mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790706086.972009432] [KMR_delivery_worker]: [KMR] pick_approach completed: part=KET8_Square_8mm; task=environment_55
+[WARN] [1790706087.451850863] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706087.942725638] [KMR_delivery_worker]: [KMR] pick_part: part=KET8_Square_8mm; target=M1
+[INFO] [1790706096.093907298] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET8_Square_8mm; task=environment_61
+[INFO] [1790706096.310414405] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706097.212099826] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET8_Square_8mm; target=M1
+[INFO] [1790706111.864133111] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706116.549023720] [ur5e_3_workflow_controller]: snap_to_slot stabilized RGOCG4-50_Round_4mm at (-0.001, -0.155, 1.024)
+{"stage": "workflow", "time": 1790706118.6156852, "status": [["executing", 5]], "transitions": [64]}
+[INFO] [1790706119.926596785] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET8_Square_8mm; task=environment_63
+[INFO] [1790706120.613608955] [KMR_delivery_worker]: [KMR] place_approach: part=KET8_Square_8mm; target=M1
+[INFO] [1790706138.337309019] [KMR_delivery_worker]: [KMR] place_approach completed: part=KET8_Square_8mm; task=environment_67
+[INFO] [1790706139.833716442] [KMR_delivery_worker]: [KMR] place_release: part=KET8_Square_8mm; target=M1
+[INFO] [1790706158.399391768] [KMR_delivery_worker]: [KMR] place_release completed: part=KET8_Square_8mm; task=environment_68
+[INFO] [1790706159.175466861] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706166.265842480] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_69
+[INFO] [1790706174.941177153] [KMR_delivery_worker]: [KMR] pick_approach: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790706178.290005722] [ur5e_1_workflow_controller]: [ComputePickTargets] part=KET8_Square_8mm current=(-4.348, 0.699, 1.280) target=(-4.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706184.393568021] [KMR_delivery_worker]: [KMR] pick_approach completed: part=RGOCG8-50_8mm; task=environment_71
+[INFO] [1790706185.265251719] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790706186.509149944] [ur5e_1_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706191.909635920] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG8-50_8mm; task=environment_73
+[INFO] [1790706192.483917086] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790706201.067092231] [ur5e_1_workflow_controller]: Gripper: OPEN (position=0.110)
+[WARN] [1790706210.095584951] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (1/3)
+[WARN] [1790706217.458912507] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (1/3)
+{"stage": "render_frame", "time": 1790706221.3807645, "stage_name": "during_motion", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/during_motion_frame.png", "size": [999, 1908, 3]}
+[INFO] [1790706221.601088364] [ur5e_3_workflow_controller]: [ComputePickTargets] part=KET8_Square_8mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790706228.418466272] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG8-50_8mm; task=environment_76
+[INFO] [1790706229.054895137] [KMR_delivery_worker]: [KMR] place_approach: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790706229.824281571] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706238.233398381] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706240.797319147] [ur5e_3_workflow_controller]: snap_to_slot stabilized KET8_Square_8mm at (0.074, -0.080, 1.024)
+{"stage": "workflow", "time": 1790706242.0090547, "status": [["executing", 6]], "transitions": [87]}
+[INFO] [1790706244.158918347] [KMR_delivery_worker]: [KMR] place_approach completed: part=RGOCG8-50_8mm; task=environment_85
+[INFO] [1790706244.805791542] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG8-50_8mm; target=M2
+[INFO] [1790706262.853962577] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG8-50_8mm; task=environment_90
+[INFO] [1790706263.932158735] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706280.281495470] [ur5e_2_workflow_controller]: [ComputePickTargets] part=RGOCG8-50_8mm current=(-2.348, 0.699, 1.280) target=(-2.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706286.441616295] [ur5e_2_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706289.640566576] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_92
+[INFO] [1790706292.917536504] [KMR_delivery_worker]: [KMR] pick_approach: part=KET12_Square_12mm; target=M1
+[INFO] [1790706299.323364136] [ur5e_2_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706301.049801354] [KMR_delivery_worker]: [KMR] pick_approach completed: part=KET12_Square_12mm; task=environment_96
+[INFO] [1790706301.967430860] [KMR_delivery_worker]: [KMR] pick_part: part=KET12_Square_12mm; target=M1
+[WARN] [1790706312.109419500] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706312.226203023] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET12_Square_12mm; task=environment_98
+[INFO] [1790706313.278847265] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET12_Square_12mm; target=M1
+[INFO] [1790706319.317319126] [ur5e_3_workflow_controller]: [ComputePickTargets] part=RGOCG8-50_8mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790706326.879061287] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706329.391940042] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET12_Square_12mm; task=environment_103
+[INFO] [1790706330.630169065] [KMR_delivery_worker]: [KMR] place_approach: part=KET12_Square_12mm; target=M1
+[INFO] [1790706335.980302201] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706338.300390378] [ur5e_3_workflow_controller]: snap_to_slot stabilized RGOCG8-50_8mm at (-0.076, -0.155, 1.024)
+{"stage": "workflow", "time": 1790706343.9539454, "status": [["executing", 7]], "transitions": [110]}
+[INFO] [1790706346.166295796] [KMR_delivery_worker]: [KMR] place_approach completed: part=KET12_Square_12mm; task=environment_109
+[INFO] [1790706346.931849393] [KMR_delivery_worker]: [KMR] place_release: part=KET12_Square_12mm; target=M1
+[INFO] [1790706364.812892022] [KMR_delivery_worker]: [KMR] place_release completed: part=KET12_Square_12mm; task=environment_112
+[INFO] [1790706366.029505969] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706373.700145914] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_114
+[INFO] [1790706379.157888183] [KMR_delivery_worker]: [KMR] pick_approach: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790706381.123010362] [ur5e_1_workflow_controller]: [ComputePickTargets] part=KET12_Square_12mm current=(-4.348, 0.699, 1.280) target=(-4.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706390.482144211] [ur5e_1_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706394.968440942] [KMR_delivery_worker]: [KMR] pick_approach completed: part=RGOCG12-50_12mm; task=environment_116
+[INFO] [1790706396.512485418] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790706404.690128919] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG12-50_12mm; task=environment_118
+[INFO] [1790706405.765925981] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790706408.226781799] [ur5e_1_workflow_controller]: Gripper: OPEN (position=0.110)
+[WARN] [1790706417.407247529] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (1/3)
+[WARN] [1790706422.490363198] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (2/3)
+[WARN] [1790706436.298342111] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706444.843978718] [ur5e_3_workflow_controller]: [ComputePickTargets] part=KET12_Square_12mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790706455.897199780] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706473.943728985] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG12-50_12mm; task=environment_120
+[INFO] [1790706475.641755136] [KMR_delivery_worker]: [KMR] place_approach: part=RGOCG12-50_12mm; target=M2
+[WARN] [1790706478.906913759] [ur5e_3_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_3_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706480.271561032] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706486.867676364] [ur5e_3_workflow_controller]: snap_to_slot stabilized KET12_Square_12mm at (-0.151, -0.005, 1.024)
+{"stage": "workflow", "time": 1790706492.3398776, "status": [["executing", 8]], "transitions": [131]}
+[INFO] [1790706508.387321409] [KMR_delivery_worker]: [KMR] place_approach completed: part=RGOCG12-50_12mm; task=environment_132
+[INFO] [1790706509.979491237] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG12-50_12mm; target=M2
+[INFO] [1790706543.299836800] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG12-50_12mm; task=environment_134
+[INFO] [1790706545.505950591] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706578.521049091] [ur5e_2_workflow_controller]: [ComputePickTargets] part=RGOCG12-50_12mm current=(-2.348, 0.699, 1.280) target=(-2.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706589.759275504] [ur5e_2_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706618.422691852] [ur5e_2_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706623.695240076] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_135
+[WARN] [1790706634.043745543] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706637.878055566] [KMR_delivery_worker]: [KMR] pick_approach: part=KET16_Square_16mm; target=M1
+[WARN] [1790706645.783779194] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706653.405739540] [ur5e_3_workflow_controller]: [ComputePickTargets] part=RGOCG12-50_12mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790706661.585134183] [KMR_delivery_worker]: [KMR] pick_approach completed: part=KET16_Square_16mm; task=environment_144
+[INFO] [1790706663.777865861] [KMR_delivery_worker]: [KMR] pick_part: part=KET16_Square_16mm; target=M1
+[INFO] [1790706665.804413959] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706672.538825265] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET16_Square_16mm; task=environment_149
+[INFO] [1790706673.519064524] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET16_Square_16mm; target=M1
+[INFO] [1790706680.941343457] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706686.135109607] [ur5e_3_workflow_controller]: snap_to_slot stabilized RGOCG12-50_12mm at (-0.151, 0.070, 1.024)
+{"stage": "workflow", "time": 1790706690.3772185, "status": [["executing", 9]], "transitions": [152]}
+[INFO] [1790706703.153169890] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET16_Square_16mm; task=environment_152
+[INFO] [1790706704.702569189] [KMR_delivery_worker]: [KMR] place_approach: part=KET16_Square_16mm; target=M1
+[INFO] [1790706734.559364275] [KMR_delivery_worker]: [KMR] place_approach completed: part=KET16_Square_16mm; task=environment_155
+[INFO] [1790706736.178540060] [KMR_delivery_worker]: [KMR] place_release: part=KET16_Square_16mm; target=M1
+[INFO] [1790706766.344573288] [KMR_delivery_worker]: [KMR] place_release completed: part=KET16_Square_16mm; task=environment_156
+[INFO] [1790706770.584044104] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706782.392099934] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_158
+[INFO] [1790706802.433463306] [KMR_delivery_worker]: [KMR] pick_approach: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790706804.300798966] [ur5e_1_workflow_controller]: [ComputePickTargets] part=KET16_Square_16mm current=(-4.348, 0.699, 1.280) target=(-4.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706811.748901564] [ur5e_1_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706815.351878245] [KMR_delivery_worker]: [KMR] pick_approach completed: part=RGOCG16-50_16mm; task=environment_160
+[INFO] [1790706817.714535239] [KMR_delivery_worker]: [KMR] pick_part: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790706826.136578442] [KMR_delivery_worker]: [KMR] pick_part completed: part=RGOCG16-50_16mm; task=environment_163
+[INFO] [1790706828.147704012] [KMR_delivery_worker]: [KMR] move_to_resource: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790706830.849037698] [ur5e_1_workflow_controller]: Gripper: OPEN (position=0.110)
+[WARN] [1790706843.938693290] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (1/3)
+[WARN] [1790706849.463421198] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (2/3)
+[WARN] [1790706860.484427856] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (1/3)
+[WARN] [1790706865.520307907] [ur5e_1_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_1_wrist_3_link; reconnecting for fresh observation (2/3)
+[INFO] [1790706866.809745145] [ur5e_3_workflow_controller]: [ComputePickTargets] part=KET16_Square_16mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790706879.258321480] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706886.903258681] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=RGOCG16-50_16mm; task=environment_164
+[INFO] [1790706887.912755811] [KMR_delivery_worker]: [KMR] place_approach: part=RGOCG16-50_16mm; target=M2
+[WARN] [1790706891.413423337] [ur5e_3_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_3_wrist_3_link; reconnecting for fresh observation (1/3)
+[INFO] [1790706899.295311371] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706902.441708012] [ur5e_3_workflow_controller]: snap_to_slot stabilized KET16_Square_16mm at (-0.151, -0.155, 1.024)
+{"stage": "workflow", "time": 1790706906.2406404, "status": [["executing", 10]], "transitions": [175]}
+[INFO] [1790706910.829922347] [KMR_delivery_worker]: [KMR] place_approach completed: part=RGOCG16-50_16mm; task=environment_175
+[INFO] [1790706912.012092758] [KMR_delivery_worker]: [KMR] place_release: part=RGOCG16-50_16mm; target=M2
+[INFO] [1790706944.798353781] [KMR_delivery_worker]: [KMR] place_release completed: part=RGOCG16-50_16mm; task=environment_178
+[INFO] [1790706945.828864444] [KMR_delivery_worker]: [KMR] move_to_resource: part=gear_small; target=Storage
+[INFO] [1790706962.037660783] [ur5e_2_workflow_controller]: [ComputePickTargets] part=RGOCG16-50_16mm current=(-2.348, 0.699, 1.280) target=(-2.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+[INFO] [1790706968.346998972] [ur5e_2_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790706983.458168648] [ur5e_2_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790706983.823760098] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=gear_small; task=environment_180
+[WARN] [1790706994.532991310] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (1/3)
+[WARN] [1790706999.628977297] [ur5e_2_workflow_controller]: Gazebo link observation timed out: dual_robot::ur5e_2_wrist_3_link; reconnecting for fresh observation (2/3)
+[INFO] [1790707006.503992437] [ur5e_3_workflow_controller]: [ComputePickTargets] part=RGOCG16-50_16mm current=(0.401, 0.202, 1.501) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.501 pick_z=1.288 tcp_offset_z=-0.218
+[INFO] [1790707013.384167598] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+[INFO] [1790707025.151532038] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790707027.717826907] [ur5e_3_workflow_controller]: snap_to_slot stabilized RGOCG16-50_16mm at (0.074, 0.070, 1.024)
+{"stage": "workflow", "time": 1790707031.028001, "status": [["completed", 11]], "transitions": [195]}
+{"stage": "render_frame", "time": 1790707034.1251683, "stage_name": "final", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/final_frame.png", "size": [999, 1908, 3]}
+{"stage": "result_written", "time": 1790707036.8778079, "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/result.json", "passed": true}
+{"stage": "video_render_waiting", "time": 1790707040.5651786, "marker": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/video_render_approved"}
+{"stage": "recording_promoted", "time": 1790707210.8032317, "success": {"validated": true, "run_id": "2a18a5d1ee544380b6ed6be402e43839", "accepted": true, "placements": 11, "program_revision": 4, "diagnostic_cca_bypass": true, "ur_cartesian_avoid_collisions": {"ur5e-1": false, "ur5e-2": false, "ur5e-3": false, "ur5e-4": false}, "kmr_base_collision_checks": true, "kmr_equipment_contacts": 0, "render_checks": ["preflight_frame.png", "approved_frame.png", "during_motion_frame.png", "final_frame.png"], "visual_evidence": "visual_evidence.json", "video": {"validated": true, "full_frames_decoded": 19089, "preview_frames_decoded": 1909, "fps": 15.0, "size": [1908, 998], "duration_sec": 1272.6, "preview_duration_sec": 127.26666666666667, "capture": {"status": "captured", "started_at_unix": 1790705743.4763725, "ended_at_unix": 1790707036.8802876, "encoder_finalize_time_sec": 0.8253321060001326, "fps": 15.0, "frames": 19089, "captures": 15909, "repeated_frames": 3180, "encoder": "h264_nvenc", "preset": "p1", "capture_cpu_time_sec": 933.8879870000001, "encoder_cpu_time_sec": 233.62922700000001, "max_capture_gap_sec": 0.8434193179982685, "wall_duration_sec": 1272.6015952609996}, "preview_encoder": "h264_nvenc", "preview_preset": "p1", "duration_validation": {"source": "frames.jsonl:last elapsed_sec + frame interval", "observed_duration_sec": 1272.6524692606663, "difference_sec": -0.0524692606663848}}, "full_video": "assembly.mp4", "preview_video": "assembly-10x.mp4", "preview_speed": 10}}
+2026-09-29 14:40:13,014 - agent:ur5e-1 - INFO - [Robot] Controller shutdown complete for ur5e-1
+2026-09-29 14:40:13,114 - agent:ur5e-2 - INFO - [Robot] Controller shutdown complete for ur5e-2
+2026-09-29 14:40:13,191 - agent:ur5e-3 - INFO - [Robot] Controller shutdown complete for ur5e-3
+2026-09-29 14:40:13,245 - agent:ur5e-4 - INFO - [Robot] Controller shutdown complete for ur5e-4

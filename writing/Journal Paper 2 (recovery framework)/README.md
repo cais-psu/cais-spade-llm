@@ -1,5 +1,81 @@
 # Journal Paper 2: Recovery Framework
 
+## Raised KMR startup verification (2026-09-29)
+
+KMR starts at the existing **1.16 m transport pose**, with its gripper down.
+The saved `pick_approach → move_to_named_pose("transport")` step remains and
+completed in **0.013 s with no trajectory**, compared with **17.598 s** in the
+previous run. Functions, primitive catalogs, contracts, waypoints, and program
+revision 4 are unchanged.
+
+The [fresh complete run](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/README.md),
+`2a18a5d1ee544380b6ed6be402e43839`, passed with **11 valid placements**, **195 matching
+transitions**, and **zero KMR or UR equipment contacts** in 645,198 contact
+messages. All five robots are visible, including KMR already raised in the
+first video frame. The full and accelerated videos decode completely.
+
+- [1× full video — 21m13s](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/assembly.mp4)
+- [20× video — 1m04s](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/assembly-20x.mp4)
+- [Startup pose and first-step evidence](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/startup_pose_audit.json)
+- [Timing comparison](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/speed_comparison.json)
+
+Total video time was **21m13s versus 21m06s** previously (+0.5%). The startup
+raise was removed; other execution and observation timings varied. KMR base
+travel was 559.35 s versus 558.15 s. No overall speedup is claimed for this run.
+626 focused checks, Python compilation, CLI help, Poetry checks, and the Gazebo
+rebuild passed; the [verification record](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/VERIFICATION.md) lists two
+excluded pre-existing fixture tests. Execution settings remain speed 1, ODE
+threads 0, diagnostic CCA bypass, UR `avoid_collisions=false`, and active KMR
+collision checks.
+
+The earlier compact-layout result below remains the timing reference. Its video
+directory was already absent; its [run data and timing summary](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/previous_run_baseline/)
+were preserved with this new record.
+
+## Compact layout recorded acceptance (2026-09-29)
+
+The [fresh normal 11-part run](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/README.md) passed with **11 valid
+placements**, **195 matching function transitions**, and **zero KMR or UR
+equipment contacts** across 622,956 native Gazebo contact messages. The saved
+layout includes the compact Conveyor, Storage move, M1/M2 +15 cm adjustment,
+and ur5e-4 pickup rotation at its measured tool position. All three changed
+pickup rotations passed their collision sweep checks. Function compositions,
+primitive catalogs, state contracts, `SystemBridge`, and program revision 4
+remain unchanged. All five robots are visible in the inspected recording frames.
+
+- [1× recording — 21m06s](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/assembly.mp4)
+- [10× recording — 2m07s](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/assembly-10x.mp4)
+- [20× recording — 1m03s](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/assembly-20x.mp4)
+- [RTF 2 recording — 5m11s](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/assembly-rtf2.mp4)
+
+The RTF 2 copy follows the recorded Gazebo clock throughout: two simulated
+seconds per video second. All four videos decode completely. The
+[timing comparison](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/speed_comparison.json) shows a 6.3% shorter
+full recording than the accepted 22m30s reference, with 20.4% less KMR base
+wall time and 23.4% less KMR base simulation time. The settings remain speed 1,
+ODE island threads 0, diagnostic CCA bypass enabled, UR
+`avoid_collisions=false`, and active KMR collision checks.
+
+See the [acceptance audit](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/acceptance_audit.json),
+[clearance evidence](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/clearance_audit.json), and
+[verification record](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/VERIFICATION.md).
+
+## Current Gazebo functions and recovery primitives (2026-09-25)
+
+[Gazebo resource functions and primitive catalogs](RESOURCE_FUNCTIONS_AND_PRIMITIVES.md)
+record the saved programs used by the Resources page and Gazebo execution.
+The [sourced controller command reference](CONTROLLER_COMMAND_REFERENCE.md)
+separates actual simulation actions from future device commands. The compact
+KMR delivery now uses `pick_approach`, `pick_part`, `move_to_resource`,
+`place_approach`, and `place_release`. The three-task run recorded below is a
+historical result from before the approach events were added.
+
+The [earlier accepted 11-part recording](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-10fae2a02d124a1c987439ce84686757/assembly.mp4) and its [10× video](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-10fae2a02d124a1c987439ce84686757/assembly-10x.mp4) passed all 11 placements, 195 matching transitions, complete video decoding and visible-robot checks, with zero KMR equipment contacts. The [run summary](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-10fae2a02d124a1c987439ce84686757/README.md) links the acceptance, trace, model and visual evidence.
+
+The full video is **22m30s**, down from **24m46s** in the [previous accepted recording](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-870a8072570d44cab6e3dba8a9cf6472/assembly.mp4), a 9.1% reduction. KMR base actions took 14.0% less wall time. All eight empty returns kept the arm parked without a home trajectory; function compositions and primitive catalogs are unchanged. See the [speed comparison and 12-setting benchmark](../../cais_spade_llm/monitor/recovery_gazebo_runs/performance-20260928/README.md). The accepted settings remain speed 1 / ODE island threads 0, with diagnostic CCA bypass enabled, UR `avoid_collisions=false`, and KMR collision checks active.
+
+The [recorded 11-part Gazebo run](evidence/2026-09-28-gazebo-11-parts/gazebo_11_parts_success.mp4) and its [10× copy](evidence/2026-09-28-gazebo-11-parts/gazebo_11_parts_success_10x.mp4) completed all configured placements on 2026-09-28. Its [acceptance audit](evidence/2026-09-28-gazebo-11-parts/acceptance_audit.json) records 195 matching transitions and zero KMR equipment contacts. The resource-program document above identifies the saved revision and controller checks.
+
 ## Compact M1/M2 and KMR delivery (2026-09-21)
 
 The new order is
@@ -19,10 +95,11 @@ cancels preparation and execution while retaining acknowledged custody and
 leaving Gazebo available. Use **Reset Scope → Reset Gazebo → Reset** before
 repeating a transfer. Restart the UI to load the updated Python code.
 
-ProductAgent plans `pick_part`, `move_to_resource`, and `place_release` through
-the nominal ProcessPlanner. KMR ResourceAgent dispatches through the existing
+ProductAgent now plans `pick_approach`, `pick_part`, `move_to_resource`,
+`place_approach`, and `place_release` through the nominal ProcessPlanner. KMR ResourceAgent dispatches through the existing
 CCA protocol. Storage and M1 participate in the same atomic nominal handoffs.
-`move_to_resource` retains the `DockKMR` controller and `/KMR/dock` endpoint.
+`move_to_resource` now calls `move_base` through `/KMR/move_base`; `/KMR/dock`
+remains a compatibility action through the same controller checks.
 Arm/gripper controller results, acknowledged attachment/release, measured part
 poses, and robot withdrawal are required before task completion. Ordinary
 placement records neither machining nor assembly completion.
@@ -192,17 +269,13 @@ that one static KMR include from a temporary runtime-world copy and spawns one
 articulated `KMR` at the same accepted pose. Its planar KMP omniMove 400 base,
 seven LBR iiwa joints, and `KMR_rg2_finger_width` joint publish live state.
 Nav2 now plans collision-aware base paths against the committed fixed cell map.
-The named `/KMR/dock` action retains the configured Storage–M1 and Storage–M2
-routes; M1-to-M2 docking remains rejected until KMR returns to `Storage`.
-Arbitrary travel uses a `1.20 m/s` simulation speed override. This exceeds the
-KMP omniMove 400 physical limits and cannot support physical cycle-time claims.
-Named docking follows the configured,
-map-validated Storage–M1/M2 waypoints deterministically while holding the
-requested yaw. It travels at up to `1.20 m/s` and slows to `0.40 m/s` for the
-last `0.20 m`. A `1.00 m/s²` command ramp prevents the planar simulation plugin
-from applying an abrupt velocity step to the articulated KMR. Return to Storage
-from an arbitrary pose uses Nav2 to reach the
-Storage approach before the deterministic final motion.
+`/KMR/move_base` accepts a world-frame coordinate target and optional saved
+waypoints. `/KMR/dock` keeps named Storage–M1/M2 route compatibility through the
+same Nav2 path planning, footprint validation, measured braking, and final
+alignment checks. Arbitrary travel uses a `1.20 m/s` simulation speed override;
+it cannot support physical cycle-time claims. Final alignment slows to
+`0.40 m/s` for the last `0.20 m`. A `1.00 m/s²` command ramp prevents an abrupt
+velocity step in the planar simulation plugin.
 
 At startup, the recovery base controller moves the KMR iiwa to its upright
 transport pose and maintains that pose while the base travels. The articulated

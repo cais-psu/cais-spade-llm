@@ -1,0 +1,39 @@
+from __future__ import annotations
+import collections, hashlib, json, math
+from pathlib import Path
+out=Path(Path('/tmp/cais_acceptance_output_path').read_text())
+result=json.loads((out/'result.json').read_text())
+run=json.loads((out/'run_before_stop.json').read_text())
+trace=json.loads((out/'trace_audit.json').read_text())
+model=json.loads((out/'model_audit.json').read_text())
+sources=json.loads((out/'verification_sources.json').read_text())
+scene=run['inputs']['scene']
+poses={}
+for part,row in result.get('final_poses',{}).items():
+ if part=='KMR':continue
+ q=row['pose'][3:];norm=sum(v*v for v in q)
+ tilt=math.acos(max(-1.,min(1.,1-2*(q[0]*q[0]+q[1]*q[1])/norm))) if norm>0 else math.inf
+ route=next((m['resource_id'] for m in scene['machines'] if part in m['nominal_parts']),'initially preprinted')
+ poses[part]={'route':route,'position_error_m':row.get('position_error_m'),'position_tolerance_m':row.get('tolerance_m'),'upright_error_rad':tilt,'yaw_error_rad':row.get('yaw_error_rad'),'valid':bool(row.get('valid') and tilt<=.02)}
+changed=[path for path,digest in sources['source_sha256'].items() if hashlib.sha256(Path(path).read_bytes()).hexdigest()!=digest]
+counts=collections.Counter((t['acknowledgement']['resource_id'],t['acknowledgement']['event_name']) for t in run['transitions'])
+paths=[]
+for t in run['transitions']:
+ if t['acknowledgement']['resource_id']!='KMR':continue
+ for op in t['observations']['observations']['operations']:
+  if op.get('operation')=='cartesian_path':paths.append(op)
+audit={'run_id':run['run_id'],'accepted':bool(result['acceptance_passed'] and len(poses)==11 and all(p['valid'] for p in poses.values()) and not trace['errors'] and not model['errors'] and not changed),'program_revision':scene['resource_programs']['revision'],'changed_execution_sources_during_run':changed,'completed_transitions':len(run['transitions']),'primitive_trace_errors':trace['errors'],'model_transition_errors':model['errors'],'contact_counts':result.get('contact_counts'),'elapsed_wall_time_sec':result['elapsed_wall_time_sec'],'final_poses':poses,'KMR_cartesian':{'paths':len(paths),'collision_samples':sum(p.get('checked_states',0) for p in paths),'cartesian_samples':sum(p.get('checked_cartesian_states',0) for p in paths),'maximum_path_error_m':max((p.get('maximum_path_error_m',0) for p in paths),default=0.),'planned_arm_motion_sec':sum(p['trajectory']['points'][-1]['time_from_start'] for p in paths)},'function_counts':[{'resource':rid,'event':event,'completed':n} for (rid,event),n in sorted(counts.items())]}
+probe=json.loads((out/'startup_probe.json').read_text())
+startup=next(op for op in probe['operations'] if op['operation']=='initial_arm_pose')
+first=next(t for t in run['transitions'] if t['acknowledgement']['resource_id']=='KMR' and t['acknowledgement']['event_name']=='pick_approach')
+park=first['observations']['observations']['primitive_results'][0]
+arm_ops=[op for op in park['observations'] if op.get('operation') in ('cartesian_path','/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory')]
+protected=json.loads((out/'previous_run_baseline/protected.json').read_text())
+programs_unchanged=scene['resource_programs']==protected['resource_programs']
+protected_changes=[path for path,digest in protected['files'].items() if hashlib.sha256(Path(path).read_bytes()).hexdigest()!=digest]
+startup_audit={'valid':bool(startup['success'] and startup['checked_states']>0 and startup['collision_checks_bypassed'] is False and park['primitive']=='move_to_named_pose' and park['result'].get('motion_required') is False and not arm_ops and programs_unchanged and not protected_changes), 'measured_startup':startup,'first_transport_step':park,'first_transport_arm_operations':len(arm_ops),'resource_programs_unchanged':programs_unchanged,'protected_files_changed':protected_changes,'previous_run_id':'82cb3858f1a94394a8f846a0b6831cf3'}
+(out/'startup_pose_audit.json').write_text(json.dumps(startup_audit,indent=2))
+audit['startup_pose_valid']=startup_audit['valid']
+audit['accepted'] &= startup_audit['valid'] and audit['contact_counts'].get('ur_equipment')==0 and audit['contact_counts'].get('ur_robot')==0
+(out/'acceptance_audit.json').write_text(json.dumps(audit,indent=2))
+print(json.dumps({k:v for k,v in audit.items() if k not in ['function_counts','final_poses']},indent=2))

@@ -585,7 +585,12 @@ def test_setup_tab_direct_link_keeps_one_draft_and_no_polling(project, monkeypat
     monkeypatch.setattr(recovery_framework, "_ROOT", project)
     monkeypatch.setattr(recovery_framework, "_PAPER", project / "missing.md")
     monkeypatch.setattr(recovery_run, "render", Mock())
-    monkeypatch.setattr(ui, "timer", Mock(side_effect=AssertionError("unexpected polling")))
+    reads = []
+    def one_time_read(interval, callback, **kwargs):
+        assert kwargs.get("once"), "unexpected polling"
+        reads.append(callback)
+        return Mock()
+    monkeypatch.setattr(ui, "timer", one_time_read)
     request = Request(
         {"type": "http", "path": "/recovery-framework", "headers": [], "query_string": b"tab=setup"}
     )
@@ -593,6 +598,8 @@ def test_setup_tab_direct_link_keeps_one_draft_and_no_polling(project, monkeypat
     before = snapshot(project)
     with client:
         recovery_framework.render(SimpleNamespace())
+        assert len(reads) == 1
+        asyncio.run(reads[0]())
         tabs = next(item for item in client.elements.values() if isinstance(item, ui.tabs))
         assert tabs.value == "setup"
         mode = _element(client, ui.select, "Mode")

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 from pathlib import Path
 from typing import Any
+
+from cais_spade_llm.ui.evidence import read_json_cached
 
 NOT_RECORDED = "not recorded"
 RESULT_FIELDS = (
@@ -32,15 +33,20 @@ def read_artifact(root: Path, relative_path: str) -> dict[str, Any]:
     try:
         path = root / relative_path
         path.resolve().relative_to(root.resolve())
-        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError, ValueError) as exc:
         return {"record_error": f"{type(exc).__name__}: {exc}"}
     try:
-        payload = json.loads(text)
+        payload = read_json_cached(path)
         if not isinstance(payload, dict):
             raise ValueError("Expected a JSON object")
         return payload
+    except (OSError, UnicodeError) as exc:
+        return {"record_error": f"{type(exc).__name__}: {exc}"}
     except ValueError as exc:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            text = ""
         return {"record_error": f"{type(exc).__name__}: {exc}", "raw_text": text}
 
 
@@ -164,6 +170,13 @@ def render_results(contexts_root: Path) -> None:
     """Render saved evidence without restoring it into an active interaction."""
     from nicegui import ui
 
+    from cais_spade_llm.ui.evidence import (
+        BackgroundSection,
+        TablePager,
+        contained_path,
+        render_file,
+    )
+
     ui.label("Saved Spec2Primitives evidence").classes("text-lg font-semibold")
     ui.label(
         "One row per interaction. Summary fields describe its latest refinement and execution runs. "
@@ -175,6 +188,7 @@ def render_results(contexts_root: Path) -> None:
         search = ui.input("Search saved results").classes("grow")
         refresh_button = ui.button("Refresh saved results", icon="refresh")
         export_button = ui.button("Export CSV", icon="download")
+    loading = BackgroundSection()
     message = ui.label().classes("text-slate-600")
     table = ui.table(
         columns=[
@@ -184,7 +198,6 @@ def render_results(contexts_root: Path) -> None:
         rows=[],
         row_key="interaction_identifier",
         selection="single",
-        pagination=10,
     ).classes("w-full")
     details = ui.column().classes("w-full")
 
@@ -197,19 +210,21 @@ def render_results(contexts_root: Path) -> None:
             in " ".join(str(row.get(field, "")) for field in RESULT_FIELDS).casefold()
         ]
 
+    pager = TablePager(table, filtered)
+
     def update() -> None:
-        table.rows = filtered()
+        pager.update()
         table.selected = []
         details.clear()
 
-    def refresh() -> None:
+    def loaded(records: list[dict]) -> None:
         rows.clear()
-        try:
-            rows.extend(read_interactions(contexts_root))
-            message.text = "" if rows else "No saved interactions are available."
-        except OSError as exc:
-            message.text = f"Saved interactions are unavailable: {exc}"
+        rows.extend(records)
+        message.text = "" if rows else "No saved interactions are available."
         update()
+
+    def refresh() -> None:
+        loading.load(lambda: read_interactions(contexts_root), loaded)
 
     def select() -> None:
         details.clear()
@@ -219,7 +234,9 @@ def render_results(contexts_root: Path) -> None:
         root = contexts_root / identifier
         with details:
             ui.label(identifier).classes("font-semibold")
-            paths = artifact_paths(root)
+            artifacts = BackgroundSection()
+
+        def show_artifacts(paths: list[str]) -> None:
             if not paths:
                 ui.label("No saved artifacts are available.")
                 return
@@ -231,15 +248,17 @@ def render_results(contexts_root: Path) -> None:
             artifact = ui.select(
                 paths, label="Saved artifact", value=paths[0], with_input=True
             ).classes("w-full")
-            content = ui.code(language="json").classes("w-full")
+            content = ui.column().classes("w-full")
 
             def show() -> None:
-                content.content = json.dumps(
-                    read_artifact(root, artifact.value), indent=2, ensure_ascii=False
-                )
+                content.clear()
+                with content:
+                    render_file(contained_path(root, artifact.value))
 
             artifact.on_value_change(show)
             show()
+
+        artifacts.load(lambda: artifact_paths(root), show_artifacts)
 
     search.on_value_change(update)
     refresh_button.on_click(refresh)

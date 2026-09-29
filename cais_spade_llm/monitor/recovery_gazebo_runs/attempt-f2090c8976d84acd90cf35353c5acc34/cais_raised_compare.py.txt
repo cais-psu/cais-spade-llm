@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import statistics
+import sys
+
+
+def summarize(directory: Path) -> dict:
+    run=json.loads((directory/'run.json').read_text())
+    video=json.loads((directory/'video_validation.json').read_text())
+    acceptance=json.loads((directory/'acceptance_audit.json').read_text())
+    actions=[]
+    home=[]
+    planning=[]
+    arm=[]
+    for transition in run['transitions']:
+        ack=transition['acknowledgement']
+        if ack['resource_id']!='KMR':
+            continue
+        observations=transition.get('observations',{})
+        execution=observations.get('observations',{})
+        for primitive in execution.get('primitive_results',[]):
+            if primitive.get('primitive')=='move_to_named_pose' and primitive.get('parameters',{}).get('pose_name')=='home':
+                operations=primitive.get('observations',[])
+                home.append({'task_id':ack['task_id'],
+                             'wall_time_sec':primitive.get('timing',{}).get('wall_time_sec'),
+                             'arm_trajectories':sum(op.get('operation')=='/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory' for op in operations),
+                             'planned_paths':sum(op.get('operation')=='cartesian_path' for op in operations),
+                             'observed_parked':any(op.get('operation')=='observed_storage_home' and op.get('arm_parked') is True for op in operations)})
+        for operation in execution.get('operations',[]):
+            if 'planning_wall_time_sec' in operation:
+                planning.append(operation['planning_wall_time_sec'])
+            if operation.get('operation')=='/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory':
+                arm.append(operation)
+            if operation.get('operation')!='/KMR/move_base':
+                continue
+            samples=operation.get('base_motion_samples',[])
+            poses=[sample['pose'] for sample in samples if 'pose' in sample]
+            rotation=sum(abs((b[2]-a[2]+math.pi)%(2*math.pi)-math.pi) for a,b in zip(poses,poses[1:]))
+            actions.append({'function':ack['event_name'],'part':ack.get('part_name'),
+                            'source':ack['parameters'].get('source_resource'),
+                            'destination':ack['parameters'].get('target_resource'),
+                            'wall_time_sec':operation['wall_time_sec'],
+                            'function_wall_time_sec':observations.get('timing',{}).get('wall_time_sec'),
+                            'simulation_time_sec':operation['simulation_time_sec'],
+                            'heading_change_deg':math.degrees(rotation),
+                            'distance_m':sum(math.dist(a[:2],b[:2]) for a,b in zip(poses,poses[1:])),
+                            'final_error_m':operation.get('feedback',{}).get('remaining_distance_m'),
+                            'collision_checks_bypassed':any(sample.get('collision_checks_bypassed') for sample in samples)})
+    result={'directory':str(directory),'run_id':run['run_id'],
+            'accepted':acceptance['accepted'], 'placements':len(acceptance['final_poses']),
+            'transitions':acceptance['completed_transitions'],
+            'kmr_equipment_contacts':acceptance['contact_counts']['kmr_equipment'],
+            'video_duration_sec':video['duration_sec'],'preview_duration_sec':video['preview_duration_sec'],
+            'base_action_count':len(actions),'base_wall_time_sec':sum(a['wall_time_sec'] for a in actions),
+            'base_simulation_time_sec':sum(a['simulation_time_sec'] for a in actions),
+            'base_heading_change_deg':sum(a['heading_change_deg'] for a in actions),
+            'arm_planning_wall_time_sec':sum(planning),
+            'arm_controller_wall_time_sec':sum(a['wall_time_sec'] for a in arm),
+            'arm_controller_simulation_time_sec':sum(a['simulation_time_sec'] for a in arm),
+            'home_steps':home,'base_actions':actions}
+    result['base_simulation_rate']=result['base_simulation_time_sec']/result['base_wall_time_sec']
+    for resource in ('M1','M2','Storage'):
+        selected=[a for a in actions if a['function']=='move_to_resource' and a['destination']==resource]
+        result[resource]={'count':len(selected),
+                          'mean_wall_time_sec':statistics.mean(a['wall_time_sec'] for a in selected),
+                          'mean_function_wall_time_sec':statistics.mean(a['function_wall_time_sec'] for a in selected),
+                          'mean_simulation_time_sec':statistics.mean(a['simulation_time_sec'] for a in selected),
+                          'mean_heading_change_deg':statistics.mean(a['heading_change_deg'] for a in selected)}
+    return result
+
+
+out=Path(Path('/tmp/cais_acceptance_output_path').read_text().strip())
+old=json.loads((out/'previous_run_baseline/previous_timing.json').read_text())
+new=summarize(out)
+run=json.loads((out/'run.json').read_text())
+new['ur5e-4_pick_approach']=[]
+for transition in run['transitions']:
+ ack=transition['acknowledgement']
+ if ack['resource_id']!='ur5e-4' or ack['event_name']!='pick_approach':continue
+ execution=transition['observations']['controller_result']['observations']['simulation_execution']
+ for primitive in execution['primitive_results']:
+  if primitive['step_id']!='move_above_part':continue
+  evidence=primitive['command_evidence'];start=evidence['observed_start_pose'];points=[start,*evidence['waypoints']]
+  turns=[(a,b) for a,b in zip(points,points[1:]) if math.dist(a[3:],b[3:])>1e-8]
+  legacy=run['inputs']['scene']['robots'][3]['cartesian_motion']['rotation_waypoint']
+  new['ur5e-4_pick_approach'].append({'part':ack['part_name'],'primitive':primitive['primitive'],
+   'timing':primitive['timing'],'observed_start_pose':start,'target_pose':points[-1],
+   'cartesian_translation_length_m':sum(math.dist(a[:3],b[:3]) for a,b in zip(points,points[1:])),
+   'rotation_at_measured_xyz':all(math.dist(a[:3],start[:3])<1e-8 and math.dist(b[:3],start[:3])<1e-8 for a,b in turns),
+   'rotation_sample_count':len(turns),
+   'previous_rotation_waypoint_distance_from_same_start_m':math.dist(start[:3],legacy)+math.dist(legacy,points[-1][:3]),
+   'comparison_scope':'Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start.'})
+checks=[json.loads(line) for line in (out/'ur5e-4_pick_rotation_checks.jsonl').read_text().splitlines()]
+new['ur5e-4_collision_checks']=[{k:v for k,v in row.items() if k!='joint_samples'} for row in checks]
+comparison={'previous':old,'current':new,'baseline_source':'previous_run_baseline/previous_timing.json','changes':{}}
+for key in ('video_duration_sec','base_wall_time_sec','base_simulation_time_sec','base_heading_change_deg','arm_controller_wall_time_sec'):
+ comparison['changes'][key]={'difference':new[key]-old[key], 'reduction_percent':100*(old[key]-new[key])/old[key] if old[key] else None}
+def first_park(run):
+ t=next(t for t in run['transitions'] if t['acknowledgement']['resource_id']=='KMR' and t['acknowledgement']['event_name']=='pick_approach')
+ p=t['observations']['observations']['primitive_results'][0]
+ return {'wall_time_sec':p['timing']['wall_time_sec'],'simulation_time_sec':p['timing']['simulation_time_sec'],'arm_trajectories':sum(op.get('operation')=='/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory' for op in p['observations']),'result':p['result']}
+comparison['startup_transport']={'previous':first_park(json.loads((out/'previous_run_baseline/previous_run.json').read_text())),'current':first_park(run)}
+(out/'speed_comparison.json').write_text(json.dumps(comparison,indent=2))
+print(json.dumps({'current':{k:v for k,v in new.items() if k not in ('base_actions','home_steps','ur5e-4_collision_checks')},'changes':comparison['changes']},indent=2))

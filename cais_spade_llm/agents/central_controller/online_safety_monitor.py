@@ -109,27 +109,29 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         candidate_aps: list[str],
         *,
         predicted_state_aps: list[str] | None = None,
+        successor_state_aps: list[str] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        """
-        Pure safety validation step: check if adding candidate APs would violate any rule.
-        Does NOT mutate state.
+        """Check that accepting states remain reachable after the projected label.
+
+        Args:
+            candidate_aps: Propositions for the candidate event.
+            predicted_state_aps: Additional facts for legacy task admission.
+            successor_state_aps: Complete projected state facts for recovery;
+                replaces current state facts when supplied, including an empty list.
+
+        Returns:
+            Admissibility and evidence without mutating DFA states or running_aps.
         """
         predicted = list(predicted_state_aps or [])
 
-        # If no safety rules apply to this task, allow it.
-        if not candidate_aps and not predicted:
-            return True, {
-                "running_snapshot": list(self.running_aps),
-                "state_snapshot": sorted(self._all_state_aps()),
-                "next_states": {},
-                "candidate_aps": candidate_aps,
-                "predicted_state_aps": predicted,
-            }
-
-        # Combine Running + Candidate to see the "Next World State"
-        sigma = frozenset(
-            set(self.running_aps) | self._all_state_aps() | set(candidate_aps) | set(predicted)
+        # Outline projection supplies the full successor valuation, including
+        # unchanged resources. Superseded current facts must not survive here.
+        state_aps = (
+            set(successor_state_aps)
+            if successor_state_aps is not None
+            else self._all_state_aps() | set(predicted)
         )
+        sigma = frozenset(set(self.running_aps) | state_aps | set(candidate_aps))
 
         next_states: dict[str, str] = {}
         violated_rule = None
@@ -138,11 +140,15 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
 
         for rule_id in self.dfas:
             curr = self.current_states.get(rule_id, "1")
-            nxt = self._delta(rule_id, curr, sigma)
+            dfa = self.dfas[rule_id]
+            destinations = {
+                dst
+                for label, dst in dfa["transitions"].get(curr, [])
+                if self._eval_label(label, sigma, dfa["ap_symbols"])
+            }
+            nxt = next(iter(destinations)) if len(destinations) == 1 else None
 
-            # Check for violation state
-            vio_state = self.dfas[rule_id].get("violation_state")
-            if vio_state and nxt == vio_state:
+            if nxt not in dfa["accepting_reachable_states"]:
                 violated_rule = rule_id
                 violated_from = curr
                 violated_to = nxt
@@ -155,6 +161,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
                 "violated_rule": violated_rule,
                 "violated_from": violated_from,
                 "violated_to": violated_to,
+                "successor_state_aps": sorted(state_aps),
                 "candidate_aps": candidate_aps,
                 "running_snapshot": list(self.running_aps),
                 "state_snapshot": sorted(self._all_state_aps()),
@@ -165,6 +172,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
             "running_snapshot": list(self.running_aps),
             "state_snapshot": sorted(self._all_state_aps()),
             "next_states": next_states,
+            "successor_state_aps": sorted(state_aps),
             "candidate_aps": candidate_aps,
             "predicted_state_aps": predicted,
         }

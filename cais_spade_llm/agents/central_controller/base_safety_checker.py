@@ -2,11 +2,58 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
+from functools import lru_cache
 from typing import Any
 from urllib.parse import parse_qsl
+
+
+@lru_cache(maxsize=4096)
+def _satisfiable_label(label: str) -> bool:
+    """Check Boolean DFA guards without treating impossible edges as paths."""
+    expression = label.replace("&", " and ").replace("|", " or ")
+    expression = expression.replace("~", " not ").replace("!", " not ")
+    expression = re.sub(r"\btrue\b", "True", expression, flags=re.IGNORECASE)
+    expression = re.sub(r"\bfalse\b", "False", expression, flags=re.IGNORECASE)
+    tree = ast.parse(expression.strip(), mode="eval").body
+    names = sorted({node.id for node in ast.walk(tree) if isinstance(node, ast.Name)})
+    for node in ast.walk(tree):
+        if not isinstance(
+            node,
+            (ast.BoolOp, ast.UnaryOp, ast.Name, ast.Constant, ast.And, ast.Or, ast.Not, ast.Load),
+        ):
+            raise ValueError(f"Unsupported DFA guard: {label!r}")
+        if isinstance(node, ast.Constant) and type(node.value) is not bool:
+            raise ValueError(f"Unsupported DFA guard constant: {label!r}")
+        if isinstance(node, ast.Name) and not re.fullmatch(r"ap\d+", node.id):
+            raise ValueError(f"Unsupported DFA proposition: {node.id!r}")
+
+    def evaluate(node: ast.AST, values: dict[str, bool]) -> bool | None:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return values.get(node.id)
+        if isinstance(node, ast.UnaryOp):
+            value = evaluate(node.operand, values)
+            return None if value is None else not value
+        results = [evaluate(child, values) for child in node.values]
+        if isinstance(node.op, ast.And):
+            return False if False in results else None if None in results else True
+        return True if True in results else None if None in results else False
+
+    def search(values: dict[str, bool], index: int) -> bool:
+        result = evaluate(tree, values)
+        if result is not None:
+            return result
+        name = names[index]
+        return search({**values, name: False}, index + 1) or search(
+            {**values, name: True}, index + 1
+        )
+
+    return search({}, 0)
 
 
 class BaseSafetyChecker:
@@ -553,12 +600,16 @@ class BaseSafetyChecker:
             init = m_init.group(1)
 
         for state_blob in re.findall(
-            r"node\s*\[shape\s*=\s*doublecircle\]\s*;\s*([^;]+)\s*;",
+            r"node\s*\[shape\s*=\s*doublecircle\]\s*;\s*(.*?)"
+            r"(?=node\s*\[|\binit\b|[A-Za-z0-9_.]+\s*->|\}|$)",
             text,
             flags=re.IGNORECASE,
         ):
             for state in re.findall(state_pat, state_blob):
                 accepting.add(state)
+        accepting.update(re.findall(
+            rf"\b(?!node\b)({state_pat})\s*\[\s*shape\s*=\s*doublecircle\s*\]", text
+        ))
 
         # Match transitions: '1 -> 2 [label="..."];'
         pattern = re.compile(rf"({state_pat})\s*->\s*({state_pat})\s*\[label=\"(.*?)\"\];")
@@ -566,7 +617,7 @@ class BaseSafetyChecker:
         for src, dst, label in pattern.findall(text):
             transitions.setdefault(src, []).append((label, dst))
 
-            if src == dst and label.strip().lower() == "true":
+            if src == dst and label.strip().lower() == "true" and src not in accepting:
                 violation = src
 
             for ap in re.findall(r"(ap\d+)", label):
@@ -576,10 +627,23 @@ class BaseSafetyChecker:
         if init is None and transitions:
             init = next(iter(transitions.keys()))
 
+        predecessors: dict[str, set[str]] = {}
+        for src, edges in transitions.items():
+            for label, dst in edges:
+                if _satisfiable_label(label):
+                    predecessors.setdefault(dst, set()).add(src)
+        accepting_reachable = set(accepting)
+        pending = list(accepting)
+        while pending:
+            for src in predecessors.get(pending.pop(), set()) - accepting_reachable:
+                accepting_reachable.add(src)
+                pending.append(src)
+
         return {
             "initial": init,
             "transitions": transitions,
             "violation_state": violation,
             "accepting_states": sorted(accepting),
+            "accepting_reachable_states": sorted(accepting_reachable),
             "ap_symbols": ap_list,
         }

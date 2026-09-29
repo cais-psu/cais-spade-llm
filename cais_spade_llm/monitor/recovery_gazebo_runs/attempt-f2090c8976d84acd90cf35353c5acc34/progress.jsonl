@@ -1,0 +1,26 @@
+{"stage": "setup_validated", "time": 1790705652.5608516, "output": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34", "parts": ["gear_small", "gear_medium", "gear_large", "KET4_Square_4mm", "KET8_Square_8mm", "KET12_Square_12mm", "KET16_Square_16mm", "RGOCG4-50_Round_4mm", "RGOCG8-50_8mm", "RGOCG12-50_12mm", "RGOCG16-50_16mm"]}
+{"stage": "gazebo_launch", "time": 1790705654.6333337, "error": null}
+{"stage": "gazebo_wait", "time": 1790705657.515343, "reason": "Simulation startup is not done yet. Waiting for core services: /compute_cartesian_path, /ATTACHLINK, /DETACHLINK"}
+{"stage": "gazebo_wait", "time": 1790705665.9684627, "reason": "Simulation startup is not done yet. Waiting for core services: /compute_cartesian_path"}
+{"stage": "gazebo_ready", "time": 1790705684.3695207}
+{"stage": "render_frame", "time": 1790705710.3814263, "stage_name": "preflight", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/preflight_frame.png", "size": [999, 1908, 3]}
+{"stage": "render_preflight_waiting", "time": 1790705710.3833518, "marker": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/render_approved"}
+{"stage": "render_frame", "time": 1790705739.2267725, "stage_name": "approved", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/approved_frame.png", "size": [999, 1908, 3]}
+{"stage": "system_started", "time": 1790705780.0382311, "running": true, "error": null}
+{"stage": "workflow", "time": 1790705781.5258853, "status": [["executing", 0]], "transitions": [3]}
+{"stage": "workflow", "time": 1790705832.2404354, "status": [["executing", 1]], "transitions": [11]}
+{"stage": "workflow", "time": 1790705872.8293839, "status": [["executing", 2]], "transitions": [17]}
+{"stage": "workflow", "time": 1790705908.4767709, "status": [["executing", 3]], "transitions": [25]}
+{"stage": "workflow", "time": 1790705985.49965, "status": [["executing", 4]], "transitions": [44]}
+{"stage": "workflow", "time": 1790706118.6156852, "status": [["executing", 5]], "transitions": [64]}
+{"stage": "render_frame", "time": 1790706221.3807645, "stage_name": "during_motion", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/during_motion_frame.png", "size": [999, 1908, 3]}
+{"stage": "workflow", "time": 1790706242.0090547, "status": [["executing", 6]], "transitions": [87]}
+{"stage": "workflow", "time": 1790706343.9539454, "status": [["executing", 7]], "transitions": [110]}
+{"stage": "workflow", "time": 1790706492.3398776, "status": [["executing", 8]], "transitions": [131]}
+{"stage": "workflow", "time": 1790706690.3772185, "status": [["executing", 9]], "transitions": [152]}
+{"stage": "workflow", "time": 1790706906.2406404, "status": [["executing", 10]], "transitions": [175]}
+{"stage": "workflow", "time": 1790707031.028001, "status": [["completed", 11]], "transitions": [195]}
+{"stage": "render_frame", "time": 1790707034.1251683, "stage_name": "final", "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/final_frame.png", "size": [999, 1908, 3]}
+{"stage": "result_written", "time": 1790707036.8778079, "path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/result.json", "passed": true}
+{"stage": "video_render_waiting", "time": 1790707040.5651786, "marker": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/video_render_approved"}
+{"stage": "recording_promoted", "time": 1790707210.8032317, "success": {"validated": true, "run_id": "2a18a5d1ee544380b6ed6be402e43839", "accepted": true, "placements": 11, "program_revision": 4, "diagnostic_cca_bypass": true, "ur_cartesian_avoid_collisions": {"ur5e-1": false, "ur5e-2": false, "ur5e-3": false, "ur5e-4": false}, "kmr_base_collision_checks": true, "kmr_equipment_contacts": 0, "render_checks": ["preflight_frame.png", "approved_frame.png", "during_motion_frame.png", "final_frame.png"], "visual_evidence": "visual_evidence.json", "video": {"validated": true, "full_frames_decoded": 19089, "preview_frames_decoded": 1909, "fps": 15.0, "size": [1908, 998], "duration_sec": 1272.6, "preview_duration_sec": 127.26666666666667, "capture": {"status": "captured", "started_at_unix": 1790705743.4763725, "ended_at_unix": 1790707036.8802876, "encoder_finalize_time_sec": 0.8253321060001326, "fps": 15.0, "frames": 19089, "captures": 15909, "repeated_frames": 3180, "encoder": "h264_nvenc", "preset": "p1", "capture_cpu_time_sec": 933.8879870000001, "encoder_cpu_time_sec": 233.62922700000001, "max_capture_gap_sec": 0.8434193179982685, "wall_duration_sec": 1272.6015952609996}, "preview_encoder": "h264_nvenc", "preview_preset": "p1", "duration_validation": {"source": "frames.jsonl:last elapsed_sec + frame interval", "observed_duration_sec": 1272.6524692606663, "difference_sec": -0.0524692606663848}}, "full_video": "assembly.mp4", "preview_video": "assembly-10x.mp4", "preview_speed": 10}}

@@ -1,0 +1,39 @@
+{
+  "resource_id": "KMR",
+  "function_name": "pick_approach",
+  "step_id": "park",
+  "task_id": "environment_5",
+  "primitive": "move_to_named_pose",
+  "parameters": {
+    "pose_name": "transport"
+  },
+  "preconditions": {
+    "arm_joints": "fresh"
+  },
+  "effects": {
+    "tcp_pose": "observed"
+  },
+  "status": "completed",
+  "result": {
+    "success": true,
+    "tcp_pose": [
+      -6.03999908124546,
+      1.8799981634401435,
+      1.159999999173262,
+      0.9999999999983132,
+      1.8367140531827535e-06,
+      -9.489846348689049e-11,
+      -8.462703019260013e-11
+    ],
+    "motion_required": false
+  },
+  "observations": [],
+  "timing": {
+    "wall_time_sec": 0.012900072000775253,
+    "simulation_time_sec": 0.0,
+    "planning_wall_time_sec": 0.0,
+    "trajectory_duration_sec": 0,
+    "real_time_factor": 0.0,
+    "clock_reset": false
+  }
+}

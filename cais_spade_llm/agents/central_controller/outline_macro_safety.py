@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -38,8 +39,29 @@ def _recovery_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         dfa_dot = str(raw_rule.get("dfa_dot") or "").strip()
         recovery_aps = _recovery_rule_aps(raw_rule)
-        if not dfa_dot or not recovery_aps:
-            continue
+        if not dfa_dot:
+            raise ValueError("Applicable recovery safety rule has no DFA")
+        declared_labels = {ap["label"] for ap in recovery_aps}
+        if set(re.findall(r"\bap\d+\b", dfa_dot)) - declared_labels:
+            raise ValueError("Applicable recovery safety rule has unprojected propositions")
+        for ap in recovery_aps:
+            mode = dict(ap.get("selector") or {}).get("mode")
+            supported = (
+                {"move_part_to_destination", "resource_move_to_destination"}
+                if ap["full"].startswith("ap_event/")
+                else {
+                    "part_goal_satisfied",
+                    "part_at_destination",
+                    "resource_in_destination",
+                    "resource_state",
+                }
+                if ap["full"].startswith("ap_state/")
+                else set()
+            )
+            if mode not in supported:
+                raise ValueError(
+                    "Applicable recovery safety proposition has no deterministic evaluator"
+                )
         rule = deepcopy(raw_rule)
         rule.setdefault("rule_id", str(rule.get("id") or rule.get("rule_id") or "").strip())
         rule["recovery_aps"] = recovery_aps
@@ -147,8 +169,8 @@ def _recovery_monitor_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]
             and str(ap.get("label") or "").strip()
             and str(ap.get("full") or "").strip()
         ]
-        if not rule_id or not recovery_aps:
-            continue
+        if not rule_id:
+            raise ValueError("Applicable recovery safety rule has no identifier")
         monitor_rules.append(
             {
                 "id": rule_id,
@@ -455,6 +477,7 @@ def _admissible_projected_event_ids(
         allowed, _ = monitor.online_safety_validation(
             list(projection.get("candidate_aps") or []),
             predicted_state_aps=list(projection.get("predicted_state_aps") or []),
+            successor_state_aps=list(projection.get("predicted_state_aps") or []),
         )
         if allowed:
             admissible.append(event_id)
@@ -510,6 +533,12 @@ def validate_outline_macro_recovery_safety(
     llm_input: dict[str, Any],
     safety_dfa_states_before: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """Validate a successor from observed history and the accepted recovery prefix.
+
+    Returns:
+        Safety decision, projected DFA states, and requirement/condition evidence.
+        Rejected candidates preserve the supplied DFA states.
+    """
     rules = _recovery_loaded_rules(llm_input)
     projection = project_outline_macro_recovery_aps(
         task=task,
@@ -629,6 +658,7 @@ def validate_outline_macro_recovery_safety(
     allowed, info = monitor.online_safety_validation(
         list(projection.get("candidate_aps") or []),
         predicted_state_aps=list(projection.get("predicted_state_aps") or []),
+        successor_state_aps=list(projection.get("predicted_state_aps") or []),
     )
     candidate_dfa_states_after = deepcopy(dfa_states_before)
     if allowed:
@@ -688,6 +718,10 @@ def validate_outline_macro_recovery_safety(
                     "running_aps": deepcopy(safety_ctx.get("running_aps") or []),
                     "violated_from": deepcopy(info.get("violated_from")),
                     "violated_to": deepcopy(info.get("violated_to")),
+                    "safety_rule": deepcopy(violated_rule),
+                    "projected_resources": deepcopy(projected_resources),
+                    "projected_parts": deepcopy(projected_parts),
+                    "successor_state_aps": deepcopy(info.get("successor_state_aps") or []),
                 },
                 "safe_next_task_ids": [],
             }

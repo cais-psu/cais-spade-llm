@@ -7,6 +7,10 @@ from copy import deepcopy
 from cais_spade_llm.recovery_framework.gazebo_worker import GazeboExecutionError
 from cais_spade_llm.recovery_framework.kmr_tasks import capability_decompositions
 from cais_spade_llm.resources.resource_profile import ResourceProfile, register_resource_profile
+from cais_spade_llm.resources.gazebo_programs import (
+    current_program_revision, primitive_available, resource_program_revision,
+)
+from cais_spade_llm.recovery_framework import ROOT
 
 
 class KMRPrimitives:
@@ -17,13 +21,41 @@ class KMRPrimitives:
 
     async def _call(self, primitive: str, parameters: dict) -> dict:
         agent = self.agent
-        request = deepcopy(getattr(agent, '_kmr_execution_request', None))
-        if request is None:
-            return {'success': False, 'message': 'No observed KMR task context for recovery'}
         runtime = getattr(agent, 'environment_runtime', None) or getattr(agent, 'delivery_runtime', None)
+        if runtime is not None:
+            previous = getattr(agent, 'workflow_custody', None)
+            if previous is None:
+                for transition in reversed(runtime.context.transitions):
+                    acknowledgement = transition['acknowledgement']
+                    if acknowledgement.get('resource_id') == 'KMR':
+                        previous = transition.get('observations') or acknowledgement.get('observations')
+                        break
+            valuation = runtime.context.snapshot()
+            for field in ('held_part', 'resource_location'):
+                if field in getattr(agent, '_primitive_state', {}):
+                    valuation['KMR'][field] = deepcopy(agent._primitive_state[field])
+            request = {
+                'mode': 'primitive', 'inputs': runtime.context.inputs,
+                'valuation': valuation,
+                'geometry': deepcopy(getattr(runtime.context, 'geometry', {})),
+                'probe': getattr(runtime, 'kmr_probe', None) or runtime.prepared.get('probe'),
+                'custody': deepcopy(previous),
+            }
+        else:
+            request = deepcopy(getattr(agent, '_kmr_execution_request', None))
+            if request is None:
+                return {'success': False, 'message': 'No active KMR runtime context for recovery'}
+        scene = request.get('inputs', {}).get('scene', {})
+        if 'resource_programs' in scene:
+            if not primitive_available(scene, 'KMR', primitive, recovery=True):
+                return {'success': False, 'message': f'KMR primitive is unavailable for recovery: {primitive}'}
+            scene_file = getattr(runtime, 'scene_file', '')
+            if scene_file and current_program_revision(ROOT / scene_file) != resource_program_revision(scene):
+                return {'success': False, 'message': 'Stale Gazebo program revision'}
         if runtime is not None and runtime.stopped:
             return {'success': False, 'message': 'KMR execution is stopped'}
         request.update(mode='primitive', primitive=primitive, primitive_parameters=parameters)
+        agent._kmr_execution_request = deepcopy(request)
         try:
             result = await agent.worker.run(request)
         except GazeboExecutionError as exc:
@@ -34,300 +66,87 @@ class KMRPrimitives:
         return {**(output if isinstance(output, dict) else {'value': output}),
                 'success': True, 'observations': deepcopy(result)}
 
-    async def compute_pick_targets(self, initial: list[float] | None = None) -> dict:
-        """Compute downward pickup targets from a fresh observed Storage part.
+    async def detect_parts(self) -> dict:
+        """Read fresh Gazebo poses for configured Storage parts."""
+        return await self._call('detect_parts', {})
 
-        ---
-        description: Compute downward pickup targets from a fresh observed Storage part.
-        preconditions:
-          held_part:
-            equals: null
-        effects: {}
-        ---
-        """
+    async def compute_pick_targets(self, initial: list[float] | None = None) -> dict:
+        """Compute KMR pickup poses from the observed Storage part."""
         return await self._call('compute_pick_targets', {'initial': initial})
 
     async def compute_place_targets(self, transform: list[float]) -> dict:
-        """Compute placement and arm clearance targets from observed custody.
-
-        ---
-        description: Compute placement and arm clearance targets from observed custody.
-        preconditions:
-          held_part:
-            exists: true
-        effects: {}
-        ---
-        """
+        """Compute placement targets from the observed grasp transform."""
         return await self._call('compute_place_targets', {'transform': transform})
 
-    async def move_cartesian(self, target: list[float]) -> dict:
-        """Move along a complete collision-checked path preserving TCP orientation.
+    async def move_to_named_pose(self, pose_name: str) -> dict:
+        """Move the arm to a configured home or transport posture."""
+        return await self._call('move_to_named_pose', {'pose_name': pose_name})
 
-        ---
-        description: Move along a complete collision-checked path preserving TCP orientation.
-        preconditions: {}
-        effects:
-          current_pose:
-            set_from_param: target
-        ---
-        """
-        return await self._call('move_cartesian', {'target': target})
+    async def move_cartesian(self, target: list[float],
+                             waypoints: list[list[float]] | None = None,
+                             seed: list[float] | None = None) -> dict:
+        """Follow a checked Cartesian TCP path from measured feedback."""
+        return await self._call('move_cartesian',
+                                {'target': target, 'waypoints': waypoints, 'seed': seed})
 
-    async def move_to_pose(self, target: list[float], seed: list[float] | None = None,
-                           waypoints: list[list[float]] | None = None) -> dict:
-        """Enter a Cartesian segment using a collision-checked posture.
+    async def move_relative(self, offset: list[float]) -> dict:
+        """Move the TCP by a world-frame XYZ offset."""
+        return await self._call('move_relative', {'offset': offset})
 
-        ---
-        description: Enter a Cartesian segment using a collision-checked posture.
-        preconditions: {}
-        effects:
-          current_pose:
-            set_from_param: target
-        ---
-        """
-        return await self._call('move_to_pose', {'target': target, 'seed': seed, 'waypoints': waypoints})
+    async def move_joints(self, joints: list[float]) -> dict:
+        """Move all seven KMR arm joints to absolute radian targets."""
+        return await self._call('move_joints', {'joints': joints})
 
-    async def move_to_configuration(self, joints: list[float], hold_arm_base: bool = False) -> dict:
-        """Move to bounded joint positions with collision checks.
-
-        ---
-        description: Move to bounded joint positions with collision checks.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('move_to_configuration', {'joints': joints, 'hold_arm_base': hold_arm_base})
-
-    async def move_home(self) -> dict:
-        """Return the empty arm to the configured downward posture at Storage.
-
-        ---
-        description: Return the empty KMR arm to its downward-facing Storage home.
-        preconditions:
-          held_part:
-            equals: null
-          resource_location:
-            equals: Storage
-        effects:
-          current_pose_ref:
-            set: home
-        ---
-        """
-        return await self._call('move_home', {})
-
-    async def rotate_arm_base(self, joint_a1: float) -> dict:
-        """Turn joint_a1 while holding the other joints after checking the complete sweep.
-
-        ---
-        description: Turn joint_a1 while holding the other joints after checking the complete
-          sweep.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('rotate_arm_base', {'joint_a1': joint_a1})
+    async def rotate_joint(self, joint_name: str, delta_deg: float) -> dict:
+        """Rotate one selected KMR arm joint by a relative angle."""
+        return await self._call('rotate_joint', {'joint_name': joint_name,
+                                                 'delta_deg': delta_deg})
 
     async def open_gripper(self) -> dict:
-        """Open the gripper at a supported release pose or while empty.
-
-        ---
-        description: Open the gripper at a supported release pose or while empty.
-        preconditions: {}
-        effects:
-          gripper_state:
-            set: open
-        ---
-        """
+        """Open the KMR gripper and confirm the observed width."""
         return await self._call('open_gripper', {})
 
     async def close_gripper(self) -> dict:
-        """Close the gripper at the observed pickup pose.
-
-        ---
-        description: Close the gripper at the observed pickup pose.
-        preconditions: {}
-        effects:
-          gripper_state:
-            set: closed
-        ---
-        """
+        """Close the KMR gripper and confirm the observed width."""
         return await self._call('close_gripper', {})
 
-    async def observe_grasp(self, initial: list[float]) -> dict:
-        """Observe the part to TCP transform without establishing custody.
+    async def grasp_part(self, part_name: str | None = None,
+                         initial: list[float] | None = None) -> dict:
+        """Close, attach, and observe the targeted part."""
+        return await self._call('grasp_part', {'part_name': part_name, 'initial': initial})
 
-        ---
-        description: Observe the part to TCP transform without establishing custody.
-        preconditions:
-          gripper_state:
-            equals: closed
-        effects: {}
-        ---
-        """
-        return await self._call('observe_grasp', {'initial': initial})
+    async def release_part(self, transform: list[float] | None = None) -> dict:
+        """Open, detach, and update the part collision geometry."""
+        return await self._call('release_part', {'transform': transform})
 
-    async def attach_part(self) -> dict:
-        """Acknowledge attachment of the bound part to the closed gripper.
-
-        ---
-        description: Acknowledge attachment of the bound part to the closed gripper.
-        preconditions:
-          gripper_state:
-            equals: closed
-        effects: {}
-        ---
-        """
-        return await self._call('attach_part', {})
+    async def attach_part(self, part_name: str | None = None) -> dict:
+        """Attach the observed part to the closed KMR gripper."""
+        return await self._call('attach_part', {'part_name': part_name})
 
     async def detach_part(self) -> dict:
-        """Acknowledge release of the bound part at a supported destination.
-
-        ---
-        description: Acknowledge release of the bound part at a supported destination.
-        preconditions:
-          gripper_state:
-            equals: open
-        effects:
-          held_part:
-            set: null
-        ---
-        """
+        """Detach the observed part from the open KMR gripper."""
         return await self._call('detach_part', {})
 
-    async def part_collision(self, attached: bool) -> dict:
-        """Update the collision scene from observed part attachment.
-
-        ---
-        description: Update the collision scene from observed part attachment.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('part_collision', {'attached': attached})
-
-    async def custody(self, transform: list[float]) -> dict:
-        """Check the held part against its acknowledged attachment transform.
-
-        ---
-        description: Check the held part against its acknowledged attachment transform.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('custody', {'transform': transform})
-
-    async def confirm_carrying(self) -> dict:
-        """Confirm the arm remains at its acknowledged carrying posture.
-
-        ---
-        description: Confirm the arm remains at its acknowledged carrying posture.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('confirm_carrying', {})
-
-    async def observe_carrying(self, transform: list[float]) -> dict:
-        """Observe custody and preserve the current arm posture for transport.
-
-        ---
-        description: Observe custody and preserve the current arm posture for transport.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('observe_carrying', {'transform': transform})
-
-    async def observe_custody(self, previous: dict) -> dict:
-        """Validate previous custody against current Gazebo evidence.
-
-        ---
-        description: Validate previous custody against current Gazebo evidence.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('observe_custody', {'previous': previous})
-
-    async def validate_transport(self) -> dict:
-        """Collision-check complete robot geometry and payload along the configured route.
-
-        ---
-        description: Collision-check complete robot geometry and payload along the configured
-          route.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('validate_transport', {})
-
-    async def dock(self, target_resource: str, transform: list[float]) -> dict:
-        """Execute the guarded docking controller after validated transport clearance.
-
-        ---
-        description: Execute the guarded docking controller after validated transport clearance.
-        preconditions: {}
-        effects:
-          resource_location:
-            set_from_param: target_resource
-        ---
-        """
-        return await self._call('dock', {'target_resource': target_resource, 'transform': transform})
-
-    async def observe_dock(self, transform: list[float]) -> dict:
-        """Observe the dock and custody before acknowledging arrival.
-
-        ---
-        description: Observe the dock and custody before acknowledging arrival.
-        preconditions: {}
-        effects: {}
-        ---
-        """
-        return await self._call('observe_dock', {'transform': transform})
-
-    async def observe_release(self, destination: list[float]) -> dict:
-        """Observe support, orientation, and arm clearance after release.
-
-        ---
-        description: Observe support, orientation, and arm clearance after release.
-        preconditions: {}
-        effects:
-          held_part:
-            set: null
-          current_state:
-            set: idle
-        ---
-        """
-        return await self._call('observe_release', {'destination': destination})
+    async def move_base(self, target_pose: list[float],
+                        waypoints: list[list[float]] | None = None,
+                        transform: list[float] | None = None) -> dict:
+        """Plan and follow a checked base route to an exact planar pose."""
+        return await self._call('move_base', {'target_pose': target_pose,
+                                              'waypoints': waypoints,
+                                              'transform': transform})
 
 
 KMR_RECOVERY_PRIMITIVES = (
-    'compute_pick_targets',
-    'compute_place_targets',
-    'move_cartesian',
-    'move_to_pose',
-    'move_to_configuration',
-    'move_home',
-    'rotate_arm_base',
-    'open_gripper',
-    'close_gripper',
-    'observe_grasp',
-    'attach_part',
-    'detach_part',
-    'part_collision',
-    'custody',
-    'confirm_carrying',
-    'observe_carrying',
-    'observe_custody',
-    'validate_transport',
-    'dock',
-    'observe_dock',
-    'observe_release',
+    'detect_parts', 'compute_pick_targets', 'compute_place_targets',
+    'move_to_named_pose', 'move_cartesian', 'move_relative',
+    'move_joints', 'rotate_joint', 'open_gripper', 'close_gripper',
+    'grasp_part', 'release_part', 'attach_part', 'detach_part', 'move_base',
 )
+
 
 KMR_RESOURCE_PROFILE = ResourceProfile(
     resource_type='kmr',
-    snapshot_fields=('current_state', 'resource_location', 'held_part', 'gripper_state', 'current_pose'),
+    snapshot_fields=('current_state', 'resource_location', 'held_part', 'gripper_state', 'current_pose', 'base_pose'),
     primitive_owner_resolver=lambda agent: agent.kmr_primitives,
     capability_decomposition_provider=capability_decompositions,
     carried_entity_field='held_part',
@@ -337,7 +156,7 @@ KMR_RESOURCE_PROFILE = ResourceProfile(
         'resource_location': 'resource_location',
     },
     primitive_kind_map={
-        name: ('observation' if name.startswith(('observe_', 'compute_', 'validate_', 'confirm_')) else 'motion')
+        name: ('observation' if name.startswith(('detect_', 'compute_')) else 'motion')
         for name in KMR_RECOVERY_PRIMITIVES
     },
     observation_output_schema_map={
@@ -345,6 +164,7 @@ KMR_RESOURCE_PROFILE = ResourceProfile(
                                  for name in ('target', 'approach', 'lift', 'seed')},
         'compute_place_targets': {name: {'type': 'array', 'items': {'type': 'number'}}
                                   for name in ('target', 'approach', 'retreat', 'destination', 'before_turn')},
+        'move_base': {'base_pose': {'type': 'array', 'items': {'type': 'number'}}},
         'move_cartesian': {'tcp_pose': {'type': 'array', 'items': {'type': 'number'}},
                            'avoid_collisions': 'boolean', 'fraction': 'number'},
     },

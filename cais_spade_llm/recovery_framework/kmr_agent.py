@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from copy import deepcopy
 
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.recovery_framework.delivery import check_stopped, validate_execution_evidence, verify_configuration
+from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
+from cais_spade_llm.resources.gazebo_programs import (
+    current_program_revision, resource_program_revision, validate_resource_programs,
+)
 from cais_spade_llm.recovery_framework.gazebo_worker import GazeboExecutionError, GazeboWorker
 from cais_spade_llm.recovery_framework.kmr_primitives import (
     KMRPrimitives, KMR_RECOVERY_PRIMITIVES, KMR_RESOURCE_PROFILE,
@@ -28,15 +33,40 @@ class KMRResourceAgent(ResourceAgent):
         self._primitive_state = {}
         self._primitive_evidence = {}
         self.current_state = 'idle'
-        for name in ('pick_part', 'move_to_resource', 'place_release'):
+        for name in ('pick_approach', 'pick_part', 'move_to_resource',
+                     'place_approach', 'place_release', 'move_to_location'):
             self.executables[name] = getattr(self, name)
+
+    def recovery_execution_primitive_catalog(self) -> list[dict]:
+        """Expose only primitives selectable in this pinned Gazebo scene."""
+        rows = super().recovery_execution_primitive_catalog()
+        runtime = getattr(self, 'environment_runtime', None) or getattr(self, 'delivery_runtime', None)
+        scene = (runtime.context.inputs['scene'] if runtime is not None
+                 else json.loads(SCENE_PATH.read_text()))
+        if 'resource_programs' not in scene:
+            return rows
+        validate_resource_programs(scene)
+        catalog = scene['resource_programs']['resources']['KMR']['primitives']
+        return [row for row in rows if catalog.get(row['name'], {}).get('status') == 'executable'
+                and catalog[row['name']].get('recovery_selectable') is True]
+
+    async def pick_approach(self, **params) -> dict:
+        """Dock at the configured Storage pickup and approach the selected part.
+
+        Args:
+            **params: Exact bound nominal task parameters.
+
+        Returns:
+            Gazebo execution and observed approach evidence.
+        """
+        return await self._execute('pick_approach', params)
 
     async def pick_part(self, **params) -> dict:
         """Pick the bound Storage part and park with acknowledged custody.
 
         ---
         description: Pick the exact configured part from Storage.
-        in_state: idle
+        in_state: at_pick
         out_state: carrying
         params:
           part_name: {type: string}
@@ -58,12 +88,23 @@ class KMRResourceAgent(ResourceAgent):
         """
         return await self._execute('move_to_resource', params)
 
+    async def place_approach(self, **params) -> dict:
+        """Approach loaded M1/M2 workholding while retaining custody.
+
+        Args:
+            **params: Exact bound nominal task parameters.
+
+        Returns:
+            Gazebo execution and observed approach evidence.
+        """
+        return await self._execute('place_approach', params)
+
     async def place_release(self, **params) -> dict:
         """Release into M1 and withdraw before acknowledging the shared handoff.
 
         ---
         description: Place and release the held part into M1 workholding.
-        in_state: carrying
+        in_state: positioned
         out_state: idle
         params:
           part_name: {type: string}
@@ -71,6 +112,93 @@ class KMRResourceAgent(ResourceAgent):
         ---
         """
         return await self._execute('place_release', params)
+
+    async def move_to_location(self, x: float, y: float, yaw: float) -> dict:
+        """Execute the saved coordinate function from an active pinned Gazebo context."""
+        runtime = getattr(self, 'environment_runtime', None) or getattr(self, 'delivery_runtime', None)
+        if runtime is None or runtime.stopped:
+            return {'status': 'failed', 'content': 'No active KMR Gazebo context'}
+        if any(type(value) not in {int, float} or not math.isfinite(value)
+               for value in (x, y, yaw)):
+            return {'status': 'failed', 'content': 'KMR coordinates must be finite numbers'}
+        scene = runtime.context.inputs['scene']
+        try:
+            validate_resource_programs(scene)
+            if (runtime.scene_file
+                    and current_program_revision(ROOT / runtime.scene_file)
+                    != resource_program_revision(scene)):
+                raise ValueError('Stale Gazebo program revision')
+            valuation = runtime.context.snapshot()
+            kmr = valuation['KMR']
+            if kmr['resource_state'] not in {'idle', 'carrying'}:
+                raise ValueError('KMR coordinate travel requires idle or carrying state')
+            if (kmr['resource_state'] == 'idle') != (kmr['held_part'] is None):
+                raise ValueError('KMR held part disagrees with its function state')
+            pending = getattr(runtime.context, 'pending_tasks', {})
+            if pending and any(task.get('resource_id') == 'KMR' for task in pending.values()):
+                raise ValueError('KMR already has a pending function')
+            if getattr(runtime.context, 'pending', None):
+                raise ValueError('KMR already has a pending function')
+            custody = deepcopy(getattr(self, 'workflow_custody', None) or {})
+            if kmr['held_part'] is not None and custody.get('grasp_transform') is None:
+                raise ValueError('KMR carrying state lacks measured grasp evidence')
+            request = {
+                'mode': 'function', 'inputs': runtime.context.inputs,
+                'valuation': valuation, 'geometry': deepcopy(getattr(runtime.context, 'geometry', {})),
+                'probe': getattr(runtime, 'kmr_probe', None) or runtime.prepared.get('probe'),
+                'custody': custody,
+                'pending': {'event_name': 'move_to_location',
+                            'parameters': {'x': x, 'y': y, 'yaw': yaw}},
+            }
+            self._kmr_execution_request = deepcopy(request)
+            result = await self.worker.run(request)
+            self.record_primitive_evidence(result)
+            observation = result['observations']
+            pose = observation.get('base_pose')
+            if not isinstance(pose, list) or len(pose) != 3:
+                raise ValueError('KMR coordinate movement lacks measured base pose')
+            location = observation.get('resource_location')
+            if location is not None and location not in scene['resource_programs']['resources']:
+                raise ValueError('KMR coordinate movement reported an unknown location')
+            model_parameters = {
+                'resource_id': 'KMR', 'x': x, 'y': y, 'yaw': yaw,
+                'resource_state': kmr['resource_state'],
+                'observed_resource_location': location,
+            }
+            if hasattr(runtime.context, 'pending_tasks'):
+                from cais_spade_llm.resources.environment_models import project_transition
+
+                event = next(row for row in runtime.context.models['KMR']['events']
+                             if row['event_name'] == 'move_to_location'
+                             and row['parameter_bindings']['resource_state']['equals'] == kmr['resource_state'])
+                projected, _ = project_transition(
+                    runtime.context.models, valuation, runtime.context.part_tracker,
+                    {'resource_id': 'KMR', 'event_id': event['event_id'],
+                     'event_name': 'move_to_location', 'parameters': model_parameters},
+                    runtime.context.product_name, runtime.context.requirements,
+                )
+            else:
+                from cais_spade_llm.resources.nominal_des import project_nominal_event
+
+                projected = project_nominal_event(
+                    runtime.context.models, valuation, 'KMR', 'move_to_location',
+                    model_parameters,
+                )
+            context = runtime.context.resources['KMR']
+            context.valuation = projected['KMR']
+            context.revision += 1
+            context.evidence = 'Gazebo move_to_location at measured base pose'
+            self._primitive_state.update(base_pose=deepcopy(pose), resource_location=location)
+            if hasattr(runtime, 'queue_save'):
+                runtime.queue_save()
+            else:
+                runtime.save()
+            return {'status': 'completed', 'observations': observation}
+        except (GazeboExecutionError, KeyError, RuntimeError, TypeError, ValueError) as exc:
+            if isinstance(exc, GazeboExecutionError):
+                self.record_primitive_evidence(exc.result)
+                return {'status': 'failed:gazebo', 'content': str(exc), 'observations': exc.result}
+            return {'status': 'failed', 'content': str(exc)}
 
     async def _execute(self, name: str, params: dict) -> dict:
         runtime = self.delivery_runtime
@@ -97,8 +225,14 @@ class KMRResourceAgent(ResourceAgent):
             self.record_primitive_evidence(exc.result)
             return {'status': 'failed:gazebo', 'content': str(exc), 'observations': exc.result}
         ack = {**pending, 'status': 'completed', 'evidence': 'gazebo', 'observations': result['observations']}
-        validate_execution_evidence(ack)
-        self.current_state = 'idle' if name == 'place_release' else 'carrying'
+        validate_execution_evidence(ack, scene=runtime.context.inputs['scene'])
+        self.current_state = {
+            'pick_approach': 'at_pick',
+            'pick_part': 'carrying',
+            'move_to_resource': 'carrying',
+            'place_approach': 'positioned',
+            'place_release': 'idle',
+        }[name]
         return {'status': 'completed', 'observations': {'nominal_acknowledgement': ack}}
 
     def record_primitive_evidence(self, result: dict) -> None:
@@ -106,18 +240,33 @@ class KMRResourceAgent(ResourceAgent):
         self._primitive_evidence = deepcopy(result)
         records = result.get('primitive_results', result.get('observations', {}).get('primitive_results', []))
         request = getattr(self, '_kmr_execution_request', {})
-        part = request.get('pending', {}).get('parameters', {}).get('part_name')
+        part = (request.get('primitive_parameters', {}).get('part_name')
+                or request.get('pending', {}).get('parameters', {}).get('part_name'))
         for record in records:
             if record.get('status') != 'completed':
                 continue
             primitive = record['primitive']
             if primitive in {'open_gripper', 'close_gripper'}:
                 self._primitive_state['gripper_state'] = 'open' if primitive == 'open_gripper' else 'closed'
-            if primitive == 'attach_part':
-                self._primitive_state.update(held_part=part, current_state='carrying')
-            elif primitive == 'detach_part':
-                self._primitive_state.update(held_part=None, current_state='idle')
             output = record.get('result')
+            if primitive in {'attach_part', 'grasp_part'}:
+                self._primitive_state['held_part'] = (output or {}).get('held_part', part)
+                self._primitive_state['gripper_state'] = 'closed'
+            elif primitive in {'detach_part', 'release_part'}:
+                self._primitive_state['held_part'] = None
+                self._primitive_state['gripper_state'] = 'open'
+            if primitive == 'move_base' and isinstance(output, dict):
+                if output.get('base_pose') is not None:
+                    self._primitive_state['base_pose'] = deepcopy(output['base_pose'])
+                if 'resource_location' in output:
+                    self._primitive_state['resource_location'] = output['resource_location']
+            if isinstance(output, dict) and 'attached' in output:
+                measured = deepcopy(getattr(self, 'workflow_custody', None) or {})
+                measured.update(deepcopy(output))
+                if output['attached'] is False:
+                    measured.pop('grasp_transform', None)
+                    measured.pop('carrying_arm_configuration', None)
+                self.workflow_custody = measured
             if isinstance(output, dict) and output.get('tcp_pose'):
                 self._primitive_state['current_pose'] = deepcopy(output['tcp_pose'])
         observation = result.get('observations', {})

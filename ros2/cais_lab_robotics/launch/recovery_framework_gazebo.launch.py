@@ -164,7 +164,7 @@ def _build_description(robots: list[dict[str, Any]], controllers_yaml: str) -> s
 def _build_kmr_description(
     share: Path, controllers_yaml: Path, initial_arm_configuration: list[float] | None = None,
 ) -> str:
-    """Initialize the simulated iiwa at a configured pickup posture."""
+    """Initialize the simulated iiwa at the configured parked arm position."""
     description = subprocess.check_output([
         'xacro', str(share / 'urdf' / 'KMR_recovery.urdf.xacro'),
         f'controllers_file:={controllers_yaml}',
@@ -534,7 +534,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     """Create the recovery world with four UR5e arms and articulated KMR."""
     from ament_index_python import get_package_prefix, get_package_share_directory
     from launch.actions import (
-        AppendEnvironmentVariable, EmitEvent, IncludeLaunchDescription, LogInfo, OpaqueFunction,
+        AppendEnvironmentVariable, EmitEvent, ExecuteProcess, IncludeLaunchDescription, LogInfo, OpaqueFunction,
         RegisterEventHandler, TimerAction,
     )
     from launch.event_handlers import OnProcessExit, OnProcessIO, OnShutdown
@@ -554,7 +554,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     kmr = scene_config['KMR']
     initial_part = LaunchConfiguration('kmr_initial_part', default='').perform(context)
     initial_part = initial_part or next(iter(scene_config['Storage']['slots']))
-    initial_arm = scene_config['Storage']['KMR_pick_arm_configurations'][initial_part]
+    initial_arm = list(kmr['parked_arm_configuration'])
     initial_dock = scene_config['Storage']['KMR_pick_docking_poses'][initial_part]
     startup_pose = [*initial_dock[:2], 0., 0., 0., initial_dock[2]]
     speed = int(LaunchConfiguration('simulation_speed').perform(context))
@@ -731,7 +731,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 PythonLaunchDescriptionSource(str(Path(get_package_share_directory('gazebo_ros')) / 'launch/gazebo.launch.py')),
                 launch_arguments={
                     'world': str(world),
-                    'gui': LaunchConfiguration('launch_gazebo_gui'),
+                    'gui': 'false',
                     'server_required': 'true',
                     'gui_required': 'false',
                 }.items(),
@@ -773,6 +773,18 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 # first model is inserted and the KMR request can start safely.
                 target_action=ur_spawner, on_exit=[kmr_spawn, kmr_spawner],
             )),
+            *(
+                [RegisterEventHandler(OnProcessExit(
+                    # Gazebo clients started before both models are inserted can
+                    # miss their visual updates even when links exist in Gazebo.
+                    target_action=kmr_spawner,
+                    on_exit=[ExecuteProcess(
+                        cmd=['gzclient', '--gui-client-plugin=libgazebo_ros_eol_gui.so'],
+                        output='screen',
+                    )],
+                ))]
+                if enabled('launch_gazebo_gui') else []
+            ),
             *(
                 [RegisterEventHandler(OnProcessExit(
                     target_action=kmr_spawner,

@@ -1283,14 +1283,17 @@ def test_gazebo_deposit_uses_board_attachment_only_at_assembly(monkeypatch, dest
     controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller._set_state_client = SimpleNamespace(wait_for_service=lambda **_: True)
     controller._simulation_release_detach_timeout_sec = lambda: .5
+    controller._attached_model = None
     controller._detach_part = Mock(return_value=True)
     controller._set_entity_state_for_snap = Mock(return_value=True)
+    controller._sync_part_collision = Mock(return_value=True)
     controller._attach_part_to_assembly_board = Mock(return_value=True)
     controller._detach_part_from_assembly_board = Mock(return_value=True)
     controller._verify_snapped_entity_position = Mock(return_value=True)
     controller._log = lambda: Mock()
     assert controller._snap_part_to_slot('peg', -6., .5, .05, .99, 1.015, destination)
     controller._verify_snapped_entity_position.assert_called_once_with('peg', (-6., .5, 1.015))
+    controller._detach_part.assert_not_called()
     if destination == 'Conveyor':
         controller._attach_part_to_assembly_board.assert_not_called()
         controller._detach_part_from_assembly_board.assert_not_called()
@@ -1299,3 +1302,76 @@ def test_gazebo_deposit_uses_board_attachment_only_at_assembly(monkeypatch, dest
         controller._detach_part_from_assembly_board.assert_called_once_with('peg', 'link')
         controller._detach_part_from_assembly_board.return_value = False
         assert not controller._snap_part_to_slot('peg', -6., .5, .05, .99, 1.015, destination)
+
+
+def test_gazebo_release_detaches_the_recorded_link_before_other_candidates():
+    from unittest.mock import Mock
+
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._attached_model = "gear_small"
+    controller._attached_link = "ur5e_4_wrist_3_link"
+    controller.release_detach_link_candidates = ["ur5e_4_rg2_gripper_tcp"]
+    controller._simulation_release_detach_timeout_sec = lambda: 3.0
+    controller._detach_part = Mock(return_value=True)
+    result = controller._release_part_simulation_best_effort_detach("gear_small", "gear_small")
+    assert result["success"] is True
+    assert controller._detach_part.call_args.kwargs["prefer_attached_link"] is True
+    assert controller._detach_part.call_args.args == ("gear_small",)
+
+
+def test_gazebo_slot_correction_rejects_a_part_still_attached(monkeypatch):
+    import sys
+    from unittest.mock import Mock
+
+    monkeypatch.setitem(sys.modules, 'gazebo_msgs.msg', SimpleNamespace(
+        EntityState=lambda: SimpleNamespace(
+            pose=SimpleNamespace(position=SimpleNamespace(), orientation=SimpleNamespace()),
+            twist=SimpleNamespace(linear=SimpleNamespace(), angular=SimpleNamespace()),
+        )
+    ))
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._set_state_client = SimpleNamespace(wait_for_service=lambda **_: True)
+    controller._attached_model = "gear_small"
+    controller._simulation_release_detach_timeout_sec = lambda: 3.0
+    controller._detach_part = Mock(return_value=False)
+    controller._set_entity_state_for_snap = Mock(return_value=True)
+    assert not controller._snap_part_to_slot("gear_small", 0.1, 0.2, 0.02, 1.0, 1.01,
+                                             "assembly_board-v1")
+    controller._set_entity_state_for_snap.assert_not_called()
+
+
+@pytest.mark.parametrize('response_kind', ['delayed_success', 'timeout', 'rejected'])
+@pytest.mark.parametrize('configured_timeout', [.9, 3., 6.])
+def test_assembly_board_detach_uses_configured_wait_and_requires_acknowledgement(response_kind, configured_timeout):
+    from unittest.mock import Mock
+
+    controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
+    controller._link_attacher_enabled = True
+    controller.detach_timeout_sec = configured_timeout
+    controller._detach_client = Mock()
+    controller._detach_srv = SimpleNamespace(Request=SimpleNamespace)
+    controller._last_command_evidence = {'existing': True}
+    controller._last_failure_message = ''
+    waits = []
+
+    def wait(future, *, timeout_sec, **kwargs):
+        waits.append(timeout_sec)
+        # A valid reply at 0.8 s was lost by the previous fixed 0.5 s budget.
+        if response_kind == 'timeout' or timeout_sec < .8:
+            return None
+        return SimpleNamespace(success=response_kind == 'delayed_success', message=response_kind)
+
+    controller._wait_future = wait
+    success = controller._detach_part_from_assembly_board('RGOCG12-50_12mm', 'link')
+    assert success is (response_kind == 'delayed_success')
+    assert waits == [configured_timeout]
+    controller._detach_client.wait_for_service.assert_called_once_with(timeout_sec=configured_timeout)
+    request = controller._detach_client.call_async.call_args.args[0]
+    assert (request.model1_name, request.link1_name, request.model2_name, request.link2_name) == (
+        'assembly_board_v1', 'link', 'RGOCG12-50_12mm', 'link')
+    evidence = controller._last_command_evidence['assembly_board_detach']
+    assert evidence['acknowledged'] is (response_kind != 'timeout')
+    assert evidence['success'] is success
+    assert controller._last_command_evidence['existing']
+    if not success:
+        assert 'Assembly board detach failed for RGOCG12-50_12mm' in controller._last_failure_message

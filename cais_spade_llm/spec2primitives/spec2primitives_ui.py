@@ -18,7 +18,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from nicegui import ui
+from nicegui import context, ui
 from .agents.ra.validation_scope import GAZEBO_LINK_ATTACHER_SCOPE, GAZEBO_OBSERVED_SCOPE, GAZEBO_PICK_PLACE_SCOPE
 from nicegui.elements.badge import Badge
 from nicegui.elements.button import Button
@@ -3958,9 +3958,18 @@ def _render_pa_interaction(  # noqa: C901, PLR0915
 
 
 def render(runtime: Spec2PrimitivesUIRuntime) -> None:
-    """Open run once per page client, with read-only setup and saved results."""
+    """Open the requested tab and construct run controls once per page client."""
+    from cais_spade_llm.ui.project_navigation import bind_project_tabs
     from cais_spade_llm.spec2primitives.project_results import render_results
     from cais_spade_llm.spec2primitives.project_setup import render_setup
+
+    try:
+        request = context.client.request
+    except RuntimeError:
+        request = None
+    initial_tab = request.query_params.get("tab", "run") if request is not None else "run"
+    if initial_tab not in {"run", "setup", "results"}:
+        initial_tab = "run"
 
     with ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-6"):
         with ui.row().classes("w-full items-start justify-between gap-4"):
@@ -3977,7 +3986,7 @@ def render(runtime: Spec2PrimitivesUIRuntime) -> None:
         with ui.tabs().props("no-caps").classes("w-full") as tabs:
             for name in ("run", "setup", "results"):
                 ui.tab(name).props("no-caps")
-        with ui.tab_panels(tabs, value="run", animated=False, keep_alive=True).classes("w-full"):
+        with ui.tab_panels(tabs, value=initial_tab, animated=False, keep_alive=True).classes("w-full"):
             panels = {}
             for name in ("run", "setup", "results"):
                 with ui.tab_panel(name).classes("p-0") as panel:
@@ -3986,10 +3995,8 @@ def render(runtime: Spec2PrimitivesUIRuntime) -> None:
 
         def show_tab() -> None:
             name = tabs.value
-            if name not in panels or (name in built and name != "setup"):
+            if name not in panels or name in built:
                 return
-            if name == "setup":
-                panels[name].clear()
             with panels[name]:
                 if name == "setup":
                     render_setup(runtime)
@@ -4001,4 +4008,5 @@ def render(runtime: Spec2PrimitivesUIRuntime) -> None:
             built.add(name)
 
         tabs.on_value_change(show_tab)
+        bind_project_tabs(tabs, "/spec2primitives", ("run", "setup", "results"))
         show_tab()

@@ -1338,6 +1338,7 @@ def _primitive_authoring_event_context(
         "action_target": deepcopy(outline_event.get("action_target") or {}),
         "expected_start_state": deepcopy(outline_event.get("expected_start_state") or {}),
         "expected_end_state": deepcopy(outline_event.get("expected_end_state") or {}),
+        "primitive_support": deepcopy(outline_event.get("primitive_support") or {}),
     }
     candidate_outline_id = str(outline_event.get("candidate_outline_id") or "").strip()
     if candidate_outline_id:

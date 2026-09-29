@@ -222,6 +222,26 @@ def _segment_timing(positions: list[list[float]], names: Sequence[str], limits: 
                            math.sqrt(abs(a) / limits[name]['acceleration']))
         rows.append({'positions': list(joints), 'velocities': velocity,
                      'accelerations': acceleration, 'time_from_start': u})
+    # Dense Cartesian IK can reach a bounded joint tangentially. Stop the
+    # neighbouring derivatives if they would leave its valid interval; all
+    # Cartesian samples and the remaining timed collision checks are preserved.
+    for _ in range(3):
+        changed = False
+        for left, right in zip(rows, rows[1:]):
+            for index, name in enumerate(names):
+                bounds = _extrema(_coefficients(left, right, index))
+                overshoot = max(limits[name]['lower'] - min(bounds),
+                                max(bounds) - limits[name]['upper'], 0.)
+                if 1e-9 < overshoot <= .005 and any(
+                    row['velocities'][index] or row['accelerations'][index]
+                    for row in (left, right)
+                ):
+                    for row in (left, right):
+                        row['velocities'][index] = 0.
+                        row['accelerations'][index] = 0.
+                    changed = True
+        if not changed:
+            break
     # Include endpoint-only segments and every connecting displacement in the bound.
     for left, right in zip(rows, rows[1:]):
         dt = right['time_from_start'] - left['time_from_start']

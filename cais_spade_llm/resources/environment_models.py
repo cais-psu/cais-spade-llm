@@ -28,6 +28,8 @@ from cais_spade_llm.resources.nominal_conveyor import (
     conveyor_parts,
 )
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
+from cais_spade_llm.resources.gazebo_programs import resource_program_revision
+from cais_spade_llm.resources.function_contracts import validate_function_contracts
 from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
 
 PART_REFERENCE = {"scope": "resource", "type": ["string", "null"], "reference": "part_name"}
@@ -49,6 +51,7 @@ def build_environment_models(
     """
     if schema_version not in {2, 3}:
         raise ValueError("Environmental models require schema_version 2 or 3")
+    program_revision = resource_program_revision(scene) if "resource_programs" in scene else ""
     # Validate the configured topology independently of scenario part assignments.
     # Inventory is initialized below; it never restricts capability eligibility.
     topology = deepcopy(scene)
@@ -129,10 +132,14 @@ def build_environment_models(
             model["assignments"].get("process_capabilities", {})
         )
         model["configuration_revision"] = 0
+        model["program_revision"] = program_revision
+        model["primitive_catalog"] = deepcopy(
+            scene.get("resource_programs", {}).get("resources", {}).get(rid, {}).get("primitives", {})
+        )
         if "held_part" not in model["state_variables"]:
             model["marked_state_conditions"] = []
         model["events"] = [
-            _parameterized_event(event, rid, registry, schema_version)
+            _parameterized_event(event, rid, registry, schema_version, scene)
             for event in model["events"]
         ]
         model["events"] = [event for event in model["events"] if event is not None]
@@ -161,6 +168,7 @@ def build_environment_models(
             }
         )
     validate_environment_composition(models)
+    validate_function_contracts(models)
     return models
 
 
@@ -223,7 +231,7 @@ def _validate_composition_fields(model: dict, event: dict, resource_id: str) -> 
 
 def _declare_runtime_state(model: dict, registered: list[str], scene: dict) -> None:
     for field in model["state_variables"]:
-        if field in {"held_part", "part_name", "staging_part", "task_ctx.part_name"} or (
+        if field in {"held_part", "approached_part", "part_name", "staging_part", "task_ctx.part_name"} or (
             field.startswith("zone_") and field.endswith("_part")
         ):
             model["state_variables"][field] = deepcopy(PART_REFERENCE)
@@ -251,7 +259,7 @@ def _declare_runtime_state(model: dict, registered: list[str], scene: dict) -> N
 
 
 def _parameterized_event(
-    event: dict, rid: str, registry: dict, schema_version: int
+    event: dict, rid: str, registry: dict, schema_version: int, scene: dict
 ) -> dict | None:
     event = deepcopy(event)
     name = event["event_name"]
@@ -302,7 +310,16 @@ def _parameterized_event(
     # place_release is the capability event; the robot executes place_insert.
     # KMR owns a separate place_release function and keeps its own program.
     function_name = "place_insert" if actor != "KMR" and name == "place_release" else name
-    if actor == "KMR" and name in KMR_TASKS:
+    program_key = function_name if function_name in registry and actor != "KMR" else name
+    saved = scene.get("resource_programs", {}).get("resources", {}).get(actor, {}).get("functions", {}).get(program_key)
+    if saved is not None:
+        event["program_key"] = program_key
+        event["function_name"] = saved["function_name"]
+        event["program"] = deepcopy(saved["program"])
+        event["program_status"] = saved["status"]
+        if saved.get("variants"):
+            event["program_variants"] = deepcopy(saved["variants"])
+    elif actor == "KMR" and name in KMR_TASKS:
         event["function_name"] = name
         event["program"] = json.loads(json.dumps(asdict(KMR_TASKS[name].program)))
         event["program_status"] = "implemented"
@@ -313,7 +330,7 @@ def _parameterized_event(
     else:
         program = workflow_task_program(name)
         if program:
-            event["function_name"] = name
+            event["function_name"] = program.pop("function_name", name)
             event["program_status"] = program.pop("status")
             event["program"] = program
     if (
@@ -595,6 +612,10 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
             != (values["held_part"] is not None)
         ):
             raise ValueError("Resource state disagrees with held_part")
+        if "approached_part" in values and (
+            (values["resource_state"] == "at_pick") != (values["approached_part"] is not None)
+        ):
+            raise ValueError("KMR approach state disagrees with approached_part")
         if "staging_part" in values and (
             (values["resource_state"] == "idle") != (values["part_name"] is None)
         ):

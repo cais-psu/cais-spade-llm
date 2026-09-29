@@ -3370,6 +3370,32 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             evaluation["failed_event_index"] = event_index
             return evaluation
 
+        primitive_support = physical_result.get("primitive_support")
+        primitive_support = primitive_support if isinstance(primitive_support, dict) else {}
+        witnesses = primitive_support.get("primitives")
+        witnesses = witnesses if isinstance(witnesses, list) else []
+        if physical_result.get("allowed") is True and (
+            primitive_support.get("descriptor_fingerprint") != recovery_des_model_fingerprint
+            or primitive_support.get("expected_start_state") != validated_task.get("expected_start_state")
+            or primitive_support.get("expected_end_state") != validated_task.get("expected_end_state")
+            or not witnesses
+            or any(
+                not isinstance(row, dict)
+                or row.get("allowed") is not True
+                or row.get("feasibility_status") != "FEASIBLE"
+                or not isinstance(row.get("params"), dict)
+                for row in witnesses
+            )
+        ):
+            physical_result = {
+                "allowed": False,
+                "feasibility_status": "NEEDS_CONTEXT",
+                "findings": [_unavailable_validation_finding(
+                    task=validated_task, validation_category=PHYSICAL_FEASIBILITY,
+                    validator_role="RA", constraint_code="resource_validation_unavailable",
+                    reason="ResourceAgent reply omitted current primitive-support evidence",
+                )],
+            }
         physical_findings = [
             _shared.annotate_validation_finding(row)
             for row in (physical_result.get("findings") or [])
@@ -3687,6 +3713,9 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
         committed_event = _shared._commit_selected_candidate_task(
             task=dict(validated_task or {}),
             sequence_index=sequence_index + event_index,
+        )
+        committed_event["primitive_support"] = deepcopy(
+            physical_result.get("primitive_support") or {}
         )
         accepted_prefix = list(working_session_state.get("accepted_outline_prefix") or [])
         accepted_prefix.append(deepcopy(committed_event))

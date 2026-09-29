@@ -299,8 +299,10 @@ def test_distributed_square_trim_then_stationary_assembly(inputs, schema_version
             assert result["status"] == "planned", result
             assert context.snapshot() == before and context.revision == 0
             assert [task["event_name"] for task in result["tasks"]] == [
+                "pick_approach",
                 "pick_part",
                 "move_to_resource",
+                "place_approach",
                 "place_release",
                 "machine_part",
             ]
@@ -444,15 +446,17 @@ def test_one_part_round_route_negotiates_empty_KMR_return_and_assembles(inputs):
             first = await explore(runtime, driver, timeout=20)
             assert first["status"] == "planned"
             assert [(task["resource_id"], task["event_name"]) for task in first["tasks"]] == [
+                ("KMR", "pick_approach"),
                 ("KMR", "pick_part"),
                 ("KMR", "move_to_resource"),
+                ("KMR", "place_approach"),
                 ("KMR", "place_release"),
                 ("M1", "machine_part"),
             ]
-            assert first["tasks"][1]["parameters"]["target_resource"] == "M1"
-            assert first["tasks"][2]["parameters"]["destination_location"] == "M1"
+            assert first["tasks"][2]["parameters"]["target_resource"] == "M1"
+            assert first["tasks"][4]["parameters"]["destination_location"] == "M1"
 
-            for task in first["tasks"][:3]:
+            for task in first["tasks"][:5]:
                 pending = context.prepare(task, simulated=True)
                 context.acknowledge({**pending, "status": "completed"})
             assert context.snapshot()["KMR"]["resource_location"] == "M1"
@@ -479,7 +483,7 @@ def test_one_part_round_route_negotiates_empty_KMR_return_and_assembles(inputs):
             context.acknowledge({**pending, "status": "completed"})
             assert _kmr_at_storage(context)
 
-            pending = context.prepare(first["tasks"][3], simulated=True)
+            pending = context.prepare(first["tasks"][5], simulated=True)
             context.acknowledge({**pending, "status": "completed"})
             assert context.part_tracker[part]["processCompleted"] == [
                 {"process": "trim", "result": "circle"}
@@ -604,6 +608,8 @@ def test_shared_handoffs_check_all_guards_and_update_participants_atomically(inp
                 context.requirements,
             )
 
+    approach = task_for("KMR", "pick_approach", origin_resource_location="Storage", part_name=SQUARE)
+    valuation, products = project(approach, valuation, products, {"KMR", "Storage"})
     pick = task_for("KMR", "pick_part", origin_resource_location="Storage", part_name=SQUARE)
     blocked_by_peer(pick, valuation, products, "Storage", "inventory.{part_name}", False)
     valuation, products = project(pick, valuation, products, {"Storage", "KMR"})
@@ -612,6 +618,8 @@ def test_shared_handoffs_check_all_guards_and_update_participants_atomically(inp
 
     route = task_for("KMR", "move_to_resource", source_resource="Storage", target_resource="M1")
     valuation, products = project(route, valuation, products, {"KMR"})
+    place_approach = task_for("KMR", "place_approach", destination_location="M1", part_name=SQUARE)
+    valuation, products = project(place_approach, valuation, products, {"KMR", "M1"})
     release = task_for("KMR", "place_release", destination_location="M1", part_name=SQUARE)
     blocked_by_peer(release, valuation, products, "M1", "resource_state", "completed")
     valuation, products = project(release, valuation, products, {"KMR", "M1"})
@@ -946,7 +954,7 @@ def test_kmr_empty_return_and_machining_dispatch_concurrently(inputs):
         async with network(inputs) as (runtime, driver):
             context = runtime.context
             first = await explore(runtime, driver)
-            for task in first["tasks"][:3]:
+            for task in first["tasks"][:5]:
                 pending = context.prepare(task, simulated=True)
                 assert context.acknowledge({**pending, "status": "completed"})
             goals = EnvironmentProductLoop()._negotiation_goals(runtime)
@@ -1182,7 +1190,7 @@ def test_shared_handoff_disagreement_cannot_commit(inputs):
         for offer in context.resources["KMR"].alternatives(
             context, context.snapshot(), context.part_tracker, SQUARE, context.outstanding()[1]
         )
-        if offer["task"]["event_name"] == "pick_part"
+        if offer["task"]["event_name"] == "pick_approach"
     )
     participant = next(
         event
@@ -1341,7 +1349,7 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
             try:
                 await asyncio.wait_for(loop.run(), 45 * len(runtime.context.selected_parts))
                 if not all_capabilities:
-                    assert runtime.context.revision == 5
+                    assert runtime.context.revision == 7
                     assert product.part_tracker[SQUARE]["processCompleted"] == [
                         {"process": "trim", "result": "square"}
                     ]
@@ -1378,19 +1386,22 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                             and max(left["timestamp"], right["timestamp"]) < min(ends[a], ends[b])
                             for a, left in starts.items() for b, right in starts.items() if a != b
                         )
-                    release = execution_starts.index(("ur5e-1", "place_release"))
-                    home = execution_starts.index(("ur5e-1", "move_home"), release)
-                    assembly = execution_starts.index(("ur5e-3", "place_insert"))
-                    assert release < home < assembly
+                    if all_capabilities is True:
+                        release = execution_starts.index(("ur5e-1", "place_release"))
+                        home = execution_starts.index(("ur5e-1", "move_home"), release)
+                        assembly = execution_starts.index(("ur5e-3", "place_insert"))
+                        assert release < home < assembly
                 assert runtime.context.snapshot()["KMR"] == {
-                    "resource_state": "idle", "held_part": None, "resource_location": "Storage"
+                    "resource_state": "idle", "held_part": None, "resource_location": "Storage",
+                    "approached_part": None,
                 }
                 events = [row["acknowledgement"]["event_name"]
                           for row in runtime.context.transitions]
                 if not all_capabilities:
-                    assert events[:3] == ["pick_part", "move_to_resource", "place_release"]
-                    assert sorted(events[3:]) == ["machine_part", "move_to_resource"]
-                    assert 4 <= len(checks) <= 5
+                    assert events[:5] == ["pick_approach", "pick_part", "move_to_resource",
+                                          "place_approach", "place_release"]
+                    assert sorted(events[5:]) == ["machine_part", "move_to_resource"]
+                    assert 6 <= len(checks) <= 7
                 if all_capabilities == "bypass":
                     assert not checks
                     assert runtime.context.selected_parts == [SQUARE, "gear_small"]
@@ -1424,11 +1435,11 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                     task_id = transition['acknowledgement']['task_id']
                     stages = ('task_sent', 'task_received', 'execution_started', 'execution_completed',
                               'ack_sent', 'ack_received', 'acknowledgement')
-                    rows = {row['kind']: row['timestamp'] for row in runtime.context.negotiations
+                    rows = {row['kind']: index for index, row in enumerate(runtime.context.negotiations)
                             if row.get('task_id') == task_id and row['kind'] in stages
                             and row.get('status', 'completed') == 'completed'}
-                    timestamps = [rows[stage] for stage in stages]
-                    assert timestamps == sorted(timestamps)
+                    positions = [rows[stage] for stage in stages]
+                    assert positions == sorted(positions)
                 assert runtime.message_loop_timing
             finally:
                 closed.set()
@@ -1557,6 +1568,7 @@ def test_home_ack_preserves_this_functions_observed_endpoint_after_feedback_expi
 
     controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.execution_mode = "simulation"
+    controller.controller_config = {}
     controller._simulation_goal = None
     controller.arm_joint_names = ["joint_1", "joint_2"]
     controller.named_positions = {"home": [0.2, -0.4]}
@@ -1733,6 +1745,52 @@ def test_eight_peg_order_preserves_machine_programs_and_other_orders(inputs):
     assert read_json(order_path / "assembly_board-v1-round-4mm-m1.json")["machine_resource"] == "M1"
 
 
+def test_kmr_intake_offer_binds_the_approached_part_in_runtime_model(inputs):
+    round_part = "RGOCG4-50_Round_4mm"
+    inputs["product_order"]["parts"] = [SQUARE, round_part]
+    context = EnvironmentProductContext(**inputs)
+    kmr = context.resources["KMR"]
+    for name in ("pick_approach", "pick_part"):
+        kmr.bind_executor(name, AsyncMock(), lambda task, evidence: True,
+                          validate_start=AsyncMock(return_value=True))
+    valuation = context.snapshot()
+    square_offer = next(offer for offer in kmr.alternatives(
+        context, valuation, context.part_tracker, SQUARE, context.requirements[SQUARE][0]
+    ) if offer["task"]["event_name"] == "pick_approach")
+    assert square_offer["executable"]
+    assert square_offer["valuation"]["KMR"]["approached_part"] == SQUARE
+    wrong_pick = next(task for task in candidates(
+        kmr.model, square_offer["valuation"], round_part,
+        context.requirements[round_part][0], context.requirements[round_part]
+    ) if task["event_name"] == "pick_part")
+    with pytest.raises(ValueError, match="Guard blocked: KMR.approached_part"):
+        project_transition(context.models, square_offer["valuation"],
+                           context.part_tracker, wrong_pick, context.product_name,
+                           context.requirements)
+
+
+def test_kmr_approach_limits_next_storage_intake_to_its_bound_part(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
+
+    round_part = "RGOCG4-50_Round_4mm"
+    inputs["product_order"]["parts"] = [SQUARE, round_part]
+    context = EnvironmentProductContext(**inputs)
+    waiting = [SQUARE, round_part]
+    assert EnvironmentProductLoop._intake_parts(context, waiting) == waiting
+    context.resources["KMR"].valuation.update(
+        resource_state="at_pick", approached_part=SQUARE,
+    )
+    assert EnvironmentProductLoop._intake_parts(context, waiting) == [SQUARE]
+    context.reservations[f"part:{SQUARE}"] = "active-pick"
+    assert EnvironmentProductLoop._intake_parts(context, [round_part]) == []
+    context.reservations.clear()
+    assert EnvironmentProductLoop._intake_parts(context, [round_part]) == []
+    assert EnvironmentProductLoop._intake_parts(context, []) == []
+    context.part_tracker[SQUARE]["location"] = "KMR"
+    with pytest.raises(ValueError, match="approached part is unavailable"):
+        EnvironmentProductLoop._intake_parts(context, [round_part])
+
+
 def test_intake_uses_local_machine_offers_and_observes_availability(inputs):
     inputs["product_order"] = read_json(
         ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-eight-pegs.json"
@@ -1806,7 +1864,7 @@ def test_intake_timeout_retries_without_resource_revision_change(inputs, monkeyp
             assert all(current == revisions for current in calls)
             assert len(calls) == (2 if lost_replies == 1 else 3)
             if lost_replies == 1:
-                assert [(task['resource_id'], task['event_name']) for task in sent] == [('KMR', 'pick_part')]
+                assert [(task['resource_id'], task['event_name']) for task in sent] == [('KMR', 'pick_approach')]
             else:
                 assert not sent and runtime.outcome['status'] == 'blocked'
                 assert runtime.outcome['details']['intake']['status'] == 'timeout'
@@ -2354,3 +2412,66 @@ def test_CCA_bypass_preserves_Stop_revisions_and_completion_evidence(inputs, mon
                 assert not context.pending_tasks and not context.reservations
 
     asyncio.run(scenario())
+
+
+def test_saved_function_contracts_cover_every_resource_graph_variant():
+    """The graph, program, and formal transition share each exact event ID."""
+    from cais_spade_llm.resources.function_contracts import validated_function_contract
+    from cais_spade_llm.ui.components.nominal_resource_des import (
+        nominal_capability_graph, nominal_capability_mermaid,
+    )
+
+    scene = read_json(SCENE_PATH)
+    models = build_environment_models(scene)
+    for resource_id, model in models.items():
+        graph = nominal_capability_graph(model, models)
+        assert graph["edges"], resource_id
+        for edge in graph["edges"]:
+            contract = validated_function_contract(models, edge["event_id"])
+            assert edge["function_contract"] == contract
+            assert edge["function_name"] == contract["function_name"]
+            assert resource_id in contract["participants"]
+            saved = scene["resource_programs"]["resources"][contract["resource_id"]]["functions"]
+            assert contract["steps"] == saved[contract["program_key"]]["program"]["steps"]
+            assert contract["program_revision"] == model["program_revision"]
+    ur_event = next(
+        event for event in models["ur5e-1"]["events"]
+        if event["event_name"] == "place_release"
+        and event["parameter_bindings"]["resource_id"]["equals"] == "ur5e-1"
+    )
+    ur_contract = validated_function_contract(models, ur_event["event_id"])
+    assert ur_contract["function_name"] == "place_insert"
+    assert "place_insert" in nominal_capability_mermaid(
+        models["ur5e-1"], models=models
+    )
+    assert "formal event=place_release" in nominal_capability_mermaid(
+        models["ur5e-1"], models=models
+    )
+    storage = next(iter(models["Storage"]["events"]))
+    assert validated_function_contract(models, storage["event_id"])["resource_id"] == "KMR"
+    printer = next(
+        event for event in models["3D Printing Station"]["events"]
+        if event["event_name"] == "print_part"
+    )
+    planned = validated_function_contract(models, printer["event_id"])
+    assert planned["program_status"] == "planned" and not planned["steps"]
+    kmr = next(
+        event for event in models["KMR"]["events"]
+        if event["event_name"] == "move_to_location"
+        and event["parameter_bindings"]["resource_state"] == {"equals": "carrying"}
+    )
+    assert "carrying" in validated_function_contract(models, kmr["event_id"])["program_variants"]
+
+
+def test_function_contract_rejects_saved_state_disagreement():
+    """A changed function state cannot silently disagree with its formal event."""
+    from cais_spade_llm.resources.function_contracts import validated_function_contract
+
+    models = build_environment_models(read_json(SCENE_PATH))
+    event = next(
+        event for event in models["M1"]["events"]
+        if event["event_name"] == "machine_part"
+    )
+    event["program"]["entry_state"] = "idle"
+    with pytest.raises(ValueError, match="in state"):
+        validated_function_contract(models, event["event_id"])

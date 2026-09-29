@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
+from cais_spade_llm.resources.gazebo_programs import saved_workflow_program
 
 
 def _motion_distance(elapsed: float, distance: float, speed: float, acceleration: float) -> float:
@@ -133,22 +134,13 @@ class WorkflowPrimitiveRunner:
     def execute(self) -> dict[str, Any]:
         """Run only the ordered implemented primitives for the bound event."""
         event_name = self.task["event_name"]
-        program = workflow_task_program(event_name)
+        program = (saved_workflow_program(self.scene, self.task["resource_id"], event_name)
+                   if "resource_programs" in self.scene else workflow_task_program(event_name))
         if not program or program["status"] != "implemented":
             raise ValueError(f"Unsupported workflow Gazebo event: {event_name}")
         primitives = {
-            "observe_workholding": self.observe_workholding,
-            "verify_process_clearance": self.verify_process_clearance,
-            "run_machining_clock": self.run_machining_clock,
-            "confirm_process_observation": self.confirm_process_observation,
-            "observe_belt_residents": self.observe_belt_residents,
-            "compute_shared_displacement": self.compute_shared_displacement,
-            "observe_zone_part": self.observe_zone_part,
-            "compute_downstream_motion": self.compute_downstream_motion,
-            "verify_transport_clearance": self.verify_transport_clearance,
-            "move_belt_residents": self.move_belt_residents,
-            "move_buffer_part": self.move_buffer_part,
-            "confirm_arrival": self.confirm_arrival,
+            "dwell": self.dwell,
+            "move_relative": self.move_relative,
         }
         for step in program["steps"]:
             primitive_name = step["op"]
@@ -161,7 +153,7 @@ class WorkflowPrimitiveRunner:
             }
             self.primitive_trace.append(record)
             try:
-                primitive()
+                primitive(**step.get("params", {}))
             except (OSError, KeyError, TypeError, ValueError, RuntimeError, TimeoutError, InterruptedError) as exc:
                 record.update(status="failed", error=str(exc))
                 self._observe_transport_progress()
@@ -234,12 +226,17 @@ class WorkflowPrimitiveRunner:
             [machine["handling_robot"]], {self.part_name: self.state["initial"]}
         )
 
-    def run_machining_clock(self) -> None:
+    def dwell(self, duration_sec: float | None = None) -> None:
         """Wait on /clock while repeatedly observing the part and clearance."""
+        self.observe_workholding()
+        self.verify_process_clearance()
         machine = self.state["machine"]
         model = self.state["model"]
         expected = self.state["expected"]
-        duration = float(machine["simulation_process"]["processing_time_sec"])
+        minimum_duration = float(machine["simulation_process"]["processing_time_sec"])
+        duration = minimum_duration if duration_sec is None else float(duration_sec)
+        if not math.isfinite(duration) or duration < minimum_duration:
+            raise ValueError("Machining dwell must meet the configured minimum processing time")
         interval = float(machine["simulation_process"].get("observation_interval_sec", 0.25))
         last_observation = -math.inf
 
@@ -267,6 +264,7 @@ class WorkflowPrimitiveRunner:
 
         start, end = self.wait_simulation(duration, observe_machine)
         self.state.update(process_duration=duration, started_sim=start, completed_sim=end)
+        self.confirm_process_observation()
 
     def confirm_process_observation(self) -> None:
         """Return the observations required by the existing completion validator."""
@@ -377,13 +375,25 @@ class WorkflowPrimitiveRunner:
         start, end = self.wait_simulation(self.state["duration"], transport)
         self.state.update(started_sim=start, completed_sim=end)
 
-    def move_belt_residents(self) -> None:
-        """Move every conveyor resident in one synchronized step."""
+    def move_relative(self, speed_mps: float | None = None) -> None:
+        """Move the selected Gazebo part entities by the guarded displacement."""
+        if self.task["resource_id"] == "Conveyor":
+            self.observe_belt_residents()
+            self.compute_shared_displacement()
+        else:
+            self.observe_zone_part()
+            self.compute_downstream_motion()
+        self.verify_transport_clearance()
+        if speed_mps is not None:
+            configured = float(self.scene[self.task["resource_id"]]["simulation_transport"]["speed_mps"])
+            if not math.isfinite(speed_mps) or not 0 < speed_mps <= configured:
+                raise ValueError("Transport speed must stay within the configured limit")
+            self.state["speed"] = speed_mps
+            self.state["duration"] = _motion_duration(
+                self.state["displacement"], speed_mps, self.state["acceleration"]
+            )
         self._move_transport()
-
-    def move_buffer_part(self) -> None:
-        """Move one part to its configured downstream buffer slot."""
-        self._move_transport()
+        self.confirm_arrival()
 
     def confirm_arrival(self) -> None:
         """Observe endpoint positions and clearance before acknowledging transport."""

@@ -21,10 +21,10 @@ OCCUPIED = 0
 # Ground-plane envelopes from the accepted recovery layout. Operational blue
 # docking markers are intentionally omitted from the occupied geometry.
 OBSTACLE_BOUNDS = {
-    "Storage": (-9.65, -8.65, 1.675, 2.925),
-    "ur5e-1 work area": (-6.80, -5.65, 0.72, 1.47),
-    "ur5e-2 work area": (-3.40, -2.25, 0.72, 1.47),
-    "Conveyor": (-6.75, -0.74, 0.32, 0.68),
+    "Storage": (-6.95, -5.95, 1.675, 2.925),
+    "ur5e-1 work area": (-4.85, -3.70, 0.72, 1.47),
+    "ur5e-2 work area": (-2.85, -1.70, 0.72, 1.47),
+    "Conveyor": (-4.95, -0.74, 0.32, 0.68),
     "Buffer For Machined parts": (-0.74, -0.26, 0.32, 0.68),
     "Assembly Station": (-0.75, 0.75, -0.95, 1.05),
 }

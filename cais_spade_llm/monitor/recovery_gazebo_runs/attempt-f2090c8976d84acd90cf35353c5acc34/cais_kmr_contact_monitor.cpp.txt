@@ -1,0 +1,85 @@
+#include <gazebo/gazebo_client.hh>
+#include <gazebo/transport/transport.hh>
+#include <gazebo/msgs/msgs.hh>
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <fstream>
+#include <mutex>
+#include <set>
+#include <string>
+#include <thread>
+
+std::atomic<bool> running{true};
+std::mutex guard;
+uint64_t messages=0, ground=0, parts=0, equipment=0, ur_equipment=0, ur_parts=0, ur_robot=0;
+std::set<std::string> ur_pairs;
+std::set<std::string> pairs;
+std::string directory;
+const std::set<std::string> components={"gear_small","gear_medium","gear_large","KET4_Square_4mm","KET8_Square_8mm","KET12_Square_12mm","KET16_Square_16mm","RGOCG4-50_Round_4mm","RGOCG8-50_8mm","RGOCG12-50_12mm","RGOCG16-50_16mm"};
+std::string model(const std::string &value) { return value.substr(0,value.find("::")); }
+void receive(ConstContactsPtr &msg) {
+  std::lock_guard<std::mutex> lock(guard);
+  ++messages;
+  for (int i=0;i<msg->contact_size();++i) {
+    const auto &contact=msg->contact(i);
+    const auto left=model(contact.collision1()),right=model(contact.collision2());
+    if (left=="dual_robot" || right=="dual_robot") {
+      const auto &robot_collision=left=="dual_robot"?contact.collision1():contact.collision2();
+      const auto &other_collision=left=="dual_robot"?contact.collision2():contact.collision1();
+      const auto other=left=="dual_robot"?right:left;
+      if (components.count(other)) ++ur_parts;
+      else if (other=="dual_robot") {
+        auto first=robot_collision.find("ur5e_");
+        auto second=other_collision.find("ur5e_");
+        if(first!=std::string::npos && second!=std::string::npos &&
+           robot_collision.substr(first,7)!=other_collision.substr(second,7)) ++ur_robot;
+      } else if (robot_collision.find("base_link")==std::string::npos && other!="ground_plane") {
+        ++ur_equipment;
+        const auto pair=robot_collision+" | "+other_collision;
+        if(ur_pairs.insert(pair).second) {
+          std::ofstream log(directory+"/ur_equipment_contacts.txt",std::ios::app);
+          log << msg->time().sec()+1e-9*msg->time().nsec() << " " << pair;
+          for(int point=0;point<contact.depth_size();++point) log << " depth=" << contact.depth(point);
+          log << "\n";
+        }
+      }
+    }
+    if (left!="KMR" && right!="KMR") continue;
+    const auto other=left=="KMR"?right:left;
+    if (other=="KMR") continue;
+    if (other=="ground_plane") { ++ground; continue; }
+    if (components.count(other)) { ++parts; continue; }
+    ++equipment;
+    const auto pair=contact.collision1()+" | "+contact.collision2();
+    if (pairs.insert(pair).second) {
+      std::ofstream log(directory+"/equipment_contacts.txt",std::ios::app);
+      log << msg->time().sec()+1e-9*msg->time().nsec() << " " << pair;
+      for (int point=0;point<contact.position_size();++point) {
+        const auto &position=contact.position(point);
+        log << " point=[" << position.x() << "," << position.y() << "," << position.z() << "]";
+        if (point<contact.depth_size()) log << " depth=" << contact.depth(point);
+      }
+      log << "\n";
+    }
+  }
+}
+void write_counts() {
+  std::lock_guard<std::mutex> lock(guard);
+  std::ofstream out(directory+"/contact_counts.txt");
+  out << "messages=" << messages << " kmr_ground=" << ground << " kmr_part=" << parts
+      << " kmr_equipment=" << equipment << " equipment_pairs=" << pairs.size() << " ur_equipment=" << ur_equipment << " ur_part=" << ur_parts << " ur_robot=" << ur_robot << "\n";
+}
+int main(int argc,char **argv) {
+  if(argc!=2) return 2;
+  directory=argv[1];
+  std::signal(SIGTERM,[](int){running=false;});
+  std::signal(SIGINT,[](int){running=false;});
+  gazebo::client::setup();
+  gazebo::transport::NodePtr node(new gazebo::transport::Node());
+  node->Init();
+  auto subscriber=node->Subscribe("/gazebo/default/physics/contacts",receive);
+  while(running) {write_counts();std::this_thread::sleep_for(std::chrono::milliseconds(500));}
+  write_counts();
+  gazebo::client::shutdown();
+}

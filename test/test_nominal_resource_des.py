@@ -24,6 +24,8 @@ from cais_spade_llm.ui.components.nominal_resource_des import (
     nominal_composition_event_rows,
     nominal_des_mermaid,
     nominal_event_rows,
+    nominal_function_graph,
+    nominal_function_mermaid,
     nominal_inventory_rows,
     nominal_product_process_event_rows,
     nominal_product_process_plan_diagram,
@@ -105,6 +107,8 @@ def release(models, state, robot, part, destination, **inputs):
 
 
 def completed_machine_part(models, state, machine, part):
+    state = event(models, state, "KMR", "pick_approach", part_name=part,
+                  origin_resource_location="Storage")
     state = event(
         models,
         state,
@@ -115,6 +119,8 @@ def completed_machine_part(models, state, machine, part):
         handoff_acknowledged=True,
     )
     state = move_mobile(models, state, "Storage", machine)
+    state = event(models, state, "KMR", "place_approach", part_name=part,
+                  destination_location=machine)
     state = event(
         models,
         state,
@@ -227,6 +233,7 @@ def test_catalog_preserves_assignments_and_only_nominal_tasks(models, scene):
     names = {row["event_name"] for model in models.values() for row in model["events"]}
     assert names == {
         "move_to_resource",
+        "move_to_location",
         "pick_part",
         "place_release",
         "machine_part",
@@ -278,8 +285,28 @@ def test_finite_domains_declared_updates_and_shared_bindings(models):
                 assert matching[0]["parameter_bindings"] == row["parameter_bindings"]
 
 
+def test_kmr_pick_approach_binds_the_part_for_pick_part(models):
+    state = initial_nominal_valuation(models)
+    state = event(models, state, "KMR", "pick_approach", part_name=SQUARE,
+                  origin_resource_location="Storage")
+    assert state["KMR"]["approached_part"] == SQUARE
+    before = deepcopy(state)
+    with pytest.raises(ValueError, match="guard blocked: KMR.approached_part"):
+        event(models, state, "KMR", "pick_part", part_name=CIRCULAR,
+              origin_resource_location="Storage", handoff_acknowledged=True)
+    assert state == before
+    state = event(models, state, "KMR", "pick_part", part_name=SQUARE,
+                  origin_resource_location="Storage", handoff_acknowledged=True)
+    assert state["KMR"]["approached_part"] is None
+    assert state["KMR"]["held_part"] == SQUARE
+    assert state["Storage"][f"inventory.{SQUARE}"] is False
+    assert state["Storage"][f"inventory.{CIRCULAR}"] is True
+
+
 def test_machine_assignment_and_mobile_routes_are_guarded(models):
     state = initial_nominal_valuation(models)
+    state = event(models, state, "KMR", "pick_approach", part_name=SQUARE,
+                  origin_resource_location="Storage")
     state = event(
         models,
         state,
@@ -402,6 +429,8 @@ def test_shared_parameter_definitions_must_match_before_handoff(models):
     peer = next(row for row in changed["Storage"]["events"] if row["event_name"] == "pick_part")
     peer["parameter_bindings"]["part_name"] = {"equals": CIRCULAR}
     state = initial_nominal_valuation(changed)
+    state = event(changed, state, "KMR", "pick_approach", part_name=SQUARE,
+                  origin_resource_location="Storage")
     before = deepcopy(state)
     with pytest.raises(ValueError, match="matching participant"):
         event(
@@ -707,7 +736,9 @@ def test_ui_rows_and_diagrams_use_the_same_des_definitions(models, scene, schema
         assert "flowchart TB" in capability_diagram
         for row in nominal_capability_rows(model):
             assert row["event"] in capability_diagram
-            assert row["signature"] in capability_diagram.replace("<br/>", " ")
+            if row["signature"] not in capability_diagram.replace("<br/>", " "):
+                assert f"event_id={row['id']}" in capability_diagram
+                assert f"formal event={row['event']}" in capability_diagram
             definition = next(event for event in model["events"] if event["event_id"] == row["id"])
             for field in definition["guards"]:
                 assert f"{rid}.{field} = " in row["source"]
@@ -742,6 +773,79 @@ def test_capability_graphs_distinguish_robot_paths_without_per_part_expansion(mo
         assert SQUARE not in graph and CIRCULAR not in graph
         inventory = [row["part_name"] for row in nominal_inventory_rows(models[robot])]
         assert inventory == models[machine]["assignments"]["nominal_parts"]
+
+
+def test_function_graph_uses_saved_ur5e_in_and_out_states(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    for robot in ("ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"):
+        graph = nominal_function_graph(models[robot], models)
+        states = {node["id"]: node["state"] for node in graph["nodes"]}
+        assert set(states.values()) == {"idle", "at_pick", "picked", "positioned", "placed"}
+        transitions = {
+            (states[edge["source"]], edge["function_name"], states[edge["target"]])
+            for edge in graph["edges"]
+        }
+        assert transitions == {
+            ("idle", "pick_approach", "at_pick"),
+            ("at_pick", "pick_grasp", "picked"),
+            ("picked", "place_approach", "positioned"),
+            ("positioned", "place_insert", "placed"),
+            ("idle", "move_home", "idle"),
+            ("at_pick", "move_home", "idle"),
+            ("placed", "move_home", "idle"),
+        }
+        assert len(graph["edges"]) == 7
+        assert "event_id=" not in nominal_function_mermaid(models[robot], models)
+        home = [edge for edge in graph["edges"] if edge["function_name"] == "move_home"]
+        assert all(edge["saved_in_state"] == "any" for edge in home)
+        assert all(edge["event_ids"] == [home[0]["event_ids"][0]] for edge in home)
+
+    ordinary = models["ur5e-1"]
+    place = next(edge for edge in nominal_function_graph(ordinary, models)["edges"]
+                 if edge["function_name"] == "place_insert")
+    assert {
+        event["event_name"] for event in ordinary["events"]
+        if event["event_id"] in place["event_ids"]
+    } == {"place_release"}
+
+
+def test_function_graph_handles_variants_planned_and_unowned_resources(scene):
+    from cais_spade_llm.resources.environment_models import build_environment_models
+
+    models = build_environment_models(scene)
+    kmr = nominal_function_graph(models["KMR"], models)
+    states = {node["id"]: node["state"] for node in kmr["nodes"]}
+    movement = [edge for edge in kmr["edges"]
+                if edge["function_name"] == "move_to_resource"]
+    assert {(states[edge["source"]], states[edge["target"]]) for edge in movement} == {
+        ("idle", "idle"), ("carrying", "carrying"),
+    }
+    assert next(edge for edge in movement if states[edge["source"]] == "idle")[
+        "program_variants"
+    ] == ["empty", "empty_return"]
+    assert len({event_id for edge in movement for event_id in edge["event_ids"]}) == 4
+    location = [edge for edge in kmr["edges"]
+                if edge["function_name"] == "move_to_location"]
+    assert {(states[edge["source"]], states[edge["target"]]) for edge in location} == {
+        ("idle", "idle"), ("carrying", "carrying"),
+    }
+
+    printer = nominal_function_graph(models["3D Printing Station"], models)
+    assert len(printer["edges"]) == 1
+    assert printer["edges"][0]["program_status"] == "planned"
+    assert "print_part (planned)" in nominal_function_mermaid(
+        models["3D Printing Station"], models
+    )
+    for resource in ("M1", "M2", "Conveyor", BUFFER):
+        graph = nominal_function_graph(models[resource], models)
+        assert len(graph["edges"]) == 1
+        assert graph["edges"][0]["event_ids"]
+    for resource in ("Storage", "Exit"):
+        assert nominal_function_graph(models[resource], models) == {
+            "nodes": [], "edges": [],
+        }
 
 
 def test_capability_graph_excludes_events_that_only_consult_resource_guards(models):
@@ -856,7 +960,9 @@ def test_resource_state_diagrams_use_exact_fields_events_and_symbolic_effects(sc
             assert len(diagram["state_rows"]) == len(diagram["nodes"])
 
     kmr = nominal_resource_state_diagram(models["KMR"], "resource_location")
-    assert {edge["event_name"] for edge in kmr["edges"]} == {"move_to_resource"}
+    assert {edge["event_name"] for edge in kmr["edges"]} == {
+        "move_to_resource", "move_to_location",
+    }
     buffer = nominal_resource_state_diagram(models[BUFFER], "zone_1_part")
     assert {json.dumps(node["value"], sort_keys=True) for node in buffer["nodes"]} == {
         "null", '{"reference": "delivered_part"}', '{"reference": "part_name"}'
@@ -1049,10 +1155,10 @@ def test_repeated_endpoint_arrows_keep_original_event_ids(scene):
     diagram = nominal_resource_capability_diagram(model)
     assert len(diagram["edges"]) == 1
     assert diagram["edges"][0]["event_ids"] == sorted(
-        event["event_id"] for event in model["events"]
+        event["event_id"] for event in model["events"] if event["event_name"] == "pick_part"
     )
     detailed = nominal_capability_graph(model, {"Storage": model})
-    for original in model["events"]:
+    for original in (event for event in model["events"] if event["event_name"] == "pick_part"):
         variant = next(
             edge for edge in detailed["edges"] if edge["event_id"] == original["event_id"]
         )
@@ -1171,10 +1277,11 @@ def test_kmr_graph_preserves_custody_while_moving_and_does_not_invent_routes(sce
 
     models = build_environment_models(scene)
     graph = nominal_capability_graph(models["KMR"], models)
-    paths = _graph_paths(graph, ["pick_part", "move_to_resource", "place_release"])
+    paths = _graph_paths(graph, ["pick_approach", "pick_part", "move_to_resource",
+                                "place_approach", "place_release"])
     assert {graph["nodes"][path[-1]["target"]]["state"]["KMR.resource_location"] for path in paths} == {"M1", "M2"}
     for path in paths:
-        for edge in path[:2]:
+        for edge in path[1:4]:
             assert graph["nodes"][edge["target"]]["state"]["KMR.held_part"] == {"reference": "part_name"}
         assert graph["nodes"][path[-1]["target"]]["state"]["KMR.held_part"] is None
     for edge in graph["edges"]:
@@ -1414,12 +1521,31 @@ def test_complete_resources_page_keeps_one_read_only_live_status_poll(scene, mod
             selector.set_value(resource)
             await asyncio.sleep(0)
             graphs = [item.content for item in page.descendants() if isinstance(item, ui.mermaid)]
-            fields = nominal_resource_default_fields(runtime_models[resource])
-            assert len(graphs) == len(fields), resource
-            assert graphs == [
-                nominal_resource_state_diagram(runtime_models[resource], field)["mermaid"]
-                for field in fields
-            ]
+            function_graph = nominal_function_graph(runtime_models[resource], runtime_models)
+            if function_graph["edges"]:
+                assert graphs, resource
+                assert graphs[0] == nominal_function_mermaid(
+                    runtime_models[resource], runtime_models
+                )
+            else:
+                assert any(
+                    getattr(item, "text", "") == "No owned functions."
+                    for item in page.descendants()
+                )
+            if resource == "ur5e-1":
+                place = next(
+                    item for item in page.descendants()
+                    if isinstance(item, ui.expansion)
+                    and item.text == "place_insert · implemented"
+                )
+                assert any(
+                    isinstance(item, ui.expansion) and "place_release" in item.text
+                    for item in place.descendants()
+                )
+                assert any(
+                    {"in_state", "out_state", "steps"} <= set(json.loads(item.content))
+                    for item in place.descendants() if isinstance(item, ui.code)
+                )
             assert any(
                 getattr(item, "text", "") == "Marked state conditions: " + json.dumps(
                     runtime_models[resource]["marked_state_conditions"], ensure_ascii=False
@@ -1675,7 +1801,7 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
             part = next(e for e in client.elements.values()
                         if isinstance(e, ui.select) and e.label == "Part")
             assert resource.value == "Conveyor" and part.value == SQUARE
-            assert len([e for e in client.elements.values() if isinstance(e, ui.mermaid)]) == 4
+            assert len([e for e in client.elements.values() if isinstance(e, ui.mermaid)]) == 2
             initial_conditions = next(e for e in client.elements.values()
                                       if isinstance(e, ui.expansion)
                                       and e.text == "Configured initial values and marked state conditions")
@@ -1698,16 +1824,11 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
             export.assert_called()
             details = next(e for e in client.elements.values()
                            if isinstance(e, ui.expansion)
-                           and e.text == "Local capability graph and event details")
+                           and e.text == "Shared event details")
             assert not any(isinstance(item, ui.mermaid) for item in details.descendants())
             details.set_value(True)
             await asyncio.sleep(0)
-            assert any(isinstance(item, ui.mermaid)
-                       and item.content == component.nominal_capability_mermaid(models["Conveyor"], models=models)
-                       for item in details.descendants())
-            assert any(isinstance(item, ui.mermaid)
-                       and item.content == component.nominal_resource_capability_diagram(models["Conveyor"])["mermaid"]
-                       for item in details.descendants())
+            assert not any(isinstance(item, ui.mermaid) for item in details.descendants())
             detail_codes = [json.loads(e.content) for e in details.descendants() if isinstance(e, ui.code)]
             assert any(isinstance(value, list)
                        and value == nominal_composition_event_rows(models, "Conveyor")
@@ -1727,13 +1848,10 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
             await asyncio.sleep(0)
             assert any(isinstance(e, ui.code) for e in variants.descendants())
 
-            local_contents = {
-                nominal_resource_state_diagram(models["Conveyor"], field)["mermaid"]
-                for field in nominal_resource_default_fields(models["Conveyor"])
-            }
+            local_content = nominal_function_mermaid(models["Conveyor"], models)
             compact = [e for e in client.elements.values() if isinstance(e, ui.mermaid)
-                       and e.content in local_contents]
-            assert len(compact) == 3
+                       and e.content == local_content and e not in details.descendants()]
+            assert len(compact) == 1
             compact_ids = [e.id for e in compact]
             product_id = product_graph.id
             elements = set(client.elements)
@@ -1763,14 +1881,13 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
             state["revision"] = 3
             peer = next(e for e in models["ur5e-1"]["events"]
                         if e["event_name"] == "place_release" and "Conveyor" in e["participants"])
+            original_guard = deepcopy(peer["guards"]["resource_state"])
             peer["guards"]["resource_state"] = {"equals": "idle"}
             await refresh()
             assert all(eid in client.elements for eid in compact_ids + [product_id])
-            detail_codes = [json.loads(e.content) for e in details.descendants() if isinstance(e, ui.code)]
-            assert any(isinstance(value, dict)
-                       and any(edge["guards"].get("ur5e-1", {}).get("resource_state") == {"equals": "idle"}
-                               for edge in value.get("edges", []))
-                       for value in detail_codes)
+            assert any("disagrees with its in state" in getattr(e, "text", "")
+                       for e in client.elements.values())
+            peer["guards"]["resource_state"] = original_guard
 
             state["revision"] = 4
             models["Conveyor"]["events"] = [
@@ -1778,21 +1895,20 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
             ]
             await refresh()
             assert product_id in client.elements
-            local_contents = {
-                nominal_resource_state_diagram(models["Conveyor"], field)["mermaid"]
-                for field in nominal_resource_default_fields(models["Conveyor"])
+            local_content = nominal_function_mermaid(models["Conveyor"], models)
+            assert nominal_function_graph(models["Conveyor"], models) == {
+                "nodes": [], "edges": [],
             }
-            current_compact = [e for e in client.elements.values()
-                               if isinstance(e, ui.mermaid) and e.content in local_contents]
-            assert len(current_compact) == 3
-            assert all(e.id not in compact_ids for e in current_compact)
-            assert all("advance_conveyor" not in e.content for e in current_compact)
+            assert not any(eid in client.elements for eid in compact_ids)
+            assert any(getattr(e, "text", "") == "No owned functions."
+                       for e in client.elements.values())
 
             resource.set_value("ur5e-1")
             await asyncio.sleep(0)
             robot_graph = next(e for e in client.elements.values() if isinstance(e, ui.mermaid))
             configured_graph = robot_graph.content
-            assert "start --> s0" in configured_graph
+            assert "pick_approach" in configured_graph and "place_insert" in configured_graph
+            assert "event_id=" not in configured_graph
             state["revision"] = 5
             models["ur5e-1"]["current_valuation"]["resource_state"] = "picked"
             await refresh()
@@ -1807,7 +1923,7 @@ def test_resource_refresh_uses_revisions_and_preserves_expanded_controls(scene, 
                        and e.text == "Configured initial values and marked state conditions"
                        and e.value for e in client.elements.values())
             assert any(isinstance(e, ui.expansion)
-                       and e.text == "Local capability graph and event details"
+                       and e.text == "Shared event details"
                        and e.value for e in client.elements.values())
             assert any(isinstance(e, ui.expansion)
                        and e.text == "DES details" and e.value
@@ -1834,7 +1950,11 @@ def test_gazebo_capability_functions_cover_owned_events_and_passive_resources(sc
         ]
         assert sum(len(row["variants"]) for row in view["functions"]) == len(owned)
         for event in owned:
-            assert event["program"]["steps"], (resource_id, event["event_name"])
+            if event["event_name"] == "print_part":
+                assert event["program"]["steps"] == []
+                assert event["program_status"] == "planned"
+            else:
+                assert event["program"]["steps"], (resource_id, event["event_name"])
             assert event["function_name"]
     assert not resource_function_rows(models["Storage"])["functions"]
     assert not resource_function_rows(models["Exit"])["functions"]
@@ -1853,11 +1973,11 @@ def test_gazebo_capability_functions_cover_owned_events_and_passive_resources(sc
     assert kmr_release["function_name"] == "place_release"
     assert robot_release["program"]["steps"] != kmr_release["program"]["steps"]
     expected_workflow_steps = {
-        "M1": ("observe_workholding", "verify_process_clearance", "run_machining_clock", "confirm_process_observation"),
-        "M2": ("observe_workholding", "verify_process_clearance", "run_machining_clock", "confirm_process_observation"),
-        "Conveyor": ("observe_belt_residents", "compute_shared_displacement", "verify_transport_clearance", "move_belt_residents", "confirm_arrival"),
-        BUFFER: ("observe_zone_part", "compute_downstream_motion", "verify_transport_clearance", "move_buffer_part", "confirm_arrival"),
-        "3D Printing Station": ("validate_print_request", "run_print_cycle", "confirm_printed_output"),
+        "M1": ("dwell",),
+        "M2": ("dwell",),
+        "Conveyor": ("move_relative",),
+        BUFFER: ("move_relative",),
+        "3D Printing Station": (),
     }
     for resource_id, expected_steps in expected_workflow_steps.items():
         functions = resource_function_rows(models[resource_id])["functions"]
@@ -1930,7 +2050,10 @@ def test_resource_catalog_renders_steps_and_current_generated_program(scene):
             await refresh()
         labels = [getattr(element, "text", "") for element in client.elements.values()]
         assert any("observe_workholding" in label for label in labels)
-        assert any("Executed function: place_insert" in label for label in labels)
+        assert any("Formal event: place_release" in label for label in labels)
+        assert any("Formal event: machine_part" in label for label in labels)
+        headings = [element._props.get("label") for element in client.elements.values()]
+        assert "place_insert" in headings and "trim_part" in headings
         assert any("assembly_board-v1 · M1 · machine_part" in label for label in labels)
         assert any("Approval: primitive_pending" in label for label in labels)
 

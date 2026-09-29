@@ -1,4 +1,4 @@
-"""Read-only capability functions, primitive steps, and generated recovery programs."""
+"""Saved capability functions, primitive catalogs, and generated recovery programs."""
 
 from __future__ import annotations
 
@@ -52,20 +52,34 @@ def resource_function_rows(model: dict[str, Any]) -> dict[str, list[dict[str, An
                     availability += f". {note}"
             elif executable is None:
                 availability = "Configured — start the system to check Gazebo execution"
-            elif event_name in executable:
+            elif event_name in executable or (resource_id == "KMR" and event_name == "move_to_location"):
                 availability = "Gazebo executable"
             else:
                 availability = "No Gazebo executor bound"
             owned[key] = {
                 "event_name": event_name,
                 "function_name": function_name,
+                "program_key": str(event.get("program_key") or event_name),
                 "program_status": status,
                 "availability": availability,
                 "program": deepcopy(event.get("program") or {}),
+                "program_variants": deepcopy(event.get("program_variants") or {}),
                 "variants": [],
             }
         owned[key]["variants"].append(variant)
-    return {"functions": list(owned.values()), "participating": participating}
+    for item in owned.values():
+        item["saved"] = {
+            "function_name": item["function_name"], "status": item["program_status"],
+            "program": deepcopy(item["program"]),
+        }
+        if item.get("program_variants"):
+            item["saved"]["variants"] = deepcopy(item["program_variants"])
+    return {
+        "resource_id": resource_id,
+        "program_revision": model.get("program_revision", ""),
+        "primitive_catalog": deepcopy(model.get("primitive_catalog", {})),
+        "functions": list(owned.values()), "participating": participating,
+    }
 
 
 def _render_json(label: str, value: Any) -> None:
@@ -75,17 +89,24 @@ def _render_json(label: str, value: Any) -> None:
         )
 
 
-def render_resource_function_rows(rows: dict[str, list[dict[str, Any]]]) -> None:
-    """Render a selected resource's functions without dispatch controls."""
+def render_resource_function_rows(
+    rows: dict[str, Any], *, on_save_function: Callable | None = None,
+    on_save_catalog: Callable | None = None,
+) -> None:
+    """Render saved functions and the complete primitive catalog for one resource."""
     functions = rows["functions"]
+    if rows.get("program_revision"):
+        ui.label(f"Saved Gazebo program revision: {rows['program_revision'][:12]}").classes(
+            "text-xs text-slate-600"
+        )
     if not functions:
         ui.label("This resource owns no capability functions.").classes("text-sm text-slate-600")
     for item in functions:
         event_name = item["event_name"]
         function_name = item["function_name"]
-        with ui.expansion(event_name, icon="precision_manufacturing").classes("w-full"):
+        with ui.expansion(function_name, icon="precision_manufacturing").classes("w-full"):
             if function_name != event_name:
-                ui.label(f"Executed function: {function_name}").classes("text-sm font-medium")
+                ui.label(f"Formal event: {event_name}").classes("text-sm font-medium")
             ui.label(item["availability"]).classes("text-sm text-slate-600")
             program = item["program"]
             steps = list(program.get("steps") or [])
@@ -108,16 +129,70 @@ def render_resource_function_rows(rows: dict[str, list[dict[str, Any]]]) -> None
                     _render_json(f"{step.get('id', '')} parameter sources", step["params"])
                 if step.get("when"):
                     _render_json(f"{step.get('id', '')} conditions", step["when"])
-            _render_json("Function conditions and effects", {
+            if item.get("program_variants"):
+                _render_json(f"Configured {function_name} variants", item["program_variants"])
+            if on_save_function is not None and rows.get("program_revision"):
+                with ui.expansion("Edit saved function program", icon="edit").classes("w-full"):
+                    ui.label(
+                        "Edit parameters and add motion or observation steps before the final step. "
+                        "Required handoff steps, their order, and the function contract must be preserved."
+                    ).classes("text-xs text-slate-600")
+                    editor = ui.textarea(
+                        label="Function JSON", value=json.dumps(item["saved"], indent=2, ensure_ascii=False)
+                    ).classes("w-full").props("autogrow outlined")
+
+                    def save_function(*, program_key=item["program_key"], field=editor) -> None:
+                        try:
+                            on_save_function(program_key, json.loads(field.value), rows["program_revision"])
+                        except (ValueError, TypeError, KeyError, OSError, json.JSONDecodeError) as exc:
+                            ui.notify(str(exc), type="negative")
+                        else:
+                            ui.notify("Saved function. Reset Gazebo and Start System to load this revision.", type="positive")
+
+                    ui.button("Save function", on_click=save_function)
+            _render_json("Function in state and out state", {
+                "in_state": program.get("entry_state"),
+                "out_state": program.get("success_state"),
+                "event_variants": [
+                    {"event_id": variant["event_id"],
+                     "in_state": variant["guards"],
+                     "out_state": variant["updates"],
+                     "participants": variant["participants"]}
+                    for variant in item["variants"]
+                ],
+            })
+            _render_json("Function execution conditions", {
                 key: program[key]
-                for key in ("entry_state", "success_state", "entry_guards", "effects")
-                if key in program
+                for key in ("entry_guards", "effects") if key in program
             })
             with ui.expansion(
                 f"Capability event variants ({len(item['variants'])})", icon="account_tree"
             ).classes("w-full"):
                 for variant in item["variants"]:
                     _render_json(f"event_id {variant['event_id']}", variant)
+    catalog = rows.get("primitive_catalog") or {}
+    with ui.expansion(f"Primitive catalog ({len(catalog)})", icon="build").classes("w-full"):
+        for name, primitive in sorted(catalog.items()):
+            status = primitive.get("status", "")
+            availability = "recovery selectable" if primitive.get("recovery_selectable") else "not recovery selectable"
+            ui.label(f"{name} · {status} · {availability}").classes("text-sm")
+            if primitive.get("availability_note"):
+                ui.label(str(primitive["availability_note"])).classes("text-xs text-slate-600")
+        if on_save_catalog is not None and rows.get("program_revision"):
+            with ui.expansion("Edit saved primitive catalog", icon="edit").classes("w-full"):
+                editor = ui.textarea(
+                    label="Primitive catalog JSON", value=json.dumps(catalog, indent=2, ensure_ascii=False)
+                ).classes("w-full").props("autogrow outlined")
+
+                def save_catalog() -> None:
+                    try:
+                        on_save_catalog(json.loads(editor.value), rows["program_revision"])
+                    except (ValueError, TypeError, KeyError, OSError, json.JSONDecodeError) as exc:
+                        ui.notify(str(exc), type="negative")
+                    else:
+                        ui.notify("Saved catalog. Reset Gazebo and Start System to load this revision.", type="positive")
+
+                ui.button("Save catalog", on_click=save_catalog)
     if rows["participating"]:
         with ui.expansion(
             f"Shared events this resource participates in ({len(rows['participating'])})",

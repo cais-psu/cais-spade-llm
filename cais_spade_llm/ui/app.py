@@ -10,7 +10,7 @@ from pathlib import Path
 from nicegui import app, context, ui
 from nicegui.elements.drawer import Drawer as NiceGUIDrawer
 from nicegui.elements.timer import Timer as NiceGUITimer
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import RedirectResponse, Response, StreamingResponse
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
@@ -38,7 +38,6 @@ _NO_PERCEPTION_FRAME_JPEG = base64.b64decode(
 _SIDEBAR_BG = "bg-slate-800"
 _HEADER_BG = "bg-slate-900"
 _NAV_ITEMS = [
-    ("dashboard", "/", "dashboard"),
     ("products", "/products", "inventory_2"),
     ("resources", "/resources", "precision_manufacturing"),
     ("safety", "/safety", "shield"),
@@ -46,8 +45,23 @@ _NAV_ITEMS = [
     ("perception", "/perception", "photo_camera"),
 ]
 _PROJECT_ITEMS = [
-    ("recovery-framework", "/recovery-framework", "restore"),
-    ("spec2primitives", "/spec2primitives", "account_tree"),
+    (
+        "journal2-project",
+        [
+            ("dashboard", "/recovery-framework?tab=run", "dashboard"),
+            ("setup", "/recovery-framework?tab=setup", "settings"),
+            ("results", "/recovery-framework?tab=results", "assessment"),
+            ("recovery", "/recovery-framework?tab=recovery", "restore"),
+        ],
+    ),
+    (
+        "jounral3-project",
+        [
+            ("dashboard", "/spec2primitives?tab=run", "dashboard"),
+            ("setup", "/spec2primitives?tab=setup", "settings"),
+            ("results", "/spec2primitives?tab=results", "assessment"),
+        ],
+    ),
 ]
 
 
@@ -93,7 +107,9 @@ def _header(bridge: SystemBridge) -> None:
             emitEvent('cais_page_visibility', !document.hidden));
     </script>""")
     with ui.header().classes(f"{_HEADER_BG} text-white items-center gap-4 px-6"):
-        with ui.link(target="/").classes("no-underline flex items-center gap-3"):
+        with ui.link(target="/recovery-framework?tab=run").classes(
+            "no-underline flex items-center gap-3"
+        ):
             ui.image("/static/favicon.ico").classes("w-8 h-8")
             ui.label("Penn State CAIS Lab Multi-Agent Manufacturing System").classes(
                 "text-lg font-bold text-white"
@@ -148,21 +164,22 @@ def _sidebar_link(label: str, path: str, icon: str) -> None:
 
 
 def _sidebar() -> None:
+    """Render the project folders and shared navigation links."""
     # Use an explicit initial drawer state to avoid JS value probing timeout on slow/disconnecting clients.
     with (
-        ui.left_drawer(value=True).classes(f"{_SIDEBAR_BG} text-white").props("width=240 bordered")
+        ui.left_drawer(value=True).classes(f"{_SIDEBAR_BG} text-white").props("width=280 bordered")
     ):
         ui.label("Navigation").classes(
             "text-xs text-slate-400 uppercase tracking-wider px-4 pt-4 pb-2"
         )
-        _sidebar_link(*_NAV_ITEMS[0])
-        with ui.expansion("projects", icon="folder", value=True).classes(
-            "w-full text-slate-200 text-sm"
-        ).props('dense header-class="rounded" expand-icon-class="text-slate-300"'):
-            with ui.column().classes("w-full gap-0 pl-4"):
-                for label, path, icon in _PROJECT_ITEMS:
-                    _sidebar_link(label, path, icon)
-        for label, path, icon in _NAV_ITEMS[1:]:
+        for project, items in _PROJECT_ITEMS:
+            with ui.expansion(project, icon="folder", value=True).classes(
+                "w-full text-slate-200 text-sm"
+            ).props('dense header-class="rounded" expand-icon-class="text-slate-300"'):
+                with ui.column().classes("w-full gap-0 pl-4"):
+                    for label, path, icon in items:
+                        _sidebar_link(label, path, icon)
+        for label, path, icon in _NAV_ITEMS:
             _sidebar_link(label, path, icon)
 
 
@@ -198,7 +215,6 @@ def create_app() -> None:
     )
     from cais_spade_llm.ui.pages import (
         control,
-        dashboard,
         perception,
         products,
         recovery_framework,
@@ -294,9 +310,9 @@ def create_app() -> None:
         )
 
     @ui.page("/")
-    def index_page():
-        _page_wrapper(bridge)
-        dashboard.render(bridge)
+    def index_page() -> RedirectResponse:
+        """Open the journal2-project dashboard as the home page."""
+        return RedirectResponse("/recovery-framework?tab=run")
 
     @ui.page("/recovery-framework")
     def recovery_framework_page() -> None:
@@ -467,6 +483,9 @@ def create_app() -> None:
 
     app.on_startup(_on_startup)
     app.on_shutdown(_on_shutdown)
+    from cais_spade_llm.recovery_framework.diagnostics import jobs
+    app.on_startup(jobs.recover_interrupted)
+    app.on_shutdown(jobs.cancel)
 
     ui.run(
         title="Penn State CAIS Lab Multi-Agent Manufacturing System",

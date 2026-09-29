@@ -8,6 +8,7 @@ are defined here with YAML frontmatter for catalog introspection.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any
 
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
@@ -61,6 +62,7 @@ class PrintingAgent(ResourceAgent):
             "events": [
                 {
                     "event_name": "pause_job",
+                    "primitive_support": [{"primitive": "pause_job", "params": {}}],
                     "controllable": True,
                     "observable": True,
                     "guards": {"resource_state": {"equals": "printing"}},
@@ -68,6 +70,7 @@ class PrintingAgent(ResourceAgent):
                 },
                 {
                     "event_name": "resume_job",
+                    "primitive_support": [{"primitive": "resume_job", "params": {}}],
                     "controllable": True,
                     "observable": True,
                     "guards": {"resource_state": {"equals": "paused"}},
@@ -75,6 +78,7 @@ class PrintingAgent(ResourceAgent):
                 },
                 {
                     "event_name": "cancel_job",
+                    "primitive_support": [{"primitive": "cancel_job", "params": {}}],
                     "controllable": True,
                     "observable": True,
                     "guards": {"resource_state": {"not_equals": "idle"}},
@@ -100,6 +104,9 @@ class PrintingAgent(ResourceAgent):
     async def pause_job(self, *, job_id: str = "", **kwargs: Any) -> dict[str, Any]:
         """
         ---
+        capability_constraints:
+          current_state:
+            equals: "printing"
         preconditions:
           current_state:
             equals: "printing"
@@ -120,6 +127,9 @@ class PrintingAgent(ResourceAgent):
     async def resume_job(self, *, job_id: str = "", **kwargs: Any) -> dict[str, Any]:
         """
         ---
+        capability_constraints:
+          current_state:
+            equals: "paused"
         preconditions:
           current_state:
             equals: "paused"
@@ -140,6 +150,9 @@ class PrintingAgent(ResourceAgent):
     async def cancel_job(self, *, job_id: str = "", **kwargs: Any) -> dict[str, Any]:
         """
         ---
+        capability_constraints:
+          current_state:
+            not_equals: "idle"
         preconditions:
           current_state:
             not_equals: "idle"
@@ -159,6 +172,48 @@ class PrintingAgent(ResourceAgent):
         if hasattr(self, "_job_state"):
             self._job_state = "idle"
         return {"success": True, "state": "idle"}
+
+    def check_recovery_primitive_feasibility(
+        self,
+        *,
+        primitive: str,
+        params: dict[str, Any],
+        task: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        part_context: dict[str, Any],
+        grounded_action: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Evaluate a printer primitive without dispatching a print command."""
+        del params, task
+        missing = [
+            field
+            for field in ("current_state", "material_state", "bed_state")
+            if recovery_snapshot.get(field) in (None, "")
+        ]
+        if missing:
+            return {
+                "allowed": False,
+                "feasibility_status": "NEEDS_CONTEXT",
+                "constraint_code": "resource_validation_unavailable",
+                "reason": "Printer capability evidence is unavailable",
+                "evidence": {"missing_fields": missing},
+            }
+        if primitive not in self._RECOVERY_PRIMITIVES:
+            return {
+                "allowed": False,
+                "feasibility_status": "INFEASIBLE",
+                "reason": "Primitive is not exposed by this printer",
+            }
+        result = self.check_recovery_physical_feasibility(
+            part_context=part_context,
+            recovery_snapshot=recovery_snapshot,
+            grounded_action=grounded_action,
+        )
+        return {
+            **result,
+            "feasibility_status": "FEASIBLE" if result.get("allowed") is True else "INFEASIBLE",
+            "evidence": {"resource_snapshot": deepcopy(recovery_snapshot)},
+        }
 
     def check_recovery_physical_feasibility(
         self,

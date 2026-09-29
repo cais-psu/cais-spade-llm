@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import json
 from copy import deepcopy
 from dataclasses import asdict
 
@@ -21,13 +22,17 @@ def _path(name, *path):
 
 
 def delivery_bindings(part_name: str) -> dict[str, dict]:
-    """Retain every binding in the existing three-task acknowledgement protocol."""
+    """Bind the five KMR functions used for the Storage-to-M1 delivery."""
     return {
+        'pick_approach': {'resource_id': 'KMR', 'part_name': part_name,
+                          'origin_resource_location': 'Storage'},
         'pick_part': {'resource_id': 'KMR', 'part_name': part_name,
                       'origin_resource_location': 'Storage', 'handoff_acknowledged': True},
         'move_to_resource': {'resource_id': 'KMR', 'target_resource': 'M1',
                              'source_resource': 'Storage', 'arrival_acknowledged': True,
                              'arm_parked': True},
+        'place_approach': {'resource_id': 'KMR', 'part_name': part_name,
+                           'destination_location': 'M1'},
         'place_release': {'resource_id': 'KMR', 'part_name': part_name,
                           'destination_location': 'M1', 'handoff_acknowledged': True,
                           'robot_clear': True},
@@ -35,61 +40,62 @@ def delivery_bindings(part_name: str) -> dict[str, dict]:
 
 
 PRIMITIVE_CONTRACTS = {
-    'open_gripper': ({'held_part': 'checked by the bound task'}, {'gripper_state': 'open'}),
-    'close_gripper': ({'endpoint': 'observed pickup pose'}, {'gripper_state': 'closed'}),
-    'compute_pick_targets': ({'resource_location': 'Storage', 'part_pose': 'fresh'}, {'pick_targets': 'vertical and downward-facing'}),
-    'move_to_pose': ({'start_joints': 'fresh'}, {'endpoint': 'collision checked and observed'}),
-    'rotate_arm_base': ({'arm_clearance': 'collision checked'}, {'joint_a1': 'observed', 'orientation': 'downward'}),
-    'move_to_configuration': ({'start_joints': 'fresh'}, {'joints': 'collision checked and observed'}),
-    'execute_plan': ({'start_joints': 'fresh and matching'}, {'endpoint': 'observed'}),
-    'observe_grasp': ({'part_pose': 'unchanged since planning'}, {'grasp_transform': 'observed'}),
+    'detect_parts': ({}, {'parts': 'observed Gazebo poses'}),
+    'compute_pick_targets': ({'part_pose': 'fresh'}, {'pick_targets': 'observed poses'}),
+    'compute_place_targets': ({'held_part': 'observed'}, {'place_targets': 'observed poses'}),
+    'move_to_named_pose': ({'arm_joints': 'fresh'}, {'tcp_pose': 'observed'}),
+    'move_cartesian': ({'arm_joints': 'fresh'}, {'tcp_pose': 'observed'}),
+    'move_relative': ({'arm_joints': 'fresh'}, {'tcp_pose': 'observed'}),
+    'move_joints': ({'arm_joints': 'fresh'}, {'joints': 'observed'}),
+    'rotate_joint': ({'arm_joints': 'fresh'}, {'joints': 'observed'}),
+    'open_gripper': ({}, {'gripper_state': 'open'}),
+    'close_gripper': ({}, {'gripper_state': 'closed'}),
+    'grasp_part': ({'held_part': None}, {'held_part': 'observed'}),
+    'release_part': ({'held_part': 'observed'}, {'held_part': None}),
     'attach_part': ({'gripper_state': 'closed'}, {'attached': True}),
     'detach_part': ({'gripper_state': 'open'}, {'attached': False}),
-    'part_collision': ({'part_pose': 'fresh'}, {'planning_scene': 'acknowledged'}),
-    'custody': ({'grasp_transform': 'acknowledged'}, {'held_part': 'observed'}),
-    'confirm_carrying': ({'arm_joints': 'fresh'}, {'arm_parked': True}),
-    'observe_carrying': ({'attached': True}, {'part_location': 'KMR', 'arm_parked': True}),
-    'observe_custody': ({'attached': True}, {'grasp_transform': 'validated'}),
-    'validate_transport': ({'arm_parked': True}, {'transport_sweep': 'collision checked'}),
-    'dock': ({'arm_parked': True, 'attached': True}, {'resource_location': 'observed'}),
-    'observe_dock': ({'attached': True}, {'resource_location': 'M1'}),
-    'compute_place_targets': ({'resource_location': 'configured destination', 'workholding': 'empty'}, {'place_targets': 'vertical and downward-facing'}),
-    'move_cartesian': ({'start_joints': 'fresh'}, {'endpoint': 'observed'}),
-    'observe_release': ({'attached': False}, {'part_location': 'M1', 'robot_clear': True}),
+    'move_base': ({'base_pose': 'fresh'}, {'base_pose': 'observed'}),
 }
 
-_pick = (
+_pick_approach = (
+    _step('park', 'move_to_named_pose', pose_name='transport'),
+    _step('transport', 'move_base', target_pose=_state('pickup_pose'),
+          waypoints=_state('pickup_waypoints')),
     _step('open', 'open_gripper'),
     _step('pick', 'compute_pick_targets', initial=_state('initial')),
-    _step('approach', 'move_to_pose', target=_path('pick', 'approach'), seed=_path('pick', 'seed')),
-    _step('descend', 'move_cartesian', target=_path('pick', 'target')),
-    _step('close', 'close_gripper'),
-    _step('grasp', 'observe_grasp', initial=_state('initial')),
-    _step('attach', 'attach_part'),
-    _step('attached_collision', 'part_collision', attached=True),
-    _step('lift', 'move_to_pose', target=_path('pick', 'lift'), waypoints=_path('pick', 'lift_waypoints')),
-    _step('lift_custody', 'custody', transform=_path('grasp')),
-    _step('observations', 'observe_carrying', transform=_path('grasp')),
+    _step('approach', 'move_cartesian', target=_path('pick', 'approach'),
+          seed=_path('pick', 'seed')),
+)
+_pick = (
+    _step('descend', 'move_cartesian', target=_state('previous', 'pick_targets', 'target')),
+    _step('grasp', 'grasp_part', initial=_state('initial')),
+    _step('lift', 'move_cartesian', target=_state('previous', 'pick_targets', 'lift'),
+          waypoints=_state('previous', 'pick_targets', 'lift_waypoints')),
 )
 _move = (
-    _step('grasp', 'observe_custody', previous=_state('previous')),
-    _step('posture', 'confirm_carrying'),
-    _step('sweep', 'validate_transport'),
-    _step('transport', 'dock', target_resource=_arg('target_resource'), transform=_path('grasp')),
-    _step('observations', 'observe_dock', transform=_path('grasp')),
+    _step('transport', 'move_base', target_pose=_state('base_target_pose'),
+          waypoints=_state('base_waypoints'), transform=_state('previous', 'grasp_transform')),
+)
+_place_approach = (
+    _step('place', 'compute_place_targets', transform=_state('previous', 'grasp_transform')),
+    _step('clearance', 'move_cartesian', target=_path('place', 'approach'),
+          waypoints=_path('place', 'transfer_waypoints')),
 )
 _place = (
-    _step('grasp', 'observe_custody', previous=_state('previous')),
-    _step('place', 'compute_place_targets', transform=_path('grasp')),
-    _step('clearance', 'move_to_pose', target=_path('place', 'approach'), waypoints=_path('place', 'transfer_waypoints')),
-    _step('descend', 'move_cartesian', target=_path('place', 'target')),
-    _step('held', 'custody', transform=_path('grasp')),
-    _step('open', 'open_gripper'),
-    _step('detach', 'detach_part'),
-    _step('released_collision', 'part_collision', attached=False),
-    _step('withdraw', 'move_cartesian', target=_path('place', 'retreat')),
-    _step('park', 'move_to_pose', target=_path('place', 'transport'), waypoints=_path('place', 'withdraw_waypoints')),
-    _step('observations', 'observe_release', destination=_path('place', 'destination')),
+    _step('descend', 'move_cartesian', target=_state('previous', 'place_targets', 'target')),
+    _step('release', 'release_part', transform=_state('previous', 'grasp_transform')),
+    _step('withdraw', 'move_cartesian', target=_state('previous', 'place_targets', 'retreat')),
+    _step('park', 'move_cartesian', target=_state('previous', 'place_targets', 'transport'),
+          waypoints=_state('previous', 'place_targets', 'withdraw_waypoints')),
+)
+_empty_move = (
+    _step('transport', 'move_base', target_pose=_state('base_target_pose'),
+          waypoints=_state('base_waypoints')),
+)
+_empty_return = (
+    _step('transport', 'move_base', target_pose=_state('base_target_pose'),
+          waypoints=_state('base_waypoints')),
+    _step('home', 'move_to_named_pose', pose_name='home'),
 )
 
 
@@ -110,14 +116,58 @@ def _definition(name, before, after, steps):
 
 
 KMR_TASKS = {
-    'pick_part': _definition('pick_part', 'idle', 'carrying', _pick),
+    'pick_approach': _definition('pick_approach', 'idle', 'at_pick', _pick_approach),
+    'pick_part': _definition('pick_part', 'at_pick', 'carrying', _pick),
     'move_to_resource': _definition('move_to_resource', 'carrying', 'carrying', _move),
-    'place_release': _definition('place_release', 'carrying', 'idle', _place),
+    'place_approach': _definition('place_approach', 'carrying', 'positioned', _place_approach),
+    'place_release': _definition('place_release', 'positioned', 'idle', _place),
+}
+
+KMR_MOVE_VARIANTS = {
+    'empty': _definition('move_to_resource', 'idle', 'idle', _empty_move),
+    'empty_return': _definition('move_to_resource', 'idle', 'idle', _empty_return),
 }
 
 
-def capability_decompositions(*, function_name='', resource_jid='', **_kwargs) -> dict:
+def _location_definition(resource_state: str) -> RobotTaskDefinition:
+    """Declare coordinate travel with the current KMR held-part state preserved."""
+    steps = (_step('transport', 'move_base', target_pose=_state('base_target_pose'),
+                   waypoints=_state('base_waypoints')),) if resource_state == 'idle' else (
+        _step('transport', 'move_base', target_pose=_state('base_target_pose'),
+              waypoints=_state('base_waypoints'),
+              transform=_state('previous', 'grasp_transform')),
+    )
+    return RobotTaskDefinition(
+        name='move_to_location',
+        description='Move the KMR base to a validated world-frame coordinate.',
+        arguments=tuple(RobotTaskArgument(name, 'number', required=True)
+                        for name in ('x', 'y', 'yaw')),
+        source='recovery_framework/kmr_tasks.py',
+        program=RobotTaskProgram(
+            entry_state=resource_state, success_state=resource_state,
+            entry_guards=(RobotTaskGuard(
+                'bound_task', description='Fresh KMR observations and saved scene revision'),),
+            steps=steps, effects=(),
+            notes=('Coordinate movement updates measured base pose and only a matched named location.',),
+        ),
+    )
+
+
+KMR_LOCATION_TASK = _location_definition('idle')
+KMR_LOCATION_VARIANTS = {'carrying': _location_definition('carrying')}
+
+
+def capability_decompositions(*, function_name='', resource_jid='', scene=None, **_kwargs) -> dict:
     """Derive recovery metadata from the same programs that dispatch primitives."""
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
+
+    scene = scene if scene is not None else json.loads(SCENE_PATH.read_text())
+    definitions = (
+        {name: saved_robot_definition(scene, 'KMR', name)
+         for name in (*KMR_TASKS, 'move_to_location')}
+        if 'resource_programs' in scene else {**KMR_TASKS, 'move_to_location': KMR_LOCATION_TASK}
+    )
     decompositions = {name: {
         **definition.capability_decomposition(resource_jid=resource_jid),
         'program': asdict(definition.program),
@@ -126,14 +176,15 @@ def capability_decompositions(*, function_name='', resource_jid='', **_kwargs) -
                       'effects': deepcopy(PRIMITIVE_CONTRACTS[step.op][1])}
             for step in definition.program.steps
         },
-    } for name, definition in KMR_TASKS.items() if not function_name or name == function_name}
+    } for name, definition in definitions.items() if not function_name or name == function_name}
     return decompositions.get(function_name, {}) if function_name else decompositions
 
 
 def execute_composition(name, *, arguments, state, primitives, records, operations,
-                        now, check, serialize, planning_time=lambda: 0.0) -> dict:
+                        now, check, serialize, planning_time=lambda: 0.0,
+                        definition=None) -> dict:
     """Run declared steps in order, preserving partial evidence on failure."""
-    definition = KMR_TASKS[name]
+    definition = definition or KMR_TASKS[name]
     outputs = {}
     for step in definition.program.steps:
         parameters = _resolve_value(step.params, args=arguments, runtime_state=state, step_outputs=outputs)
@@ -170,4 +221,4 @@ def execute_composition(name, *, arguments, state, primitives, records, operatio
                 'real_time_factor': simulated_elapsed / elapsed if elapsed > 0 and simulated_elapsed >= 0 else None,
                 'clock_reset': simulated_elapsed < 0,
             }
-    return outputs['observations']
+    return outputs

@@ -75,7 +75,7 @@ def test_robot_bindings_match_machine_and_preserved_assembly_positions() -> None
     ]
     assert all(robot['clearance_observation_link'] == 'wrist_3_link' for robot in robots)
     assert [robot['base_xyz'] for robot in robots] == [
-        [-6.0, 1.1, 0.8], [-2.6, 1.1, 0.8],
+        [-4.05, 1.1, 0.8], [-2.05, 1.1, 0.8],
         [0.0, 0.5, 1.021], [0.0, -0.5, 1.021],
     ]
     printer_robot = next(robot for robot in robots if robot['resource_id'] == 'ur5e-4')
@@ -161,12 +161,12 @@ def test_assembly_fixture_models_are_stationary_with_one_component_carrier() -> 
 def test_machining_station_matches_the_side_by_side_material_flow() -> None:
     machines = json.loads(ROBOTS_PATH.read_text())['machines']
     assert [machine['world_pose'] for machine in machines] == [
-        [-6.0, 1.9, 0.0, 0.0, 0.0, -math.pi / 2],
-        [-2.6, 1.9, 0.0, 0.0, 0.0, -math.pi / 2],
+        [-4.05, 1.9, 0.0, 0.0, 0.0, -math.pi / 2],
+        [-2.05, 1.9, 0.0, 0.0, 0.0, -math.pi / 2],
     ]
     assert [machine['KMR_docking_pose'] for machine in machines] == [
-        [-6.65, 2.2, 0.0, 0.0, 0.0, math.pi / 2],
-        [-3.25, 2.2, 0.0, 0.0, 0.0, math.pi / 2],
+        [-4.70, 2.2, 0.0, 0.0, 0.0, math.pi / 2],
+        [-2.70, 2.2, 0.0, 0.0, 0.0, math.pi / 2],
     ]
     assert {machine['KMR_departure_clearance_m'] for machine in machines} == {0.35}
     assert {machine['front_access_link'] for machine in machines} == {'front_access'}
@@ -208,6 +208,8 @@ def test_machine_enclosures_have_one_metre_horizontal_separation_from_assembly()
     gap = assembly_west_edge - max(east_edges)
     assert payload['minimum_station_gap'] == 1.0
     assert gap >= payload['minimum_station_gap']
+    assert gap == pytest.approx(1.0345)
+    assert payload['machines'][1]['world_pose'][0] - payload['machines'][0]['world_pose'][0] == pytest.approx(2.0)
 
 
 def test_compact_layout_stays_inside_the_intended_horizontal_range() -> None:
@@ -218,9 +220,9 @@ def test_compact_layout_stays_inside_the_intended_horizontal_range() -> None:
         for item in ET.parse(WORLD_PATH).findall('./world/include')
         if item.findtext('uri') == 'model://table'
     )
-    assert storage_min_x == pytest.approx(-9.65)
+    assert storage_min_x == pytest.approx(-6.95)
     assert assembly_max_x == pytest.approx(0.75)
-    assert storage_min_x >= -9.8
+    assert assembly_max_x - storage_min_x == pytest.approx(7.7)
     assert assembly_max_x <= 0.8
 
 
@@ -260,6 +262,10 @@ def test_passive_layout_supports_match_manifest_and_both_loading_positions() -> 
         assert abs(loading[0] - conveyor['world_pose'][0]) < sx / 2
         assert loading[1] == conveyor['world_pose'][1]
         assert loading[2] == conveyor['surface_height']
+        marker_number = payload['machines'].index(machine) + 1
+        marker = models['Conveyor'].find(f"./link/visual[@name='loading_position_{marker_number}']")
+        marker_pose = list(map(float, marker.findtext('pose').split()))
+        assert [conveyor['world_pose'][i] + marker_pose[i] for i in range(2)] == pytest.approx(loading[:2])
         tray = models[machine['resource_id'] + ' staging tray']
         assert list(map(float, tray.findtext('pose').split()))[:2] == machine['staging_pose'][:2]
         assert machine['staging_capacity'] == 1
@@ -385,7 +391,7 @@ def test_storage_contains_all_eight_nist_pegs_on_configured_shelves() -> None:
         model = models[name]
         actual_pose = list(map(float, model.findtext('pose').split()))
         assert actual_pose == pytest.approx(expected_pose)
-        assert actual_pose[0] == pytest.approx(-8.95 if name.startswith('KET') else -8.77)
+        assert actual_pose[0] == pytest.approx(-6.25 if name.startswith('KET') else -6.07)
         assert actual_pose[2] == pytest.approx(0.645)
         assert actual_pose[5] == pytest.approx(math.pi / 2)
         mesh = model.findtext('link/visual/geometry/mesh/uri')
@@ -461,7 +467,7 @@ def test_single_printing_station_starts_with_three_gears_and_empty_exit() -> Non
     assert not {'left_frame', 'right_frame', 'top_frame', 'gantry', 'extruder'} & collisions
     assert {'cam_storage', 'cam_mk4_2', 'cam_assembly'} <= set(models)
     assert list(map(float, models['cam_storage'].findtext('pose').split())) == pytest.approx(
-        [-8.20, 0.75, 2.35, 0.0, 0.694, 2.047]
+        [-5.50, 0.75, 2.35, 0.0, 0.694, 2.047]
     )
     assert list(map(float, models['cam_mk4_2'].findtext('pose').split())) == pytest.approx(
         [0.50, -0.50, 1.75, 0.0, 1.5708, 0.0]
@@ -541,7 +547,7 @@ def test_kmr_source_layout_stays_at_storage_and_runtime_control_is_configured() 
     expected = {
         'spawned': True,
         'gazebo_model': 'KMR',
-        'initial_pose': [-8.24, 2.13, 0.0, 0.0, 0.0, math.pi / 2],
+        'initial_pose': [-5.54, 2.13, 0.0, 0.0, 0.0, math.pi / 2],
         'integrated': True,
         'simulation_control_integrated': True,
         'manufacturer': 'KUKA',
@@ -559,13 +565,13 @@ def test_kmr_source_layout_stays_at_storage_and_runtime_control_is_configured() 
         'gripper_stroke_m': 0.11,
         'mount_verified': False,
         'parked_arm_configuration': [
-            0.0,
-            -0.07,
-            0.0,
-            -1.62,
-            0.0,
-            0.54,
-            0.0,
+            -7.965669315561509e-08,
+            0.26379006890547957,
+            1.1232119596294415e-07,
+            -1.0886704491781178,
+            -3.0172351081028154e-08,
+            1.7891321353164003,
+            2.201577622499959e-08,
         ],
         'predefined_routes': [['Storage', 'M1'], ['Storage', 'M2']],
     }
@@ -578,6 +584,8 @@ def test_kmr_source_layout_stays_at_storage_and_runtime_control_is_configured() 
     assert kmr['base_odometry_topic'] == '/KMR/odom'
     assert kmr['docking_action'] == '/KMR/dock'
     assert kmr['task_execution']['attachment_support_contact_allowance_m'] == 0.001
+    # The 10 mm sampling produced an M1 finger contact between trajectory knots.
+    assert 0.0 < kmr['task_execution']['cartesian_waypoints']['linear_step_m'] <= 0.005
     storage_east_edge = payload['Storage']['world_pose'][0] + payload['Storage']['size'][1] / 2
     storage_dock_west_edge = (
         payload['Storage']['KMR_docking_pose'][0]
@@ -601,10 +609,10 @@ def test_kmr_source_layout_stays_at_storage_and_runtime_control_is_configured() 
     ).split()))
     assert m1_marker_pose[-1] == pytest.approx(math.pi / 2)
     assert payload['machines'][0]['KMR_docking_pose'] == pytest.approx(
-        [-6.65, 2.2, 0.0, 0.0, 0.0, math.pi / 2]
+        [-4.70, 2.2, 0.0, 0.0, 0.0, math.pi / 2]
     )
     assert payload['machines'][1]['KMR_docking_pose'] == pytest.approx(
-        [-3.25, 2.2, 0.0, 0.0, 0.0, math.pi / 2]
+        [-2.70, 2.2, 0.0, 0.0, 0.0, math.pi / 2]
     )
     assert payload['Storage']['KMR_docking_pose'][-1] == pytest.approx(math.pi / 2)
     kmr_include = next(item for item in world.findall('./world/include')
@@ -702,7 +710,7 @@ def test_kmr_source_layout_stays_at_storage_and_runtime_control_is_configured() 
     mount_x, mount_y, mount_z = kmr['arm_mount_xyz']
     world_mount_x = base_x + math.cos(base_yaw) * mount_x - math.sin(base_yaw) * mount_y
     world_mount_y = base_y + math.sin(base_yaw) * mount_x + math.cos(base_yaw) * mount_y
-    assert [world_mount_x, world_mount_y, mount_z] == pytest.approx([-8.24, 1.88, 0.70])
+    assert [world_mount_x, world_mount_y, mount_z] == pytest.approx([-5.54, 1.88, 0.70])
     assert base_yaw + kmr['arm_mount_rpy'][2] == pytest.approx(math.pi)
     assert (KMR_LICENSES_PATH / 'iiwa_ros2-Apache-2.0.txt').is_file()
     assert (KMR_LICENSES_PATH / 'OnRobot_ROS2_Description-MIT.txt').is_file()
@@ -924,8 +932,8 @@ def test_kmr_routes_are_reversible_and_reject_cross_machine_motion() -> None:
     storage_m2 = kmr_base.route_for(routes, 'Storage', 'M2')
     configured = json.loads(ROBOTS_PATH.read_text())['KMR']['predefined_route_waypoints']
     assert storage_m1 == tuple(tuple(pose) for pose in configured[0]['poses'])
-    assert len(storage_m1) == 3
-    assert math.dist(storage_m1[0][:2], storage_m1[1][:2]) == pytest.approx(0.790253124005214)
+    assert len(storage_m1) == 2
+    assert math.dist(storage_m1[0][:2], storage_m1[1][:2]) == pytest.approx(math.hypot(.84, .07))
     assert storage_m1[0][2] == storage_m1[1][2]
     assert storage_m2 == tuple(tuple(pose) for pose in configured[1]['poses'])
     assert kmr_base.route_for(routes, 'M2', 'Storage') == tuple(reversed(storage_m2))
@@ -964,8 +972,8 @@ def test_kmr_nav2_routes_and_velocity_gate_preserve_safety_boundaries() -> None:
     kmr, routes = kmr_base.load_kmr_config(ROBOTS_PATH)
     endpoints = {
         'Storage': tuple(kmr['initial_pose'][index] for index in (0, 1, 5)),
-        'M1': (-6.65, 2.2, math.pi / 2),
-        'M2': (-3.45, 2.15, math.pi / 2),
+        'M1': (-4.70, 2.2, math.pi / 2),
+        'M2': (-2.70, 2.2, math.pi / 2),
     }
     assert kmr_base.docking_poses(routes, endpoints, 'Storage', 'M1') == kmr_base.route_for(routes, 'Storage', 'M1')[1:]
     assert kmr_base.docking_poses(routes, endpoints, 'M1', 'M2') is None
@@ -1056,8 +1064,8 @@ def test_kmr_fixed_routes_are_clear_for_the_padded_footprint() -> None:
     kmr, routes = kmr_base.load_kmr_config(ROBOTS_PATH)
     endpoints = {
         'Storage': tuple(kmr['initial_pose'][index] for index in (0, 1, 5)),
-        'M1': (-6.65, 2.2, math.pi / 2),
-        'M2': (-3.45, 2.15, math.pi / 2),
+        'M1': (-4.70, 2.2, math.pi / 2),
+        'M2': (-2.70, 2.2, math.pi / 2),
     }
     for source, target in (
         ('Storage', 'M1'),
@@ -1116,6 +1124,74 @@ def test_kmr_rejects_invalid_docking_position_gain(tmp_path, gain):
         kmr_base.load_kmr_config(path)
 
 
+def test_kmr_kinematic_base_rotation_correction_is_loaded_and_pinned() -> None:
+    payload = json.loads(ROBOTS_PATH.read_text())
+    assert payload['KMR']['task_execution']['attach_link'] == 'iiwa_link_7'
+    plugins = ET.parse(KMR_URDF_PATH).getroot().findall('./gazebo/plugin')
+    names = [plugin.attrib['name'] for plugin in plugins]
+    correction = plugins[names.index('KMR_planar_move') + 1]
+    assert correction.attrib == {
+        'name': 'KMR_rigid_base_motion', 'filename': 'libcais_kmr_rigid_base_motion.so',
+    }
+    assert 'src/kmr_rigid_base_motion.cpp' in payload['KMR']['task_execution']['scene_assets']
+    cmake = (ROOT / 'ros2/cais_lab_robotics/CMakeLists.txt').read_text()
+    assert 'install(TARGETS cais_kmr_rigid_base_motion LIBRARY DESTINATION lib)' in cmake
+
+
+def test_kmr_final_custody_waits_for_fresh_tcp_but_rejects_persistent_shift():
+    import ast
+
+    from cais_spade_llm.recovery_framework.geometry import compose
+
+    tree = ast.parse((ROOT / 'cais_spade_llm/recovery_framework/kmr_gazebo.py').read_text())
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == 'custody')
+    measured_tcp = [0., 0., 0., 0., 0., 0., 1.]
+    settled_part = [0., 0., 0., 0., 0., 0., 1.]
+    shifted_part = [.02, 0., 0., 0., 0., 0., 1.]
+
+    def run(samples):
+        readings = iter(samples)
+        operations = []
+
+        def wait(predicate, _timeout, _label):
+            for _ in range(len(samples)):
+                if predicate():
+                    return
+            raise TimeoutError('observation timed out')
+
+        namespace = {
+            'entity': lambda _part: next(readings), 'part': 'peg',
+            'tcp': lambda: measured_tcp, 'compose': compose, 'math': math,
+            'spin_until': wait, 'operations': operations,
+            'TimeoutError': TimeoutError, 'ValueError': ValueError,
+        }
+        exec(compile(ast.Module(body=[method], type_ignores=[]),
+                     'kmr_gazebo.py', 'exec'), namespace)
+        return namespace['custody'], operations
+
+    custody, operations = run([shifted_part, settled_part])
+    assert custody(settled_part) == settled_part
+    assert operations[-1]['success'] is True
+    assert operations[-1]['checked_samples'] == 2
+    custody, operations = run([shifted_part, shifted_part])
+    with pytest.raises(ValueError, match='position error'):
+        custody(settled_part)
+    assert operations[-1]['success'] is False
+    assert operations[-1]['position_error_m'] == pytest.approx(.02)
+
+
+def test_kmr_transport_custody_keeps_the_strict_attachment_tolerance() -> None:
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _transport_attachment_check
+
+    expected = [0., 0., .417, 0., 0., 0., 1.]
+    assert _transport_attachment_check(expected, [.007, 0., .417, 0., 0., 0., 1.])[0]
+    assert not _transport_attachment_check(expected, [.009, 0., .417, 0., 0., 0., 1.])[0]
+    assert not _transport_attachment_check(expected, [.007, 0., .417, 0., 0., .15,
+                                                       math.sqrt(1 - .15 ** 2)])[0]
+    assert not _transport_attachment_check(expected, None)[0]
+
+
 def test_kmr_custody_acknowledgement_requires_observed_parked_posture():
     import ast
     from unittest.mock import Mock
@@ -1138,6 +1214,29 @@ def test_kmr_custody_acknowledgement_requires_observed_parked_posture():
     receive(node, message)
     assert node._publish_motion_status.call_count == 2
     assert node._transport_custody_monotonic == 10.
+
+
+def test_kmr_stopping_reaction_time_uses_simulation_age_during_a_pause() -> None:
+    """A paused Gazebo clock cannot add travel to the measured stopping sweep."""
+
+    budget = kmr_base.stopping_reaction_time(
+        simulation_speed=1.0, command_timeout=.1, control_period=.05,
+        observation_age_sim_sec=.02,
+    )
+    assert budget == pytest.approx(.17)
+    assert kmr_base.stopping_reaction_time(
+        simulation_speed=1.0, command_timeout=.1, control_period=.05,
+        observation_age_sim_sec=.02,
+    ) == budget
+    assert kmr_base.stopping_reaction_time(
+        simulation_speed=2.0, command_timeout=.1, control_period=.05,
+        observation_age_sim_sec=.4,
+    ) == pytest.approx(.7)
+    with pytest.raises(ValueError, match="finite nonnegative"):
+        kmr_base.stopping_reaction_time(
+            simulation_speed=1.0, command_timeout=.1, control_period=.05,
+            observation_age_sim_sec=float("nan"),
+        )
 
 
 @pytest.mark.parametrize('delay', [0.0, 0.1])
@@ -1269,6 +1368,7 @@ def test_kmr_stop_does_not_refresh_commands_or_resume_cancellation(
             node._arm_state_simulation_time = 123.45
             monkeypatch.setattr(node.cmd_pub, 'publish', outputs.append)
             monkeypatch.setattr(node.joint_pub, 'publish', joint_states.append)
+            monkeypatch.setattr(node, '_validate_transport_sweeps', lambda *_args, **_kwargs: None)
             node._initial_arm_parked = True
             node._navigation_active = True
             node._active_goal = True
@@ -1320,6 +1420,35 @@ def test_kmr_stop_does_not_refresh_commands_or_resume_cancellation(
             previous_speed = outputs[-1].linear.x
             node._control_tick()
             assert outputs[-1].linear.x == previous_speed
+
+            def clearance_delayed(*_args, **_kwargs):
+                raise TimeoutError("KMR arm and payload clearance validation timed out")
+
+            monkeypatch.setattr(node, '_validate_transport_sweeps', clearance_delayed)
+            node._control_tick()
+            assert outputs[-1].linear.x == 0.0
+            assert not node._cancel_base_motion_requested
+            assert node._clearance_wait_started == 1000.0
+            assert 'timed out' in node._motion_status['clearance_wait_reason']
+            monkeypatch.setattr(node, '_validate_transport_sweeps', lambda *_args, **_kwargs: None)
+            odometry.header.stamp.nanosec += 10_000_000
+            node._odom_cb(odometry)
+            node._control_tick()
+            assert outputs[-1].linear.x > 0.0
+            assert node._clearance_wait_started is None
+
+            monkeypatch.setattr(node, '_validate_transport_sweeps', clearance_delayed)
+            node._clearance_wait_started = 1000.0 - node.arm_state_timeout
+            node._control_tick()
+            assert outputs[-1].linear.x == 0.0
+            assert node._cancel_base_motion_requested
+            assert 'clearance service remained unavailable' in node._base_abort_reason
+            node._release_base_action()
+            assert node._claim_base_action(True)
+            assert node._clearance_wait_started is None
+            node._navigation_active = True
+            monkeypatch.setattr(node, '_validate_transport_sweeps', lambda *_args, **_kwargs: None)
+            node._nav_command_cb(command)
 
             expired = 1000.0 - node.command_timeout - 0.1
             node._nav_command_monotonic = expired
@@ -1741,17 +1870,17 @@ def test_dragged_kmr_targets_are_checked_before_nav2_planning() -> None:
 
     assert is_clear(-8.15, 2.30)
     assert is_clear(-5.0, 3.85)
-    assert not is_clear(-6.0, 2.30)
+    assert not is_clear(-4.05, 2.30)
     assert not is_clear(-3.75, 0.50)
     assert not is_clear(-10.4, 3.0)
     assert controller_is_clear(-8.15, 2.30)
     assert controller_is_clear(-5.0, 3.85)
-    assert not controller_is_clear(-6.0, 2.30)
+    assert not controller_is_clear(-4.05, 2.30)
     assert not controller_is_clear(-3.75, 0.50)
     assert not controller_is_clear(-10.4, 3.0)
 
     # These centers clear even the 0.45 m inflation radius, but KMR crosses M1.
-    for x, y, yaw in ((-6.0, 2.65, -math.pi / 2.0), (-6.7, 2.15, 0.0)):
+    for x, y, yaw in ((-4.05, 2.65, -math.pi / 2.0), (-4.75, 2.15, 0.0)):
         assert not recovery_map.occupied_at(x, y)
         assert not is_clear(x, y, yaw)
         assert not controller_is_clear(x, y, yaw)
@@ -1773,9 +1902,19 @@ def _kmr_test_pose(x: float, y: float, yaw: float) -> SimpleNamespace:
     )
 
 
-def _kmr_test_map(*, previous_machine_bounds: bool = False) -> SimpleNamespace:
+def _kmr_test_map(*, previous_machine_bounds: bool = False, previous_layout: bool = False) -> SimpleNamespace:
     saved = dict(recovery_map.OBSTACLE_BOUNDS)
     try:
+        if previous_layout or previous_machine_bounds:
+            # Preserve measured regression poses against their original obstacles.
+            recovery_map.OBSTACLE_BOUNDS.update({
+                'Storage': (-9.65, -8.65, 1.675, 2.925),
+                'ur5e-1 work area': (-6.80, -5.65, .72, 1.47),
+                'ur5e-2 work area': (-3.40, -2.25, .72, 1.47),
+                'Conveyor': (-6.75, -.74, .32, .68),
+                'M1': (-6.2655, -5.7345, 1.6485, 2.1515),
+                'M2': (-2.8655, -2.3345, 1.6485, 2.1515),
+            })
         if previous_machine_bounds:
             recovery_map.OBSTACLE_BOUNDS.update(M1=(-6.85, -5.15, 1.475, 3.125), M2=(-3.45, -1.75, 1.475, 3.125))
         pixels = recovery_map.map_pixels()
@@ -1837,6 +1976,72 @@ def test_kmr_bottom_floor_accepts_the_rejected_target_and_preserves_obstacles() 
         assert occupancy_map.data[row * recovery_map.WIDTH + column] == 100
 
 
+def test_kmr_m1_nearby_straight_replacement_preserves_machine_clearance() -> None:
+    occupancy_map = _kmr_test_map(previous_layout=True)
+    start = (-7.45, 2.15, math.pi / 2)
+    target = (-6.65, 2.2, math.pi / 2)
+    replacement = kmr_base.prepare_base_path(
+        _kmr_test_path(start, target), start, target, occupancy_map,
+    )
+    assert len(replacement.poses) > 2
+    assert kmr_base.base_path_is_clear(occupancy_map, (start, target))
+    assert not kmr_base.base_path_is_clear(occupancy_map, ((-6.898, 2.485, 0.073),))
+
+
+def test_kmr_short_validated_m1_segment_replaces_nav2_detour() -> None:
+    """Use the clear final M1 segment when Nav2's arc approaches the enclosure."""
+    import ast
+    import copy
+
+    occupancy_map = _kmr_test_map(previous_layout=True)
+    start = (-7.45, 2.15, math.pi / 2)
+    target = (-6.65, 2.2, math.pi / 2)
+    detour = _kmr_test_path(
+        start, (-7.3, 2.32, .92), (-7.0, 2.35, .72),
+        (-6.7, 2.48, 1.0), target,
+    )
+    assert kmr_base.base_path_is_clear(occupancy_map, tuple(
+        kmr_base.planar_pose(point.pose) for point in detour.poses
+    ))
+    assert kmr_base.base_path_is_clear(occupancy_map, (start, target))
+    assert not kmr_base.base_path_is_clear(occupancy_map, (
+        (-6.688034735875444, 2.265092604583665, 1.6529905614557963),
+    ))
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == '_compute_base_path')
+    namespace = {
+        'Any': object, 'math': math, 'copy': copy,
+        'NavPath': lambda: _kmr_test_path(),
+        'ComputePathToPose': SimpleNamespace(Goal=SimpleNamespace),
+        'GoalStatus': SimpleNamespace(STATUS_SUCCEEDED=4),
+        'normalize_angle': kmr_base.normalize_angle,
+        'planar_pose': kmr_base.planar_pose,
+        'prepare_base_path': kmr_base.prepare_base_path,
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    messages = []
+    node = SimpleNamespace(
+        _check_motion=lambda _goal: start,
+        _validate_transport_sweeps=lambda *args, **kwargs: None,
+        _pose_stamped=lambda pose: _kmr_test_path(pose).poses[0],
+        _occupancy_map=occupancy_map,
+        compute_path_client=object(),
+        _send_motion_goal=lambda *_args: SimpleNamespace(get_result_async=lambda: object()),
+        _wait_motion_future=lambda *_args: SimpleNamespace(
+            status=4, result=SimpleNamespace(path=detour),
+        ),
+        get_logger=lambda: SimpleNamespace(info=messages.append, warning=messages.append),
+    )
+    selected = namespace['_compute_base_path'](node, target, object())
+    poses = tuple(kmr_base.planar_pose(point.pose) for point in selected.poses)
+    assert poses[0] == pytest.approx(start)
+    assert poses[-1] == pytest.approx(target)
+    assert max(pose[1] for pose in poses) <= target[1] + 1e-9
+    assert kmr_base.base_path_is_clear(occupancy_map, poses)
+    assert any('validated straight KMR segment' in message for message in messages)
+
+
 def test_kmr_sweep_rejects_corner_crossing_with_clear_endpoints() -> None:
     occupancy_map = _kmr_test_map(previous_machine_bounds=True)
     start, finish = (-8.15, 2.3, -math.pi / 2), (-5.0, 3.85, -math.pi / 2)
@@ -1857,7 +2062,7 @@ def test_kmr_turn_rejects_intermediate_corner_collision() -> None:
 
 
 def test_kmr_rotated_footprint_checks_world_and_local_separating_axes() -> None:
-    occupancy_map = _kmr_test_map()
+    occupancy_map = _kmr_test_map(previous_layout=True)
     # The padded corner clears Storage by 7 mm; projecting only onto KMR's
     # axes incorrectly includes a nearby map cell that is entirely to its left.
     assert kmr_base.base_path_is_clear(occupancy_map, ((-7.925, 2.275, -math.pi / 4),))
@@ -1941,7 +2146,9 @@ def test_kmr_base_motion_is_nav2_gated_and_fail_closed() -> None:
     assert '"/KMR/map"' in controller
     assert 'self._navigation_target_is_clear(request)' in controller
     assert 'self._active_goal or self._follow_path_active' in controller
-    assert 'remaining_distance <= self.docking_slow_distance' in controller
+    assert 'remaining <= self.docking_slow_distance' in controller
+    assert '"/KMR/move_base"' in controller
+    assert 'self._wait_base_stopped(goal_handle)' in controller
     assert 'self._arm_is_parked()' in controller
     assert 'reason = self._state_stop_reason()' in controller
     assert '"/KMR/follow_path/_action/status"' in controller
@@ -2362,10 +2569,19 @@ def test_single_ur5e_builder_retains_its_original_defaults(models) -> None:
     assert root.find("link[@name='ur5e_tool0']") is not None
 
 
-def test_launch_resolves_the_nist_cad_meshes(models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('gui', [False, True])
+def test_launch_resolves_the_nist_cad_meshes(
+    models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gui: bool,
+) -> None:
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path / 'ros_logs'))
     from launch import LaunchContext
-    from launch.actions import AppendEnvironmentVariable
+    from launch.actions import (
+        AppendEnvironmentVariable, ExecuteProcess, IncludeLaunchDescription, RegisterEventHandler,
+    )
+    from launch.event_handlers import OnProcessExit
+    from launch.events.process import ProcessExited
+    from launch.utilities import perform_substitutions
+    from launch_ros.actions import Node
 
     _, description, kmr_description, planning_description, srdf, _ = models
     monkeypatch.setattr(scene, '_build_description', lambda *args: description)
@@ -2383,14 +2599,43 @@ def test_launch_resolves_the_nist_cad_meshes(models, tmp_path: Path, monkeypatch
         'enable_camera_streams': 'false', 'dynamic_shadows': 'false',
         'robots_file': str(ROBOTS_PATH), 'world_file': 'table_recovery_framework.world',
         'run_perception': 'false', 'include_assembly_parts': 'true', 'include_loose_parts': 'true',
-        'launch_gazebo': 'true', 'launch_gazebo_gui': 'false',
+        'launch_gazebo': 'true', 'launch_gazebo_gui': str(gui).lower(),
         'enable_camera_streams': 'false',
         'launch_moveit': 'false', 'launch_rviz': 'false',
         'launch_nav2': 'false',
     })
-    for action in scene.launch_setup(context):
+    actions = scene.launch_setup(context)
+    for action in actions:
         if isinstance(action, AppendEnvironmentVariable):
             action.execute(context)
+    gazebo, = [action for action in actions if isinstance(action, IncludeLaunchDescription)]
+    assert dict(gazebo.launch_arguments)['gui'] == 'false'
+    ur_spawner = next(
+        action for action in actions
+        if isinstance(action, Node) and action.node_executable == 'spawner'
+    )
+    handlers = [
+        action.event_handler for action in actions
+        if isinstance(action, RegisterEventHandler)
+        and isinstance(action.event_handler, OnProcessExit)
+    ]
+    event_args = dict(name='spawner', cmd=[], cwd=None, env=None, pid=1)
+    ur_exit = ProcessExited(action=ur_spawner, returncode=0, **event_args)
+    kmr_spawn, kmr_spawner = next(
+        handler.handle(ur_exit, context) for handler in handlers if handler.matches(ur_exit)
+    )
+    assert isinstance(kmr_spawn, Node)
+    kmr_exit = ProcessExited(action=kmr_spawner, returncode=0, **event_args)
+    clients = [
+        child for handler in handlers if handler.matches(kmr_exit)
+        for child in handler.handle(kmr_exit, context)
+        if isinstance(child, ExecuteProcess)
+    ]
+    assert len(clients) == int(gui)
+    if gui:
+        assert [perform_substitutions(context, item) for item in clients[0].cmd] == [
+            'gzclient', '--gui-client-plugin=libgazebo_ros_eol_gui.so',
+        ]
     model_paths = [Path(value) for value in context.environment['GAZEBO_MODEL_PATH'].split(os.pathsep)]
     world = ET.parse(ROOT / 'ros2/cais_lab_robotics/worlds/table_recovery_framework.world')
     meshes = {item.text.removeprefix('model://') for item in world.findall('.//mesh/uri')}
@@ -2582,7 +2827,6 @@ def test_ode_island_threads_preserve_contacts_step_and_full_scene(tmp_path, thre
 def test_docking_shared_storage_pose_acknowledges_requested_part_identity(bypass):
     import ast
     import asyncio
-    import threading
     from typing import Any
     from unittest.mock import Mock
 
@@ -2592,85 +2836,173 @@ def test_docking_shared_storage_pose_acknowledges_requested_part_identity(bypass
     shared = (-8.24, 2.41, math.pi / 2)
     square = kmr_base.STORAGE_PICK_PREFIX + 'KET8_Square_8mm'
     target = kmr_base.STORAGE_PICK_PREFIX + 'RGOCG8-50_8mm'
-    poses = iter([storage, (-8.24, 2.4055, math.pi / 2)])
     node = SimpleNamespace(
-        _fresh_pose=lambda: next(poses), _resource_at=Mock(side_effect=['Storage', square]),
-        get_parameter=lambda _: SimpleNamespace(value=bypass),
+        _fresh_pose=lambda: storage, _resource_at=lambda _pose: 'Storage',
         kmr={'task_execution': {'avoid_collisions': not bypass}},
-        endpoints={'Storage': storage, square: shared, target: shared}, routes=(), _occupancy_map=object(),
-        _cancel_base_motion_requested=False, _arm_state_is_fresh=lambda: True, _arm_is_parked=lambda: True,
-        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0)),
-        waypoint_timeout=30., docking_linear_speed=.2, docking_slow_distance=.1,
-        max_linear_speed=1., max_angular_speed=1., position_tolerance=.005, yaw_tolerance=.01,
-        docking_position_gain=1.5, _docking_speed_limit=lambda remaining: .1,
-        _lock=threading.Lock(), _odom_velocity=(0., 0., 0.), _last_output=(0., 0., 0.),
-        _stop=Mock(), _release_base_action=Mock(), _result=lambda success, resource, message: (success, resource, message),
+        endpoints={'Storage': storage, square: shared, target: shared}, routes=(),
+        _follow_base_goals=Mock(return_value=square), _finish_base_action=Mock(),
+        _abort_base_motion=Mock(),
+        _result=lambda success, resource, message: (success, resource, message),
     )
-    goal = SimpleNamespace(request=SimpleNamespace(target_resource=target), is_cancel_requested=False,
-                           publish_feedback=Mock(), succeed=Mock(), abort=Mock())
-    footprint_check = Mock(return_value=True)
-    namespace = {'Any': Any, 'DockKMR': SimpleNamespace(Result=object, Feedback=SimpleNamespace),
-                 'Pose2D': SimpleNamespace, 'math': math, 'docking_poses': kmr_base.docking_poses,
-                 'normalize_angle': kmr_base.normalize_angle, 'simulation_elapsed': kmr_base.simulation_elapsed,
-                 'docking_velocity': kmr_base.docking_velocity, 'base_path_is_clear': footprint_check}
+    goal = SimpleNamespace(request=SimpleNamespace(target_resource=target),
+                           is_cancel_requested=False, succeed=Mock(), abort=Mock())
+    namespace = {'Any': Any, 'DockKMR': SimpleNamespace(Result=object),
+                 'STORAGE_PICK_PREFIX': kmr_base.STORAGE_PICK_PREFIX,
+                 'docking_poses': kmr_base.docking_poses}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
     result = asyncio.run(namespace['_execute_dock'](node, goal))
     assert result[:2] == (True, target)
+    assert node._follow_base_goals.call_args.kwargs['named'] is True
+    assert node._follow_base_goals.call_args.args[1][-1] == shared
     goal.succeed.assert_called_once()
     goal.abort.assert_not_called()
-    node._release_base_action.assert_called_once()
-    assert footprint_check.call_count == (0 if bypass else 1)
+    node._finish_base_action.assert_called_once()
 
 
 def test_docking_waits_for_observed_braking_before_next_waypoint():
     import ast
-    import asyncio
     import threading
     from typing import Any
     from unittest.mock import Mock
 
     tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
-    method = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_execute_dock")
-    source = (-8.24, 2.41, math.pi / 2)
-    corner = (-3.25, 3.10, math.pi / 2)
-    endpoint = (-3.25, 2.20, math.pi / 2)
-    observations = iter([(source, (0., 0., 0.)), (corner, (0., -.06, 0.)),
-                         (corner, (0., 0., 0.)), (endpoint, (0., 0., 0.))])
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_wait_base_stopped')
+    velocity = iter([(.06, 0., 0.), (0., 0., 0.)])
     node = SimpleNamespace(
-        _resource_at=lambda _pose: "Storage", endpoints={"M2": endpoint}, routes=(), _occupancy_map=object(),
-        get_parameter=lambda _: SimpleNamespace(value=False), kmr={'task_execution': {}},
-        _cancel_base_motion_requested=False, _arm_state_is_fresh=lambda: True, _arm_is_parked=lambda: True,
+        _lock=threading.Lock(), _odom_velocity=(.06, 0., 0.), _last_output=(0., 0., 0.),
         get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0)),
-        waypoint_timeout=30., docking_linear_speed=.2, docking_slow_distance=.1, control_period=.02,
-        max_linear_speed=1., max_angular_speed=1., position_tolerance=.035, yaw_tolerance=.01,
-        docking_position_gain=1.5, _docking_speed_limit=lambda remaining: .1,
-        _lock=threading.Lock(), _stop=Mock(), _release_base_action=Mock(),
-        _result=lambda success, resource, message: (success, resource, message),
+        waypoint_timeout=30., control_period=.02, _stop=Mock(),
     )
 
-    def observe():
-        pose, velocity = next(observations)
-        node._odom_velocity = velocity
-        node._last_output = velocity
-        return pose
+    def check_motion(_goal):
+        node._odom_velocity = next(velocity)
+        return (-8.24, 2.41, math.pi / 2)
 
-    node._fresh_pose = observe
-    commands = []
-    goal = SimpleNamespace(request=SimpleNamespace(target_resource="M2"), is_cancel_requested=False,
-                           publish_feedback=Mock(), succeed=Mock(), abort=Mock())
-    namespace = {"Any": Any, "DockKMR": SimpleNamespace(Result=object, Feedback=SimpleNamespace),
-                 "Pose2D": SimpleNamespace, "math": math, "docking_poses": lambda *args: [corner, endpoint],
-                 "normalize_angle": kmr_base.normalize_angle, "simulation_elapsed": kmr_base.simulation_elapsed,
-                 "docking_velocity": kmr_base.docking_velocity, "base_path_is_clear": lambda *args: True,
-                 "Twist": lambda: SimpleNamespace(linear=SimpleNamespace(x=0., y=0.), angular=SimpleNamespace(z=0.)),
-                 "time": SimpleNamespace(monotonic=lambda: 0., sleep=lambda _: commands.append(node._nav_command))}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), "exec"), namespace)
-    assert asyncio.run(namespace["_execute_dock"](node, goal))[:2] == (True, "M2")
-    assert [call.args[0].waypoint_index for call in goal.publish_feedback.call_args_list] == [0, 0, 1]
-    assert len(commands) == 1
-    assert (commands[0].linear.x, commands[0].linear.y, commands[0].angular.z) == (0., 0., 0.)
-    goal.succeed.assert_called_once()
-    goal.abort.assert_not_called()
+    node._check_motion = check_motion
+    sleeps = []
+    namespace = {'Any': Any, 'time': SimpleNamespace(monotonic=lambda: 0., sleep=sleeps.append),
+                 'simulation_elapsed': kmr_base.simulation_elapsed, 'TimeoutError': TimeoutError}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    namespace['_wait_base_stopped'](node, SimpleNamespace())
+    assert sleeps == [.02]
+    node._stop.assert_called_once()
+
+
+def test_base_route_replans_and_brakes_at_each_waypoint():
+    import ast
+    from typing import Any
+    from unittest.mock import Mock
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_follow_base_goals')
+    first, second = (-7.0, 3.0, 0.0), (-3.25, 2.20, math.pi / 2)
+    calls = []
+    node = SimpleNamespace(
+        _occupancy_map=object(), _navigation_active=False,
+        _compute_base_path=lambda point, _goal: calls.append(('plan', point)) or point,
+        _run_base_path=lambda path, _goal, **kwargs: calls.append(('execute', path, kwargs['final_waypoint'])),
+        _wait_base_stopped=lambda _goal: calls.append(('brake',)),
+        _align_base_pose=lambda target, _goal, _index, **_kw: calls.append(('align', target)),
+        _check_motion=lambda _goal: second, _resource_at=lambda _pose: 'M2',
+        position_tolerance=.035, yaw_tolerance=.02,
+    )
+    namespace = {'Any': Any, 'math': math, 'normalize_angle': kmr_base.normalize_angle,
+                 'base_path_is_clear': Mock(return_value=True)}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    assert namespace['_follow_base_goals'](node, SimpleNamespace(), (first, second), named=True) == 'M2'
+    assert calls == [('plan', first), ('execute', first, False), ('brake',),
+                     ('plan', second), ('execute', second, True), ('brake',), ('align', second)]
+    assert node._navigation_active is True
+
+
+def test_kmr_nav2_handoff_finishes_each_path_segment_before_the_next() -> None:
+    """Reserve the docking handoff for the final waypoint and check each stop."""
+    import ast
+    import threading
+    from typing import Any
+    from unittest.mock import Mock
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == '_run_base_path')
+
+    class MoveGoal:
+        pass
+
+    class DockGoal:
+        pass
+
+    class FollowGoal:
+        pass
+
+    class PathGoal:
+        pass
+
+    def path(start, finish):
+        return SimpleNamespace(poses=[SimpleNamespace(pose=start), SimpleNamespace(pose=finish)])
+
+    segments = (path((0., 0., 0.), (1., 0., 0.)),
+                path((1., 0., 0.), (2., 0., 0.)))
+    namespace = {
+        'Any': Any, 'math': math, 'normalize_angle': kmr_base.normalize_angle,
+        'MoveBaseKMR': SimpleNamespace(Goal=MoveGoal),
+        'DockKMR': SimpleNamespace(Goal=DockGoal),
+        'FollowPath': SimpleNamespace(Goal=PathGoal),
+        'GoalStatus': SimpleNamespace(STATUS_SUCCEEDED=4),
+        'planar_pose': lambda pose: pose,
+        'prepare_base_path': lambda route, *_args: route,
+        'split_base_path': lambda _route: segments,
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]),
+                 str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+
+    def run(request):
+        observations = iter(
+            [(0., 0., 0.), (0., 0., 0.), (.95, 0., 0.), (1., 0., 0.),
+             (1., 0., 0.), (1.91, 0., 0.), (2., 0., 0.)]
+            if isinstance(request, MoveGoal) else
+            [(0., 0., 0.), (0., 0., 0.), (.95, 0., 0.), (.95, 0., 0.),
+             (.95, 0., 0.), (1.91, 0., 0.), (1.91, 0., 0.)]
+        )
+        sent = []
+        aligned = []
+        result = SimpleNamespace(done=lambda: True,
+                                 result=lambda: SimpleNamespace(status=4, result=None))
+        node = SimpleNamespace(
+            _occupancy_map=object(), path_pub=Mock(), _navigation_active=False,
+            docking_slow_distance=.20,
+            _validate_transport_sweeps=Mock(),
+            get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0)),
+            _check_motion=lambda _goal: next(observations),
+            _send_motion_goal=lambda _client, goal, _handle: (
+                sent.append(goal.goal_checker_id) or
+                SimpleNamespace(get_result_async=lambda: result)),
+            follow_path_client=object(), _stop=Mock(), _wait_base_stopped=Mock(),
+            _align_base_pose=lambda finish, *_args, **_kwargs: aligned.append(finish),
+            _lock=threading.RLock(), _nav_command=None, _nav_command_monotonic=None,
+            _nav_goal_handle=None,
+        )
+        namespace['_run_base_path'](node, path((0., 0., 0.), (2., 0., 0.)),
+                                    SimpleNamespace(request=request), final_waypoint=True)
+        return sent, aligned
+
+    assert run(MoveGoal()) == (
+        ['precise_goal_checker', 'docking_handoff_goal_checker'], [],
+    )
+    with pytest.raises(RuntimeError, match='segment tolerance'):
+        run(FollowGoal())
+
+    nav2 = yaml.safe_load(RECOVERY_NAV2_PATH.read_text())['controller_server']['ros__parameters']
+    assert nav2['precise_goal_checker']['xy_goal_tolerance'] == .06
+    assert nav2['FollowPath']['CostCritic']['near_goal_distance'] == 1.0
+    assert nav2['FollowPath']['PathFollowCritic']['threshold_to_consider'] == nav2['docking_handoff_goal_checker']['xy_goal_tolerance']
+    assert nav2['FollowPath']['GoalCritic']['threshold_to_consider'] == nav2['docking_handoff_goal_checker']['xy_goal_tolerance']
+    assert nav2['FollowPath']['CostCritic']['consider_footprint'] is True
+    assert nav2['FollowPath']['CostCritic']['collision_cost'] == 1000000.0
+    assert nav2['docking_handoff_goal_checker']['xy_goal_tolerance'] == (
+        json.loads(ROBOTS_PATH.read_text())['KMR']['base_control']['docking_slow_distance_m']
+    )
+    assert json.loads(ROBOTS_PATH.read_text())['KMR']['base_control']['position_tolerance_m'] == .005
 
 
 @pytest.mark.parametrize('invalid', [None, 'hardware', 'configuration', 'launch', 'scene',
@@ -2714,4 +3046,359 @@ def test_KMR_empty_waypoint_transport_requires_matching_simulation_evidence(inva
                            _arm_state_is_fresh=lambda: invalid != 'feedback',
                            _transport_custody=custody,
                            get_parameter=lambda name: SimpleNamespace(value=parameters[name]))
-    assert namespace['_arm_is_parked'](node) is (invalid is None)
+    assert namespace['_arm_is_parked'](node) is (invalid is None and not bypass)
+
+
+@pytest.mark.parametrize("failure", [None, "collision", "unavailable", "stale", "canceled", "timeout"])
+@pytest.mark.parametrize("distance", [.04, .4])
+def test_actual_base_sweep_checks_measured_arm_and_planning_scene_payload(failure, distance):
+    """Validate every selected pose and fail closed before publishing velocity."""
+    import ast
+    from typing import Any
+    from unittest.mock import Mock
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == "_validate_transport_sweeps")
+    requests, futures, consumed = [], [], []
+    clock = iter([0., 0., 2., 2.]) if failure == "timeout" else None
+
+    def call(query):
+        assert len(requests) - len(consumed) < 4
+        requests.append(query)
+        pose = query.robot_state.joint_state.position[-3:]
+        def result():
+            consumed.append(query)
+            return SimpleNamespace(
+                valid=not (failure == "collision" and pose[2] >= .025),
+                contacts=[SimpleNamespace(contact_body_1="iiwa_link_7", contact_body_2="M1")],
+            )
+
+        future = SimpleNamespace(done=lambda: failure != "timeout", result=result, cancel=Mock())
+        futures.append(future)
+        return future
+
+    node = SimpleNamespace(
+        transport_validity_client=SimpleNamespace(
+            service_is_ready=lambda: failure != "unavailable", call_async=call),
+        _state_stop_reason=lambda: "KMR odometry is stale" if failure == "stale" else None,
+        kmr={"arm_joint_names": ["joint_a1", "joint_a2"], "gripper_joint": "finger",
+             "task_execution": {"planning_group": "KMR_iiwa_arm"}},
+        _arm_positions={"joint_a1": .2, "joint_a2": -.4, "finger": .02},
+        _cancel_base_motion_requested=failure == "canceled",
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1000000000)),
+        _transport_custody={"part_name": "KET4_Square_4mm"},
+    )
+    namespace = {
+        "Any": Any, "math": math, "RobotState": SimpleNamespace, "JointState": SimpleNamespace,
+        "GetStateValidity": SimpleNamespace(Request=SimpleNamespace),
+        "BASE_STATE_JOINTS": kmr_base.BASE_STATE_JOINTS,
+        "interpolate_base_poses": kmr_base.interpolate_base_poses,
+        "time": SimpleNamespace(monotonic=lambda: next(clock) if clock else 0., sleep=lambda _: None),
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), "exec"), namespace)
+    sweep = ((0., 0., 0.), (distance, 0., .05))
+    validate = namespace["_validate_transport_sweeps"]
+    if failure:
+        errors = {"collision": "intersects geometry", "unavailable": "unavailable",
+                  "stale": "odometry is stale", "canceled": "canceled", "timeout": "timed out"}
+        with pytest.raises((ValueError, RuntimeError, TimeoutError), match=errors[failure]):
+            validate(node, (sweep,), timeout=1.)
+        if failure == "timeout":
+            assert all(future.cancel.call_count == 1 for future in futures)
+    else:
+        validate(node, (sweep,))
+        expected = [list(round(value, 8) for value in pose)
+                    for pose in kmr_base.interpolate_base_poses(sweep)]
+        assert len(requests) == len(expected)
+        assert [q.robot_state.joint_state.position[-3:] for q in requests] == expected
+        assert all(q.robot_state.is_diff and q.robot_state.joint_state.position[:3] == [.2, -.4, .02]
+                   for q in requests)
+        assert node._transport_clearance_status["held_part"] == "KET4_Square_4mm"
+        assert node._transport_clearance_status["checked_states"] == len(expected)
+
+
+@pytest.mark.parametrize('start,target,direct', [
+    ((-5.54, 3.1, math.pi / 2), (-2.70, 3.1, math.pi / 2), True),
+    ((-5.54, 2.13, math.pi / 2), (-2.70, 2.2, math.pi / 2), False),
+])
+def test_kmr_long_straight_selection_and_blocked_m1_route(start, target, direct):
+    """Keep the aisle heading and ask Nav2 when M1 blocks the direct line."""
+    import ast
+    from unittest.mock import Mock
+
+    route = _kmr_test_path(start, (-5.54, 3.1, math.pi / 2),
+                           (-2.70, 3.1, math.pi / 2), target)
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == '_compute_base_path')
+    namespace = dict(Any=object, math=math, normalize_angle=kmr_base.normalize_angle,
+                     NavPath=lambda: _kmr_test_path(), prepare_base_path=kmr_base.prepare_base_path,
+                     planar_pose=kmr_base.planar_pose,
+                     ComputePathToPose=SimpleNamespace(Goal=SimpleNamespace),
+                     GoalStatus=SimpleNamespace(STATUS_SUCCEEDED=4))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    node = SimpleNamespace(_check_motion=lambda _: start, _occupancy_map=_kmr_test_map(),
+        _validate_transport_sweeps=Mock(),
+        _pose_stamped=lambda pose: _kmr_test_path(pose).poses[0], get_logger=lambda: Mock(),
+        compute_path_client=object(),
+        _send_motion_goal=Mock(return_value=SimpleNamespace(get_result_async=lambda: object())),
+        _wait_motion_future=lambda *args: SimpleNamespace(status=4, result=SimpleNamespace(path=route)))
+    selected = namespace['_compute_base_path'](node, target, object())
+    poses = tuple(kmr_base.planar_pose(point.pose) for point in selected.poses)
+    assert kmr_base.base_path_is_clear(node._occupancy_map, poses)
+    assert bool(node._send_motion_goal.call_count) is not direct
+    assert all(pose[2] == pytest.approx(math.pi / 2) for pose in poses)
+    if direct:
+        assert max(pose[1] for pose in poses) == pytest.approx(3.1)
+        assert sum(math.dist(a[:2], b[:2]) for a, b in zip(poses, poses[1:])) == pytest.approx(2.84)
+    else:
+        assert not kmr_base.base_path_is_clear(node._occupancy_map, (start, target))
+
+
+def test_kmr_cached_map_matches_uncached_sweeps_and_refreshes():
+    """Index every occupied/unknown cell without changing footprint decisions."""
+    original = _kmr_test_map()
+    cached = kmr_base.cache_occupancy_map(original)
+    for x in (-9., -8.24, -6.65, -6., -3.25, -2.6, 0.):
+        for y in (0., 2.2, 3.1, 3.8):
+            for yaw in (0., .07, .72, math.pi / 2):
+                pose = ((x, y, yaw),)
+                assert kmr_base.base_path_is_clear(cached, pose) == kmr_base.base_path_is_clear(original, pose)
+    point = (-8.24, 3.1, math.pi / 2)
+    assert kmr_base.base_path_is_clear(cached, (point,))
+    info = original.info
+    index = int((point[1] - info.origin.position.y) / info.resolution) * info.width + int(
+        (point[0] - info.origin.position.x) / info.resolution)
+    data = list(original.data)
+    data[index] = -1
+    original.data = data
+    assert kmr_base.base_path_is_clear(cached, (point,))
+    assert not kmr_base.base_path_is_clear(kmr_base.cache_occupancy_map(original), (point,))
+
+
+@pytest.mark.parametrize('failure', [None, 'cancel_timeout', 'nav2_aborted', 'blocked_connector', 'stale'])
+def test_kmr_intermediate_stall_stops_nav2_before_checked_connection(failure):
+    """Recover the observed 11 cm stall without accepting an unchecked endpoint."""
+    import ast
+    import threading
+    from typing import Any
+    from unittest.mock import Mock
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == '_run_base_path')
+
+    class MoveGoal:
+        pass
+
+    class DockGoal:
+        pass
+
+    class PathGoal:
+        pass
+
+    clock = [0.0]
+    pose = [(0.0, 0.0, 0.0)]
+    target = (.11, 0.0, 0.0)
+    route = SimpleNamespace(poses=[SimpleNamespace(pose=pose[0]), SimpleNamespace(pose=target)])
+    events = []
+    finished = [False]
+    future = SimpleNamespace(done=lambda: finished[0],
+                             result=lambda: SimpleNamespace(status=6 if failure == 'nav2_aborted' else 5, result=None))
+    cancel = object()
+
+    def request_cancel():
+        events.append('cancel')
+        return cancel
+
+    def wait(result, _goal, _timeout):
+        if failure == 'cancel_timeout':
+            raise TimeoutError('Nav2 cancellation unavailable')
+        if result is future:
+            finished[0] = True
+            events.append('nav2_stopped')
+        return None
+
+    def check(_goal):
+        if failure == 'stale' and clock[0] >= .5:
+            raise ValueError('KMR odometry is stale')
+        return pose[0]
+
+    def align(finish, _goal, _index, **kwargs):
+        assert finished[0] and events[-1] == 'braked'
+        assert node._nav_goal_handle is None and node._nav_command is None
+        assert kwargs['position_tolerance'] == .06
+        assert kwargs['yaw_tolerance'] == .05
+        if failure == 'blocked_connector':
+            raise ValueError('KMR arm or payload sweep intersects geometry')
+        events.append('checked_connection')
+        pose[0] = (finish[0] - .05, finish[1], finish[2])
+
+    handle = SimpleNamespace(get_result_async=lambda: future, cancel_goal_async=request_cancel)
+    node = SimpleNamespace(
+        _occupancy_map=object(), path_pub=Mock(), _navigation_active=False,
+        _validate_transport_sweeps=Mock(), _check_motion=check,
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=int(clock[0]*1e9))),
+        _send_motion_goal=lambda *_args: handle, _wait_motion_future=wait,
+        follow_path_client=object(), docking_slow_distance=.2, position_tolerance=.005,
+        control_period=.1, _publish_base_feedback=Mock(),
+        _stop=lambda: events.append('stop'),
+        _wait_base_stopped=lambda _goal: events.append('braked'),
+        _align_base_pose=align, _lock=threading.Lock(),
+        _nav_command=object(), _nav_command_monotonic=0., _nav_goal_handle=handle,
+    )
+    namespace = {'Any': Any, 'math': math, 'normalize_angle': kmr_base.normalize_angle,
+                 'MoveBaseKMR': SimpleNamespace(Goal=MoveGoal),
+                 'DockKMR': SimpleNamespace(Goal=DockGoal),
+                 'FollowPath': SimpleNamespace(Goal=PathGoal),
+                 'GoalStatus': SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5),
+                 'planar_pose': lambda value: value,
+                 'prepare_base_path': lambda path, *_args: path,
+                 'split_base_path': lambda path: (path,),
+                 'simulation_elapsed': kmr_base.simulation_elapsed,
+                 'time': SimpleNamespace(sleep=lambda duration: clock.__setitem__(0, clock[0]+duration))}
+    exec(compile(ast.Module(body=[method], type_ignores=[]),
+                 str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    goal = SimpleNamespace(request=MoveGoal())
+    if failure:
+        with pytest.raises((TimeoutError, ValueError, RuntimeError)):
+            namespace['_run_base_path'](node, route, goal)
+        assert 'checked_connection' not in events
+    else:
+        namespace['_run_base_path'](node, route, goal)
+        assert events[:5] == ['cancel', 'nav2_stopped', 'stop', 'braked', 'checked_connection']
+        assert .005 < math.dist(pose[0][:2], target[:2]) <= .06
+        assert clock[0] < 2.0
+
+
+@pytest.mark.parametrize('intermediate', [True, False])
+def test_kmr_alignment_uses_intermediate_tolerance_and_preserves_final_precision(intermediate):
+    """An intermediate 5 cm error is acceptable; final docking still moves closer."""
+    import ast
+    import threading
+    from typing import Any
+    from unittest.mock import Mock
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == '_align_base_pose')
+    pose = [(0.05, 0., 0.)]
+    clock = [0.0]
+
+    class Twist:
+        def __init__(self):
+            self.linear = SimpleNamespace(x=0., y=0.)
+            self.angular = SimpleNamespace(z=0.)
+
+    node = SimpleNamespace(
+        position_tolerance=.005, yaw_tolerance=.035, _validate_transport_sweeps=Mock(),
+        _check_motion=lambda _goal: pose[0], _occupancy_map=object(),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=int(clock[0]*1e9))),
+        waypoint_timeout=30., docking_linear_speed=.4, docking_slow_distance=.2,
+        max_linear_speed=1.5, max_angular_speed=.5, _docking_speed_limit=lambda _remaining: .4,
+        docking_position_gain=4., _lock=threading.Lock(), _odom_velocity=(0., 0., 0.),
+        _last_output=(0., 0., 0.), control_period=.05, _nav_command=None,
+    )
+
+    def advance(duration):
+        clock[0] += duration
+        command = node._nav_command
+        pose[0] = (pose[0][0] + command.linear.x*duration,
+                   pose[0][1] + command.linear.y*duration, pose[0][2])
+
+    namespace = {'Any': Any, 'math': math, 'normalize_angle': kmr_base.normalize_angle,
+                 'simulation_elapsed': kmr_base.simulation_elapsed,
+                 'base_path_is_clear': Mock(return_value=True),
+                 'docking_velocity': kmr_base.docking_velocity, 'Twist': Twist,
+                 'MoveBaseKMR': SimpleNamespace(Feedback=SimpleNamespace),
+                 'DockKMR': SimpleNamespace(Feedback=SimpleNamespace), 'Pose2D': SimpleNamespace,
+                 'time': SimpleNamespace(sleep=advance, monotonic=lambda: clock[0])}
+    exec(compile(ast.Module(body=[method], type_ignores=[]),
+                 str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    kwargs = {'position_tolerance': .06, 'yaw_tolerance': .05} if intermediate else {}
+    namespace['_align_base_pose'](node, (0., 0., 0.), SimpleNamespace(publish_feedback=Mock()),
+                                  0, named=False, **kwargs)
+    node._validate_transport_sweeps.assert_called_once()
+    if intermediate:
+        assert pose[0][0] == .05 and node._nav_command is None
+    else:
+        assert pose[0][0] <= .005 and clock[0] > 0
+
+
+@pytest.mark.parametrize('part', list(json.loads(ROBOTS_PATH.read_text())['Storage']['slots']))
+def test_kmr_startup_uses_raised_configuration_independently_of_first_part(part):
+    """Spawn the same raised arm while retaining each selected pickup dock."""
+    import ast
+
+    payload = json.loads(ROBOTS_PATH.read_text())
+    tree = ast.parse(LAUNCH_PATH.read_text())
+    body = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'launch_setup').body
+    assignments = {n.targets[0].id: index for index, n in enumerate(body)
+                   if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
+    namespace = {'scene_config': payload, 'context': object(),
+                 'LaunchConfiguration': lambda *_args, **_kwargs: SimpleNamespace(perform=lambda _: part)}
+    exec(compile(ast.Module(body=body[assignments['kmr']:assignments['speed']], type_ignores=[]),
+                 str(LAUNCH_PATH), 'exec'), namespace)
+    assert namespace['initial_arm'] == payload['KMR']['parked_arm_configuration']
+    assert namespace['initial_arm'] != payload['Storage']['KMR_pick_arm_configurations'][part]
+    dock = payload['Storage']['KMR_pick_docking_poses'][part]
+    assert namespace['startup_pose'] == [*dock[:2], 0., 0., 0., dock[2]]
+
+
+def test_kmr_spawned_joint_values_resolve_to_raised_downward_tcp(models, monkeypatch):
+    """Check the actual URDF joint chain rather than just the configured label."""
+    from cais_spade_llm.recovery_framework.geometry import compose, quaternion, rotate
+
+    kmr = json.loads(ROBOTS_PATH.read_text())['KMR']
+    monkeypatch.setattr(scene.subprocess, 'check_output', lambda *_args, **_kwargs: models[2])
+    root = ET.fromstring(scene._build_kmr_description(
+        ROOT/'ros2/cais_lab_robotics', KMR_CONTROLLERS_PATH, kmr['parked_arm_configuration']))
+    positions = dict(zip(kmr['arm_joint_names'], kmr['parked_arm_configuration']))
+    for name, value in positions.items():
+        initial = root.find(f"ros2_control/joint[@name='{name}']/state_interface[@name='position']/param")
+        assert float(initial.text) == value
+    by_child = {j.find('child').get('link'): j for j in root.findall('joint')}
+    chain, link = [], kmr['task_execution']['tcp_link']
+    while link != 'KMR_base_link':
+        joint = by_child[link]
+        chain.append(joint)
+        link = joint.find('parent').get('link')
+    pose = [0., 0., 0., 0., 0., 0., 1.]
+    for joint in reversed(chain):
+        origin = joint.find('origin')
+        xyz = [float(v) for v in origin.get('xyz', '0 0 0').split()] if origin is not None else [0.]*3
+        rpy = [float(v) for v in origin.get('rpy', '0 0 0').split()] if origin is not None else [0.]*3
+        pose = compose(pose, [*xyz, *quaternion(rpy)])
+        if joint.get('type') in ('revolute', 'continuous'):
+            angle = positions[joint.get('name')]
+            axis = [float(v) for v in joint.find('axis').get('xyz').split()]
+            pose = compose(pose, [0., 0., 0., *(v*math.sin(angle/2) for v in axis), math.cos(angle/2)])
+    assert pose[:3] == pytest.approx(
+        kmr['task_execution']['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'], abs=1e-6)
+    assert rotate(pose[3:], [0., 0., 1.])[2] == pytest.approx(-1., abs=1e-7)
+
+
+@pytest.mark.parametrize('feedback', ['fresh', 'stale', 'wrong_position'])
+def test_kmr_initial_parking_observes_spawn_without_commanding_motion(feedback):
+    import ast
+    from unittest.mock import Mock
+
+    kmr = json.loads(ROBOTS_PATH.read_text())['KMR']
+    positions = dict(zip(kmr['arm_joint_names'], kmr['parked_arm_configuration']))
+    if feedback == 'wrong_position':
+        positions['joint_a2'] += .1
+    node = SimpleNamespace(
+        kmr=kmr, initial_arm_configuration=kmr['parked_arm_configuration'],
+        _initial_arm_parked=False, _arm_positions=positions, arm_parked_tolerance=.02,
+        _arm_state_is_fresh=lambda: feedback != 'stale', arm_parking_timer=Mock(),
+        arm_client=Mock(), get_logger=lambda: Mock())
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == '_ensure_initial_arm_parked')
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    namespace['_ensure_initial_arm_parked'](node)
+    assert node._initial_arm_parked is (feedback == 'fresh')
+    node.arm_client.send_goal_async.assert_not_called()
+    assert node.arm_parking_timer.cancel.called is (feedback == 'fresh')

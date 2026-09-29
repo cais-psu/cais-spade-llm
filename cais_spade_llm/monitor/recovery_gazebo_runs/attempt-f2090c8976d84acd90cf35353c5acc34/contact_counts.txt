@@ -1,0 +1,1 @@
+messages=645198 kmr_ground=645197 kmr_part=0 kmr_equipment=0 equipment_pairs=0 ur_equipment=0 ur_part=0 ur_robot=0

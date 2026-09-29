@@ -1,0 +1,29 @@
+from __future__ import annotations
+import json
+import sys
+from pathlib import Path
+
+from cais_spade_llm.product.environment import EnvironmentProductContext
+from cais_spade_llm.resources.environment_models import project_transition
+
+out = Path(sys.argv[1])
+run = json.loads((out / 'run_before_stop.json').read_text())
+context = EnvironmentProductContext(**run['inputs'], permitted_resources=run['permitted_resources'])
+errors = []
+previous = None
+for index, transition in enumerate(run['transitions']):
+    ack = transition['acknowledgement']
+    after, products = project_transition(run['models'], transition['before'], transition['product_before'], ack, context.product_name, context.requirements)
+    if after != transition['after']:
+        errors.append({'task_id': ack['task_id'], 'error': 'resource effects disagree'})
+    formal_products = lambda values: {name: {key: value for key, value in row.items() if key != 'last_task'} for name, row in values.items()}
+    if formal_products(products) != formal_products(transition['product_after']):
+        errors.append({'task_id': ack['task_id'], 'error': 'product effects disagree'})
+    if previous is not None and previous != transition['before']:
+        errors.append({'task_id': ack['task_id'], 'error': 'resource state chain is discontinuous'})
+    previous = transition['after']
+if previous != run['final_valuation']:
+    errors.append({'error': 'final resource valuation disagrees'})
+result = {'run_id': run['run_id'], 'completed_transitions': len(run['transitions']), 'errors': errors}
+(out / 'model_audit.json').write_text(json.dumps(result, indent=2))
+print(json.dumps(result, indent=2))

@@ -1,0 +1,261 @@
+{
+  "run_id": "5096f2ba7cd2409bacd171b575cec86e",
+  "accepted": true,
+  "program_revision": 4,
+  "changed_execution_sources_during_run": [],
+  "completed_transitions": 195,
+  "primitive_trace_errors": [],
+  "model_transition_errors": [],
+  "contact_counts": {
+    "messages": 803005,
+    "kmr_ground": 803004,
+    "kmr_part": 0,
+    "kmr_equipment": 0,
+    "equipment_pairs": 0
+  },
+  "elapsed_wall_time_sec": 1454.107274729,
+  "final_poses": {
+    "gear_small": {
+      "route": "initially preprinted",
+      "position_error_m": 6.553820556633137e-06,
+      "position_tolerance_m": 0.0005,
+      "upright_error_rad": 0.0010528513368560435,
+      "yaw_error_rad": 3.3239144385799335e-06,
+      "valid": true
+    },
+    "gear_medium": {
+      "route": "initially preprinted",
+      "position_error_m": 7.487046424181602e-06,
+      "position_tolerance_m": 0.0005,
+      "upright_error_rad": 0.00015000092264738835,
+      "yaw_error_rad": 2.2264197023114107e-05,
+      "valid": true
+    },
+    "gear_large": {
+      "route": "initially preprinted",
+      "position_error_m": 3.46774928078395e-05,
+      "position_tolerance_m": 0.0005,
+      "upright_error_rad": 0.0008962171357510917,
+      "yaw_error_rad": 0.0008129938432872575,
+      "valid": true
+    },
+    "KET4_Square_4mm": {
+      "route": "M1",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "KET8_Square_8mm": {
+      "route": "M1",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "KET12_Square_12mm": {
+      "route": "M1",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "KET16_Square_16mm": {
+      "route": "M1",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "RGOCG4-50_Round_4mm": {
+      "route": "M2",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "RGOCG8-50_8mm": {
+      "route": "M2",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "RGOCG12-50_12mm": {
+      "route": "M2",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    },
+    "RGOCG16-50_16mm": {
+      "route": "M2",
+      "position_error_m": 0.0,
+      "position_tolerance_m": 0.001,
+      "upright_error_rad": 0.0,
+      "yaw_error_rad": null,
+      "valid": true
+    }
+  },
+  "KMR_cartesian": {
+    "paths": 72,
+    "collision_samples": 9192,
+    "cartesian_samples": 9192,
+    "maximum_path_error_m": 4.297139703072205e-07,
+    "planned_arm_motion_sec": 224.94569730400002
+  },
+  "function_counts": [
+    {
+      "resource": "Buffer For Machined parts",
+      "event": "advance_part",
+      "completed": 24
+    },
+    {
+      "resource": "Conveyor",
+      "event": "advance_conveyor",
+      "completed": 16
+    },
+    {
+      "resource": "KMR",
+      "event": "move_to_resource",
+      "completed": 16
+    },
+    {
+      "resource": "KMR",
+      "event": "pick_approach",
+      "completed": 8
+    },
+    {
+      "resource": "KMR",
+      "event": "pick_part",
+      "completed": 8
+    },
+    {
+      "resource": "KMR",
+      "event": "place_approach",
+      "completed": 8
+    },
+    {
+      "resource": "KMR",
+      "event": "place_release",
+      "completed": 8
+    },
+    {
+      "resource": "M1",
+      "event": "machine_part",
+      "completed": 4
+    },
+    {
+      "resource": "M2",
+      "event": "machine_part",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-1",
+      "event": "move_home",
+      "completed": 5
+    },
+    {
+      "resource": "ur5e-1",
+      "event": "pick_approach",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-1",
+      "event": "pick_grasp",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-1",
+      "event": "place_approach",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-1",
+      "event": "place_release",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-2",
+      "event": "move_home",
+      "completed": 5
+    },
+    {
+      "resource": "ur5e-2",
+      "event": "pick_approach",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-2",
+      "event": "pick_grasp",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-2",
+      "event": "place_approach",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-2",
+      "event": "place_release",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-3",
+      "event": "move_home",
+      "completed": 9
+    },
+    {
+      "resource": "ur5e-3",
+      "event": "pick_approach",
+      "completed": 8
+    },
+    {
+      "resource": "ur5e-3",
+      "event": "pick_grasp",
+      "completed": 8
+    },
+    {
+      "resource": "ur5e-3",
+      "event": "place_approach",
+      "completed": 8
+    },
+    {
+      "resource": "ur5e-3",
+      "event": "place_insert",
+      "completed": 8
+    },
+    {
+      "resource": "ur5e-4",
+      "event": "move_home",
+      "completed": 4
+    },
+    {
+      "resource": "ur5e-4",
+      "event": "pick_approach",
+      "completed": 3
+    },
+    {
+      "resource": "ur5e-4",
+      "event": "pick_grasp",
+      "completed": 3
+    },
+    {
+      "resource": "ur5e-4",
+      "event": "place_approach",
+      "completed": 3
+    },
+    {
+      "resource": "ur5e-4",
+      "event": "place_insert",
+      "completed": 3
+    }
+  ]
+}

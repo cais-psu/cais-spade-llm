@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+import time
+import traceback
+from pathlib import Path
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT / 'cais_spade_llm'))
+from cais_spade_llm.ui.bridge import SystemBridge
+from cais_spade_llm.ui.recovery_setup import load_setup, validate_setup
+from cais_spade_llm.recovery_framework.environment_runtime import prepare_environment_start, record_environment_startup_ready
+from cais_spade_llm.recovery_framework.gazebo_recording import RecordingAttempt, X11Capture
+import cv2
+import numpy as np
+
+attempt = RecordingAttempt(ROOT / 'cais_spade_llm/monitor/recovery_gazebo_runs', record_simulation_clock=False)
+OUTPUT = attempt.directory
+Path('/tmp/cais_acceptance_output_path').write_text(str(OUTPUT))
+
+import hashlib
+import shutil
+scene = json.loads((ROOT / 'cais_spade_llm/initialization/recovery_framework_gazebo.json').read_text())
+source_paths = [
+    'cais_spade_llm/initialization/recovery_framework_gazebo.json',
+    'cais_spade_llm/resources/gazebo_programs.py',
+    'cais_spade_llm/resources/robot/cartesian_waypoints.py',
+    'cais_spade_llm/resources/robot/robot_task_runtime.py',
+    'cais_spade_llm/resources/robot/gazebo_pick_place_controller.py',
+    'cais_spade_llm/recovery_framework/kmr_gazebo.py',
+    'cais_spade_llm/recovery_framework/gazebo_recording.py',
+    'cais_spade_llm/initialization/recovery_framework_setup.json',
+    'cais_spade_llm/recovery_framework/kmr_tasks.py',
+    'cais_spade_llm/recovery_framework/kmr_primitives.py',
+    'cais_spade_llm/recovery_framework/kmr_agent.py',
+    'cais_spade_llm/recovery_framework/workflow_gazebo.py',
+    'cais_spade_llm/recovery_framework/environment_runtime.py',
+    'cais_spade_llm/resources/function_contracts.py',
+]
+source_paths += ['ros2/cais_lab_robotics/' + path for path in scene['KMR']['task_execution']['scene_assets']]
+(OUTPUT / 'verification_sources.json').write_text(json.dumps({
+    'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+    'source_sha256': {path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest() for path in source_paths},
+    'catalog_counts': {rid: len(row['primitives']) for rid, row in scene['resource_programs']['resources'].items()},
+}, indent=2))
+shutil.copyfile(Path(__file__), OUTPUT / 'cais_structured_run.py.txt')
+shutil.copyfile(ROOT / 'cais_spade_llm/initialization/recovery_framework_gazebo.json', OUTPUT / 'scene.json')
+shutil.copyfile(Path('/tmp/cais_compact_commissioning.py'), OUTPUT / 'cais_compact_commissioning.py.txt')
+for name in ['cais_kmr_contact_monitor.cpp', 'cais_audit_run.py', 'cais_model_run_audit.py', 'cais_raised_acceptance_audit.py']:
+    shutil.copyfile(Path('/tmp') / name, OUTPUT / (name + '.txt'))
+
+shutil.copytree(Path('/tmp/cais-raised-start-baseline'), OUTPUT / 'previous_run_baseline')
+for name in ['focused', 'suite', 'poetry-check', 'compile', 'cli-help', 'bootstrap']:
+    path = Path('/tmp') / f'cais-raised-{name}.log'
+    if path.exists():
+        shutil.copyfile(path, OUTPUT / path.name)
+from cais_spade_llm.recovery_framework.gazebo_worker import GazeboWorker
+_original_worker_run = GazeboWorker.run
+
+async def record_startup_probe(self, request):
+    result = await _original_worker_run(self, request)
+    if self.label == 'KMR' and request.get('mode') == 'probe':
+        (OUTPUT / 'startup_probe.json').write_text(json.dumps(result, indent=2))
+    return result
+
+GazeboWorker.run = record_startup_probe
+
+def report(stage, **fields):
+    value = {'stage': stage, 'time': time.time(), **fields}
+    print(json.dumps(value, default=str), flush=True)
+    with (OUTPUT / 'progress.jsonl').open('a') as stream:
+        stream.write(json.dumps(value, default=str)+'\n')
+
+def snapshot_render(stage):
+    path = OUTPUT / f'{stage}_frame.png'
+    child = (
+        "import cv2, numpy as np, sys\n"
+        "from cais_spade_llm.recovery_framework.gazebo_recording import X11Capture\n"
+        "camera = X11Capture()\n"
+        "frame = camera.frame()\n"
+        "camera.close()\n"
+        "gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)\n"
+        "if float(np.percentile(gray, 95) - np.percentile(gray, 5)) < 20:\n"
+        "    raise RuntimeError('Gazebo client frame has not rendered the scene')\n"
+        "if not cv2.imwrite(sys.argv[1], frame):\n"
+        "    raise RuntimeError('Cannot save Gazebo frame')\n"
+    )
+    failure = ''
+    for _ in range(5):
+        completed = subprocess.run([sys.executable, '-c', child, str(path)],
+                                   cwd=ROOT, capture_output=True, text=True, timeout=15)
+        if completed.returncode == 0:
+            frame = cv2.imread(str(path))
+            report('render_frame', stage_name=stage, path=str(path), size=list(frame.shape))
+            return
+        failure = completed.stderr[-500:]
+        time.sleep(2)
+    raise RuntimeError(f'Gazebo frame capture failed: {failure}')
+
+
+def check_robot_links():
+    links = {}
+    for model, expected in (
+        ('dual_robot', ['ur5e_1_', 'ur5e_2_', 'ur5e_3_', 'ur5e_4_']),
+        ('KMR', ['iiwa_link_7']),
+    ):
+        output = subprocess.check_output(['gz', 'model', '-m', model, '-i'], text=True, timeout=35)
+        (OUTPUT / f'{model}_gazebo_links.txt').write_text(output)
+        for name in expected:
+            links[name] = name in output
+    (OUTPUT / 'robot_link_check.json').write_text(json.dumps(links, indent=2))
+    if not all(links.values()):
+        raise RuntimeError(f'Gazebo robot links missing: {links}')
+    return links
+
+
+def observe_parts(controller, parts, geometry):
+    observations = {}
+    board = geometry['assembly_board']
+    for part in [*parts, 'KMR']:
+        result = controller._wait_future(controller._get_state_client.call_async(
+            controller._GetEntityState.Request(name=part, reference_frame='world')),
+            timeout_sec=5., label='acceptance final pose')
+        if result is None or not result.success:
+            observations[part] = {'valid': False, 'error': 'No measured Gazebo pose'}
+            continue
+        p, q = result.state.pose.position, result.state.pose.orientation
+        row = {'pose': [p.x, p.y, p.z, q.x, q.y, q.z, q.w]}
+        if part in parts:
+            target = [*board['slots'][part], board['target_origin_z_m'][part]]
+            bounds = board.get('mating_contact_by_part', {}).get(part, {})
+            tolerance = bounds.get('axis_tolerance_m', .001)
+            row.update(target=target, tolerance_m=tolerance,
+                       position_error_m=math.dist(row['pose'][:3], target))
+            row['valid'] = row['position_error_m'] <= tolerance
+            if 'target_yaw_rad' in bounds:
+                yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+                error = math.atan2(math.sin(yaw-bounds['target_yaw_rad']), math.cos(yaw-bounds['target_yaw_rad']))
+                row['yaw_error_rad'] = abs(error)
+                row['valid'] &= abs(error) <= bounds['yaw_tolerance_rad']
+        observations[part] = row
+    return observations
+
+# Record shutdown authority without changing controller cancellation behavior.
+import rclpy.context
+from functools import wraps
+
+def audit_context_shutdown(method):
+    @wraps(method)
+    def audited(self, *args, **kwargs):
+        report('ros_context_shutdown', method=method.__name__, pid=os.getpid(),
+               traceback=traceback.format_stack())
+        return method(self, *args, **kwargs)
+    return audited
+
+for method in ('shutdown', 'try_shutdown'):
+    setattr(rclpy.context.Context, method, audit_context_shutdown(getattr(rclpy.context.Context, method)))
+
+def interrupted(signum, frame):
+    report('process_signal', signal=signal.Signals(signum).name, pid=os.getpid(),
+           traceback=traceback.format_stack(frame))
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
+
+from cais_compact_commissioning import install_commissioning_check
+install_commissioning_check(OUTPUT)
+
+async def main():
+    setup = load_setup()
+    (OUTPUT / 'setup.json').write_text(json.dumps(setup, indent=2))
+    checked = validate_setup(setup)
+    assert len(checked['selected_parts']) == 11, checked['selected_parts']
+    report('setup_validated', output=str(OUTPUT), parts=checked['selected_parts'])
+    bridge = SystemBridge.instance()
+    bridge.ROS2_LAUNCH_CMDS = dict(bridge.ROS2_LAUNCH_CMDS)
+    bridge.ROS2_LAUNCH_CMDS['gazebo_dual'] += ' launch_gazebo_gui:=false gazebo_gui_rate_hz:=15'
+    bridge.selected_product = setup['selected_product']
+    bridge.selected_product_order_file = setup['selected_product_order_file']
+    bridge.selected_requirement_file = ''
+    bridge.selected_safety_file = setup['selected_safety_file']
+    bridge.set_active_bundle(None)
+    bridge.set_runtime_recovery_mode(setup['runtime_recovery_mode'])
+    bridge.set_runtime_recovery_validation_policy(setup['runtime_recovery_validation_policy'])
+    bridge.set_runtime_recovery_archive_selection(setup['runtime_recovery_archive_path'], setup['runtime_recovery_archive_label'])
+    result, monitor, client, client_log = {'status': 'starting'}, None, None, None
+    started = time.monotonic()
+    try:
+        error = await asyncio.to_thread(bridge.ros2_start, 'gazebo_dual')
+        report('gazebo_launch', error=error)
+        if error:
+            result = {'status': 'launch_failed', 'error': error}
+            return
+        deadline = time.monotonic()+300
+        last_reason = None
+        while time.monotonic() < deadline:
+            ready, reason = await asyncio.to_thread(bridge.simulation_start_ready, True)
+            if ready:
+                report('gazebo_ready')
+                break
+            if reason != last_reason:
+                report('gazebo_wait', reason=reason)
+                last_reason = reason
+            await asyncio.sleep(5)
+        else:
+            result = {'status': 'readiness_failed', 'reason': last_reason}
+            return
+        check_robot_links()
+        await asyncio.to_thread(prepare_environment_start, setup, prewarm_controllers=True,
+                                launch_identity=bridge._simulation_launch_key(), requested_at_unix=time.time(),
+                                diagnostic_cca_bypass=setup.get('diagnostic_cca_bypass', False))
+        installed_share = Path.home() / 'ros2_ws/install/cais_lab_robotics/share/cais_lab_robotics'
+        if not (installed_share / 'models/KMR').exists():
+            raise RuntimeError('Installed KMR visual meshes are unavailable')
+        client_env = os.environ.copy()
+        client_env['GAZEBO_MODEL_PATH'] = ':'.join((
+            str(installed_share.parent), str(installed_share), str(installed_share / 'models'),
+            client_env.get('GAZEBO_MODEL_PATH', ''),
+        ))
+        client_env['MESA_D3D12_DEFAULT_ADAPTER_NAME'] = 'NVIDIA'
+        client_env['LIBGL_ALWAYS_SOFTWARE'] = '0'
+        client_log = (OUTPUT / 'gazebo_client.log').open('w')
+        client = subprocess.Popen(['gzclient', '--gui-client-plugin=libgazebo_ros_eol_gui.so'],
+                                  env=client_env, stdout=client_log, stderr=client_log,
+                                  start_new_session=True)
+        await asyncio.sleep(20)
+        render_deadline = time.monotonic() + 120
+        while time.monotonic() < render_deadline:
+            if client.poll() is not None:
+                raise RuntimeError('Gazebo client exited before visual preflight')
+            try:
+                snapshot_render('preflight')
+                break
+            except RuntimeError:
+                await asyncio.sleep(2)
+        else:
+            raise RuntimeError('Gazebo client window did not appear')
+        report('render_preflight_waiting', marker=str(OUTPUT / 'render_approved'))
+        render_deadline = time.monotonic() + 900
+        while not (OUTPUT / 'render_approved').exists() and time.monotonic() < render_deadline:
+            if client.poll() is not None:
+                raise RuntimeError('Gazebo client closed while awaiting visual preflight')
+            await asyncio.sleep(2)
+        if not (OUTPUT / 'render_approved').exists():
+            raise RuntimeError('Gazebo visual preflight was not approved')
+        snapshot_render('approved')
+        monitor = subprocess.Popen(['/tmp/cais_kmr_contact_monitor', str(OUTPUT)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        await asyncio.sleep(2)
+        attempt.start()
+        await bridge.start_system()
+        report('system_started', running=bridge.system_running, error=bridge.last_error)
+        if not bridge.system_running:
+            result = {'status': 'start_failed', 'error': bridge.last_error}
+            return
+        record_environment_startup_ready(bridge)
+        deadline = time.monotonic()+7200
+        previous = None
+        middle_frame = False
+        while time.monotonic() < deadline:
+            runtimes = [product.environment_runtime for product in bridge.product_agents
+                        if getattr(product, 'environment_runtime', None) is not None]
+            snapshots = [{'outcome': runtime.outcome, 'part_tracker': runtime.context.part_tracker,
+                          'run_id': runtime.context.run_id, 'revision': runtime.context.revision}
+                         for runtime in runtimes]
+            status = [(s['outcome'].get('status'), sum(s['part_tracker'][part]['state']=='assembled'
+                       for part in checked['selected_parts'])) for s in snapshots]
+            if status != previous:
+                report('workflow', status=status, transitions=[s['revision'] for s in snapshots])
+                previous = status
+            if not middle_frame and snapshots and max(s['revision'] for s in snapshots) >= 80:
+                snapshot_render('during_motion')
+                middle_frame = True
+            attempt.check()
+            if client is None or client.poll() is not None:
+                raise RuntimeError('Gazebo client exited during workflow capture')
+            if snapshots and all(s['outcome'].get('status') in {'completed','blocked','execution_unavailable','stopped'} for s in snapshots):
+                result = {'status':'finished','products':snapshots}
+                runtime = runtimes[0]
+                await asyncio.to_thread(runtime.save)
+                (OUTPUT/'run_before_stop.json').write_bytes((ROOT/'cais_spade_llm/monitor/environment_runs/latest/run.json').read_bytes())
+                controllers = [getattr(agent, '_controller', None) for agent in bridge.resource_agents]
+                controller = next((item for item in controllers if item is not None and getattr(item, '_get_state_client', None)), None)
+                if controller is not None:
+                    result['final_poses'] = await asyncio.to_thread(observe_parts, controller, checked['selected_parts'], runtime.context.inputs['geometry'])
+                snapshot_render('final')
+                break
+            await asyncio.sleep(5)
+        else:
+            result = {'status':'timeout','products':snapshots}
+    except BaseException as exc:
+        result = {'status':'exception','error':repr(exc),'traceback':traceback.format_exc()}
+        report('exception', error=repr(exc))
+    finally:
+        try:
+            if monitor is not None:
+                try:
+                    os.killpg(monitor.pid, signal.SIGTERM)
+                    await asyncio.to_thread(monitor.wait, 5)
+                except ProcessLookupError:
+                    pass
+                except subprocess.TimeoutExpired:
+                    os.killpg(monitor.pid, signal.SIGKILL)
+                contact_file = OUTPUT/'contact_counts.txt'
+                if contact_file.exists():
+                    result['contact_counts'] = {k:int(v) for k,v in (item.split('=',1) for item in contact_file.read_text().split())}
+            counts = result.get('contact_counts',{})
+            result['acceptance_passed'] = bool(
+                result.get('status') == 'finished' and
+                all(product['outcome'].get('status') == 'completed' for product in result.get('products',[])) and
+                counts.get('messages',0)>0 and counts.get('kmr_equipment')==0 and
+                (OUTPUT/'ur5e-4_pick_rotation_checks.jsonl').is_file() and
+                len((OUTPUT/'ur5e-4_pick_rotation_checks.jsonl').read_text().splitlines()) == 3 and
+                all(json.loads(line)['valid'] for line in (OUTPUT/'ur5e-4_pick_rotation_checks.jsonl').read_text().splitlines()) and
+                all(result.get('final_poses',{}).get(part,{}).get('valid') for part in checked['selected_parts']))
+            result['simulation'] = setup['simulation']
+            result['elapsed_wall_time_sec'] = time.monotonic()-started
+            result['diagnostic_cca_bypass'] = setup.get('diagnostic_cca_bypass', False)
+            result['ur_cartesian_avoid_collisions'] = {robot['resource_id']: robot['cartesian_motion']['avoid_collisions'] for robot in scene['robots']}
+            result['kmr_base_collision_checks'] = True
+            (OUTPUT/'result.json').write_text(json.dumps(result,indent=2,default=str))
+            report('result_written',path=str(OUTPUT/'result.json'),passed=result['acceptance_passed'])
+            try:
+                if attempt.process is not None:
+                    attempt.finish()
+                if result['acceptance_passed'] and (OUTPUT / 'run_before_stop.json').exists():
+                    (OUTPUT / 'run.json').write_bytes((OUTPUT / 'run_before_stop.json').read_bytes())
+                    for audit_script in ('cais_audit_run.py', 'cais_model_run_audit.py'):
+                        completed = subprocess.run([sys.executable, str(OUTPUT / (audit_script + '.txt')), str(OUTPUT)],
+                                                   cwd=ROOT, text=True, capture_output=True, timeout=120)
+                        (OUTPUT / f'{audit_script}.log').write_text(completed.stdout + completed.stderr)
+                        if completed.returncode:
+                            raise RuntimeError(f'{audit_script} failed: {completed.stderr[-1000:]}')
+                    completed = subprocess.run([sys.executable, str(OUTPUT / 'cais_raised_acceptance_audit.py.txt')],
+                                               cwd=ROOT, text=True, capture_output=True, timeout=120)
+                    (OUTPUT / 'cais_final_acceptance_audit.py.log').write_text(completed.stdout + completed.stderr)
+                    if completed.returncode:
+                        raise RuntimeError(f'Final audit failed: {completed.stderr[-1000:]}')
+                    audit = json.loads((OUTPUT / 'acceptance_audit.json').read_text())
+                    if not audit['accepted'] or not (OUTPUT / 'render_approved').exists():
+                        raise RuntimeError('Final physical, trace, model, or render audit failed')
+                    report('video_render_waiting', marker=str(OUTPUT / 'video_render_approved'))
+                    render_deadline = time.monotonic() + 900
+                    while not (OUTPUT / 'video_render_approved').exists() and time.monotonic() < render_deadline:
+                        await asyncio.sleep(2)
+                    if not (OUTPUT / 'video_render_approved').exists():
+                        raise RuntimeError('Recorded robot visibility was not verified')
+                    success = attempt.promote({
+                        'validated': True, 'run_id': audit['run_id'], 'accepted': True,
+                        'placements': len(audit['final_poses']), 'program_revision': audit['program_revision'],
+                        'diagnostic_cca_bypass': result['diagnostic_cca_bypass'],
+                        'ur_cartesian_avoid_collisions': result['ur_cartesian_avoid_collisions'],
+                        'kmr_base_collision_checks': True,
+                        'kmr_equipment_contacts': audit['contact_counts']['kmr_equipment'],
+                        'render_checks': ['preflight_frame.png', 'approved_frame.png', 'during_motion_frame.png', 'final_frame.png'],
+                        'visual_evidence': 'visual_evidence.json',
+                    })
+                    report('recording_promoted', success=success)
+                else:
+                    attempt.cancel()
+            except Exception as error:
+                attempt.cancel()
+                report('recording_validation_failed', error=repr(error))
+                result['recording_error'] = repr(error)
+                (OUTPUT / 'result.json').write_text(json.dumps(result,indent=2,default=str))
+        finally:
+            try:
+                if bridge.system_running:
+                    await bridge.stop_system()
+            finally:
+                if client is not None and client.poll() is None:
+                    os.killpg(client.pid, signal.SIGTERM)
+                    try:
+                        await asyncio.to_thread(client.wait, 10)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(client.pid, signal.SIGKILL)
+                if client_log is not None:
+                    client_log.close()
+                await asyncio.to_thread(bridge.ros2_stop,'gazebo_dual')
+                prepare_environment_start(None)
+
+asyncio.run(main())

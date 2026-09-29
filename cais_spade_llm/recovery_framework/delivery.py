@@ -15,6 +15,7 @@ from uuid import uuid4
 from cais_spade_llm.product.nominal import NominalProductContext
 from cais_spade_llm.recovery_framework import ROOT, fingerprint
 from cais_spade_llm.recovery_framework.reports import LatestReport
+from cais_spade_llm.resources.gazebo_programs import current_program_revision, resource_program_revision
 
 ORDER_PATH = ROOT / 'cais_spade_llm/specification/products/orders/assembly_board-v1-kmr-storage-m1.json'
 RUN_DIRECTORY = ROOT / 'cais_spade_llm/monitor/recovery_gazebo_runs'
@@ -152,8 +153,8 @@ def record_preparation_failure(snapshot: dict, failure: BaseException) -> Path:
     return store.path/'run.json'
 
 
-def validate_execution_evidence(ack: dict) -> None:
-    """Reject incomplete or unsuccessful KMR delivery observations."""
+def validate_execution_evidence(ack: dict, *, scene: dict | None = None) -> None:
+    """Reject incomplete KMR delivery observations and unsaved primitive traces."""
     if not isinstance(ack, dict) or ack.get('evidence') != 'gazebo' or ack.get('status') != 'completed':
         raise ValueError('Expected a completed Gazebo acknowledgement')
     observation = ack.get('observations', {})
@@ -163,8 +164,12 @@ def validate_execution_evidence(ack: dict) -> None:
         raise ValueError('Only KMR delivery execution is integrated')
     name = ack.get('event_name')
     requirements = {
+        'pick_approach': {'part_location': 'Storage', 'attached': False,
+                          'approach_observed': True, 'resource_location': 'Storage'},
         'pick_part': {'part_location': 'KMR', 'attached': True, 'arm_parked': True},
         'move_to_resource': {'part_location': 'KMR', 'attached': True, 'arm_parked': True, 'resource_location': 'M1'},
+        'place_approach': {'part_location': 'KMR', 'attached': True,
+                           'approach_observed': True, 'resource_location': 'M1'},
         'place_release': {'part_location': 'M1', 'attached': False, 'robot_clear': True},
     }
     if name not in requirements:
@@ -178,8 +183,11 @@ def validate_execution_evidence(ack: dict) -> None:
     primitives = observation.get('primitive_results')
     if primitives is not None:
         from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
+        from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
 
-        expected = KMR_TASKS[name].program.steps
+        expected = (saved_robot_definition(scene, 'KMR', name).program.steps
+                    if isinstance(scene, dict) and 'resource_programs' in scene
+                    else KMR_TASKS[name].program.steps)
         if (not isinstance(primitives, list)
                 or not all(isinstance(row, dict) for row in primitives)
                 or [(row.get('step_id'), row.get('primitive')) for row in primitives]
@@ -197,6 +205,9 @@ class DeliveryRuntime:
         self.agent = agent
         self.prepared = deepcopy(prepared)
         self.context = NominalProductContext(**prepared['inputs'])
+        scene = self.context.inputs['scene']
+        self.program_revision = resource_program_revision(scene) if 'resource_programs' in scene else ''
+        self.scene_file = prepared.get('setup', {}).get('scene_file', '')
         if not is_delivery_order(self.context.product_order):
             raise ValueError('Gazebo delivery requires the supported Storage-to-M1 order')
         self.actor = next(resource for resource in resources if resource.agent_name == 'KMR')
@@ -227,8 +238,16 @@ class DeliveryRuntime:
                     'resource_jid': str(self.actor.jid), 'sequence_index': index-1,
                     'status': 'pending', 'predecessors': [nodes[-1]['id']] if nodes else [],
                     'successors': [], 'nominal_task': task,
-                    'in_state': 'idle' if index == 1 else 'carrying',
-                    'out_state': 'idle' if task['event_name'] == 'place_release' else 'carrying'}
+                    'in_state': {
+                        'pick_approach': 'idle', 'pick_part': 'at_pick',
+                        'move_to_resource': 'carrying', 'place_approach': 'carrying',
+                        'place_release': 'positioned',
+                    }[task['event_name']],
+                    'out_state': {
+                        'pick_approach': 'at_pick', 'pick_part': 'carrying',
+                        'move_to_resource': 'carrying', 'place_approach': 'positioned',
+                        'place_release': 'idle',
+                    }[task['event_name']]}
             if nodes:
                 nodes[-1]['successors'].append(node['id'])
             nodes.append(node)
@@ -243,6 +262,9 @@ class DeliveryRuntime:
         """Revalidate the shared valuation immediately before task dispatch."""
         check_stopped()
         verify_configuration(self.prepared)
+        if self.program_revision and self.scene_file:
+            if current_program_revision(ROOT / self.scene_file) != self.program_revision:
+                raise ValueError('Stale Gazebo program revision')
         if self.stopped:
             raise ValueError('Delivery is stopped')
         pending = self.context.prepare(node['nominal_task'], task_id=node['id'])

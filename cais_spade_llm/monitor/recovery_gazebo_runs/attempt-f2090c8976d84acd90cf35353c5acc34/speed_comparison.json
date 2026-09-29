@@ -1,0 +1,784 @@
+{
+  "previous": {
+    "directory": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd",
+    "run_id": "82cb3858f1a94394a8f846a0b6831cf3",
+    "accepted": true,
+    "placements": 11,
+    "transitions": 195,
+    "kmr_equipment_contacts": 0,
+    "video_duration_sec": 1265.7333333333333,
+    "preview_duration_sec": 126.6,
+    "base_action_count": 22,
+    "base_wall_time_sec": 558.1499740839972,
+    "base_simulation_time_sec": 259.3,
+    "base_heading_change_deg": 100.29414171770847,
+    "arm_planning_wall_time_sec": 95.48513715400077,
+    "arm_controller_wall_time_sec": 366.1260026999971,
+    "arm_controller_simulation_time_sec": 200.20000000000013,
+    "base_simulation_rate": 0.46457047754153863,
+    "M1": {
+      "count": 4,
+      "mean_wall_time_sec": 28.967094311750316,
+      "mean_function_wall_time_sec": 29.551608454499956,
+      "mean_simulation_time_sec": 10.199999999999994,
+      "mean_heading_change_deg": 7.789619152976563
+    },
+    "M2": {
+      "count": 4,
+      "mean_wall_time_sec": 50.110811428999796,
+      "mean_function_wall_time_sec": 50.670719300250084,
+      "mean_simulation_time_sec": 22.00000000000001,
+      "mean_heading_change_deg": 7.155023660214854
+    },
+    "Storage": {
+      "count": 8,
+      "mean_wall_time_sec": 24.340992708874637,
+      "mean_function_wall_time_sec": 24.839151217750214,
+      "mean_simulation_time_sec": 13.250000000000007,
+      "mean_heading_change_deg": 4.454960002946282
+    },
+    "ur5e-4_pick_approach": [
+      {
+        "part": "gear_small",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 14.019929210000555,
+          "simulation_time_sec": 1.5,
+          "planning_wall_time_sec": 0.38290536500062444,
+          "trajectory_duration_sec": 1.405700283,
+          "real_time_factor": 0.10699055448368705,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994294962899359,
+          -0.4999780597724763,
+          1.501115923392241,
+          0.4492787350135195,
+          0.8933909799552057,
+          0.0010008923068969106,
+          0.00041642996902527274
+        ],
+        "target_pose": [
+          0.44,
+          -0.58,
+          1.5011051888169271,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.09967635658612319,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 19,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.5187888860017685,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      },
+      {
+        "part": "gear_medium",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 12.368046942000547,
+          "simulation_time_sec": 2.0,
+          "planning_wall_time_sec": 2.240267125999708,
+          "trajectory_duration_sec": 1.6901082130000002,
+          "real_time_factor": 0.16170701885098906,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994344502876791,
+          -0.4999794438596087,
+          1.5011158293339522,
+          -0.7070754589145771,
+          0.7071380780619533,
+          -0.00018284033067207734,
+          -2.2912893265226937e-05
+        ],
+        "target_pose": [
+          0.44,
+          -0.5,
+          1.5011158293335387,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.05943445384247678,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 32,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.45471828152737814,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      },
+      {
+        "part": "gear_large",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 6.228118666999762,
+          "simulation_time_sec": 1.8999999999999915,
+          "planning_wall_time_sec": 0.3131936370000403,
+          "trajectory_duration_sec": 1.638784372,
+          "real_time_factor": 0.3050680472848582,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994344494186433,
+          -0.4999794454626384,
+          1.501115830516562,
+          -0.7069206892341112,
+          0.7072928103532313,
+          -0.00012836488126972612,
+          -5.547841318506808e-05
+        ],
+        "target_pose": [
+          0.4403,
+          -0.4198,
+          1.5011158305165084,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.09962743890486336,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 32,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.4062393931996443,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      }
+    ]
+  },
+  "current": {
+    "directory": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34",
+    "run_id": "2a18a5d1ee544380b6ed6be402e43839",
+    "accepted": true,
+    "placements": 11,
+    "transitions": 195,
+    "kmr_equipment_contacts": 0,
+    "video_duration_sec": 1272.6,
+    "preview_duration_sec": 127.26666666666667,
+    "base_action_count": 22,
+    "base_wall_time_sec": 559.3452663600056,
+    "base_simulation_time_sec": 261.1,
+    "base_heading_change_deg": 96.28677595821298,
+    "arm_planning_wall_time_sec": 107.36522783500914,
+    "arm_controller_wall_time_sec": 348.57383481400757,
+    "arm_controller_simulation_time_sec": 198.89999999999992,
+    "home_steps": [
+      {
+        "task_id": "environment_24",
+        "wall_time_sec": 0.0023370250000880333,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_48",
+        "wall_time_sec": 0.007380060000286903,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_69",
+        "wall_time_sec": 0.0029224440004327334,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_92",
+        "wall_time_sec": 0.0062403819993051,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_114",
+        "wall_time_sec": 0.011679772000206867,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_135",
+        "wall_time_sec": 0.013705315999686718,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_158",
+        "wall_time_sec": 0.011092615000961814,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      },
+      {
+        "task_id": "environment_180",
+        "wall_time_sec": 0.007309178001378314,
+        "arm_trajectories": 0,
+        "planned_paths": 0,
+        "observed_parked": true
+      }
+    ],
+    "base_actions": [
+      {
+        "function": "move_to_resource",
+        "part": "KET4_Square_4mm",
+        "source": "Storage",
+        "destination": "M1",
+        "wall_time_sec": 20.50788773699969,
+        "function_wall_time_sec": 20.768128084000637,
+        "simulation_time_sec": 4.300000000000004,
+        "heading_change_deg": 0.6682247020864129,
+        "distance_m": 0.837996140935619,
+        "final_error_m": 0.004855594675242062,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M1",
+        "destination": "Storage",
+        "wall_time_sec": 9.655559090999304,
+        "function_wall_time_sec": 11.612370622999151,
+        "simulation_time_sec": 4.700000000000003,
+        "heading_change_deg": 0.969480662157919,
+        "distance_m": 0.8333030905554875,
+        "final_error_m": 0.004706663988962712,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "RGOCG4-50_Round_4mm",
+        "source": "Storage",
+        "destination": "M2",
+        "wall_time_sec": 37.024420666999504,
+        "function_wall_time_sec": 37.57062775700069,
+        "simulation_time_sec": 19.200000000000003,
+        "heading_change_deg": 7.646266345189087,
+        "distance_m": 4.600787851864807,
+        "final_error_m": 0.004596340884822754,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M2",
+        "destination": "Storage",
+        "wall_time_sec": 49.31976024400137,
+        "function_wall_time_sec": 50.108260372000586,
+        "simulation_time_sec": 22.799999999999983,
+        "heading_change_deg": 8.578486178525369,
+        "distance_m": 4.608993070051505,
+        "final_error_m": 0.00476645806522904,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "pick_approach",
+        "part": "KET8_Square_8mm",
+        "source": null,
+        "destination": null,
+        "wall_time_sec": 8.633483890998832,
+        "function_wall_time_sec": 15.130471377999129,
+        "simulation_time_sec": 3.1999999999999886,
+        "heading_change_deg": 0.5355326691445427,
+        "distance_m": 0.27932207297352457,
+        "final_error_m": 0.004664446227486409,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "KET8_Square_8mm",
+        "source": "Storage",
+        "destination": "M1",
+        "wall_time_sec": 21.67811935700047,
+        "function_wall_time_sec": 22.18677851299981,
+        "simulation_time_sec": 10.199999999999989,
+        "heading_change_deg": 7.7246009716802675,
+        "distance_m": 1.1071722394604178,
+        "final_error_m": 0.004578557715295465,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M1",
+        "destination": "Storage",
+        "wall_time_sec": 6.7718170050011395,
+        "function_wall_time_sec": 7.090381867999895,
+        "simulation_time_sec": 5.0,
+        "heading_change_deg": 0.5759410586000362,
+        "distance_m": 0.8353777837790305,
+        "final_error_m": 0.004768731057019026,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "pick_approach",
+        "part": "RGOCG8-50_8mm",
+        "source": null,
+        "destination": null,
+        "wall_time_sec": 5.772439051001129,
+        "function_wall_time_sec": 9.452396406000844,
+        "simulation_time_sec": 3.0999999999999943,
+        "heading_change_deg": 0.5032525536249333,
+        "distance_m": 0.28576077823818957,
+        "final_error_m": 0.004611337819192747,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "RGOCG8-50_8mm",
+        "source": "Storage",
+        "destination": "M2",
+        "wall_time_sec": 34.82650640400061,
+        "function_wall_time_sec": 35.41818167499878,
+        "simulation_time_sec": 19.30000000000001,
+        "heading_change_deg": 6.430950062404338,
+        "distance_m": 4.316751733471351,
+        "final_error_m": 0.004524772548730139,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M2",
+        "destination": "Storage",
+        "wall_time_sec": 24.6696860510001,
+        "function_wall_time_sec": 25.19067183399966,
+        "simulation_time_sec": 18.400000000000034,
+        "heading_change_deg": 8.197290092218042,
+        "distance_m": 4.605999623192708,
+        "final_error_m": 0.004596927459084141,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "pick_approach",
+        "part": "KET12_Square_12mm",
+        "source": null,
+        "destination": null,
+        "wall_time_sec": 4.744065502000012,
+        "function_wall_time_sec": 8.132183046998762,
+        "simulation_time_sec": 3.900000000000034,
+        "heading_change_deg": 0.6316785374429602,
+        "distance_m": 0.5661444378409385,
+        "final_error_m": 0.004681761967549894,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "KET12_Square_12mm",
+        "source": "Storage",
+        "destination": "M1",
+        "wall_time_sec": 15.708327914999245,
+        "function_wall_time_sec": 16.113118654000573,
+        "simulation_time_sec": 11.400000000000034,
+        "heading_change_deg": 8.278934688406917,
+        "distance_m": 1.388859899940243,
+        "final_error_m": 0.004681887647461928,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M1",
+        "destination": "Storage",
+        "wall_time_sec": 6.791026529001101,
+        "function_wall_time_sec": 7.151185630000327,
+        "simulation_time_sec": 4.800000000000011,
+        "heading_change_deg": 0.8085989032671775,
+        "distance_m": 0.8334814921995466,
+        "final_error_m": 0.00466466748500216,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "pick_approach",
+        "part": "RGOCG12-50_12mm",
+        "source": null,
+        "destination": null,
+        "wall_time_sec": 10.079716180000105,
+        "function_wall_time_sec": 15.81008243299948,
+        "simulation_time_sec": 4.400000000000034,
+        "heading_change_deg": 1.0066351034412466,
+        "distance_m": 0.5637637212396562,
+        "final_error_m": 0.004701679633772773,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "RGOCG12-50_12mm",
+        "source": "Storage",
+        "destination": "M2",
+        "wall_time_sec": 66.18541719300083,
+        "function_wall_time_sec": 67.18012979100058,
+        "simulation_time_sec": 24.899999999999977,
+        "heading_change_deg": 7.728195090231028,
+        "distance_m": 4.024169088512165,
+        "final_error_m": 0.004842119010822434,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M2",
+        "destination": "Storage",
+        "wall_time_sec": 76.19772352700056,
+        "function_wall_time_sec": 77.66476036400127,
+        "simulation_time_sec": 27.599999999999966,
+        "heading_change_deg": 8.180185541218979,
+        "distance_m": 4.598864115961136,
+        "final_error_m": 0.004672365627470293,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "pick_approach",
+        "part": "KET16_Square_16mm",
+        "source": null,
+        "destination": null,
+        "wall_time_sec": 18.231473961999654,
+        "function_wall_time_sec": 23.70774234700002,
+        "simulation_time_sec": 6.600000000000023,
+        "heading_change_deg": 1.3396825337161666,
+        "distance_m": 0.8400724535728861,
+        "final_error_m": 0.004602701827648337,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "KET16_Square_16mm",
+        "source": "Storage",
+        "destination": "M1",
+        "wall_time_sec": 28.611083843001325,
+        "function_wall_time_sec": 29.109247835000133,
+        "simulation_time_sec": 12.600000000000023,
+        "heading_change_deg": 8.796179700131093,
+        "distance_m": 1.6436639389980179,
+        "final_error_m": 0.004825732731438223,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M1",
+        "destination": "Storage",
+        "wall_time_sec": 11.313629140000558,
+        "function_wall_time_sec": 11.808087891999094,
+        "simulation_time_sec": 5.400000000000091,
+        "heading_change_deg": 0.6581015136950579,
+        "distance_m": 0.8333281851678556,
+        "final_error_m": 0.0047011022151835806,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "pick_approach",
+        "part": "RGOCG16-50_16mm",
+        "source": null,
+        "destination": null,
+        "wall_time_sec": 9.056603848001032,
+        "function_wall_time_sec": 12.918560616000832,
+        "simulation_time_sec": 5.0,
+        "heading_change_deg": 1.5553041277508575,
+        "distance_m": 0.8442040488934776,
+        "final_error_m": 0.004680108419949886,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "RGOCG16-50_16mm",
+        "source": "Storage",
+        "destination": "M2",
+        "wall_time_sec": 57.48704341499979,
+        "function_wall_time_sec": 58.21724741500111,
+        "simulation_time_sec": 22.199999999999932,
+        "heading_change_deg": 5.948356932976785,
+        "distance_m": 3.753856371521059,
+        "final_error_m": 0.004845877364794266,
+        "collision_checks_bypassed": false
+      },
+      {
+        "function": "move_to_resource",
+        "part": "gear_small",
+        "source": "M2",
+        "destination": "Storage",
+        "wall_time_sec": 36.07947580799919,
+        "function_wall_time_sec": 37.41993208399981,
+        "simulation_time_sec": 22.09999999999991,
+        "heading_change_deg": 9.524897990303783,
+        "distance_m": 4.62934797873371,
+        "final_error_m": 0.004462902276660936,
+        "collision_checks_bypassed": false
+      }
+    ],
+    "base_simulation_rate": 0.4667957623010453,
+    "M1": {
+      "count": 4,
+      "mean_wall_time_sec": 21.626354713000183,
+      "mean_function_wall_time_sec": 22.044318271500288,
+      "mean_simulation_time_sec": 9.625000000000012,
+      "mean_heading_change_deg": 6.366985015576173
+    },
+    "M2": {
+      "count": 4,
+      "mean_wall_time_sec": 48.880846919750184,
+      "mean_function_wall_time_sec": 49.59654665950029,
+      "mean_simulation_time_sec": 21.39999999999998,
+      "mean_heading_change_deg": 6.938442107700309
+    },
+    "Storage": {
+      "count": 8,
+      "mean_wall_time_sec": 27.599834674375415,
+      "mean_function_wall_time_sec": 28.505706333374974,
+      "mean_simulation_time_sec": 13.85,
+      "mean_heading_change_deg": 4.686622742498296
+    },
+    "ur5e-4_pick_approach": [
+      {
+        "part": "gear_small",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 6.986812122000629,
+          "simulation_time_sec": 1.5,
+          "planning_wall_time_sec": 0.2501091889989766,
+          "trajectory_duration_sec": 1.405692516,
+          "real_time_factor": 0.21469018685598842,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994255223362705,
+          -0.49997695544705645,
+          1.5011160293756554,
+          0.44927875122217487,
+          0.893390985391868,
+          0.0010101099703907859,
+          0.0003613843355464054
+        ],
+        "target_pose": [
+          0.44,
+          -0.58,
+          1.5011160293745758,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.09967487328540212,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 19,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.5187850454495544,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      },
+      {
+        "part": "gear_medium",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 6.682774152999627,
+          "simulation_time_sec": 1.8000000000000043,
+          "planning_wall_time_sec": 0.26489486600075907,
+          "trajectory_duration_sec": 1.6901080670000006,
+          "real_time_factor": 0.2693492191700144,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994344502927619,
+          -0.49997944387166604,
+          1.5011158293227347,
+          -0.7070754525099738,
+          0.7071380848606054,
+          -0.00018133016739795235,
+          -2.2734588785492878e-05
+        ],
+        "target_pose": [
+          0.44,
+          -0.5,
+          1.501105095167544,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.059434454816876085,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 32,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.4547182825203489,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      },
+      {
+        "part": "gear_large",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 4.599113448000935,
+          "simulation_time_sec": 1.7999999999999972,
+          "planning_wall_time_sec": 0.2708225690003019,
+          "trajectory_duration_sec": 1.6387299770000006,
+          "real_time_factor": 0.3913797779401138,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994344491152492,
+          -0.4999794457899859,
+          1.5011158309526529,
+          -0.7068747993447759,
+          0.7073386733480527,
+          -0.00011570508096415329,
+          -7.648420772093798e-05
+        ],
+        "target_pose": [
+          0.4403,
+          -0.4198,
+          1.501115830952572,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.09962743898822893,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 32,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.40623939315385127,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      }
+    ],
+    "ur5e-4_collision_checks": [
+      {
+        "resource_id": "ur5e-4",
+        "step": [
+          "pick_approach",
+          "move_above_part"
+        ],
+        "checked_before_dispatch": true,
+        "valid": true,
+        "observed_at_unix": 1790705783.656943,
+        "wall_time_sec": 0.23932575899925723,
+        "motion_path_validation": {
+          "checked_states": 33,
+          "collision_free": true,
+          "observation_attempts": 33,
+          "wall_time_sec": 0.23929968799893686
+        },
+        "error": "",
+        "joint_names": [
+          "ur5e_4_shoulder_pan_joint",
+          "ur5e_4_shoulder_lift_joint",
+          "ur5e_4_elbow_joint",
+          "ur5e_4_wrist_1_joint",
+          "ur5e_4_wrist_2_joint",
+          "ur5e_4_wrist_3_joint"
+        ],
+        "configuration_avoid_collisions": false
+      },
+      {
+        "resource_id": "ur5e-4",
+        "step": [
+          "pick_approach",
+          "move_above_part"
+        ],
+        "checked_before_dispatch": true,
+        "valid": true,
+        "observed_at_unix": 1790705837.0118082,
+        "wall_time_sec": 0.2562445690000459,
+        "motion_path_validation": {
+          "checked_states": 48,
+          "collision_free": true,
+          "observation_attempts": 48,
+          "wall_time_sec": 0.2562077490001684
+        },
+        "error": "",
+        "joint_names": [
+          "ur5e_4_shoulder_pan_joint",
+          "ur5e_4_shoulder_lift_joint",
+          "ur5e_4_elbow_joint",
+          "ur5e_4_wrist_1_joint",
+          "ur5e_4_wrist_2_joint",
+          "ur5e_4_wrist_3_joint"
+        ],
+        "configuration_avoid_collisions": false
+      },
+      {
+        "resource_id": "ur5e-4",
+        "step": [
+          "pick_approach",
+          "move_above_part"
+        ],
+        "checked_before_dispatch": true,
+        "valid": true,
+        "observed_at_unix": 1790705878.2748735,
+        "wall_time_sec": 0.2527553119998629,
+        "motion_path_validation": {
+          "checked_states": 47,
+          "collision_free": true,
+          "observation_attempts": 47,
+          "wall_time_sec": 0.25272382399998605
+        },
+        "error": "",
+        "joint_names": [
+          "ur5e_4_shoulder_pan_joint",
+          "ur5e_4_shoulder_lift_joint",
+          "ur5e_4_elbow_joint",
+          "ur5e_4_wrist_1_joint",
+          "ur5e_4_wrist_2_joint",
+          "ur5e_4_wrist_3_joint"
+        ],
+        "configuration_avoid_collisions": false
+      }
+    ]
+  },
+  "baseline_source": "previous_run_baseline/previous_timing.json",
+  "changes": {
+    "video_duration_sec": {
+      "difference": 6.866666666666561,
+      "reduction_percent": -0.5425050036869188
+    },
+    "base_wall_time_sec": {
+      "difference": 1.195292276008331,
+      "reduction_percent": -0.2141525273686475
+    },
+    "base_simulation_time_sec": {
+      "difference": 1.8000000000000114,
+      "reduction_percent": -0.694176629386815
+    },
+    "base_heading_change_deg": {
+      "difference": -4.007365759495485,
+      "reduction_percent": 3.9956129947995986
+    },
+    "arm_controller_wall_time_sec": {
+      "difference": -17.552167885989547,
+      "reduction_percent": 4.794023848770927
+    }
+  },
+  "startup_transport": {
+    "previous": {
+      "wall_time_sec": 17.598203762000594,
+      "simulation_time_sec": 1.8999999999999986,
+      "arm_trajectories": 1,
+      "result": {
+        "success": true,
+        "tcp_pose": [
+          -6.040000506176645,
+          1.8799981634353866,
+          1.1599971556857325,
+          0.9999999999983132,
+          1.8367134408392438e-06,
+          -9.489932535916329e-11,
+          -8.543370115512833e-11
+        ],
+        "motion_method": "Cartesian waypoints"
+      }
+    },
+    "current": {
+      "wall_time_sec": 0.012900072000775253,
+      "simulation_time_sec": 0.0,
+      "arm_trajectories": 0,
+      "result": {
+        "success": true,
+        "tcp_pose": [
+          -6.03999908124546,
+          1.8799981634401435,
+          1.159999999173262,
+          0.9999999999983132,
+          1.8367140531827535e-06,
+          -9.489846348689049e-11,
+          -8.462703019260013e-11
+        ],
+        "motion_required": false
+      }
+    }
+  }
+}

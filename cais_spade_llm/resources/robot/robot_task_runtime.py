@@ -2899,6 +2899,11 @@ async def execute_robot_task(  # noqa: C901, PLR0912, PLR0915
         Task completion, block, or failure payload.
     """
     task = robot_task_registry().get(str(task_name or "").strip())
+    scene = getattr(agent, "gazebo_program_scene", None)
+    if task is not None and isinstance(scene, dict) and "resource_programs" in scene:
+        from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
+
+        task = saved_robot_definition(scene, agent.agent_name, task.name)
     if task is None:
         return {"status": "failed", "content": f"unknown robot task '{task_name}'"}
 

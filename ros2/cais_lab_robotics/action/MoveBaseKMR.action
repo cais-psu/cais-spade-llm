@@ -1,0 +1,12 @@
+# World-frame planar target and optional required route points.
+geometry_msgs/Pose2D target_pose
+geometry_msgs/Pose2D[] waypoints
+---
+bool success
+string final_resource
+string message
+---
+uint32 waypoint_index
+geometry_msgs/Pose2D current_pose
+float64 remaining_distance_m
+float64 remaining_yaw_rad

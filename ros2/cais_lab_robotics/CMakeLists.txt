@@ -13,8 +13,15 @@ target_link_libraries(cais_recovery_render_rate ${GAZEBO_LIBRARIES} Qt5::Widgets
 target_compile_features(cais_recovery_render_rate PRIVATE cxx_std_17)
 install(TARGETS cais_recovery_render_rate LIBRARY DESTINATION lib)
 
+add_library(cais_kmr_rigid_base_motion SHARED src/kmr_rigid_base_motion.cpp)
+target_include_directories(cais_kmr_rigid_base_motion PRIVATE ${GAZEBO_INCLUDE_DIRS})
+target_link_libraries(cais_kmr_rigid_base_motion ${GAZEBO_LIBRARIES})
+target_compile_features(cais_kmr_rigid_base_motion PRIVATE cxx_std_17)
+install(TARGETS cais_kmr_rigid_base_motion LIBRARY DESTINATION lib)
+
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/DockKMR.action"
+  "action/MoveBaseKMR.action"
   "action/MoveUR5eCartesian.action"
   "action/MoveUR5eInsert.action"
   "action/MoveUR5eJointJog.action"

@@ -1,0 +1,58 @@
+{
+  "preflight": {
+    "frame": "preflight_frame.png",
+    "checked_at_unix": 1790705737.1725109,
+    "robots_visible": [
+      "KMR",
+      "ur5e-1",
+      "ur5e-2",
+      "ur5e-3",
+      "ur5e-4"
+    ],
+    "KMR_arm_already_raised": true,
+    "gripper_points_down": true,
+    "method": "Visual inspection of captured Gazebo GUI frame"
+  },
+  "during_motion": {
+    "frame": "during_motion_frame.png",
+    "checked_at_unix": 1790706247.7609613,
+    "robots_visible": [
+      "KMR",
+      "ur5e-1",
+      "ur5e-2",
+      "ur5e-3",
+      "ur5e-4"
+    ],
+    "method": "Visual inspection of captured Gazebo GUI frame"
+  },
+  "recorded_frames": {
+    "frames": [
+      "recorded_start.png",
+      "recorded_midpoint.png",
+      "recorded_end.png"
+    ],
+    "checked_at_unix": 1790707084.386308,
+    "robots_visible": [
+      "KMR",
+      "ur5e-1",
+      "ur5e-2",
+      "ur5e-3",
+      "ur5e-4"
+    ],
+    "KMR_raised_in_first_video_frame": true,
+    "method": "Visual inspection of decoded beginning, midpoint, and final frames"
+  },
+  "20x": {
+    "frame": "recorded_20x_midpoint.png",
+    "checked_at_unix": 1790707347.1040294,
+    "robots_visible": [
+      "KMR",
+      "ur5e-1",
+      "ur5e-2",
+      "ur5e-3",
+      "ur5e-4"
+    ],
+    "label_visible": "20x speed | Gazebo assembly",
+    "method": "Visual inspection of a decoded midpoint frame; complete decoding checked separately"
+  }
+}

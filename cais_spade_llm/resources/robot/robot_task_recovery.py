@@ -170,6 +170,11 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
                     argument.name == "part_name" for argument in task.arguments
                 ),
                 "recovery_visible_steps": program.render_recovery_steps(),
+                "primitive_support": [
+                    {"primitive": step.op, "params": deepcopy(step.params)}
+                    for step in program.steps
+                    if step.executor == "primitive"
+                ],
                 "source": task.source,
             }
         )

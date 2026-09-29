@@ -1,0 +1,447 @@
+{
+  "status": "finished",
+  "products": [
+    {
+      "outcome": {
+        "status": "completed",
+        "tasks": []
+      },
+      "part_tracker": {
+        "gear_small": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_11",
+          "processCompleted": [
+            {
+              "process": "print_part"
+            },
+            {
+              "process": "assembly",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            }
+          ],
+          "target": "Gear_Plate/Gear_Shaft_1"
+        },
+        "gear_medium": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_17",
+          "processCompleted": [
+            {
+              "process": "print_part"
+            },
+            {
+              "process": "assembly",
+              "target": "Gear_Plate/Gear_Shaft_2"
+            }
+          ],
+          "target": "Gear_Plate/Gear_Shaft_2"
+        },
+        "gear_large": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_25",
+          "processCompleted": [
+            {
+              "process": "print_part"
+            },
+            {
+              "process": "assembly",
+              "target": "Gear_Plate/Gear_Shaft_3"
+            }
+          ],
+          "target": "Gear_Plate/Gear_Shaft_3"
+        },
+        "KET4_Square_4mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_44",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "square"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+        },
+        "KET8_Square_8mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_88",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "square"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/KET8_Square_8mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/KET8_Square_8mm"
+        },
+        "KET12_Square_12mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_131",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "square"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/KET12_Square_12mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/KET12_Square_12mm"
+        },
+        "KET16_Square_16mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_176",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "square"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/KET16_Square_16mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/KET16_Square_16mm"
+        },
+        "RGOCG4-50_Round_4mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_65",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "circle"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm"
+        },
+        "RGOCG8-50_8mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_110",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "circle"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/RGOCG8-50_8mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/RGOCG8-50_8mm"
+        },
+        "RGOCG12-50_12mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_153",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "circle"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/RGOCG12-50_12mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/RGOCG12-50_12mm"
+        },
+        "RGOCG16-50_16mm": {
+          "location": "assembly_board-v1",
+          "state": "assembled",
+          "last_task": "environment_194",
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "circle"
+            },
+            {
+              "process": "assembly",
+              "target": "GMC_Laser_Plate_Virtual/RGOCG16-50_16mm"
+            }
+          ],
+          "target": "GMC_Laser_Plate_Virtual/RGOCG16-50_16mm"
+        },
+        "assembly_board-v1": {
+          "location": "assembly_board-v1",
+          "state": "ready",
+          "last_task": null,
+          "processCompleted": []
+        }
+      },
+      "run_id": "2a18a5d1ee544380b6ed6be402e43839",
+      "revision": 195
+    }
+  ],
+  "final_poses": {
+    "gear_small": {
+      "pose": [
+        0.02945886862970771,
+        0.14482629598536573,
+        1.038989741341405,
+        -0.0002740508325101492,
+        -0.00036592405682633086,
+        0.7070704415849505,
+        0.7071429711399169
+      ],
+      "target": [
+        0.0294496,
+        0.1448242,
+        1.0389916
+      ],
+      "tolerance_m": 0.0005,
+      "position_error_m": 9.682730146198324e-06,
+      "valid": true,
+      "yaw_error_rad": 0.00010251347394096832
+    },
+    "gear_medium": {
+      "pose": [
+        -0.0005416114724238647,
+        0.14477638898813688,
+        1.0389912103334167,
+        -0.00010644044776110107,
+        0.00017156510861577402,
+        0.7072090716664693,
+        0.707004447078302
+      ],
+      "target": [
+        -0.0005504,
+        0.1448242,
+        1.0389916
+      ],
+      "tolerance_m": 0.0005,
+      "position_error_m": 4.8613608304427524e-05,
+      "valid": true,
+      "yaw_error_rad": 0.0002894009902767447
+    },
+    "gear_large": {
+      "pose": [
+        -0.05055319910195812,
+        0.14483570851721547,
+        1.0389733535711922,
+        0.00038236332723158654,
+        -6.335971639727839e-05,
+        0.707443786271593,
+        0.7067695091396806
+      ],
+      "target": [
+        -0.0505504,
+        0.1448242,
+        1.0389916
+      ],
+      "tolerance_m": 0.0005,
+      "position_error_m": 2.1753461896993218e-05,
+      "valid": true,
+      "yaw_error_rad": 0.0009534298314775036
+    },
+    "KET4_Square_4mm": {
+      "pose": [
+        -0.00055,
+        -0.005176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        -0.00055,
+        -0.005176,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "KET8_Square_8mm": {
+      "pose": [
+        0.07445,
+        -0.080176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        0.07445,
+        -0.080176,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "KET12_Square_12mm": {
+      "pose": [
+        -0.15055,
+        -0.005176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        -0.15055,
+        -0.005176,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "KET16_Square_16mm": {
+      "pose": [
+        -0.15055,
+        -0.155176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        -0.15055,
+        -0.155176,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "RGOCG4-50_Round_4mm": {
+      "pose": [
+        -0.00055,
+        -0.155176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        -0.00055,
+        -0.155176,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "RGOCG8-50_8mm": {
+      "pose": [
+        -0.07555,
+        -0.155176,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        -0.07555,
+        -0.155176,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "RGOCG12-50_12mm": {
+      "pose": [
+        -0.15055,
+        0.069824,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        -0.15055,
+        0.069824,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "RGOCG16-50_16mm": {
+      "pose": [
+        0.07445,
+        0.069824,
+        1.0239916,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "target": [
+        0.07445,
+        0.069824,
+        1.0239916
+      ],
+      "tolerance_m": 0.001,
+      "position_error_m": 0.0,
+      "valid": true
+    },
+    "KMR": {
+      "pose": [
+        -5.538681956640478,
+        2.134263831426481,
+        0.0,
+        0.0,
+        0.0,
+        0.7043028370574431,
+        0.7098996504526797
+      ]
+    }
+  },
+  "contact_counts": {
+    "messages": 645198,
+    "kmr_ground": 645197,
+    "kmr_part": 0,
+    "kmr_equipment": 0,
+    "equipment_pairs": 0,
+    "ur_equipment": 0,
+    "ur_part": 0,
+    "ur_robot": 0
+  },
+  "acceptance_passed": true,
+  "simulation": {
+    "speed": 1,
+    "ur_controller_rate_hz": 250,
+    "enable_camera_streams": false,
+    "dynamic_shadows": false,
+    "gazebo_gui_rate_hz": 15,
+    "ode_island_threads": 0
+  },
+  "elapsed_wall_time_sec": 1362.4471249460003,
+  "diagnostic_cca_bypass": true,
+  "ur_cartesian_avoid_collisions": {
+    "ur5e-1": false,
+    "ur5e-2": false,
+    "ur5e-3": false,
+    "ur5e-4": false
+  },
+  "kmr_base_collision_checks": true
+}

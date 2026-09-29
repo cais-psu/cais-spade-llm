@@ -1,0 +1,170 @@
+{
+  "current": {
+    "directory": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34",
+    "run_id": "2a18a5d1ee544380b6ed6be402e43839",
+    "accepted": true,
+    "placements": 11,
+    "transitions": 195,
+    "kmr_equipment_contacts": 0,
+    "video_duration_sec": 1272.6,
+    "preview_duration_sec": 127.26666666666667,
+    "base_action_count": 22,
+    "base_wall_time_sec": 559.3452663600056,
+    "base_simulation_time_sec": 261.1,
+    "base_heading_change_deg": 96.28677595821298,
+    "arm_planning_wall_time_sec": 107.36522783500914,
+    "arm_controller_wall_time_sec": 348.57383481400757,
+    "arm_controller_simulation_time_sec": 198.89999999999992,
+    "base_simulation_rate": 0.4667957623010453,
+    "M1": {
+      "count": 4,
+      "mean_wall_time_sec": 21.626354713000183,
+      "mean_function_wall_time_sec": 22.044318271500288,
+      "mean_simulation_time_sec": 9.625000000000012,
+      "mean_heading_change_deg": 6.366985015576173
+    },
+    "M2": {
+      "count": 4,
+      "mean_wall_time_sec": 48.880846919750184,
+      "mean_function_wall_time_sec": 49.59654665950029,
+      "mean_simulation_time_sec": 21.39999999999998,
+      "mean_heading_change_deg": 6.938442107700309
+    },
+    "Storage": {
+      "count": 8,
+      "mean_wall_time_sec": 27.599834674375415,
+      "mean_function_wall_time_sec": 28.505706333374974,
+      "mean_simulation_time_sec": 13.85,
+      "mean_heading_change_deg": 4.686622742498296
+    },
+    "ur5e-4_pick_approach": [
+      {
+        "part": "gear_small",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 6.986812122000629,
+          "simulation_time_sec": 1.5,
+          "planning_wall_time_sec": 0.2501091889989766,
+          "trajectory_duration_sec": 1.405692516,
+          "real_time_factor": 0.21469018685598842,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994255223362705,
+          -0.49997695544705645,
+          1.5011160293756554,
+          0.44927875122217487,
+          0.893390985391868,
+          0.0010101099703907859,
+          0.0003613843355464054
+        ],
+        "target_pose": [
+          0.44,
+          -0.58,
+          1.5011160293745758,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.09967487328540212,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 19,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.5187850454495544,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      },
+      {
+        "part": "gear_medium",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 6.682774152999627,
+          "simulation_time_sec": 1.8000000000000043,
+          "planning_wall_time_sec": 0.26489486600075907,
+          "trajectory_duration_sec": 1.6901080670000006,
+          "real_time_factor": 0.2693492191700144,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994344502927619,
+          -0.49997944387166604,
+          1.5011158293227347,
+          -0.7070754525099738,
+          0.7071380848606054,
+          -0.00018133016739795235,
+          -2.2734588785492878e-05
+        ],
+        "target_pose": [
+          0.44,
+          -0.5,
+          1.501105095167544,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.059434454816876085,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 32,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.4547182825203489,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      },
+      {
+        "part": "gear_large",
+        "primitive": "move_cartesian",
+        "timing": {
+          "wall_time_sec": 4.599113448000935,
+          "simulation_time_sec": 1.7999999999999972,
+          "planning_wall_time_sec": 0.2708225690003019,
+          "trajectory_duration_sec": 1.6387299770000006,
+          "real_time_factor": 0.3913797779401138,
+          "clock_reset": false
+        },
+        "observed_start_pose": [
+          0.4994344491152492,
+          -0.4999794457899859,
+          1.5011158309526529,
+          -0.7068747993447759,
+          0.7073386733480527,
+          -0.00011570508096415329,
+          -7.648420772093798e-05
+        ],
+        "target_pose": [
+          0.4403,
+          -0.4198,
+          1.501115830952572,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "cartesian_translation_length_m": 0.09962743898822893,
+        "rotation_at_measured_xyz": true,
+        "rotation_sample_count": 32,
+        "previous_rotation_waypoint_distance_from_same_start_m": 0.40623939315385127,
+        "comparison_scope": "Recorded commanded waypoints; previous waypoint route reconstructed from the same measured start."
+      }
+    ]
+  },
+  "changes": {
+    "video_duration_sec": {
+      "difference": 6.866666666666561,
+      "reduction_percent": -0.5425050036869188
+    },
+    "base_wall_time_sec": {
+      "difference": 1.195292276008331,
+      "reduction_percent": -0.2141525273686475
+    },
+    "base_simulation_time_sec": {
+      "difference": 1.8000000000000114,
+      "reduction_percent": -0.694176629386815
+    },
+    "base_heading_change_deg": {
+      "difference": -4.007365759495485,
+      "reduction_percent": 3.9956129947995986
+    },
+    "arm_controller_wall_time_sec": {
+      "difference": -17.552167885989547,
+      "reduction_percent": 4.794023848770927
+    }
+  }
+}

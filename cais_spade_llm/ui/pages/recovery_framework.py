@@ -2,42 +2,40 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from nicegui import context, ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.gazebo_delivery_run import render_gazebo_delivery_runs
-from cais_spade_llm.ui.components.recovery_setup import render_setup
+from cais_spade_llm.ui.components.recovery_setup import load_setup_view, render_setup
+from cais_spade_llm.ui.evidence import BackgroundSection, lazy_file
 from cais_spade_llm.ui.pages import recovery_run
-from cais_spade_llm.ui.recovery_results import NOT_RECORDED, read_artifact, render_results
+from cais_spade_llm.ui.project_navigation import bind_project_tabs
+from cais_spade_llm.ui.recovery_results import NOT_RECORDED, render_results
 
 _ROOT = Path(__file__).resolve().parents[3]
 _PAPER = _ROOT / "writing/Journal Paper 2 (recovery framework)/README.md"
 
 
 def _render_setup(bridge: SystemBridge) -> None:
-    render_setup(bridge, root=_ROOT)
-    path = "cais_spade_llm/initialization/recovery_framework_gazebo.json"
-    with ui.expansion("Configured plant layout", icon="description").classes("w-full"):
-        ui.label(path).classes("text-xs break-all")
-        ui.code(json.dumps(read_artifact(_ROOT, path), indent=2), language="json").classes("w-full")
+    section = BackgroundSection()
+    section.load(lambda: load_setup_view(_ROOT), lambda loaded: render_setup(bridge, root=_ROOT, loaded=loaded))
+    lazy_file("Configured plant layout", _ROOT / "cais_spade_llm/initialization/recovery_framework_gazebo.json")
     ui.label("Planned paper experiments").classes("text-lg font-semibold")
-    ui.label("The protocol below describes planned comparisons, not completed trials.").classes(
-        "text-sm text-slate-600"
-    )
-    try:
-        protocol = _PAPER.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        ui.label(f"Paper protocol is unavailable: {exc}").classes("text-amber-700")
-        return
+    ui.label("The protocol below describes planned comparisons, not completed trials.").classes("text-sm text-slate-600")
     for heading in ("Working Thesis", "Experiment Plan", "Neurosymbolic Selection Method"):
-        _, found, section = protocol.partition(f"## {heading}\n")
-        with ui.expansion(heading, icon="science", value=heading == "Experiment Plan").classes(
-            "w-full"
-        ):
-            ui.markdown(section.split("\n## ", 1)[0] if found else NOT_RECORDED)
+        with ui.expansion(heading, icon="science").classes("w-full") as expansion:
+            content = BackgroundSection()
+
+        def opened(e, heading=heading, content=content) -> None:
+            if not e.value:
+                return
+            def read() -> str:
+                _, found, section = _PAPER.read_text(encoding="utf-8").partition(f"## {heading}\n")
+                return section.split("\n## ", 1)[0] if found else NOT_RECORDED
+            content.load(read, ui.markdown)
+        expansion.on_value_change(opened)
     ui.button("Download paper protocol", icon="download", on_click=lambda: ui.download.file(_PAPER))
 
 
@@ -48,7 +46,7 @@ def render(bridge: SystemBridge) -> None:
     except RuntimeError:
         request = None
     initial_tab = request.query_params.get("tab", "run") if request is not None else "run"
-    if initial_tab not in {"run", "setup", "results"}:
+    if initial_tab not in {"run", "setup", "results", "recovery"}:
         initial_tab = "run"
     ui.add_head_html("""<style>
         .recovery-panels, .recovery-panels > .q-panel { overflow: visible !important; }
@@ -56,13 +54,13 @@ def render(bridge: SystemBridge) -> None:
     with ui.column().classes("w-full gap-4 p-6"):
         ui.label("recovery-framework").classes("text-2xl font-bold")
         with ui.tabs().props("no-caps").classes("w-full") as tabs:
-            for name in ("run", "setup", "results"):
+            for name in ("run", "setup", "results", "recovery"):
                 ui.tab(name).props("no-caps")
         with ui.tab_panels(tabs, value=initial_tab, animated=False, keep_alive=True).classes(
             "w-full recovery-panels"
         ):
             panels = {}
-            for name in ("run", "setup", "results"):
+            for name in ("run", "setup", "results", "recovery"):
                 with ui.tab_panel(name).classes("p-0") as panel:
                     panels[name] = panel
         built: set[str] = set()
@@ -76,6 +74,9 @@ def render(bridge: SystemBridge) -> None:
                     _render_setup(bridge)
                 elif name == "run":
                     recovery_run.render(bridge, is_active=lambda: tabs.value == "run")
+                elif name == "recovery":
+                    from cais_spade_llm.ui.pages import recovery
+                    recovery.render(root=_ROOT, is_active=lambda: tabs.value == "recovery")
                 else:
                     ui.label(
                         "Saved results retain their recorded inputs; the current setup is not applied to historical runs."
@@ -88,4 +89,5 @@ def render(bridge: SystemBridge) -> None:
             built.add(name)
 
         tabs.on_value_change(show_tab)
+        bind_project_tabs(tabs, "/recovery-framework", ("run", "setup", "results", "recovery"))
         show_tab()

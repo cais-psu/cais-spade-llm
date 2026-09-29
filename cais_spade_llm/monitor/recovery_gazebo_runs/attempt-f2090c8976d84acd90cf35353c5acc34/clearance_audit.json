@@ -1,0 +1,598 @@
+{
+  "base_actions": [
+    {
+      "task_id": "environment_10",
+      "function": "move_to_resource",
+      "part": "KET4_Square_4mm",
+      "destination": "M1",
+      "samples": 82,
+      "moving_samples": 81,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.11057723699923372,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -4.7048493219861145,
+          2.1997532695291877,
+          1.5727219558158223
+        ],
+        "remaining_distance_m": 0.004855594675242062,
+        "remaining_yaw_rad": 0.0019256290209259674
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_24",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 37,
+      "moving_samples": 37,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.09214702399913222,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.535300090650355,
+          2.1302520674713614,
+          1.5724988458413147
+        ],
+        "remaining_distance_m": 0.004706663988962712,
+        "remaining_yaw_rad": 0.0017025190464181605
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_31",
+      "function": "move_to_resource",
+      "part": "RGOCG4-50_Round_4mm",
+      "destination": "M2",
+      "samples": 137,
+      "moving_samples": 129,
+      "clearance_hold_samples": 7,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 23/35 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 28/36 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 3/32 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 37/42 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 4/9 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 6/17 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 7/20 states; 1 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.14968188799866766,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -2.7010396253683866,
+          2.204477223316175,
+          1.5577951396465828
+        ],
+        "remaining_distance_m": 0.004596340884822754,
+        "remaining_yaw_rad": 0.013001187148313775
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_48",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 185,
+      "moving_samples": 181,
+      "clearance_hold_samples": 2,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 3/19 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 4/14 states; 4 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.09780762600166781,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -5.538825999758239,
+          2.134619615343287,
+          1.5763750882081562
+        ],
+        "remaining_distance_m": 0.00476645806522904,
+        "remaining_yaw_rad": 0.005578761413259414
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_55",
+      "function": "pick_approach",
+      "part": "KET8_Square_8mm",
+      "destination": null,
+      "samples": 33,
+      "moving_samples": 32,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.07580622099885659,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.539238719898518,
+          2.405398097000566,
+          1.56702827987959
+        ],
+        "remaining_distance_m": 0.004664446227486409,
+        "remaining_yaw_rad": 0.0037680469153063
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_63",
+      "function": "move_to_resource",
+      "part": "KET8_Square_8mm",
+      "destination": "M1",
+      "samples": 84,
+      "moving_samples": 82,
+      "clearance_hold_samples": 1,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 9/10 states; 1 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.08522146599898406,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 1,
+        "current_pose": [
+          -4.704548988870841,
+          2.199480489648557,
+          1.5776924131214067
+        ],
+        "remaining_distance_m": 0.004578557715295465,
+        "remaining_yaw_rad": 0.006896086326510176
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_69",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 27,
+      "moving_samples": 26,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.04319093899903237,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.535234164712679,
+          2.1298338377049273,
+          1.5726798766791763
+        ],
+        "remaining_distance_m": 0.004768731057019026,
+        "remaining_yaw_rad": 0.001883549884279745
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_71",
+      "function": "pick_approach",
+      "part": "RGOCG8-50_8mm",
+      "destination": null,
+      "samples": 23,
+      "moving_samples": 23,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.055013928000335,
+      "maximum_odometry_sim_age_sec": 0.018000000000000682,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.5390808596296495,
+          2.405481192916011,
+          1.5673193109288885
+        ],
+        "remaining_distance_m": 0.004611337819192747,
+        "remaining_yaw_rad": 0.0034770158660082373
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_76",
+      "function": "move_to_resource",
+      "part": "RGOCG8-50_8mm",
+      "destination": "M2",
+      "samples": 130,
+      "moving_samples": 130,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.05337704399971699,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -2.7009929459710293,
+          2.2044144790084856,
+          1.567400295655714
+        ],
+        "remaining_distance_m": 0.004524772548730139,
+        "remaining_yaw_rad": 0.0033960311391822984
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_92",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 93,
+      "moving_samples": 92,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.05119952699897112,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -5.539036501792662,
+          2.1344948207159504,
+          1.567802290516195
+        ],
+        "remaining_distance_m": 0.004596927459084141,
+        "remaining_yaw_rad": 0.0029940362787015395
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_96",
+      "function": "pick_approach",
+      "part": "KET12_Square_12mm",
+      "destination": null,
+      "samples": 19,
+      "moving_samples": 19,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.022758475000955514,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.538863799473514,
+          2.6854582004134473,
+          1.5696850303724932
+        ],
+        "remaining_distance_m": 0.004681761967549894,
+        "remaining_yaw_rad": 0.001111296422403374
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_103",
+      "function": "move_to_resource",
+      "part": "KET12_Square_12mm",
+      "destination": "M1",
+      "samples": 62,
+      "moving_samples": 62,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.04355508899971028,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 1,
+        "current_pose": [
+          -4.704665910008278,
+          2.199613534298922,
+          1.571482949637336
+        ],
+        "remaining_distance_m": 0.004681887647461928,
+        "remaining_yaw_rad": 0.0006866228424393661
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_114",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 26,
+      "moving_samples": 26,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.05788350799957698,
+      "maximum_odometry_sim_age_sec": 0.0,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.5353557709788115,
+          2.1304361875105804,
+          1.5692202770115333
+        ],
+        "remaining_distance_m": 0.00466466748500216,
+        "remaining_yaw_rad": 0.0015760497833632314
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_116",
+      "function": "pick_approach",
+      "part": "RGOCG12-50_12mm",
+      "destination": null,
+      "samples": 37,
+      "moving_samples": 36,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.08496893700066721,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.5390353082991535,
+          2.685398352327595,
+          1.5691288926281168
+        ],
+        "remaining_distance_m": 0.004701679633772773,
+        "remaining_yaw_rad": 0.0016674341667797243
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_120",
+      "function": "move_to_resource",
+      "part": "RGOCG12-50_12mm",
+      "destination": "M2",
+      "samples": 237,
+      "moving_samples": 230,
+      "clearance_hold_samples": 2,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 7/12 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 8/10 states; 2 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.10710722099975101,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -2.7012733130275857,
+          2.2046717010230483,
+          1.5664487666379046
+        ],
+        "remaining_distance_m": 0.004842119010822434,
+        "remaining_yaw_rad": 0.004347560156992003
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_135",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 277,
+      "moving_samples": 257,
+      "clearance_hold_samples": 12,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 12/16 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 21/29 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 4/15 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 5/10 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 5/9 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 6/9 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 7/9 states; 2 pending",
+        "KMR arm and payload clearance validation timed out after 8/9 states; 1 pending",
+        "KMR arm and payload clearance validation timed out after 9/10 states; 1 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.12010896699939622,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -5.539119563550327,
+          2.1345886634453675,
+          1.5721411293207996
+        ],
+        "remaining_distance_m": 0.004672365627470293,
+        "remaining_yaw_rad": 0.0013448025259030771
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_144",
+      "function": "pick_approach",
+      "part": "KET16_Square_16mm",
+      "destination": null,
+      "samples": 67,
+      "moving_samples": 64,
+      "clearance_hold_samples": 2,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 8/15 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 9/10 states; 1 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.1351643360012531,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.539268410379883,
+          2.9654558124222286,
+          1.577460893582664
+        ],
+        "remaining_distance_m": 0.004602701827648337,
+        "remaining_yaw_rad": 0.006664566787767612
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_152",
+      "function": "move_to_resource",
+      "part": "KET16_Square_16mm",
+      "destination": "M1",
+      "samples": 109,
+      "moving_samples": 108,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.11593354500109854,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 1,
+        "current_pose": [
+          -4.704762512564869,
+          2.199221430501023,
+          1.5708494630148033
+        ],
+        "remaining_distance_m": 0.004825732731438223,
+        "remaining_yaw_rad": 5.3136219906768645e-05
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_158",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 42,
+      "moving_samples": 41,
+      "clearance_hold_samples": 1,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 12/17 states; 4 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.11119887700078834,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.5353012355295546,
+          2.1301482379468393,
+          1.5661854249739415
+        ],
+        "remaining_distance_m": 0.0047011022151835806,
+        "remaining_yaw_rad": 0.004610901820955249
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_160",
+      "function": "pick_approach",
+      "part": "RGOCG16-50_16mm",
+      "destination": null,
+      "samples": 34,
+      "moving_samples": 34,
+      "clearance_hold_samples": 0,
+      "clearance_hold_reasons": [],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.05584820799958834,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 0,
+        "current_pose": [
+          -5.5390753216294195,
+          2.9654121481351874,
+          1.5690259009985754
+        ],
+        "remaining_distance_m": 0.004680108419949886,
+        "remaining_yaw_rad": 0.001770425796321362
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_164",
+      "function": "move_to_resource",
+      "part": "RGOCG16-50_16mm",
+      "destination": "M2",
+      "samples": 210,
+      "moving_samples": 198,
+      "clearance_hold_samples": 9,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 12/15 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 19/24 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 20/21 states; 1 pending",
+        "KMR arm and payload clearance validation timed out after 20/26 states; 3 pending",
+        "KMR arm and payload clearance validation timed out after 22/23 states; 1 pending",
+        "KMR arm and payload clearance validation timed out after 6/10 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 9/10 states; 1 pending",
+        "KMR arm and payload clearance validation timed out after 9/12 states; 3 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.10361402899980021,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -2.7010529951425872,
+          2.2047300875958395,
+          1.5657986170216354
+        ],
+        "remaining_distance_m": 0.004845877364794266,
+        "remaining_yaw_rad": 0.004997709773260972
+      },
+      "success": true
+    },
+    {
+      "task_id": "environment_180",
+      "function": "move_to_resource",
+      "part": "gear_small",
+      "destination": "Storage",
+      "samples": 134,
+      "moving_samples": 131,
+      "clearance_hold_samples": 3,
+      "clearance_hold_reasons": [
+        "KMR arm and payload clearance validation timed out after 0/10 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 0/11 states; 4 pending",
+        "KMR arm and payload clearance validation timed out after 29/30 states; 1 pending"
+      ],
+      "moving_samples_without_clearance": 0,
+      "maximum_odometry_wall_age_sec": 0.041354323000632576,
+      "maximum_odometry_sim_age_sec": 0.018000000000029104,
+      "final_feedback": {
+        "waypoint_index": 2,
+        "current_pose": [
+          -5.538681956640478,
+          2.134263831426481,
+          1.5628812167239032
+        ],
+        "remaining_distance_m": 0.004462902276660936,
+        "remaining_yaw_rad": 0.007915110070993325
+      },
+      "success": true
+    }
+  ],
+  "moving_samples": 2019,
+  "moving_samples_without_clearance": 0,
+  "clearance_hold_samples": 39,
+  "held_sample_interpretation": "clearance_wait_reason identifies a timeout branch that calls _stop() and returns before cmd_pub.publish(gated). command_velocity in these records is the proposed vector, not dispatched output. Existing test_kmr_stop_does_not_refresh_commands_or_resume_cancellation coverage verifies zero publication on timeout.",
+  "contact_counts": {
+    "messages": 645198,
+    "kmr_ground": 645197,
+    "kmr_part": 0,
+    "kmr_equipment": 0,
+    "equipment_pairs": 0,
+    "ur_equipment": 0,
+    "ur_part": 0,
+    "ur_robot": 0
+  },
+  "KMR_cartesian": {
+    "paths": 56,
+    "collision_samples": 7632,
+    "cartesian_samples": 7632,
+    "maximum_path_error_m": 4.277531583147067e-07,
+    "planned_arm_motion_sec": 197.76557339600004
+  },
+  "scope": "Recorded map, stopping-motion, parked-arm, and payload validity evidence. No numerical minimum surface distance was reported by GetStateValidity."
+}

@@ -27,14 +27,22 @@ from cais_spade_llm.spec2primitives.tests.test_pa_completion import (
 )
 
 
+@pytest.mark.parametrize(("query", "initial_tab"), [
+    (None, "run"), (b"", "run"), (b"tab=run", "run"),
+    (b"tab=setup", "setup"), (b"tab=results", "results"),
+    (b"tab=", "run"), (b"tab=unknown", "run"),
+    (b"tab=spec2primitives", "run"), (b"tab=recovery", "run"),
+])
 def test_project_tabs_default_to_run_and_construct_controls_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    query: bytes | None, initial_tab: str,
 ) -> None:
-    """Opening run starts no work, and inspecting other tabs never remounts it."""
+    """Direct links start no work and construct run controls only when selected."""
     from unittest.mock import Mock
 
     from nicegui import context, ui
     from nicegui.client import Client
+    from starlette.requests import Request
 
     from cais_spade_llm.spec2primitives import project_setup
     from cais_spade_llm.spec2primitives.adapters.dual_gazebo import DualGazeboRuntime
@@ -53,16 +61,24 @@ def test_project_tabs_default_to_run_and_construct_controls_once(
     monkeypatch.setattr(spec2primitives_ui, "_render_dual_gazebo", render_gazebo)
     monkeypatch.setattr(spec2primitives_ui, "_render_pa_interaction", render_interaction)
     monkeypatch.setattr(
-        ui, "timer", lambda interval, callback, **kwargs: timers.append(callback) or Mock()
+        ui, "timer", lambda interval, callback, **kwargs: (
+            timers.append(callback) if not kwargs.get("once") else None
+        ) or Mock()
     )
-    client = Client(context.client.page)
+    request = Request({
+        "type": "http", "path": "/spec2primitives", "headers": [], "query_string": query,
+    }) if query is not None else None
+    client = Client(context.client.page, request=request)
     with client:
         spec2primitives_ui.render(runtime)
         tabs = next(element for element in client.elements.values() if isinstance(element, ui.tabs))
-        assert tabs.value == "run"
+        assert tabs.value == initial_tab
+        assert render_gazebo.call_count == (initial_tab == "run")
+        assert render_interaction.call_count == (initial_tab == "run")
         assert [tab._props["name"] for tab in tabs.default_slot.children] == [
             "run", "setup", "results",
         ]
+        tabs.value = "run"
         timer_count = len(timers)
         assert timer_count > 0
         for name in ("setup", "results", "run", "setup", "run"):

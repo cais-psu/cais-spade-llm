@@ -149,6 +149,8 @@ def build_execution_primitive_catalog(resource_agent: Any) -> list[dict[str, Any
             "params": properties,
             "required_params": required,
             "preconditions": preconditions,
+            "capability_validator": "check_recovery_primitive_feasibility",
+            "capability_constraints": deepcopy(frontmatter.get("capability_constraints") or {}),
             "effects": effects,
             "primitive_kind": str(
                 dict(profile.primitive_kind_map or {}).get(primitive_name) or ""
@@ -310,6 +312,7 @@ def build_recovery_des_model(
             "parameter_bindings",
             "requires_part_binding",
             "recovery_visible_steps",
+            "primitive_support",
             "source",
         ):
             if key in raw_event:
@@ -337,6 +340,7 @@ def build_recovery_des_model(
             row["event_name"] for row in events if row["observable"]
         ],
         "events": events,
+        "primitive_catalog": _execution_catalog_for_snapshot(resource_agent),
         "marked_state_conditions": deepcopy(
             raw_descriptor.get("marked_state_conditions")
             or static_capabilities.get("recovery_marked_state_conditions")

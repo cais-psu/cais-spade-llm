@@ -9,9 +9,12 @@ import json
 import math
 import threading
 import time
+import traceback
 import uuid
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 BASE_STATE_JOINTS = (
@@ -221,6 +224,7 @@ def occupancy_grid_footprint_is_clear(
     yaw: float,
     half_length: float = 0.625,
     half_width: float = 0.39,
+    *, blocked_columns: tuple[tuple[int, ...], ...] | None = None,
 ) -> bool:
     """Return whether the padded KMR footprint occupies known free cells."""
 
@@ -270,7 +274,10 @@ def occupancy_grid_footprint_is_clear(
         cell_y = origin_y + (row + 0.5) * resolution
         if cell_y + resolution / 2.0 < corner_min_y or cell_y - resolution / 2.0 > corner_max_y:
             continue
-        for column in range(minimum_column, maximum_column + 1):
+        columns = (range(minimum_column, maximum_column + 1) if blocked_columns is None else
+                   blocked_columns[row][bisect_left(blocked_columns[row], minimum_column):
+                                        bisect_right(blocked_columns[row], maximum_column)])
+        for column in columns:
             if data[row * width + column] < 0 or data[row * width + column] >= 65:
                 cell_x = origin_x + (column + 0.5) * resolution
                 # A rectangle and a cell must overlap on both world axes as well
@@ -287,6 +294,21 @@ def occupancy_grid_footprint_is_clear(
                 ):
                     return False
     return True
+
+
+def cache_occupancy_map(message: Any) -> Any:
+    """Snapshot map cells and index blocked columns once per received map."""
+    data = tuple(message.data)
+    width, height = message.info.width, message.info.height
+    blocked_columns = None
+    if width > 0 and height > 0 and len(data) == width * height:
+        blocked_columns = tuple(
+            tuple(column for column in range(width)
+                  if data[row * width + column] < 0 or data[row * width + column] >= 65)
+            for row in range(height)
+        )
+    return SimpleNamespace(header=copy.deepcopy(message.header), info=copy.deepcopy(message.info),
+                           data=data, blocked_columns=blocked_columns)
 
 
 def planar_pose(pose: Any) -> tuple[float, float, float]:
@@ -336,6 +358,7 @@ def base_path_is_clear(
         return all(occupancy_grid_footprint_is_clear(
             occupancy_map.data, info.width, info.height, info.resolution,
             origin[0], origin[1], *pose,
+            blocked_columns=getattr(occupancy_map, "blocked_columns", None),
         ) for pose in interpolate_base_poses(poses))
     except ValueError:
         return False
@@ -368,7 +391,12 @@ def prepare_base_path(
     connected = (start, (start[0], start[1], poses[0][2]), *poses,
                  (target[0], target[1], poses[-1][2]), target)
     if not base_path_is_clear(occupancy_map, connected):
-        raise ValueError("KMR path footprint intersects an obstacle or leaves the map")
+        blocked = next((pose for pose in interpolate_base_poses(connected)
+                        if not base_path_is_clear(occupancy_map, (pose,))), None)
+        raise ValueError(
+            "KMR path footprint intersects an obstacle or leaves the map"
+            f" at {tuple(round(value, 3) for value in blocked) if blocked else 'unknown pose'}"
+        )
     prepared = copy.deepcopy(path)
     prepared.poses = []
     previous = None
@@ -480,6 +508,18 @@ def docking_velocity(
     return body_x, body_y, angular, False
 
 
+def stopping_reaction_time(
+    *, simulation_speed: float, command_timeout: float, control_period: float,
+    observation_age_sim_sec: float,
+) -> float:
+    """Budget command latency and elapsed simulation time since measured odometry."""
+
+    values = (simulation_speed, command_timeout, control_period, observation_age_sim_sec)
+    if not all(math.isfinite(value) for value in values) or min(values) < 0:
+        raise ValueError("KMR stopping reaction time requires finite nonnegative inputs")
+    return simulation_speed * (command_timeout + control_period) + observation_age_sim_sec
+
+
 def braking_speed_limit(distance: float, acceleration: float, reaction_time: float) -> float:
     """Bound speed so latency and braking fit inside the remaining clear distance."""
     if (not all(math.isfinite(v) for v in (distance, acceleration, reaction_time))
@@ -497,9 +537,11 @@ def main() -> None:
     from ament_index_python.packages import get_package_share_directory
     from action_msgs.msg import GoalStatus, GoalStatusArray
     from builtin_interfaces.msg import Duration, Time
-    from cais_lab_robotics.action import DockKMR
+    from cais_lab_robotics.action import DockKMR, MoveBaseKMR
     from control_msgs.action import FollowJointTrajectory
     from geometry_msgs.msg import Pose2D, PoseStamped, Twist
+    from moveit_msgs.msg import RobotState
+    from moveit_msgs.srv import GetStateValidity
     from nav2_msgs.action import ComputePathToPose, FollowPath, NavigateToPose
     from nav_msgs.msg import OccupancyGrid, Odometry
     from nav_msgs.msg import Path as NavPath
@@ -593,6 +635,7 @@ def main() -> None:
             self._last_output = (0.0, 0.0, 0.0)
             self._last_velocity_stamp: float | None = None
             self._last_hold_reason: str | None = None
+            self._clearance_wait_started: float | None = None
             self._arm_positions: dict[str, float] = {}
             self._arm_state_monotonic: float | None = None
             self._arm_state_simulation_time: float | None = None
@@ -679,6 +722,10 @@ def main() -> None:
                 callback_group=MutuallyExclusiveCallbackGroup(),
                 clock=Clock(clock_type=ClockType.STEADY_TIME),
             )
+            self.transport_validity_client = self.create_client(
+                GetStateValidity, "/check_state_validity", callback_group=callback_group,
+            )
+            self._transport_clearance_status: dict[str, Any] = {}
             self.compute_path_client = ActionClient(
                 self, ComputePathToPose, "/KMR/compute_path_to_pose",
                 callback_group=callback_group,
@@ -706,6 +753,11 @@ def main() -> None:
             self.dock_action_server = ActionServer(
                 self, DockKMR, "/KMR/dock", execute_callback=self._execute_dock,
                 goal_callback=self._dock_goal, cancel_callback=self._cancel,
+                callback_group=callback_group,
+            )
+            self.move_base_action_server = ActionServer(
+                self, MoveBaseKMR, "/KMR/move_base", execute_callback=self._execute_move_base,
+                goal_callback=self._move_base_goal, cancel_callback=self._cancel,
                 callback_group=callback_group,
             )
             self.navigation_action_server = ActionServer(
@@ -780,7 +832,7 @@ def main() -> None:
                 self._nav_command_monotonic = time.monotonic()
 
         def _map_cb(self, message: OccupancyGrid) -> None:
-            self._occupancy_map = message
+            self._occupancy_map = cache_occupancy_map(message)
 
         def _follow_path_status_cb(self, message: GoalStatusArray) -> None:
             active_states = {
@@ -865,8 +917,17 @@ def main() -> None:
                 # Wall-clock command/feedback latency spans more physical time
                 # when Gazebo is accelerated. Use the requested upper bound.
                 clock_rate = getattr(self, 'simulation_speed', 1.0)
-                reaction_time = clock_rate * (
-                    self.command_timeout + self.control_period + max(0.0, now - odom_updated))
+                # Gazebo can pause while wall time advances. Only advancing
+                # simulation time can move the robot relative to this odometry.
+                observation_age_sim = max(
+                    0.0, self.get_clock().now().nanoseconds / 1e9 - measured_time,
+                )
+                reaction_time = stopping_reaction_time(
+                    simulation_speed=clock_rate,
+                    command_timeout=self.command_timeout,
+                    control_period=self.control_period,
+                    observation_age_sim_sec=observation_age_sim,
+                )
                 self._motion_status = {
                     **self._docking_braking_status,
                     'pose': list(pose),
@@ -878,15 +939,14 @@ def main() -> None:
                     'motion_dt_sec': motion_dt,
                     'odometry_stamp_sec': measured_time,
                     'odometry_age_sec': max(0.0, now - odom_updated),
+                    'odometry_sim_age_sec': observation_age_sim,
                     'command_age_sec': max(0.0, now - command_updated),
                     'linear_deceleration_mps2': self.max_linear_acceleration,
                     'map_available': self._occupancy_map is not None,
                 }
-                collision_checks = not (
-                    self.get_parameter('use_sim_time').value is True
-                    and self.kmr['task_execution'].get('avoid_collisions') is False)
-                self._motion_status['collision_checks_bypassed'] = not collision_checks
-                for velocity in (((x, y, angular), self._odom_velocity) if collision_checks else ()):
+                self._motion_status['collision_checks_bypassed'] = False
+                stopping_sweeps = []
+                for velocity in ((x, y, angular), self._odom_velocity):
                     sweep = stopping_base_poses(
                         pose, velocity, self.max_linear_acceleration,
                         self.max_angular_acceleration, reaction_time,
@@ -895,7 +955,24 @@ def main() -> None:
                     if not base_path_is_clear(self._occupancy_map, sweep):
                         self._abort_base_motion("KMR stopping footprint intersects an obstacle or map is unavailable")
                         return
-            except ValueError as exc:
+                    stopping_sweeps.append(sweep)
+                self._validate_transport_sweeps(tuple(stopping_sweeps), timeout=self.command_timeout)
+                self._clearance_wait_started = None
+                self._motion_status["transport_clearance"] = dict(self._transport_clearance_status)
+            except TimeoutError as exc:
+                # Shared MoveIt services can briefly wait for another robot's
+                # planning-scene lock. Hold zero and validate a fresh sweep on
+                # the next tick; never reuse the timed-out clearance result.
+                self._stop()
+                if self._clearance_wait_started is None:
+                    self._clearance_wait_started = tick_started
+                self._motion_status["clearance_wait_reason"] = str(exc)
+                if time.monotonic() - self._clearance_wait_started >= self.arm_state_timeout:
+                    self._abort_base_motion(f"KMR clearance service remained unavailable: {exc}")
+                else:
+                    self._publish_motion_status()
+                return
+            except (ValueError, RuntimeError) as exc:
                 self._abort_base_motion(str(exc))
                 return
             gated = Twist()
@@ -998,14 +1075,8 @@ def main() -> None:
                 and custody.get('launch_id') == self.get_parameter('launch_id').value
                 and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value
             )
-            collision_bypass = bool(
-                custody and custody.get('collision_checks_bypassed') is True
-                and self.get_parameter('use_sim_time').value is True
-                and self.kmr['task_execution'].get('avoid_collisions') is False
-                and custody.get('launch_id') == self.get_parameter('launch_id').value
-                and custody.get('scene_fingerprint') == self.get_parameter('scene_fingerprint').value)
             if (carrying or simulated_empty_waypoints) and (
-                    custody.get('transport_sweep_validated') is True or collision_bypass):
+                    custody.get('transport_sweep_validated') is True):
                 configuration = custody.get('carrying_arm_configuration')
                 if (not isinstance(configuration, list) or len(configuration) != 7
                         or any(not isinstance(value, (int, float)) or not math.isfinite(value)
@@ -1064,7 +1135,7 @@ def main() -> None:
             )
 
         def _ensure_initial_arm_parked(self) -> None:
-            """Observe the spawned pickup posture without an extra startup motion."""
+            """Observe the spawned parked arm position without an extra startup motion."""
 
             if self._initial_arm_parked:
                 self.arm_parking_timer.cancel()
@@ -1077,7 +1148,7 @@ def main() -> None:
                 ):
                     self._initial_arm_parked = True
                     self.arm_parking_timer.cancel()
-                    self.get_logger().info('KMR initialized at the selected pickup posture')
+                    self.get_logger().info('KMR initialized at the configured parked arm position')
                 return
             if self._arm_parking_in_progress:
                 if self._arm_is_parked():
@@ -1171,6 +1242,7 @@ def main() -> None:
                 self._active_goal = True
                 self._cancel_base_motion_requested = False
                 self._base_abort_reason = None
+                self._clearance_wait_started = None
                 self._motion_status = {}
                 self._docking_braking_status = {}
                 self._nav_command = None
@@ -1194,7 +1266,13 @@ def main() -> None:
             source = self._resource_at(pose)
             if docking_poses(self.routes, self.endpoints, source, target) is None:
                 return GoalResponse.REJECT
-            client_ready = source is not None or self.nav_client.server_is_ready()
+            goals = docking_poses(self.routes, self.endpoints, source, target)
+            client_ready = (
+                goals is not None
+                and all(base_path_is_clear(self._occupancy_map, (point,)) for point in goals)
+                and self.compute_path_client.server_is_ready()
+                and self.follow_path_client.server_is_ready()
+            )
             if not self._claim_base_action(client_ready):
                 return GoalResponse.REJECT
             return GoalResponse.ACCEPT
@@ -1235,6 +1313,29 @@ def main() -> None:
                 return GoalResponse.REJECT
             if not self._claim_base_action(self.follow_path_client.server_is_ready()):
                 self._stop()
+                return GoalResponse.REJECT
+            return GoalResponse.ACCEPT
+
+        @staticmethod
+        def _planar_goal(value: Any) -> tuple[float, float, float]:
+            """Read a finite world-frame base target."""
+            pose = (float(value.x), float(value.y), float(value.theta))
+            if not all(math.isfinite(part) for part in pose):
+                raise ValueError("KMR base target contains a non-finite value")
+            return pose
+
+        def _move_base_goal(self, request: MoveBaseKMR.Goal) -> GoalResponse:
+            try:
+                poses = (*tuple(self._planar_goal(pose) for pose in request.waypoints),
+                         self._planar_goal(request.target_pose))
+            except (TypeError, ValueError):
+                return GoalResponse.REJECT
+            if not all(base_path_is_clear(self._occupancy_map, (pose,)) for pose in poses):
+                return GoalResponse.REJECT
+            if not self._claim_base_action(
+                self.compute_path_client.server_is_ready()
+                and self.follow_path_client.server_is_ready()
+            ):
                 return GoalResponse.REJECT
             return GoalResponse.ACCEPT
 
@@ -1313,6 +1414,29 @@ def main() -> None:
 
         def _compute_base_path(self, target: tuple[float, float, float], goal_handle: Any) -> Any:
             start = self._check_motion(goal_handle)
+            if abs(normalize_angle(target[2] - start[2])) <= 0.05:
+                direct = NavPath()
+                direct.header.frame_id = "world"
+                # An omnidirectional base can translate without facing its travel
+                # direction. Preserve the requested heading along the whole aisle.
+                direct.poses = [self._pose_stamped((start[0], start[1], target[2])),
+                                self._pose_stamped(target)]
+                try:
+                    prepared = prepare_base_path(direct, start, target, self._occupancy_map)
+                except ValueError:
+                    pass
+                else:
+                    try:
+                        self._validate_transport_sweeps(
+                            (tuple(planar_pose(point.pose) for point in prepared.poses),),
+                            goal_handle=goal_handle,
+                        )
+                    except ValueError as exc:
+                        if not str(exc).startswith("KMR arm or payload sweep intersects geometry"):
+                            raise
+                    else:
+                        self.get_logger().info("Using validated straight KMR segment")
+                        return prepared
             if math.dist(start[:2], target[:2]) < 1e-5:
                 path = NavPath()
                 path.header.frame_id = "world"
@@ -1339,18 +1463,122 @@ def main() -> None:
                 feedback = FollowPath.Feedback()
                 feedback.distance_to_goal = math.dist(pose[:2], target[:2])
                 feedback.speed = math.hypot(*self._odom_velocity[:2])
+            elif isinstance(goal_handle.request, MoveBaseKMR.Goal):
+                feedback = MoveBaseKMR.Feedback()
+                feedback.current_pose = Pose2D(x=pose[0], y=pose[1], theta=pose[2])
+                feedback.remaining_distance_m = math.dist(pose[:2], target[:2])
+                feedback.remaining_yaw_rad = abs(normalize_angle(target[2] - pose[2]))
+            elif isinstance(goal_handle.request, DockKMR.Goal):
+                feedback = DockKMR.Feedback()
+                feedback.current_pose = Pose2D(x=pose[0], y=pose[1], theta=pose[2])
+                feedback.remaining_distance_m = math.dist(pose[:2], target[:2])
+                feedback.remaining_yaw_rad = abs(normalize_angle(target[2] - pose[2]))
+                feedback.active_route_to = str(goal_handle.request.target_resource)
             else:
                 feedback = NavigateToPose.Feedback()
                 feedback.current_pose = self._pose_stamped(pose)
                 feedback.distance_remaining = math.dist(pose[:2], target[:2])
             goal_handle.publish_feedback(feedback)
 
-        def _run_base_path(self, path: Any, goal_handle: Any) -> None:
+        def _validate_transport_sweeps(
+            self, sweeps: tuple, *, goal_handle: Any = None, timeout: float = 5.0,
+        ) -> None:
+            """Check measured arm and attached payload on the selected base sweeps.
+
+            Requests are diffs against MoveIt's current planning scene, including
+            its attached collision objects. Keep at most four service requests outstanding so a dense path cannot
+            overflow the response queue or starve current motion feedback.
+            """
+            if not self.transport_validity_client.service_is_ready():
+                raise ValueError("KMR arm and payload collision service is unavailable")
+            reason = self._state_stop_reason()
+            if reason is not None:
+                raise ValueError(reason)
+            joint_names = [*self.kmr["arm_joint_names"], self.kmr["gripper_joint"]]
+            if any(name not in self._arm_positions for name in joint_names):
+                raise ValueError("KMR transport clearance lacks measured joint positions")
+            positions = [float(self._arm_positions[name]) for name in joint_names]
+            if not all(math.isfinite(value) for value in positions):
+                raise ValueError("KMR transport clearance has non-finite joint positions")
+            poses = list(dict.fromkeys(
+                tuple(round(value, 8) for value in pose)
+                for sweep in sweeps for pose in interpolate_base_poses(sweep)
+            ))
+            if not poses:
+                raise ValueError("KMR transport clearance requires a nonempty sweep")
+            started = time.monotonic()
+            pending = []
+            next_pose = 0
+            checked_states = 0
+            try:
+                while next_pose < len(poses) or pending:
+                    if goal_handle is not None:
+                        self._check_motion(goal_handle)
+                    elif self._cancel_base_motion_requested:
+                        raise RuntimeError("KMR base motion canceled during clearance validation")
+                    if time.monotonic() - started > timeout:
+                        raise TimeoutError(
+                            "KMR arm and payload clearance validation timed out "
+                            f"after {checked_states}/{len(poses)} states; {len(pending)} pending"
+                        )
+                    while next_pose < len(poses) and len(pending) < 4:
+                        pose = poses[next_pose]
+                        state = RobotState(is_diff=True)
+                        state.joint_state = JointState(
+                            name=[*joint_names, *BASE_STATE_JOINTS],
+                            position=[*positions, *pose],
+                        )
+                        query = GetStateValidity.Request(
+                            group_name=self.kmr["task_execution"]["planning_group"], robot_state=state,
+                        )
+                        pending.append((pose, self.transport_validity_client.call_async(query)))
+                        next_pose += 1
+                    remaining = []
+                    for pose, future in pending:
+                        if not future.done():
+                            remaining.append((pose, future))
+                            continue
+                        response = future.result()
+                        if response is None or not response.valid:
+                            contacts = [(contact.contact_body_1, contact.contact_body_2)
+                                        for contact in response.contacts] if response is not None else []
+                            raise ValueError(
+                                f"KMR arm or payload sweep intersects geometry at {pose}: {contacts}"
+                            )
+                        checked_states += 1
+                    pending = remaining
+                    if pending:
+                        time.sleep(.001)
+                reason = self._state_stop_reason()
+                if reason is not None:
+                    raise ValueError(reason)
+                self._transport_clearance_status = {
+                    "checked_states": len(poses), "collision_checks_bypassed": False,
+                    "wall_time_sec": time.monotonic() - started,
+                    "simulation_time_sec": self.get_clock().now().nanoseconds / 1e9,
+                    "arm_configuration": positions[:-1],
+                    "held_part": (self._transport_custody or {}).get("part_name"),
+                }
+            finally:
+                for _pose, future in pending:
+                    if not future.done():
+                        future.cancel()
+
+        def _run_base_path(
+            self, path: Any, goal_handle: Any, *, final_waypoint: bool = False,
+        ) -> None:
+            # Named/coordinate moves finish with the checked precision controller.
+            docking_handoff = isinstance(goal_handle.request, (MoveBaseKMR.Goal, DockKMR.Goal))
             target = planar_pose(path.poses[-1].pose)
             path = prepare_base_path(path, self._check_motion(goal_handle), target, self._occupancy_map)
+            self._validate_transport_sweeps(
+                (tuple(planar_pose(point.pose) for point in path.poses),), goal_handle=goal_handle,
+            )
             self.path_pub.publish(path)
             self._navigation_active = True
-            for segment in split_base_path(path):
+            segments = split_base_path(path)
+            for segment_index, segment in enumerate(segments):
+                final_handoff = docking_handoff and final_waypoint and segment_index == len(segments) - 1
                 start = self._check_motion(goal_handle)
                 finish = planar_pose(segment.poses[-1].pose)
                 points = tuple(planar_pose(p.pose) for p in segment.poses)
@@ -1379,31 +1607,91 @@ def main() -> None:
                         time.sleep(self.control_period)
                 else:
                     segment = prepare_base_path(segment, start, finish, self._occupancy_map)
+                    self._validate_transport_sweeps(
+                        (tuple(planar_pose(point.pose) for point in segment.poses),), goal_handle=goal_handle,
+                    )
                     request = FollowPath.Goal()
                     request.path = segment
                     request.controller_id = "FollowPath"
-                    request.goal_checker_id = "precise_goal_checker"
+                    request.goal_checker_id = ("docking_handoff_goal_checker"
+                                               if final_handoff else "precise_goal_checker")
                     handle = self._send_motion_goal(self.follow_path_client, request, goal_handle)
                     future = handle.get_result_async()
+                    progress_pose = start
+                    progress_time = self.get_clock().now().nanoseconds / 1e9
+                    intermediate_handoff = False
                     while not future.done():
-                        self._check_motion(goal_handle)
-                        if simulation_elapsed(
-                            started, self.get_clock().now().nanoseconds / 1e9
-                        ) > 180.0:
+                        measured = self._check_motion(goal_handle)
+                        now = self.get_clock().now().nanoseconds / 1e9
+                        if simulation_elapsed(started, now) > 180.0:
                             raise TimeoutError("KMR path execution timed out")
+                        if math.dist(measured[:2], progress_pose[:2]) >= self.position_tolerance:
+                            progress_pose, progress_time = measured, now
+                        if (docking_handoff and not final_handoff
+                                and math.dist(measured[:2], finish[:2]) <= self.docking_slow_distance
+                                and simulation_elapsed(progress_time, now) >= 1.0):
+                            # MPPI can settle outside its 6 cm goal region near an
+                            # obstacle. Stop Nav2 before taking over the checked
+                            # short connection, retaining the intermediate tolerance.
+                            self._wait_motion_future(handle.cancel_goal_async(), goal_handle, 5.0)
+                            self._wait_motion_future(future, goal_handle, 5.0)
+                            intermediate_handoff = True
+                            break
                         self._publish_base_feedback(goal_handle, target)
                         time.sleep(self.control_period)
                     self._check_motion(goal_handle)
-                    if future.result().status != GoalStatus.STATUS_SUCCEEDED:
-                        raise RuntimeError("KMR path execution failed")
+                    response = future.result()
+                    if response is None:
+                        raise RuntimeError("KMR path execution returned no Nav2 result")
+                    allowed_statuses = ((GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED)
+                                        if intermediate_handoff else (GoalStatus.STATUS_SUCCEEDED,))
+                    if response.status not in allowed_statuses:
+                        detail = getattr(response.result, "error_msg", "") if response.result else ""
+                        raise RuntimeError(
+                            f"KMR path execution failed: Nav2 status {response.status}"
+                            f"{f' ({detail})' if detail else ''}"
+                        )
                     self._nav_goal_handle = None
+                    if intermediate_handoff:
+                        self._stop()
+                        with self._lock:
+                            self._nav_command = None
+                            self._nav_command_monotonic = None
+                        self._wait_base_stopped(goal_handle)
+                        self._align_base_pose(
+                            finish, goal_handle, segment_index,
+                            named=isinstance(goal_handle.request, DockKMR.Goal),
+                            position_tolerance=0.06, yaw_tolerance=0.05,
+                        )
                 self._stop()
                 with self._lock:
                     self._nav_command = None
                     self._nav_command_monotonic = None
+                self._wait_base_stopped(goal_handle)
                 pose = self._check_motion(goal_handle)
-                if math.dist(pose[:2], finish[:2]) > 0.06 or abs(normalize_angle(pose[2] - finish[2])) > 0.05:
+                position_tolerance = self.docking_slow_distance if final_handoff else 0.06
+                yaw_tolerance = 0.10 if final_handoff else 0.05
+                if (math.dist(pose[:2], finish[:2]) > position_tolerance
+                        or abs(normalize_angle(pose[2] - finish[2])) > yaw_tolerance):
                     raise RuntimeError("KMR stopped outside the planned segment tolerance")
+
+        def _wait_base_stopped(self, goal_handle: Any) -> None:
+            """Wait for measured braking before starting another route segment."""
+            started_sim = self.get_clock().now().nanoseconds / 1e9
+            started_wall = time.monotonic()
+            while True:
+                self._check_motion(goal_handle)
+                with self._lock:
+                    stopped = all(abs(value) <= .001 for value in (
+                        *self._odom_velocity, *self._last_output,
+                    ))
+                if stopped:
+                    return
+                if (simulation_elapsed(started_sim, self.get_clock().now().nanoseconds / 1e9)
+                        > self.waypoint_timeout or time.monotonic() - started_wall > 30.0):
+                    raise TimeoutError("KMR did not brake before the next route segment")
+                self._stop()
+                time.sleep(self.control_period)
 
         def _finish_base_action(self) -> None:
             self._navigation_active = False
@@ -1464,228 +1752,146 @@ def main() -> None:
             }
             return limit
 
+        def _align_base_pose(
+            self, target: tuple[float, float, float], goal_handle: Any,
+            waypoint_index: int, *, named: bool,
+            source_name: str = "", target_name: str = "",
+            position_tolerance: float | None = None, yaw_tolerance: float | None = None,
+        ) -> None:
+            """Align at a checked endpoint using the requested arrival tolerances."""
+            position_tolerance = self.position_tolerance if position_tolerance is None else position_tolerance
+            yaw_tolerance = self.yaw_tolerance if yaw_tolerance is None else yaw_tolerance
+            self._validate_transport_sweeps(
+                ((self._check_motion(goal_handle), target),), goal_handle=goal_handle,
+            )
+            started = self.get_clock().now().nanoseconds / 1e9
+            while True:
+                pose = self._check_motion(goal_handle)
+                if not base_path_is_clear(self._occupancy_map, (pose, target)):
+                    raise ValueError("KMR final docking footprint intersects an obstacle")
+                if simulation_elapsed(
+                    started, self.get_clock().now().nanoseconds / 1e9,
+                ) > self.waypoint_timeout:
+                    raise TimeoutError("KMR final docking alignment timed out")
+                remaining = math.dist(pose[:2], target[:2])
+                linear_limit = self.docking_linear_speed if remaining <= self.docking_slow_distance else self.max_linear_speed
+                linear_limit = min(linear_limit, self._docking_speed_limit(remaining))
+                x, y, angular, arrived = docking_velocity(
+                    pose, target, linear_limit, self.max_angular_speed,
+                    position_tolerance, yaw_tolerance,
+                    position_gain=self.docking_position_gain,
+                )
+                feedback = DockKMR.Feedback() if named else MoveBaseKMR.Feedback()
+                if named:
+                    feedback.active_route_from = source_name
+                    feedback.active_route_to = target_name
+                feedback.waypoint_index = waypoint_index
+                feedback.current_pose = Pose2D(x=pose[0], y=pose[1], theta=pose[2])
+                feedback.remaining_distance_m = remaining
+                feedback.remaining_yaw_rad = abs(normalize_angle(target[2] - pose[2]))
+                goal_handle.publish_feedback(feedback)
+                if arrived:
+                    with self._lock:
+                        stopped = all(abs(value) <= .001 for value in (
+                            *self._odom_velocity, *self._last_output,
+                        ))
+                    if stopped:
+                        return
+                command = Twist()
+                command.linear.x = x
+                command.linear.y = y
+                command.angular.z = angular
+                with self._lock:
+                    self._nav_command = command
+                    self._nav_command_monotonic = time.monotonic()
+                time.sleep(self.control_period)
+
+        def _follow_base_goals(
+            self, goal_handle: Any, goals: tuple[tuple[float, float, float], ...],
+            *, named: bool, source_name: str = "", target_name: str = "",
+        ) -> str:
+            """Plan around obstacles for each route point and align at the destination."""
+            if self._occupancy_map is None or not goals:
+                raise ValueError("KMR obstacle map is unavailable")
+            self._navigation_active = True
+            for index, waypoint in enumerate(goals):
+                if not base_path_is_clear(self._occupancy_map, (waypoint,)):
+                    raise ValueError("KMR route waypoint intersects an obstacle")
+                path = self._compute_base_path(waypoint, goal_handle)
+                self._run_base_path(path, goal_handle, final_waypoint=index == len(goals) - 1)
+                self._wait_base_stopped(goal_handle)
+            self._align_base_pose(goals[-1], goal_handle, len(goals) - 1,
+                                  named=named, source_name=source_name,
+                                  target_name=target_name)
+            final = self._check_motion(goal_handle)
+            if (math.dist(final[:2], goals[-1][:2]) > self.position_tolerance
+                    or abs(normalize_angle(final[2] - goals[-1][2])) > self.yaw_tolerance):
+                raise RuntimeError("KMR stopped outside the requested docking tolerance")
+            return self._resource_at(final) or ""
+
+        async def _execute_move_base(self, goal_handle: Any) -> MoveBaseKMR.Result:
+            """Follow checked coordinate waypoints from the measured base pose."""
+            result = MoveBaseKMR.Result()
+            try:
+                goals = (*tuple(self._planar_goal(pose) for pose in goal_handle.request.waypoints),
+                         self._planar_goal(goal_handle.request.target_pose))
+                result.final_resource = self._follow_base_goals(goal_handle, goals, named=False)
+                result.success = True
+                result.message = "KMR reached the requested base pose"
+                goal_handle.succeed()
+            except Exception as exc:
+                if not isinstance(exc, (ValueError, RuntimeError, TimeoutError)):
+                    self.get_logger().error(
+                        f"Unexpected KMR move_base action failure: {traceback.format_exc()}"
+                    )
+                reason = str(exc) or type(exc).__name__
+                result.message = reason
+                self._abort_base_motion(reason)
+                measured = self._fresh_pose()
+                result.final_resource = (self._resource_at(measured) or "") if measured is not None else ""
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                else:
+                    goal_handle.abort()
+            finally:
+                self._finish_base_action()
+            return result
+
         async def _execute_dock(self, goal_handle: Any) -> DockKMR.Result:
-            pose = self._fresh_pose()
+            """Adapt named legacy requests to the same obstacle-aware base travel."""
             target = str(goal_handle.request.target_resource)
+            pose = self._fresh_pose()
             source = self._resource_at(pose) if pose is not None else None
             goals = docking_poses(self.routes, self.endpoints, source, target)
-            if pose is None or goals is None:
-                self._active_goal = False
-                goal_handle.abort()
-                return self._result(False, source or "", "KMR is not at a permitted route state")
-
-            source_name = source or "arbitrary"
-
             try:
-                nav_goals = goals[:-1] if source is None else ()
-                direct_goals = goals[-1:] if source is None else goals
-                collision_checks = not (
-                    self.get_parameter('use_sim_time').value is True
-                    and self.kmr['task_execution'].get('avoid_collisions') is False)
-                if collision_checks and source is not None and not base_path_is_clear(
-                    self._occupancy_map, (pose, *direct_goals),
-                ):
-                    self._abort_base_motion('KMR configured route intersects an obstacle or map is unavailable')
-                    goal_handle.abort()
-                    return self._result(False, source, self._base_abort_reason)
-                if nav_goals and not self.nav_client.wait_for_server(timeout_sec=2.0):
-                    goal_handle.abort()
-                    return self._result(False, source or "", "KMR Nav2 is unavailable")
-                self._navigation_active = True
-                for waypoint_index, waypoint in enumerate(nav_goals):
-                    nav_goal = NavigateToPose.Goal()
-                    nav_goal.pose = self._pose_stamped(waypoint)
-
-                    def feedback_callback(
-                        message: Any, current_waypoint: int = waypoint_index,
-                    ) -> None:
-                        feedback = message.feedback
-                        current = feedback.current_pose.pose
-                        current_yaw = self._yaw_from_quaternion(current.orientation)
-                        dock_feedback = DockKMR.Feedback()
-                        dock_feedback.active_route_from = source_name
-                        dock_feedback.active_route_to = target
-                        dock_feedback.waypoint_index = current_waypoint
-                        dock_feedback.current_pose = Pose2D(
-                            x=current.position.x,
-                            y=current.position.y,
-                            theta=current_yaw,
-                        )
-                        dock_feedback.remaining_distance_m = float(
-                            feedback.distance_remaining
-                        )
-                        dock_feedback.remaining_yaw_rad = abs(
-                            normalize_angle(waypoint[2] - current_yaw)
-                        )
-                        goal_handle.publish_feedback(dock_feedback)
-
-                    nav_handle = await self.nav_client.send_goal_async(
-                        nav_goal, feedback_callback=feedback_callback,
-                    )
-                    self._nav_goal_handle = nav_handle
-                    if not nav_handle.accepted:
-                        goal_handle.abort()
-                        return self._result(
-                            False, source or "", "KMR Nav2 rejected the route"
-                        )
-                    nav_result_future = nav_handle.get_result_async()
-                    while not nav_result_future.done():
-                        if goal_handle.is_cancel_requested or self._cancel_base_motion_requested:
-                            await nav_handle.cancel_goal_async()
-                            if goal_handle.is_cancel_requested:
-                                goal_handle.canceled()
-                            else:
-                                goal_handle.abort()
-                            return self._result(
-                                False,
-                                self._resource_at(self._fresh_pose() or pose) or "",
-                                self._base_abort_reason or "KMR docking canceled",
-                            )
-                        if self._fresh_pose() is None:
-                            await nav_handle.cancel_goal_async()
-                            goal_handle.abort()
-                            return self._result(False, "", "KMR odometry became stale")
-                        if not self._arm_state_is_fresh():
-                            await nav_handle.cancel_goal_async()
-                            goal_handle.abort()
-                            return self._result(False, "", "KMR arm state became stale")
-                        if not self._arm_is_parked():
-                            await nav_handle.cancel_goal_async()
-                            goal_handle.abort()
-                            return self._result(
-                                False, "", "KMR arm left its parked configuration"
-                            )
-                        time.sleep(0.05)
-                    wrapped = nav_result_future.result()
-                    if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
-                        goal_handle.abort()
-                        return self._result(
-                            False, "", "KMR Nav2 route failed or was canceled"
-                        )
-                self._nav_goal_handle = None
-                for direct_offset, direct_target in enumerate(direct_goals):
-                    direct_index = len(nav_goals) + direct_offset
-                    final_direct_goal = direct_offset == len(direct_goals) - 1
-                    docking_started = self.get_clock().now().nanoseconds / 1e9
-                    while True:
-                        if goal_handle.is_cancel_requested or self._cancel_base_motion_requested:
-                            self._navigation_active = False
-                            self._stop()
-                            if goal_handle.is_cancel_requested:
-                                goal_handle.canceled()
-                            else:
-                                goal_handle.abort()
-                            return self._result(
-                                False,
-                                self._resource_at(self._fresh_pose() or pose) or "",
-                                self._base_abort_reason or "KMR docking canceled",
-                            )
-                        final_pose = self._fresh_pose()
-                        if final_pose is None:
-                            goal_handle.abort()
-                            return self._result(False, "", "KMR odometry became stale")
-                        if not self._arm_state_is_fresh():
-                            goal_handle.abort()
-                            return self._result(False, "", "KMR arm state became stale")
-                        if not self._arm_is_parked():
-                            goal_handle.abort()
-                            return self._result(
-                                False, "", "KMR arm left its parked configuration"
-                            )
-                        if simulation_elapsed(
-                            docking_started,
-                            self.get_clock().now().nanoseconds / 1e9,
-                        ) > self.waypoint_timeout:
-                            goal_handle.abort()
-                            return self._result(
-                                False, "", "KMR deterministic route motion timed out"
-                            )
-                        remaining_distance = math.dist(
-                            final_pose[:2], direct_target[:2]
-                        )
-                        linear_limit = (
-                            self.docking_linear_speed
-                            if (
-                                final_direct_goal
-                                and remaining_distance <= self.docking_slow_distance
-                            )
-                            else self.max_linear_speed
-                        )
-                        position_tolerance = (
-                            self.position_tolerance if final_direct_goal else 0.06
-                        )
-                        yaw_tolerance = (
-                            self.yaw_tolerance if final_direct_goal else 0.05
-                        )
-                        linear_limit = min(linear_limit, self._docking_speed_limit(remaining_distance))
-                        x, y, angular, arrived = docking_velocity(
-                            final_pose,
-                            direct_target,
-                            linear_limit,
-                            self.max_angular_speed,
-                            position_tolerance,
-                            yaw_tolerance,
-                            position_gain=self.docking_position_gain,
-                        )
-                        dock_feedback = DockKMR.Feedback()
-                        dock_feedback.active_route_from = source_name
-                        dock_feedback.active_route_to = target
-                        dock_feedback.waypoint_index = direct_index
-                        dock_feedback.current_pose = Pose2D(
-                            x=final_pose[0], y=final_pose[1], theta=final_pose[2]
-                        )
-                        dock_feedback.remaining_distance_m = remaining_distance
-                        dock_feedback.remaining_yaw_rad = abs(
-                            normalize_angle(direct_target[2] - final_pose[2])
-                        )
-                        goal_handle.publish_feedback(dock_feedback)
-                        if arrived:
-                            # Complete braking before changing route direction or
-                            # acknowledging the dock. Position alone can still
-                            # leave lateral velocity cutting the next corner.
-                            with self._lock:
-                                stopped = all(abs(value) <= 0.001 for value in (
-                                    *self._odom_velocity, *self._last_output,
-                                ))
-                            if stopped:
-                                break
-                        command = Twist()
-                        command.linear.x = x
-                        command.linear.y = y
-                        command.angular.z = angular
-                        with self._lock:
-                            self._nav_command = command
-                            self._nav_command_monotonic = time.monotonic()
-                        time.sleep(self.control_period)
-
-                self._navigation_active = False
-                self._stop()
-                endpoint = self.endpoints[target]
-                # Different peg identities can share one physical pickup dock.
-                # Confirm the requested endpoint without selecting a competing label.
-                at_requested_endpoint = (
-                    math.dist(final_pose[:2], endpoint[:2]) <= self.position_tolerance
-                    and abs(normalize_angle(final_pose[2] - endpoint[2])) <= self.yaw_tolerance
+                if goals is None:
+                    raise ValueError("KMR is not at a permitted route state")
+                final_resource = self._follow_base_goals(
+                    goal_handle, goals, named=True,
+                    source_name=source or "arbitrary", target_name=target,
                 )
-                final_resource = target if at_requested_endpoint else self._resource_at(final_pose)
-                if not at_requested_endpoint:
-                    goal_handle.abort()
-                    return self._result(
-                        False, final_resource or "",
-                        "KMR stopped outside the requested docking tolerance",
-                    )
+                if final_resource != target and not (
+                    target.startswith(STORAGE_PICK_PREFIX)
+                    and self.endpoints.get(target) == goals[-1]
+                ):
+                    raise RuntimeError("KMR stopped outside the requested resource")
                 goal_handle.succeed()
                 return self._result(True, target, f"KMR docked at {target}")
+            except (ValueError, RuntimeError, TimeoutError) as exc:
+                self._abort_base_motion(str(exc))
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                else:
+                    goal_handle.abort()
+                return self._result(False, source or "", str(exc))
             finally:
-                self._navigation_active = False
-                self._nav_goal_handle = None
-                self._release_base_action()
-                self._stop()
+                self._finish_base_action()
 
         def destroy_node(self) -> bool:
             self._navigation_active = False
             self._stop()
             self.dock_action_server.destroy()
+            self.move_base_action_server.destroy()
             self.navigation_action_server.destroy()
             self.rviz_navigation_action_server.destroy()
             self.follow_path_action_server.destroy()

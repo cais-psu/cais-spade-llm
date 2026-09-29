@@ -1,0 +1,19 @@
+{
+  "success": true,
+  "acceptance_passed": true,
+  "window_id": "0xa00025",
+  "captured_size": [
+    1618,
+    869
+  ],
+  "video_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/debug/primitive_cleanup_acceptance/594dec50218e444bb2ca9cb7acc9a22d/gazebo_11_parts_success.mp4",
+  "duration_sec": 1412.3,
+  "stream": {
+    "codec_name": "h264",
+    "width": 1280,
+    "height": 688,
+    "nb_frames": "14123"
+  },
+  "ffmpeg_exit_code": 255,
+  "ffmpeg_log": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/debug/primitive_cleanup_acceptance/594dec50218e444bb2ca9cb7acc9a22d/ffmpeg.log"
+}

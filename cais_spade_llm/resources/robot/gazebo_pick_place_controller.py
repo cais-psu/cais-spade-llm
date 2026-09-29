@@ -4515,6 +4515,7 @@ class GazeboPickPlaceController:
         model_name: str = "",
         part_name: str = "",
         assume_released_if_open: bool = False,
+        assembly_slot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         ---
@@ -4523,6 +4524,7 @@ class GazeboPickPlaceController:
           model_name: {type: string, description: "Optional controller identifier of the part to detach.", x-binding-role: controller_identifier}
           part_name: {type: string, description: "Optional canonical recovery part name for release trace validation."}
           assume_released_if_open: {type: boolean, description: "Treat an already-open gripper as an idempotent release when true."}
+          assembly_slot: {type: object, description: "Configured assembly target for Gazebo placement correction."}
         preconditions:
           held_part:
             not_equals: null
@@ -4543,6 +4545,21 @@ class GazeboPickPlaceController:
 
         target_model = str(model_name or "").strip()
         target_part = str(part_name or "").strip()
+        slot_values = None
+        if assembly_slot is not None:
+            if (str(getattr(self, "execution_mode", "") or "").lower() != "simulation"
+                    or not isinstance(assembly_slot, dict)
+                    or assembly_slot.get("destination_location") != "assembly_board-v1"
+                    or not target_model):
+                return {"success": False, "message": "Invalid bound assembly release target"}
+            try:
+                slot_values = {key: float(assembly_slot[key]) for key in (
+                    "slot_x", "slot_y", "part_height", "board_top_z", "part_origin_z"
+                )}
+            except (KeyError, TypeError, ValueError):
+                return {"success": False, "message": "Incomplete bound assembly release target"}
+            if not all(math.isfinite(value) for value in slot_values.values()):
+                return {"success": False, "message": "Nonfinite bound assembly release target"}
         if (
             not assume_released_if_open
             and str(getattr(self, "execution_mode", "") or "").strip().lower() == "simulation"
@@ -4574,6 +4591,13 @@ class GazeboPickPlaceController:
             )
         if detached.get("success"):
             self._wait_process_time(self.release_postdetach_settle_sec)
+            if slot_values is not None and not self._snap_part_to_slot(
+                target_model, slot_values["slot_x"], slot_values["slot_y"],
+                slot_values["part_height"], slot_values["board_top_z"],
+                slot_values["part_origin_z"], "assembly_board-v1",
+            ):
+                return {"success": False, "released": True,
+                        "message": self._last_failure_message or "Released part was not seated at its bound assembly target"}
             release_mode = str(detached.get("release_mode") or "").strip()
             if release_mode == "verification_unavailable_after_detach_timeout":
                 release_message = str(detached.get("message") or "")
@@ -4601,6 +4625,13 @@ class GazeboPickPlaceController:
                 self._attached_model = None
                 self._attached_link = None
                 self._wait_process_time(self.release_postdetach_settle_sec)
+                if slot_values is not None and not self._snap_part_to_slot(
+                    target_model, slot_values["slot_x"], slot_values["slot_y"],
+                    slot_values["part_height"], slot_values["board_top_z"],
+                    slot_values["part_origin_z"], "assembly_board-v1",
+                ):
+                    return {"success": False, "released": True,
+                            "message": self._last_failure_message or "Released part was not seated at its bound assembly target"}
                 result = {
                     "success": True,
                     "message": (
@@ -4696,10 +4727,10 @@ class GazeboPickPlaceController:
             fallback_model,
             timeout_sec=self._simulation_release_detach_timeout_sec(),
             attached_link_only=False,
-            log_failure=False,
+            log_failure=True,
             timeout_log_level="warn",
             break_on_timeout=False,
-            prefer_attached_link=False,
+            prefer_attached_link=True,
             extra_link_candidates=getattr(self, "release_detach_link_candidates", []),
         )
         if ok:
@@ -4741,6 +4772,45 @@ class GazeboPickPlaceController:
             ),
             "release_mode": "verification_unavailable_after_detach_timeout",
         }
+
+    def move_joints_recovery(self, joints: list[float]) -> dict[str, Any]:
+        """Plan a measured, joint-limited absolute arm command for recovery."""
+        if self._cartesian_motion_only():
+            return {"success": False, "message": "Joint commands are unavailable under Cartesian-only motion policy"}
+        if not isinstance(joints, list) or len(joints) != len(self.arm_joint_names):
+            return {"success": False, "message": "Joint target must cover every configured arm joint"}
+        try:
+            positions = [float(value) for value in joints]
+            limits = self._simulation_joint_limits(list(self.arm_joint_names))
+            if any(not math.isfinite(value) or not limits[name]["lower"] <= value <= limits[name]["upper"]
+                   for name, value in zip(self.arm_joint_names, positions, strict=True)):
+                return {"success": False, "message": "Joint target exceeds a configured limit"}
+            current, missing = self._get_arm_joint_positions(timeout_sec=2.0)
+            if current is None:
+                return {"success": False, "message": f"Missing fresh arm joints: {', '.join(missing)}"}
+            success = self._execute_simulation_motion_plan(label="move_joints", joint_positions=positions)
+            return {"success": bool(success), "message": "move_joints completed" if success else self._last_failure_message}
+        except (RuntimeError, TypeError, ValueError) as exc:
+            return {"success": False, "message": str(exc)}
+
+    def rotate_joint(self, joint_name: str, delta_deg: float) -> dict[str, Any]:
+        """Rotate one measured arm joint while holding all other joint targets."""
+        if self._cartesian_motion_only():
+            return {"success": False, "message": "Joint commands are unavailable under Cartesian-only motion policy"}
+        if joint_name not in self.arm_joint_names:
+            return {"success": False, "message": f"Unknown configured arm joint: {joint_name}"}
+        try:
+            delta = float(delta_deg)
+            if not math.isfinite(delta):
+                raise ValueError("Joint rotation must be finite")
+            current, missing = self._get_arm_joint_positions(timeout_sec=2.0)
+            if current is None:
+                raise ValueError(f"Missing fresh arm joints: {', '.join(missing)}")
+            target = list(current)
+            target[self.arm_joint_names.index(joint_name)] += math.radians(delta)
+            return self.move_joints_recovery(target)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            return {"success": False, "message": str(exc)}
 
     # ------------------------------------------------------------------ #
     # Legacy low-level API (kept for backward compat)
@@ -6768,20 +6838,26 @@ class GazeboPickPlaceController:
         from moveit_msgs.msg import RobotState
         from moveit_msgs.srv import GetPositionFK
 
-        if not hasattr(self, "_home_fk_client"):
-            self._home_fk_client = self._node.create_client(
-                GetPositionFK, "/compute_fk", callback_group=self._cb_group)
-        state = RobotState(is_diff=True)
-        state.joint_state.name = list(self.arm_joint_names)
-        state.joint_state.position = list(positions)
-        request = GetPositionFK.Request(robot_state=state, fk_link_names=[self.ee_link])
-        request.header.frame_id = self.frame_id
-        response = self._wait_future(self._home_fk_client.call_async(request),
-                                     timeout_sec=5., label="resolve Cartesian home")
-        if response is None or response.error_code.val != 1 or len(response.pose_stamped) != 1:
-            self._last_failure_message = "Configured home FK is unavailable"
-            return False
-        target = response.pose_stamped[0].pose
+        key = (self.frame_id, self.ee_link, *tuple(float(value) for value in positions))
+        cached = getattr(self, "_last_configuration_fk", None)
+        if cached is not None and cached[0] == key:
+            target = deepcopy(cached[1])
+        else:
+            if not hasattr(self, "_home_fk_client"):
+                self._home_fk_client = self._node.create_client(
+                    GetPositionFK, "/compute_fk", callback_group=self._cb_group)
+            state = RobotState(is_diff=True)
+            state.joint_state.name = list(self.arm_joint_names)
+            state.joint_state.position = list(positions)
+            request = GetPositionFK.Request(robot_state=state, fk_link_names=[self.ee_link])
+            request.header.frame_id = self.frame_id
+            response = self._wait_future(self._home_fk_client.call_async(request),
+                                         timeout_sec=15., label="resolve Cartesian home")
+            if response is None or response.error_code.val != 1 or len(response.pose_stamped) != 1:
+                self._last_failure_message = "Configured home FK is unavailable"
+                return False
+            target = deepcopy(response.pose_stamped[0].pose)
+            self._last_configuration_fk = (key, deepcopy(target))
         preserve_orientation = getattr(self, 'controller_config', {}).get('cartesian_motion', {}).get('home_preserve_orientation') is True
         if preserve_orientation:
             from cais_spade_llm.recovery_framework.geometry import rotate
@@ -8076,11 +8152,14 @@ class GazeboPickPlaceController:
         target_model = model_name or self._attached_model
         if not target_model:
             return True
-        if not self._detach_client.wait_for_service(timeout_sec=0.5):
-            return False
         detach_timeout = _as_float(timeout_sec, self.detach_timeout_sec)
         if detach_timeout <= 0.0:
             detach_timeout = self.detach_timeout_sec
+        if not self._detach_client.wait_for_service(timeout_sec=max(2.0, detach_timeout)):
+            self._last_failure_message = f"Gazebo detach service unavailable for {target_model}"
+            if log_failure:
+                self._log().warn(self._last_failure_message)
+            return False
 
         retained_mating = None
         mating = getattr(self, '_simulation_mating_context', None)
@@ -8131,6 +8210,7 @@ class GazeboPickPlaceController:
             else max(1, self.detach_max_link_attempts)
         )
         links_to_try = links_to_try[: max(1, max_link_attempts)]
+        detach_attempts: list[dict[str, Any]] = []
 
         for link_name in links_to_try:
             req = self._detach_srv.Request()
@@ -8146,6 +8226,20 @@ class GazeboPickPlaceController:
                 label=f"detach:{link_name}",
                 timeout_log_level=timeout_log_level,
             )
+            detach_attempts.append({
+                "link": link_name,
+                "service_success": bool(response and response.success),
+                "message": str(getattr(response, "message", "timeout")),
+            })
+            if log_failure and not (response and response.success):
+                self._log().warn(
+                    f"Detach {target_model} from {link_name} did not complete: "
+                    f"{detach_attempts[-1]['message']}"
+                )
+            self._last_command_evidence = {
+                **dict(self._last_command_evidence or {}),
+                "detach_attempts": deepcopy(detach_attempts),
+            }
             if response and response.success:
                 self._attached_model = None
                 self._attached_link = None
@@ -8200,7 +8294,7 @@ class GazeboPickPlaceController:
         state.pose.orientation.w = 1.0
         mating_evidence = None
         mating = getattr(self, '_simulation_mating_context', None)
-        if (self.execution_mode == 'simulation' and mating
+        if (getattr(self, 'execution_mode', '') == 'simulation' and mating
                 and mating['model_name'] == model_name):
             from cais_spade_llm.recovery_framework.part_collision import mating_pose_valid
 
@@ -8226,16 +8320,17 @@ class GazeboPickPlaceController:
         state.twist.angular.z = 0.0
         state.reference_frame = "world"
 
-        self._detach_part(
+        if getattr(self, "_attached_model", None) == model_name and not self._detach_part(
             model_name,
             timeout_sec=self._simulation_release_detach_timeout_sec(),
             attached_link_only=False,
             log_failure=False,
             timeout_log_level="debug",
             break_on_timeout=False,
-            prefer_attached_link=False,
+            prefer_attached_link=True,
             extra_link_candidates=getattr(self, "release_detach_link_candidates", []),
-        )
+        ):
+            return False
 
         if not self._set_entity_state_for_snap(model_name, state):
             return False
@@ -8401,6 +8496,7 @@ class GazeboPickPlaceController:
                     if self._attached_model == target_model:
                         self._attached_model = None
                         self._attached_link = None
+                    self._last_failure_message = ""
                     return True
 
                 last_message = str(response.message if response else "no response")
@@ -8426,13 +8522,16 @@ class GazeboPickPlaceController:
         return False
 
     def _detach_part_from_assembly_board(self, model_name: str, board_link: str) -> bool:
+        """Await the fixture detach acknowledgement before the final slot correction."""
         if not self._link_attacher_enabled:
             return True
         target_model = str(model_name or "").strip()
         link_name = str(board_link or "").strip()
         if not target_model or not link_name:
             return False
-        if not self._detach_client.wait_for_service(timeout_sec=0.5):
+        timeout_sec = max(.5, _as_float(getattr(self, "detach_timeout_sec", None), 3.0))
+        if not self._detach_client.wait_for_service(timeout_sec=timeout_sec):
+            self._last_failure_message = f"Assembly board detach service unavailable for {target_model}"
             return False
 
         req = self._detach_srv.Request()
@@ -8443,11 +8542,23 @@ class GazeboPickPlaceController:
         future = self._detach_client.call_async(req)
         response = self._wait_future(
             future,
-            timeout_sec=0.5,
+            timeout_sec=timeout_sec,
             label=f"detach:assembly_board_v1:{link_name}:{target_model}",
             timeout_log_level="debug",
         )
-        return bool(response and response.success)
+        success = bool(response and response.success)
+        message = str(getattr(response, "message", "No detach acknowledgement before timeout"))
+        self._last_command_evidence = {
+            **dict(getattr(self, "_last_command_evidence", None) or {}),
+            "assembly_board_detach": {
+                "model_name": target_model, "board_link": link_name,
+                "acknowledged": response is not None, "success": success,
+                "timeout_sec": timeout_sec, "message": message,
+            },
+        }
+        if not success:
+            self._last_failure_message = f"Assembly board detach failed for {target_model}: {message}"
+        return success
 
     def _observed_cartesian_endpoint_evidence(self, target, observed=None) -> dict[str, Any] | None:
         """Compare the observed tool pose with a commanded Cartesian endpoint."""
@@ -9088,10 +9199,14 @@ class GazeboPickPlaceController:
                     target[3:] = start[3:]
                 elif step == ('pick_grasp', 'retreat_from_source') and route:
                     route.append(list(settings['rotation_waypoint']))
+            rotation_point = settings.get('rotation_waypoint', route[-1] if route else origin)
+            if (step == ('pick_approach', 'move_above_part')
+                    and settings.get('pick_rotation_at_current_pose') is True):
+                rotation_point = origin
             try:
                 poses = fixed_orientation_waypoints(
                     start, target, route,
-                    rotation_point=settings.get('rotation_waypoint', route[-1] if route else origin),
+                    rotation_point=rotation_point,
                     angular_step=float(settings.get('angular_step_rad', .05)),
                 )
             except ValueError as exc:

@@ -1,8 +1,6 @@
 # Recovery framework: M1 and M2 layout
 
-**Current layout: compact M1/M2, 2026-09-21.** The previous 2026-09-16
-static layout remains historical evidence in the implementation plan. Storage
-pickup and machine reach checks required the docking and stand changes below.
+**Current layout: compact M1/M2, 2026-09-29.** M1/M2 centres are 2.00 m apart, Conveyor is 4.20 m long, and Storage is closer. The overall horizontal span is 7.70 m. The saved scene, Gazebo world and navigation map use the coordinates below. Earlier implementation notes remain historical context. The [fresh recorded 11-part run](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f56611c75e094e28b449ddcbb85aa8bd/README.md) passed on 2026-09-29 with all placements valid, matching function/primitive traces and model transitions, and zero KMR equipment contacts.
 
 M1 and M2 use a `0.503 × 0.531 × 0.493 m` enclosure, based on the documented
 [503 × 531 × 493 mm Bantam Tools Desktop CNC Milling Machine dimensions](https://bantamtools.com/products/bantam-tools-desktop-cnc-milling-machine).
@@ -14,6 +12,12 @@ The source scene, docking markers, navigation map, and MoveIt collision objects
 use this geometry. MoveIt retains separate enclosure panels and the openings;
 mesh obstacles use conservative boxes. KMR attachment represents a simulated
 fixed-joint grasp, not demonstrated finger contact on the 4 mm peg.
+
+KMR now initializes with its downward gripper at the configured raised transport
+position, `[-0.25, 0.50, 1.16]` m in the base frame. The Storage base position
+and part-specific pickup docks remain as listed below.
+The [fresh 11-part recorded run](../../cais_spade_llm/monitor/recovery_gazebo_runs/attempt-f2090c8976d84acd90cf35353c5acc34/README.md) verified this startup pose,
+all placements, and zero equipment contacts.
 
 ![Top view of M1 and M2](MACHINING_STATION_LAYOUT.svg)
 
@@ -62,30 +66,41 @@ separate from that shared buffer.
 
 | Element | Position in metres `(x, y, z)` | Meaning |
 | --- | --- | --- |
-| M1 | `(-6.0, 1.9, 0)` | Machine origin; yaw `-1.57079632679`. |
-| M2 | `(-2.6, 1.9, 0)` | Same yaw as M1. |
-| `ur5e-1` | `(-6.0, 1.1, 0.80)` | M1 pedestal; yaw `1.57079632679`. |
-| `ur5e-2` | `(-2.6, 1.1, 0.80)` | M2 pedestal; same yaw. |
+| M1 | `(-4.05, 1.9, 0)` | Machine origin; yaw `-1.57079632679`. |
+| M2 | `(-2.05, 1.9, 0)` | Same yaw as M1. |
+| `ur5e-1` | `(-4.05, 1.1, 0.80)` | M1 pedestal; yaw `1.57079632679`. |
+| `ur5e-2` | `(-2.05, 1.1, 0.80)` | M2 pedestal; same yaw. |
 | `ur5e-3` | `(0, 0.50, 1.021)` | Top assembly robot; yaw `3.142`. |
 | `ur5e-4` | `(0, -0.50, 1.021)` | Bottom assembly robot; yaw `0`. |
-| M1 staging tray | `(-6.55, 1.1, 1.0)` | Capacity-one staging nest. |
-| M2 staging tray | `(-3.15, 1.1, 1.0)` | Capacity-one staging nest. |
-| Conveyor loading position for `ur5e-1` | `(-6.0, 0.5, 1.015)` | Main belt surface. |
-| Conveyor loading position for `ur5e-2` | `(-2.6, 0.5, 1.015)` | Main belt surface. |
+| M1 staging tray | `(-4.60, 1.1, 1.0)` | Capacity-one staging nest. |
+| M2 staging tray | `(-2.60, 1.1, 1.0)` | Capacity-one staging nest. |
+| Conveyor loading position for `ur5e-1` | `(-4.05, 0.5, 1.015)` | Main belt surface. |
+| Conveyor loading position for `ur5e-2` | `(-2.05, 0.5, 1.015)` | Main belt surface. |
 | Conveyor output nest | `(-0.78, 0.5, 1.015)` | Capacity-one upstream handoff marker; no blocking end bar. |
 | Buffer For Machined parts | `(-0.50, 0.50, 1.015)` | Four direct-part belt zones in `0.48 × 0.24 m`; surface `z=1.017`, capacity four pegs. |
 | Buffer pickup | `(-0.32, 0.50, 1.017)` | Downstream pickup for `ur5e-3`. |
-| Storage | `(-9.15, 2.3, 0)` | Rotated shelves; yaw `1.57079632679`. |
-| `Storage_KMR_docking_pose` | `(-8.24, 2.13, 0)` | East-side dock; base yaw `1.57079632679`, local arm yaw `1.57079632679`. |
-| M1 KMR docking pose | `(-6.85, 2.15, 0)` | Side loading; base yaw `1.57079632679`. |
-| M2 KMR docking pose | `(-3.45, 2.15, 0)` | Side loading; base yaw `1.57079632679`. |
+| Storage | `(-6.45, 2.3, 0)` | Rotated shelves; yaw `1.57079632679`. |
+| `Storage_KMR_docking_pose` | `(-5.54, 2.13, 0)` | East-side dock; base yaw `1.57079632679`, local arm yaw `1.57079632679`. |
+| M1 KMR docking pose | `(-4.70, 2.20, 0)` | Side loading; base yaw `1.57079632679`. |
+| M2 KMR docking pose | `(-2.70, 2.20, 0)` | Side loading; base yaw `1.57079632679`. |
 | `3D Printing Station` | `(0.50, -0.50, 1.04)` | `prusa_mk4_2` beside `ur5e-4`; yaw `-1.57079632679`. |
 | `Exit` | `(0.50, 0.58, 1.04)` | Empty capacity-one tray handled by `ur5e-3`. |
 
-M2's east enclosure edge is `x=-2.3345`, and the assembly table's west edge is
-`x=-0.75`, leaving a **1.5845 m horizontal gap**. The main Conveyor is **6 m**
+M2's east enclosure edge is `x=-1.7845`, and the assembly table's west edge is
+`x=-0.75`, leaving a **1.0345 m horizontal gap**. The main Conveyor is **4.2 m**
 long and **0.30 m** wide. This geometry does not establish reachable or
 collision-free handling paths.
+
+
+## 2026-09-29 motion configuration
+
+The M1 station, ur5e-1 pedestal, staging, loading, access poses and Cartesian waypoints moved +1.95 m in x together; M2/ur5e-2 moved +0.55 m. Storage, all eight slots, every part-specific pickup dock and the Storage camera moved +2.70 m. Heights and orientations are preserved. Conveyor is centred at `(-2.85, 0.50)` and extends from x=-4.95 to x=-0.75; the output nest and downstream Buffer connection remain at their existing world positions. Assembly targets, ur5e-3, ur5e-4, 3D Printing Station and Exit are unchanged.
+
+The selected additional 0.15 m shift of both machines increases space beside KMR at Storage. The machine docks, associated robots and local handling paths move together, preserving their relative geometry and 2.00 m machine spacing.
+
+KMR Storage–M1 uses the two docks directly. Storage–M2 uses `(-5.54, 2.13)` → `(-5.54, 3.10)` → `(-2.70, 3.10)` → `(-2.70, 2.20)`, all at yaw π/2. The 4.71 m configured route replaces the previous 6.86 m route; the direct line still intersects M1. Full base, arm, payload and stopping checks remain mandatory.
+
+ur5e-4 enables `cartesian_motion.pick_rotation_at_current_pose` only for `pick_approach` → `move_above_part`. Its orientation changes at the freshly observed tool position, followed by translation to the computed approach. Placement retains `rotation_waypoint=(0.30, -0.35, 1.5011292266317149)`; `home_preserve_orientation` remains enabled. No function, primitive, formal state or command interface was added.
 
 ## Conveyor pickup and backpressure
 
@@ -151,14 +166,14 @@ tooling; detachable assemblies and Exit execution remain later work.
 
 ## KMR: predefined model and recovery
 
-KMR starts at `(-8.24, 2.13, 0)` on `Storage_KMR_docking_pose`, with platform
+KMR starts at `(-5.54, 2.13, 0)` on `Storage_KMR_docking_pose`, with platform
 yaw `1.57079632679` and upright arm configuration
 `[0, 0, 0, 0, 0, 0, 0]`. Its KMP omniMove 400 appearance includes four 250 mm
 Mecanum wheels, front and rear safety scanners, eight ultrasonic sensors, RGB
 bands, and two emergency stops. The iiwa links, nominal 20 mm adapter, and open
 RG2 share the arm mount `(-0.25, 0, 0.70)` and local yaw
 `1.57079632679`. The arm root is therefore at world
-`(-8.24, 1.88, 0.70)`. `mount_verified: false` remains until
+`(-5.54, 1.88, 0.70)`. `mount_verified: false` remains until
 the arm and adapter transforms are measured on the lab hardware. Meshes,
 licenses, KMR poses, and Storage–M1/M2 route contracts remain.
 
@@ -219,8 +234,8 @@ increment now binds all three gears and eight pegs to explicit CAD filenames,
 Gazebo models, source resources, and assembly targets. Recovery orders may save
 and reload any valid subset of those eleven exact identifiers.
 
-The current workholding targets are `(-6.08, 1.82, 1.06)` for M1 and
-`(-2.68, 1.82, 1.06)` for M2, each with yaw `-1.57079632679`.
+The current workholding targets are `(-4.13, 1.82, 1.06)` for M1 and
+`(-2.13, 1.82, 1.06)` for M2, each with yaw `-1.57079632679`.
 The [current geometry checks](../../cais_spade_llm/monitor/recovery_gazebo_runs/20260921T200209_5d5b706e/machine_paths.json)
 passed collision-aware IK and Cartesian approaches with fraction `1.0` for
 KMR at M1/M2, `ur5e-1` at M1, and `ur5e-2` at M2. These are planning results;

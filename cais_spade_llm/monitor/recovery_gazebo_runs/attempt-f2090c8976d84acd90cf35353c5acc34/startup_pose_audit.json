@@ -1,0 +1,90 @@
+{
+  "valid": true,
+  "measured_startup": {
+    "operation": "initial_arm_pose",
+    "success": true,
+    "joints": [
+      -7.965669368559247e-08,
+      0.26379006890547974,
+      1.1232119589976719e-07,
+      -1.088670449178118,
+      -3.01723517281971e-08,
+      1.7891321353164003,
+      2.2015775869022036e-08
+    ],
+    "target_joints": [
+      -7.965669315561509e-08,
+      0.26379006890547957,
+      1.1232119596294415e-07,
+      -1.0886704491781178,
+      -3.0172351081028154e-08,
+      1.7891321353164003,
+      2.201577622499959e-08
+    ],
+    "tcp_pose": [
+      -6.03999908124546,
+      1.8799981634401435,
+      1.159999999173262,
+      0.9999999999983132,
+      1.8367140531827535e-06,
+      -9.489846348689049e-11,
+      -8.462703019260013e-11
+    ],
+    "target_tcp_pose": [
+      -6.039999081695351,
+      1.8799981633991347,
+      1.1600000000000001,
+      0.9999999999983132,
+      1.8367140531827535e-06,
+      -9.489846348689049e-11,
+      -8.462703019260013e-11
+    ],
+    "max_joint_error_rad": 6.471689456094172e-16,
+    "position_error_m": 9.421144030497172e-10,
+    "checked_states": 1,
+    "collision_checks_bypassed": false
+  },
+  "first_transport_step": {
+    "resource_id": "KMR",
+    "function_name": "pick_approach",
+    "step_id": "park",
+    "task_id": "environment_5",
+    "primitive": "move_to_named_pose",
+    "parameters": {
+      "pose_name": "transport"
+    },
+    "preconditions": {
+      "arm_joints": "fresh"
+    },
+    "effects": {
+      "tcp_pose": "observed"
+    },
+    "status": "completed",
+    "result": {
+      "success": true,
+      "tcp_pose": [
+        -6.03999908124546,
+        1.8799981634401435,
+        1.159999999173262,
+        0.9999999999983132,
+        1.8367140531827535e-06,
+        -9.489846348689049e-11,
+        -8.462703019260013e-11
+      ],
+      "motion_required": false
+    },
+    "observations": [],
+    "timing": {
+      "wall_time_sec": 0.012900072000775253,
+      "simulation_time_sec": 0.0,
+      "planning_wall_time_sec": 0.0,
+      "trajectory_duration_sec": 0,
+      "real_time_factor": 0.0,
+      "clock_reset": false
+    }
+  },
+  "first_transport_arm_operations": 0,
+  "resource_programs_unchanged": true,
+  "protected_files_changed": [],
+  "previous_run_id": "82cb3858f1a94394a8f846a0b6831cf3"
+}

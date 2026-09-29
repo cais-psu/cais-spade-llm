@@ -11,9 +11,9 @@ from nicegui import ui
 from cais_spade_llm.spec2primitives.adapters.ui_runtime import Spec2PrimitivesUIRuntime
 from cais_spade_llm.spec2primitives.project_results import (
     NOT_RECORDED,
-    read_artifact,
     read_interactions,
 )
+from cais_spade_llm.ui.evidence import BackgroundSection, lazy_file
 
 _ROOT = Path(__file__).resolve().parent
 
@@ -35,22 +35,14 @@ def render_setup(runtime: Spec2PrimitivesUIRuntime) -> None:
         ("Configured resources", "config/workcell_profile.json"),
         ("Configured composition and validation budgets", "config/phase5_validation.json"),
     ):
-        with ui.expansion(label, icon="description").classes("w-full"):
-            ui.label(path).classes("text-xs")
-            ui.code(json.dumps(read_artifact(_ROOT, path), indent=2), language="json").classes(
-                "w-full"
-            )
+        lazy_file(label, _ROOT / path)
     with ui.expansion(
         "Saved requirement, selected resource, RGB-D, and primitive catalog", icon="history"
-    ).classes("w-full"):
-        try:
-            records = {
-                row["interaction_identifier"]: row
-                for row in read_interactions(runtime.contexts_root)
-            }
-        except OSError as exc:
-            records = {}
-            ui.label(f"Saved setup is unavailable: {exc}").classes("text-amber-700")
+    ).classes("w-full") as saved_expansion:
+        saved_content = BackgroundSection()
+
+    def display_saved(rows: list[dict]) -> None:
+        records = {row["interaction_identifier"]: row for row in rows}
         if not records:
             ui.label("No saved interactions are available.")
         else:
@@ -81,29 +73,18 @@ def render_setup(runtime: Spec2PrimitivesUIRuntime) -> None:
                         for path in root.glob("resources/*/primitive_catalog_snapshot/*.json")
                     )
                     for path in catalogs:
-                        with ui.expansion(path, icon="account_tree").classes("w-full"):
-                            ui.code(
-                                json.dumps(read_artifact(root, path), indent=2), language="json"
-                            ).classes("w-full")
+                        lazy_file(path, root / path)
                     if not catalogs:
                         ui.label(f"primitive_catalog: {NOT_RECORDED}")
 
             selection.on_value_change(show)
+    saved_expansion.on_value_change(
+        lambda e: saved_content.load(lambda: read_interactions(runtime.contexts_root), display_saved) if e.value else None
+    )
     ui.label("Planned paper experiments").classes("text-lg font-semibold")
     ui.label(
         "These protocols describe planned trials; saved observations are under results."
     ).classes("text-sm text-slate-600")
     for filename in ("COMPOSITION_EVALUATION.md", "BIAS_VALIDATION.md"):
         path = _ROOT / filename
-        with ui.expansion(filename, icon="science").classes("w-full"):
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
-                ui.label(f"Protocol is unavailable: {exc}").classes("text-amber-700")
-                continue
-            ui.markdown(text)
-            ui.button(
-                "Download protocol",
-                icon="download",
-                on_click=lambda path=path: ui.download.file(path),
-            )
+        lazy_file(filename, path)

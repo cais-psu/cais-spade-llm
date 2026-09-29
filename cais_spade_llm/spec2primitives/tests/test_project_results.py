@@ -194,6 +194,20 @@ def test_results_ui_exports_filtered_rows_and_inspects_saved_programs(tmp_path, 
     client = Client(context.client.page)
     with client:
         project_results.render_results(tmp_path)
+        def _finish_reads(client):
+            import asyncio
+            async def finish():
+                while True:
+                    timers = [item for item in client.elements.values() if isinstance(item, ui.timer)
+                              and item.callback and item.callback.__qualname__.startswith("BackgroundSection.load.")
+                              and not item._is_canceled]
+                    if not timers:
+                        break
+                    for timer in timers:
+                        timer.cancel()
+                        await timer.callback()
+            asyncio.run(finish())
+        _finish_reads(client)
         search = next(
             element for element in client.elements.values() if isinstance(element, ui.input)
         )
@@ -207,7 +221,9 @@ def test_results_ui_exports_filtered_rows_and_inspects_saved_programs(tmp_path, 
         assert exported[0]["interaction_identifier"] == "interaction_B"
         table.selected = [table.rows[0]]
         callbacks["select"]()
-        code = next(element for element in client.elements.values() if isinstance(element, ui.code))
-        assert json.loads(code.content) == candidate
+        _finish_reads(client)
+        text = next(element.text for element in client.elements.values()
+                    if isinstance(element, ui.label) and element.text.startswith('{'))
+        assert json.loads(text) == candidate
         assert path.read_bytes() == before
     client.delete()

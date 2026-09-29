@@ -10,6 +10,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+from cais_spade_llm.ui.evidence import (
+    BackgroundSection,
+    TablePager,
+    contained_path,
+    read_json_cached,
+    render_file,
+)
+
 NOT_RECORDED = "not recorded"
 RECOVERY_RESULTS_ROOT = (
     Path(__file__).resolve().parents[1]
@@ -37,15 +45,20 @@ def read_artifact(root: Path, relative_path: str) -> dict[str, Any]:
     path = root / relative_path
     try:
         path.resolve().relative_to(root.resolve())
-        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError, ValueError) as exc:
         return {"record_error": f"{type(exc).__name__}: {exc}"}
     try:
-        payload = json.loads(text)
+        payload = read_json_cached(path)
         if not isinstance(payload, dict):
             raise ValueError("Expected a JSON object")
         return payload
+    except (OSError, UnicodeError) as exc:
+        return {"record_error": f"{type(exc).__name__}: {exc}"}
     except ValueError as exc:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            text = ""
         return {"record_error": f"{type(exc).__name__}: {exc}", "raw_text": text}
 
 
@@ -179,6 +192,7 @@ def render_results(root: Path = RECOVERY_RESULTS_ROOT) -> None:
         search = ui.input("Search saved results").classes("grow")
         refresh_button = ui.button("Refresh saved results", icon="refresh")
         export_button = ui.button("Export CSV", icon="download")
+    loading = BackgroundSection()
     message = ui.label().classes("text-slate-600")
     table = ui.table(
         columns=[
@@ -188,7 +202,6 @@ def render_results(root: Path = RECOVERY_RESULTS_ROOT) -> None:
         rows=[],
         row_key="source",
         selection="single",
-        pagination=10,
     ).classes("w-full")
     details = ui.column().classes("w-full")
 
@@ -201,19 +214,21 @@ def render_results(root: Path = RECOVERY_RESULTS_ROOT) -> None:
             in " ".join(str(row.get(field, "")) for field in RESULT_FIELDS).casefold()
         ]
 
+    pager = TablePager(table, lambda: [{field: row[field] for field in RESULT_FIELDS} for row in filtered()])
+
     def update() -> None:
-        table.rows = [{field: row[field] for field in RESULT_FIELDS} for row in filtered()]
+        pager.update()
         table.selected = []
         details.clear()
 
-    def refresh() -> None:
+    def loaded(rows: list[dict]) -> None:
         records.clear()
-        try:
-            records.update((row["source"], row) for row in read_sessions(root))
-            message.text = "" if records else "No saved recovery evidence is available."
-        except OSError as exc:
-            message.text = f"Saved recovery evidence is unavailable: {exc}"
+        records.update((row["source"], row) for row in rows)
+        message.text = "" if records else "No saved recovery evidence is available."
         update()
+
+    def refresh() -> None:
+        loading.load(lambda: read_sessions(root), loaded)
 
     def select() -> None:
         details.clear()
@@ -225,12 +240,12 @@ def render_results(root: Path = RECOVERY_RESULTS_ROOT) -> None:
             artifact = ui.select(
                 row["artifacts"], label="Saved artifact", value=row["source"]
             ).classes("w-full")
-            content = ui.code(language="json").classes("w-full")
+            content = ui.column().classes("w-full")
 
             def show() -> None:
-                content.content = json.dumps(
-                    read_artifact(root, artifact.value), indent=2, ensure_ascii=False
-                )
+                content.clear()
+                with content:
+                    render_file(contained_path(root, artifact.value))
 
             artifact.on_value_change(show)
             show()

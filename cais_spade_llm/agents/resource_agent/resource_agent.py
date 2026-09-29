@@ -781,6 +781,60 @@ class ResourceAgent(LlmAgent):
             "reason": "resource_validation_unavailable",
         }
 
+    def check_recovery_primitive_feasibility(
+        self,
+        *,
+        primitive: str,
+        params: dict[str, Any],
+        task: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        part_context: dict[str, Any],
+        grounded_action: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Require a resource-owned evaluator for a bound primitive."""
+        del primitive, params, task, recovery_snapshot, part_context, grounded_action
+        return {
+            "allowed": False,
+            "feasibility_status": "NEEDS_CONTEXT",
+            "constraint_code": "resource_validation_unavailable",
+            "reason": "ResourceAgent has no primitive capability evaluator",
+        }
+
+    def validate_recovery_primitive_support(
+        self,
+        *,
+        task: dict[str, Any],
+        recovery_des_model: dict[str, Any],
+        recovery_snapshot: dict[str, Any],
+        physical_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive support and evaluate primitive parameter witnesses on this RA."""
+        from cais_spade_llm.resources.recovery_feasibility import validate_primitive_support
+
+        def validate_primitive(*, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
+            evaluator = getattr(self, "check_recovery_primitive_feasibility", None)
+            if not callable(evaluator):
+                return {
+                    "allowed": False,
+                    "feasibility_status": "NEEDS_CONTEXT",
+                    "reason": "ResourceAgent has no primitive capability evaluator",
+                }
+            return evaluator(
+                primitive=primitive,
+                params=deepcopy(params),
+                task=deepcopy(task),
+                recovery_snapshot=deepcopy(recovery_snapshot),
+                part_context=deepcopy(physical_input.get("part_context") or {}),
+                grounded_action=deepcopy(physical_input.get("grounded_action") or {}),
+            )
+
+        return validate_primitive_support(
+            task=task,
+            recovery_des_model=recovery_des_model,
+            recovery_snapshot=recovery_snapshot,
+            validate_primitive=validate_primitive,
+        )
+
     def validate_recovery_outline_physical_candidates(  # noqa: C901
         self,
         payload: dict[str, Any],
@@ -870,22 +924,35 @@ class ResourceAgent(LlmAgent):
                         ),
                     }
                 if bool(transition_result.get("allowed") is True):
-                    physical_result = self.check_recovery_physical_feasibility(
-                        part_context=deepcopy(
-                            physical_input.get("part_context") or {}
-                        ),
-                        recovery_snapshot=validation_snapshot,
-                        grounded_action=deepcopy(
-                            physical_input.get("grounded_action") or {}
-                        ),
-                        operation_kind=str(
-                            physical_input.get("operation_kind") or ""
-                        ),
-                        part_name=(
-                            str(physical_input.get("part_name") or "").strip()
-                            or None
-                        ),
+                    support_result = ResourceAgent.validate_recovery_primitive_support(
+                        self, task=deepcopy(task), recovery_des_model=recovery_des_model,
+                        recovery_snapshot=validation_snapshot, physical_input=physical_input,
                     )
+                    physical_result = support_result
+                    if support_result.get("allowed") is True:
+                        physical_result = self.check_recovery_physical_feasibility(
+                            part_context=deepcopy(
+                                physical_input.get("part_context") or {}
+                            ),
+                            recovery_snapshot=validation_snapshot,
+                            grounded_action=deepcopy(
+                                physical_input.get("grounded_action") or {}
+                            ),
+                            operation_kind=str(
+                                physical_input.get("operation_kind") or ""
+                            ),
+                            part_name=(
+                                str(physical_input.get("part_name") or "").strip()
+                                or None
+                            ),
+                        )
+                        if isinstance(physical_result, dict):
+                            physical_result["primitive_support"] = deepcopy(
+                                support_result["primitive_support"]
+                            )
+                            physical_result.setdefault("evidence", {})["primitive_support"] = deepcopy(
+                                support_result["evidence"]
+                            )
                     if not isinstance(physical_result, dict):
                         physical_result = {
                             "allowed": False,

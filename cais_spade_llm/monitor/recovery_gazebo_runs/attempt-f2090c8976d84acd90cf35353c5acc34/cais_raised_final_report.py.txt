@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import shutil
+
+root = Path.cwd()
+out = Path(Path('/tmp/cais_acceptance_output_path').read_text().strip())
+run = json.loads((out/'run.json').read_text())
+acceptance = json.loads((out/'acceptance_audit.json').read_text())
+video = json.loads((out/'video_validation.json').read_text())
+comparison = json.loads((out/'speed_comparison.json').read_text())
+previous, current = comparison['previous'], comparison['current']
+base = []
+for transition in run['transitions']:
+    ack = transition['acknowledgement']
+    if ack['resource_id'] != 'KMR':
+        continue
+    for operation in transition.get('observations', {}).get('observations', {}).get('operations', []):
+        if operation.get('operation') != '/KMR/move_base':
+            continue
+        samples = operation.get('base_motion_samples', [])
+        held = [row for row in samples if row.get('clearance_wait_reason')]
+        # Timeout records retain the proposed vector; the executor publishes zero and returns.
+        moving = [row for row in samples if not row.get('clearance_wait_reason')
+                  and any(abs(v) > 1e-9 for v in row.get('command_velocity', []))]
+        failures = [row for row in moving if row.get('map_available') is not True
+                    or row.get('collision_checks_bypassed') is not False
+                    or row.get('transport_clearance', {}).get('checked_states', 0) < 1
+                    or row.get('transport_clearance', {}).get('collision_checks_bypassed') is not False]
+        base.append({'task_id': ack['task_id'], 'function': ack['event_name'], 'part': ack.get('part_name'),
+                     'destination': ack['parameters'].get('target_resource'),
+                     'samples': len(samples), 'moving_samples': len(moving),
+                     'clearance_hold_samples': len(held),
+                     'clearance_hold_reasons': sorted({row['clearance_wait_reason'] for row in held}),
+                     'moving_samples_without_clearance': len(failures),
+                     'maximum_odometry_wall_age_sec': max((row.get('odometry_age_sec', 0) for row in samples), default=0),
+                     'maximum_odometry_sim_age_sec': max((row.get('odometry_sim_age_sec', 0) for row in samples), default=0),
+                     'final_feedback': operation.get('feedback'), 'success': operation.get('success')})
+clearance = {'base_actions': base, 'moving_samples': sum(row['moving_samples'] for row in base),
+             'moving_samples_without_clearance': sum(row['moving_samples_without_clearance'] for row in base),
+             'clearance_hold_samples': sum(row['clearance_hold_samples'] for row in base),
+             'held_sample_interpretation': 'clearance_wait_reason identifies a timeout branch that calls _stop() and returns before cmd_pub.publish(gated). command_velocity in these records is the proposed vector, not dispatched output. Existing test_kmr_stop_does_not_refresh_commands_or_resume_cancellation coverage verifies zero publication on timeout.',
+             'contact_counts': acceptance['contact_counts'],
+             'KMR_cartesian': acceptance['KMR_cartesian'],
+             'scope': 'Recorded map, stopping-motion, parked-arm, and payload validity evidence. No numerical minimum surface distance was reported by GetStateValidity.'}
+(out/'clearance_audit.json').write_text(json.dumps(clearance, indent=2))
+assert acceptance['accepted']
+assert len(base) == 22 and all(row['success'] for row in base)
+assert clearance['moving_samples_without_clearance'] == 0
+assert acceptance['contact_counts']['ur_equipment'] == 0
+assert acceptance['contact_counts']['ur_robot'] == 0
+
+def duration(value: float) -> str:
+    seconds = round(value)
+    return f'{seconds//60}m{seconds%60:02d}s'
+
+
+startup=json.loads((out/'startup_pose_audit.json').read_text())
+fast=json.loads((out/'assembly-20x-validation.json').read_text())
+old_start=comparison['startup_transport']['previous']
+new_start=comparison['startup_transport']['current']
+assert startup['valid'] and fast['validated']
+rows=[('Full recording',duration(previous['video_duration_sec']),duration(current['video_duration_sec'])),
+      ('First transport step',f"{old_start['wall_time_sec']:.3f}s",f"{new_start['wall_time_sec']:.3f}s"),
+      ('First transport arm trajectories',str(old_start['arm_trajectories']),str(new_start['arm_trajectories'])),
+      ('KMR base wall time',duration(previous['base_wall_time_sec']),duration(current['base_wall_time_sec'])),
+      ('KMR base simulation time',duration(previous['base_simulation_time_sec']),duration(current['base_simulation_time_sec'])),
+      ('KMR base simulation/wall rate',f"{previous['base_simulation_rate']:.3f}",f"{current['base_simulation_rate']:.3f}")]
+readme=f"""# KMR raised startup: recorded 11-part acceptance
+
+Run `{run['run_id']}` assembled all **11 components** at their configured targets:
+four square pegs through M1, four round pegs through M2, and three preprinted gears.
+
+## Videos
+
+- [1× full recording](assembly.mp4): **{duration(video['duration_sec'])}**.
+- [20× recording](assembly-20x.mp4): **{duration(fast['duration_sec'])}**.
+- [10× recording](assembly-10x.mp4): **{duration(video['preview_duration_sec'])}**.
+
+The accelerated copies use fixed playback speed. They include the complete recorded
+workflow; they do not change Gazebo's simulation rate. All copies decode completely.
+
+## Raised startup
+
+KMR starts at the existing transport TCP `[-0.25, 0.50, 1.16]` m in its base frame,
+with the gripper down. The seven joint targets are taken from the final trajectory
+point of the first `park` step in run `82cb3858f1a94394a8f846a0b6831cf3`.
+Fresh measured joints, TCP, and mandatory MoveIt clearance passed before production.
+The first saved `pick_approach → move_to_named_pose("transport")` step sent **zero
+arm trajectories** and reported `motion_required=false`.
+
+Functions, primitives, state contracts, waypoints, Storage position, and pickup docks
+are unchanged. Both controller initialization and new Gazebo launches use the same
+saved `parked_arm_configuration`. This run began with a fresh installed launch.
+
+## Validation
+
+- {acceptance['completed_transitions']} acknowledged transitions; no saved-step or model discrepancies.
+- Program revision {acceptance['program_revision']}; protected files and complete saved programs unchanged.
+- Zero KMR equipment contacts in {acceptance['contact_counts']['messages']:,} contact messages.
+- Zero UR equipment or cross-UR contacts.
+- {clearance['moving_samples']:,} base output samples include mandatory map and transport clearance.
+- {clearance['clearance_hold_samples']} clearance waits held zero output before continuing.
+- All three ur5e-4 pickup rotation checks passed.
+- KMR and all four UR5e arms visible in startup, motion, final, and sampled video frames.
+
+Settings: speed 1, ODE threads 0, unchanged timestep and robot motion limits,
+diagnostic CCA bypass enabled, UR `avoid_collisions=false`, KMR collision checks active.
+This is Gazebo simulation evidence.
+
+## Timing comparison
+
+Reference: accepted run `82cb3858f1a94394a8f846a0b6831cf3` (21m06s).
+Its run data and timing summary were preserved before this test. The old video directory
+was already absent before this run; surviving successful recordings were preserved.
+
+| Measurement | Previous | Raised startup |
+| --- | ---: | ---: |
+"""
+readme+=''.join(f'| {name} | {old} | {new} |\n' for name,old,new in rows)
+readme+="""
+The startup trajectory was removed. Total wall time also depends on workstation load
+and Gazebo's measured simulation rate; total differences cannot be attributed entirely
+to the startup change.
+
+## Evidence
+
+- [Startup joints, TCP, clearance, and first step](startup_pose_audit.json).
+- [Acceptance and final placements](acceptance_audit.json), [complete run](run.json).
+- [Primitive trace audit](trace_audit.json), [model transition audit](model_audit.json).
+- [Clearance and contacts](clearance_audit.json), [render evidence](visual_evidence.json).
+- [Timing comparison](speed_comparison.json), [source fingerprints](verification_sources.json).
+- [Full and 10× validation](video_validation.json), [20× validation](assembly-20x-validation.json).
+- [Saved scene](scene.json), [previous run data](previous_run_baseline/previous_run.json).
+
+626 focused regression checks passed, alongside Python compile, CLI help, Poetry checks,
+and `make bootstrap-gazebo`. Two pre-existing fixture-dependent tests were excluded:
+`retired_lg_slippage_has_no_active_bindings` (unrelated active lg_slippage file) and
+`prepared_recording_covers_configured_parts_and_observed_home_joints` (missing historical fixture).
+"""
+(out/'README.md').write_text(readme)
+for name in ['cais_raised_compare.py','cais_raised_final_report.py']:
+ shutil.copyfile(Path('/tmp')/name,out/(name+'.txt'))
+print(json.dumps({'run_id':run['run_id'],'clearance_samples':clearance['moving_samples'],
+ 'full':duration(video['duration_sec']),'20x':duration(fast['duration_sec']),
+ 'startup_step_sec':new_start['wall_time_sec']},indent=2))

@@ -24,6 +24,8 @@ from cais_spade_llm.agents.shared_information.environment_capabilities import (
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.product.environment import EnvironmentProductContext, fingerprint
 from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.resources.gazebo_programs import current_program_revision, resource_program_revision
+from cais_spade_llm.resources.function_contracts import validated_function_contract
 from cais_spade_llm.resources.environment_models import (
     feasibility,
     matches_requirement,
@@ -262,6 +264,9 @@ class EnvironmentRuntime:
         self.context = EnvironmentProductContext(
             **prepared["inputs"], permitted_resources=prepared["setup"]["permitted_resources"]
         )
+        scene = self.context.inputs["scene"]
+        self.program_revision = resource_program_revision(scene) if "resource_programs" in scene else ""
+        self.scene_file = prepared["setup"].get("scene_file", "")
         self.jids = {
             resource.agent_name: str(resource.jid).split("/", 1)[0] for resource in resources
         }
@@ -767,6 +772,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
                     runtime.waiting_since.setdefault(key, time.monotonic())
                 waiting = [part for key, part, *_ in all_goals
                            if key == part and context.part_tracker[part]["location"] == "Storage"]
+                intake_parts = self._intake_parts(context, waiting)
                 source_waiting = self._source_waiting(context, all_goals, runtime.admitted_parts)
                 deferred = {part for parts in source_waiting.values() for part in parts}
                 goals = [goal for goal in all_goals if goal[0] not in waiting and goal[0] not in deferred]
@@ -777,9 +783,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         if self._intake_ready(context, part):
                             goals.append(next(goal for goal in all_goals if goal[0] == part))
                             break
-                if (waiting and not any(part in discoveries or part in ready for part in waiting)
-                        and self._intake_ready(context, waiting[0])):
-                    goals.append(("intake", waiting[0], None, None))
+                if (intake_parts and not any(part in discoveries or part in ready for part in waiting)
+                        and self._intake_ready(context, intake_parts[0])):
+                    goals.append(("intake", intake_parts[0], None, None))
                 revisions = context.revisions()
                 for key, part, desired, resource_goal in goals:
                     runtime.waiting_since.setdefault(key, time.monotonic())
@@ -790,7 +796,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         continue
                     attempted[key] = signature
                     discoveries[key] = asyncio.create_task(
-                        match_intake(runtime, self, waiting) if key == "intake" else
+                        match_intake(runtime, self, intake_parts) if key == "intake" else
                         self._negotiate_goal(runtime, key, part, desired, resource_goal)
                     )
                 for key, discovery in tuple(discoveries.items()):
@@ -958,6 +964,18 @@ class EnvironmentProductLoop(CyclicBehaviour):
             await runtime.cancel_owned()
             runtime.outcome = {"status": "blocked", "reason": "CCA rejected negotiated work", "details": decision}
             return False
+        if runtime.program_revision and runtime.scene_file:
+            scene_path = ROOT / runtime.scene_file
+            try:
+                current_revision = current_program_revision(scene_path)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                runtime.stop(f"Saved Gazebo program revision unavailable: {exc}")
+                runtime.outcome = {"status": "blocked", "reason": "Saved Gazebo program revision unavailable"}
+                return False
+            if current_revision != runtime.program_revision:
+                runtime.stop("Saved Gazebo program revision changed after Start System")
+                runtime.outcome = {"status": "blocked", "reason": "Stale Gazebo program revision"}
+                return False
         self._report_kickoff(runtime)
         for task in approval["tasks"]:
             if runtime.stopped:
@@ -980,6 +998,21 @@ class EnvironmentProductLoop(CyclicBehaviour):
         runtime.outcome = {"status": "executing", "tasks": deepcopy(list(context.pending_tasks.values()))}
         runtime.queue_save()
         return True
+
+    @staticmethod
+    def _intake_parts(context, waiting: list[str]) -> list[str]:
+        """Finish a KMR Storage approach for its bound part before new intake."""
+        kmr = context.resources.get("KMR")
+        if kmr is None or kmr.valuation.get("resource_state") != "at_pick":
+            return waiting
+        approached = kmr.valuation.get("approached_part")
+        if f"part:{approached}" in context.reservations:
+            return []
+        if context.part_tracker.get(approached, {}).get("location") != "Storage":
+            raise ValueError("KMR approached part is unavailable for Storage pickup")
+        # An unrelated goal can be negotiated while this approach waits for its
+        # next admission. Keep other Storage parts blocked without stopping it.
+        return [approached] if approached in waiting else []
 
     @staticmethod
     def _source_waiting(context, goals: list[tuple], admitted: set[str]) -> dict[str, list[str]]:
@@ -1289,7 +1322,12 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             or task["resource_id"] != actor.resource_id
         ):
             raise ValueError("Task does not match current prepared execution")
-        name = task["event_name"]
+        contract = validated_function_contract(context.models, task["event_id"])
+        name = contract["event_name"]
+        if (task["event_name"] != name or contract["resource_id"] != actor.resource_id
+                or contract["program_status"] != "implemented"
+                or contract["program_revision"] != runtime.program_revision):
+            raise ValueError("Function transition does not match the prepared program")
         if name not in actor.executors or not context.relevant_revisions_match(task):
             raise ValueError("Controller unavailable or resource configuration changed")
         part = task["parameters"].get("part_name") or task.get("part_name") or context.selected_parts[0]

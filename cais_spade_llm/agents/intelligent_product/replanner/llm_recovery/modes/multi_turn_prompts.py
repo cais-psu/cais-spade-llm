@@ -3289,6 +3289,9 @@ def _render_primitive_generation_prompt(payload: dict[str, Any]) -> str:
             "the visible primitive catalog for the active resource. There is no "
             "mechanical composer behind you: if you emit no primitive_steps, no "
             "trace is produced for this event.\n"
+            "RA primitive_support records independent capability witnesses. Primitive Composition "
+            "must still establish ordering, compatible parameter bindings, and achievement of "
+            "the complete expected_end_state. An accepted outline is not an executable program.\n"
             "The active event body and the surrounding accepted outline are "
             "provided inline below so you can reason about intent immediately. "
             "For peripheral facts (poses, contract cards, capability decompositions, "
@@ -3686,14 +3689,14 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 _resource_capabilities_summary(recovery_resources),
                 "",
                 "Resource States",
-                "These are modeled, non-closed `resource_state` labels grouped by `resource_type`; current observations remain in the authoritative state section below, and new nonempty strings may still be authored.",
+                "These are modeled `resource_state` labels grouped by `resource_type`. Preserve exact observed start conditions; an intended resource condition must have a predefined successor with RA-validated primitive support.",
                 _resource_state_vocabulary_summary(
                     recovery_resources=recovery_resources,
                     recovery_des_models=recovery_des_models,
                 ),
                 "",
                 "Part States",
-                "These are modeled or goal-declared, non-closed product/part `part_state` labels; current observations remain in the authoritative state section below, and new nonempty strings may still be authored.",
+                "These are modeled or goal-declared product/part `part_state` labels. Preserve exact observations; proposed effects still require RA feasibility and later primitive-composition validation.",
                 _part_state_vocabulary_summary(
                     llm_input=llm_input,
                     recovery_resources=recovery_resources,
@@ -3819,9 +3822,10 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 *candidate_part_rules,
                 "- A non-null `observed_pose` is grounded source evidence for its part.",
                 (
-                    "- `event_name` may be new. `resource_state` and `part_state` may be new "
-                    "nonempty exact strings; these labels alone do not establish capability, "
-                    "custody, location, or recovery progress."
+                    "- `event_name` may be new, and the proposed transition need not be predefined. "
+                    "Its intended resource condition must match a predefined successor. "
+                    "The RA derives alternative primitive supports and requires feasible parameter "
+                    "assignments for every primitive in one alternative. Missing evidence requires revision."
                 ),
                 (
                     "- Use only supplied `resource_jid` and `part_name` values. Location "

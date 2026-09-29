@@ -1,0 +1,70 @@
+{
+  "validated": true,
+  "run_id": "2a18a5d1ee544380b6ed6be402e43839",
+  "accepted": true,
+  "placements": 11,
+  "program_revision": 4,
+  "diagnostic_cca_bypass": true,
+  "ur_cartesian_avoid_collisions": {
+    "ur5e-1": false,
+    "ur5e-2": false,
+    "ur5e-3": false,
+    "ur5e-4": false
+  },
+  "kmr_base_collision_checks": true,
+  "kmr_equipment_contacts": 0,
+  "render_checks": [
+    "preflight_frame.png",
+    "approved_frame.png",
+    "during_motion_frame.png",
+    "final_frame.png"
+  ],
+  "visual_evidence": "visual_evidence.json",
+  "video": {
+    "validated": true,
+    "full_frames_decoded": 19089,
+    "preview_frames_decoded": 1909,
+    "fps": 15.0,
+    "size": [
+      1908,
+      998
+    ],
+    "duration_sec": 1272.6,
+    "preview_duration_sec": 127.26666666666667,
+    "capture": {
+      "status": "captured",
+      "started_at_unix": 1790705743.4763725,
+      "ended_at_unix": 1790707036.8802876,
+      "encoder_finalize_time_sec": 0.8253321060001326,
+      "fps": 15.0,
+      "frames": 19089,
+      "captures": 15909,
+      "repeated_frames": 3180,
+      "encoder": "h264_nvenc",
+      "preset": "p1",
+      "capture_cpu_time_sec": 933.8879870000001,
+      "encoder_cpu_time_sec": 233.62922700000001,
+      "max_capture_gap_sec": 0.8434193179982685,
+      "wall_duration_sec": 1272.6015952609996
+    },
+    "preview_encoder": "h264_nvenc",
+    "preview_preset": "p1",
+    "duration_validation": {
+      "source": "frames.jsonl:last elapsed_sec + frame interval",
+      "observed_duration_sec": 1272.6524692606663,
+      "difference_sec": -0.0524692606663848
+    }
+  },
+  "full_video": "assembly.mp4",
+  "preview_video": "assembly-10x.mp4",
+  "preview_speed": 10,
+  "additional_videos": {
+    "20x": {
+      "video": "assembly-20x.mp4",
+      "speed": 20,
+      "duration_sec": 63.667,
+      "validated": true,
+      "validation": "assembly-20x-validation.json"
+    }
+  }
+}

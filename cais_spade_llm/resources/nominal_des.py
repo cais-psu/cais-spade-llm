@@ -134,16 +134,16 @@ def _initial_models(scene: dict) -> dict[str, dict]:
         )
     kmr = scene["KMR"]
     models["KMR"]["execution_support"] = (
-        f"DockKMR controller binding: {kmr['docking_action']}; "
+        f"DockKMR compatibility binding: {kmr['docking_action']}; "
         f"simulation_control_integrated={kmr['simulation_control_integrated']}. "
         "Nominal task execution and part handling are not connected."
     )
     if kmr.get("integrated") and kmr.get("task_execution"):
         models["KMR"]["execution_support"] = (
-            "Gazebo execution: pick_part, move_to_resource, place_release for "
-            "assembly_board-v1-kmr-storage-m1.json only. "
-            f"DockKMR controller binding: {kmr['docking_action']}. "
-            "Other orders and physical execution are not integrated."
+            "Gazebo execution: pick_approach, pick_part, move_to_resource, "
+            "place_approach, place_release, and move_to_location through /KMR/move_base. "
+            f"DockKMR compatibility binding: {kmr['docking_action']}. "
+            "Physical execution is not integrated."
         )
         models["Storage"]["execution_support"] = "Participating inventory context for acknowledged KMR Storage-to-M1 pickup."
         models["M1"]["execution_support"] = "Participating loading context for acknowledged KMR Storage-to-M1 placement; machining is not integrated."
@@ -233,11 +233,13 @@ def _declare_states(models: dict, scene: dict) -> None:
     route_resources = list(
         dict.fromkeys(rid for route in scene["KMR"]["predefined_routes"] for rid in route)
     )
-    _variable(kmr, "resource_state", ["idle", "carrying"], "idle")
+    _variable(kmr, "resource_state", ["idle", "at_pick", "carrying", "positioned"], "idle")
     _variable(kmr, "held_part", [None, *pegs], None)
-    _variable(kmr, "resource_location", route_resources, "Storage")
+    _variable(kmr, "approached_part", [None, *pegs], None)
+    _variable(kmr, "resource_location", [None, *route_resources], "Storage")
     kmr["marked_state_conditions"] = [
-        _equals(resource_state="idle", held_part=None, resource_location="Storage")
+        _equals(resource_state="idle", held_part=None, approached_part=None,
+                resource_location="Storage")
     ]
     kmr["notes"] = [
         "Initially empty at Storage is a modeling assumption. Routes are instance configuration."
@@ -331,6 +333,22 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             )
     _event(
         models,
+        "pick_approach",
+        {
+            "resource_id": "KMR",
+            "origin_resource_location": "Storage",
+        },
+        {
+            "KMR": _equals(resource_state="idle", resource_location="Storage", held_part=None),
+            "Storage": {"inventory.{part_name}": {"equals": True}},
+        },
+        {"KMR": {**_sets(resource_state="at_pick"),
+                 "approached_part": {"set_from_param": "part_name"}}},
+        parameters={"part_name": _part_parameter("Storage", "slots")},
+        capability=({"part_location": "Storage"}, {"part_location": "Storage"}),
+    )
+    _event(
+        models,
         "pick_part",
         {
             "resource_id": "KMR",
@@ -338,12 +356,13 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             "handoff_acknowledged": True,
         },
         {
-            "KMR": _equals(resource_state="idle", resource_location="Storage", held_part=None),
+            "KMR": {**_equals(resource_state="at_pick", resource_location="Storage", held_part=None),
+                    "approached_part": {"equals_from_param": "part_name"}},
             "Storage": {"inventory.{part_name}": {"equals": True}},
         },
         {
             "KMR": {
-                **_sets(resource_state="carrying"),
+                **_sets(resource_state="carrying", approached_part=None),
                 "held_part": {"set_from_param": "part_name"},
             },
             "Storage": {"inventory.{part_name}": {"set": False}},
@@ -356,6 +375,24 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
         parameters = {"part_name": _part_parameter(rid)}
         _event(
             models,
+            "place_approach",
+            {
+                "resource_id": "KMR",
+                "destination_location": rid,
+            },
+            {
+                "KMR": {
+                    **_equals(resource_state="carrying", resource_location=rid),
+                    "held_part": {"equals_from_param": "part_name"},
+                },
+                rid: _equals(resource_state="idle", part_name=None),
+            },
+            {"KMR": _sets(resource_state="positioned")},
+            parameters=parameters,
+            capability=({"part_location": "KMR"}, {"part_location": "KMR"}),
+        )
+        _event(
+            models,
             "place_release",
             {
                 "resource_id": "KMR",
@@ -365,7 +402,7 @@ def _machine_and_mobile_events(models: dict, scene: dict) -> None:
             },
             {
                 "KMR": {
-                    **_equals(resource_state="carrying", resource_location=rid),
+                    **_equals(resource_state="positioned", resource_location=rid),
                     "held_part": {"equals_from_param": "part_name"},
                 },
                 rid: _equals(resource_state="idle", part_name=None),
@@ -960,6 +997,25 @@ def build_nominal_resource_des_models(scene: dict[str, Any]) -> dict[str, dict[s
     _machine_and_mobile_events(models, scene)
     _robot_events(models, scene)
     _transport_and_print_events(models, scene)
+    for state in ("idle", "carrying"):
+        _event(
+            models, "move_to_location",
+            {"resource_id": "KMR", "resource_state": state},
+            {"KMR": _equals(resource_state=state)},
+            {"KMR": {"resource_location": {"set_from_param": "observed_resource_location"}}},
+            parameters={
+                "x": {"required": True, "type": "number"},
+                "y": {"required": True, "type": "number"},
+                "yaw": {"required": True, "type": "number"},
+                "observed_resource_location": {"required": True, "type": ["string", "null"]},
+            },
+            capability=(
+                {"resource_state": state},
+                {"resource_state": state,
+                 "resource_location": {"set_from_param": "observed_resource_location"}},
+            ),
+            notes="Measured base pose resolves a named location only at its configured dock.",
+        )
     for model in models.values():
         model["local_event_alphabet"] = list(
             dict.fromkeys(event["event_name"] for event in model["events"])
@@ -1036,6 +1092,10 @@ def _check_valuation(models: dict, valuation: dict) -> None:
             carrying = values["resource_state"] in {"carrying", "picked", "positioned"}
             if carrying != (values["held_part"] is not None):
                 raise ValueError(f"Resource state disagrees with held_part: {rid}")
+        if "approached_part" in values and (values["resource_state"] == "at_pick") != (
+            values["approached_part"] is not None
+        ):
+            raise ValueError(f"KMR approach state disagrees with approached_part: {rid}")
         if "staging_part" in values and (values["resource_state"] == "idle") != (
             values["part_name"] is None
         ):

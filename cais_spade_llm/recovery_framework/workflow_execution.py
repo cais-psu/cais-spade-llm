@@ -150,8 +150,7 @@ def create_environment_resource_agents(
                 common["prewarmed_controller"] = prepared_controller
             elif prepared_controller is not None:
                 prepared_controller.shutdown()
-            resources.append(
-                RobotAgent(
+            robot_agent = RobotAgent(
                     jid,
                     "none",
                     name=rid,
@@ -165,7 +164,8 @@ def create_environment_resource_agents(
                     enable_controller_prewarm=True,
                     **common,
                 )
-            )
+            robot_agent.gazebo_program_scene = scene
+            resources.append(robot_agent)
             continue
         worker = None
         if rid == "KMR":
@@ -381,14 +381,17 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                     validate_start=_validate_start,
                 )
             elif rid == "KMR" and event_name in {
+                "pick_approach",
                 "pick_part",
                 "move_to_resource",
+                "place_approach",
                 "place_release",
             }:
                 actor.bind_executor(
                     event_name,
                     _kmr_executor(runtime, agent),
-                    _validate_kmr_completion,
+                    lambda task, evidence, saved_scene=context.inputs["scene"]: _validate_kmr_completion(
+                        task, evidence, saved_scene),
                     validate_start=_validate_start,
                 )
 
@@ -588,13 +591,37 @@ def _validate_transport_completion(task: dict, evidence: dict) -> bool:
     )
 
 
-def _validate_kmr_completion(task: dict, evidence: dict) -> bool:
+def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = None) -> bool:
+    """Require observed function effects and the pinned primitive step trace."""
     observations = evidence.get("observations", evidence)
+    if scene is not None and "resource_programs" in scene:
+        from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
+
+        name = task["event_name"]
+        variant = ""
+        if name == "move_to_resource" and observations.get("attached") is False:
+            variant = ("empty_return" if task["parameters"].get("target_resource") == "Storage"
+                       else "empty")
+        expected = saved_robot_definition(scene, "KMR", name, variant=variant).program.steps
+        records = observations.get("primitive_results")
+        if (not isinstance(records, list)
+                or [(row.get("step_id"), row.get("primitive")) for row in records]
+                != [(step.id, step.op) for step in expected]
+                or any(row.get("status") != "completed"
+                       or row.get("task_id") != task["task_id"] for row in records)):
+            return False
     if task["event_name"] == "move_to_resource" and task["parameters"].get("target_resource") == "Storage":
         home = observations.get("home_observation") or {}
         if not (home.get("home_pose_observed") is True and home.get("downward_facing") is True
                 and home.get("gripper_open") is True and observations.get("attached") is False
                 and observations.get("part_name") is None):
+            return False
+    if task["event_name"] in {"pick_approach", "place_approach"}:
+        if observations.get("approach_observed") is not True:
+            return False
+        if task["event_name"] == "pick_approach" and observations.get("attached") is not False:
+            return False
+        if task["event_name"] == "place_approach" and observations.get("attached") is not True:
             return False
     return (
         evidence.get("status") == "completed"

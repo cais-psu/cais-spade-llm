@@ -192,8 +192,8 @@ def _repo_path(raw_path: Any) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
-def _load_case3_runtime_context() -> dict[str, Any]:
-    payload = _load_json(CASE3_RUNTIME_CONTEXT)
+def _load_case3_runtime_context(runtime_context_path: Path | None = None) -> dict[str, Any]:
+    payload = _load_json(runtime_context_path or CASE3_RUNTIME_CONTEXT)
     if not isinstance(payload, dict):
         raise TypeError(f"runtime context {CASE3_RUNTIME_CONTEXT} did not decode to an object")
     return payload
@@ -1191,6 +1191,7 @@ class FakeRecoveryRobot:
     check_recovery_physical_feasibility = (
         RobotAgent.check_recovery_physical_feasibility
     )
+    check_recovery_primitive_feasibility = RobotAgent.check_recovery_primitive_feasibility
 
     async def execute_recovery_observation(
         self,
@@ -1509,8 +1510,9 @@ async def _prepare_recovery_dryrun_harness(
     debug_root: Path | None = None,
     scripted_responses: list[dict[str, Any]] | None = None,
     experiment_settings: dict[str, Any] | None = None,
+    runtime_context_path: Path | None = None,
 ) -> tuple[dict[str, Any], FakeProductAgent, ProcessPlanner, dict[str, Any]]:
-    runtime_context = _load_case3_runtime_context()
+    runtime_context = _load_case3_runtime_context(runtime_context_path)
     paths = _case3_paths(runtime_context)
     tools_catalog = _load_json(paths["tools"])
     plan_payload = _load_json(paths["plan"])
@@ -2010,26 +2012,59 @@ async def _run_actual_recovery(
     debug_root: Path | None = None,
     scripted_responses: list[dict[str, Any]] | None = None,
     experiment_settings: dict[str, Any] | None = None,
+    runtime_context_path: Path | None = None,
+    outline_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
-    runtime_context = _load_case3_runtime_context()
+    from cais_spade_llm.recovery_framework.diagnostics import (
+        inspect_inputs, load_outline_checkpoint, validator_fingerprint, write_record,
+    )
+
+    if mode not in {"outline", "primitive", "safety", "full"}:
+        raise ValueError("Unsupported recovery test mode")
+    if outline_checkpoint and mode == "outline":
+        raise ValueError("Select primitive, safety, or full to reuse an outline")
+    runtime_context = _load_case3_runtime_context(runtime_context_path)
+    inputs = inspect_inputs(runtime_context_path or CASE3_RUNTIME_CONTEXT)
+    if debug_root is not None and (debug_root / "inputs.json").is_file():
+        recorded_inputs = _load_json(debug_root / "inputs.json")
+        if recorded_inputs.get("fingerprint") != inputs["fingerprint"]:
+            raise ValueError("Saved inputs changed after test selection; select the inputs again")
+    checkpoint = load_outline_checkpoint(outline_checkpoint, inputs) if outline_checkpoint else None
     fixture, product_agent, planner, prepared_recovery_request = await _prepare_recovery_dryrun_harness(
         debug_root=debug_root,
         scripted_responses=scripted_responses,
         experiment_settings=experiment_settings,
+        runtime_context_path=runtime_context_path,
     )
-    paths = _case3_paths()
+    paths = _case3_paths(runtime_context)
     proposal: dict[str, Any] | None = None
     recovery_safety_generation: dict[str, Any] = {}
     recovery_final: dict[str, str] = {}
 
-    proposal = await _execute_recovery_until(
-        planner,
-        prepared_recovery_request,
-        stop_after="outline",
-    )
-    outline_session = _latest_session(prepared_recovery_request, planner)
+    if checkpoint is not None:
+        if checkpoint.get("experiment_settings") != prepared_recovery_request.get("recovery_outline_experiment_settings"):
+            raise ValueError("Outline experiment settings differ; generate a new outline")
+        outline_session = deepcopy(checkpoint["multi_turn_session"])
+        prepared_recovery_request["multi_turn_session_state"] = deepcopy(outline_session)
+    else:
+        proposal = await _execute_recovery_until(
+            planner,
+            prepared_recovery_request,
+            stop_after="outline",
+        )
+        outline_session = _latest_session(prepared_recovery_request, planner)
     outline_trace = _outline_trace_from_session_state(outline_session)
     _validate_outline_trace(outline_trace, label="transition_trace")
+    if outline_session.get("current_phase") not in {"primitive_generation", "finalize"}:
+        raise ValueError("Outline generation did not reach an accepted outline checkpoint")
+    if debug_root is not None:
+        write_record(debug_root / "outline_checkpoint.json", {
+            "input_fingerprint": inputs["fingerprint"],
+            "validator_fingerprint": validator_fingerprint(),
+            "experiment_settings": prepared_recovery_request.get("recovery_outline_experiment_settings"),
+            "multi_turn_session": outline_session,
+            "outline_source": str(outline_checkpoint) if outline_checkpoint else None,
+        })
 
     primitive_session: dict[str, Any] = {}
     primitive_program: list[dict[str, Any]] = []
@@ -2075,7 +2110,7 @@ async def _run_actual_recovery(
     return {
         "mode": mode,
         "scenario": str(runtime_context.get("failure_scenario_id") or "").strip(),
-        "runtime_context_source": str(CASE3_RUNTIME_CONTEXT),
+        "runtime_context_source": str(runtime_context_path or CASE3_RUNTIME_CONTEXT),
         "llm_response_source": (
             "mocked_scripted_fixture" if scripted_responses is not None else "live"
         ),
@@ -2106,6 +2141,8 @@ def run_recovery_outline_only(
     debug_root: Path | None = None,
     scripted_responses: list[dict[str, Any]] | None = None,
     experiment_settings: dict[str, Any] | None = None,
+    runtime_context_path: Path | None = None,
+    outline_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     """Run Case 3 runtime failure context through accepted recovery outline."""
     return asyncio.run(
@@ -2114,6 +2151,8 @@ def run_recovery_outline_only(
             debug_root=debug_root,
             scripted_responses=scripted_responses,
             experiment_settings=experiment_settings,
+            runtime_context_path=runtime_context_path,
+            outline_checkpoint=outline_checkpoint,
         )
     )
 
@@ -2123,6 +2162,8 @@ def run_primitive_composition(
     debug_root: Path | None = None,
     scripted_responses: list[dict[str, Any]] | None = None,
     experiment_settings: dict[str, Any] | None = None,
+    runtime_context_path: Path | None = None,
+    outline_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     """Run Case 3 outline first, then actual primitive composition."""
     return asyncio.run(
@@ -2131,6 +2172,8 @@ def run_primitive_composition(
             debug_root=debug_root,
             scripted_responses=scripted_responses,
             experiment_settings=experiment_settings,
+            runtime_context_path=runtime_context_path,
+            outline_checkpoint=outline_checkpoint,
         )
     )
 
@@ -2140,6 +2183,8 @@ def run_safety_synthsis(
     debug_root: Path | None = None,
     scripted_responses: list[dict[str, Any]] | None = None,
     experiment_settings: dict[str, Any] | None = None,
+    runtime_context_path: Path | None = None,
+    outline_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     """Run Case 3 outline first, then actual recovery safety synthsis."""
     return asyncio.run(
@@ -2148,6 +2193,8 @@ def run_safety_synthsis(
             debug_root=debug_root,
             scripted_responses=scripted_responses,
             experiment_settings=experiment_settings,
+            runtime_context_path=runtime_context_path,
+            outline_checkpoint=outline_checkpoint,
         )
     )
 
@@ -2157,6 +2204,8 @@ def run_full(
     debug_root: Path | None = None,
     scripted_responses: list[dict[str, Any]] | None = None,
     experiment_settings: dict[str, Any] | None = None,
+    runtime_context_path: Path | None = None,
+    outline_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     """Run Case 3 outline, safety synthsis, primitive composition, and final bundle."""
     return asyncio.run(
@@ -2165,6 +2214,8 @@ def run_full(
             debug_root=debug_root,
             scripted_responses=scripted_responses,
             experiment_settings=experiment_settings,
+            runtime_context_path=runtime_context_path,
+            outline_checkpoint=outline_checkpoint,
         )
     )
 
@@ -2425,6 +2476,9 @@ def _parse_args() -> argparse.Namespace:
         default="outline",
         help="Recovery stage to run",
     )
+    parser.add_argument("--runtime-context", type=Path, help="Saved runtime_context JSON")
+    parser.add_argument("--debug-root", type=Path, help="Directory for this test's artifacts")
+    parser.add_argument("--outline-checkpoint", type=Path, help="Accepted outline to reuse with matching inputs")
     return parser.parse_args()
 
 
@@ -2437,7 +2491,21 @@ def main() -> int:
         "safety": run_safety_synthsis,
         "full": run_full,
     }
-    result = run_by_mode[args.mode]()
+    result = run_by_mode[args.mode](
+        runtime_context_path=args.runtime_context,
+        debug_root=args.debug_root,
+        outline_checkpoint=args.outline_checkpoint,
+    )
+    if args.debug_root is not None:
+        from cais_spade_llm.recovery_framework.diagnostics import write_record
+        write_record(args.debug_root / "result.json", {
+            "mode": args.mode, "scenario": result["scenario"],
+            "llm_response_source": result["llm_response_source"],
+            "transition_trace": result["transition_trace"],
+            "accepted_primitive_program": result["accepted_primitive_program"],
+            "recovery_safety_generation": result["recovery_safety_generation"],
+            "experiment_settings": result["experiment_settings"],
+        })
     _print_result(result)
     return 0
 
@@ -2812,6 +2880,7 @@ async def _run_mocked_candidate_handler(
     parsed_response: dict[str, Any],
     invalid_candidate_indexes: set[int] | None = None,
     recovery_des_models: dict[str, Any] | None = None,
+    admissible_nominal_reentry_event_ids_after: list[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
         multi_turn_outline_generation,
@@ -2872,6 +2941,9 @@ async def _run_mocked_candidate_handler(
             "validation_stages": [],
             "remaining_blocked_issues": 0,
             "resource_switch_count": 0,
+            "admissible_nominal_reentry_event_ids_after": deepcopy(
+                admissible_nominal_reentry_event_ids_after or []
+            ),
             "pa_state_fingerprint": multi_turn_outline_generation._pa_state_fingerprint(
                 session_state=session_state,
                 prepared_recovery_request=prepared_recovery_request,
@@ -2901,15 +2973,45 @@ async def _run_mocked_candidate_handler(
         )
 
 
+async def _run_fixture_outline_prefix(
+    *, debug_root: Path, responses: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Run all supplied fixture turns, retaining an incomplete accepted prefix."""
+    _, product_agent, planner, request = await _prepare_recovery_dryrun_harness(
+        debug_root=debug_root, scripted_responses=responses,
+    )
+    request["_stop_after_multi_turn_phase"] = "outline"
+    session = None
+    while product_agent._scripted_responses:
+        if session is None:
+            await planner.execute_prepared_recovery_request(request)
+        else:
+            await multi_turn_mode.execute_multi_turn_recovery(
+                planner, request, session_state=session,
+            )
+        session = deepcopy(request.get("multi_turn_session_state") or _latest_session(request, planner))
+        if session.get("current_phase") != "outline":
+            break
+    assert not product_agent._scripted_responses
+    return {
+        "prepared_recovery_request": request,
+        "transition_trace": _outline_trace_from_session_state(session),
+        "multi_turn_session": session,
+        "turns": deepcopy(session["turns"]),
+        "llm_response_source": "mocked_scripted_fixture",
+        "accepted_primitive_program": _primitive_program_from_session(session),
+    }
+
+
 def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> None:
     runtime_context = _load_case3_runtime_context()
     expected_failed_task_id = str(
         dict(runtime_context.get("failure_event") or {}).get("failed_task_id") or ""
     ).strip()
-    result = run_recovery_outline_only(
-        debug_root=tmp_path,
-        scripted_responses=_fixture_outline_responses(),
-    )
+    responses = _fixture_outline_responses()
+    # Request the predefined picked successor; geometric evidence is still absent.
+    responses[4]["candidate_events"][0]["expected_end_state"]["resource_state"] = "picked"
+    result = asyncio.run(_run_fixture_outline_prefix(debug_root=tmp_path, responses=responses))
     trace = result["transition_trace"]
     prepared_recovery_request = result["prepared_recovery_request"]
     failure_context = prepared_recovery_request["failure_context_raw"]
@@ -3222,7 +3324,6 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         for audit_token in (
             '"validation_stages":',
             '"state_fingerprint":',
-            '"recovery_enabledness_validation_after":',
             '"selection_evidence":',
         ):
             assert audit_token in serialized_audit
@@ -3242,7 +3343,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
                 "artifact_paths",
             }
         )
-        assert set(outline_result["selected_transition"]).issubset(
+        assert set(outline_result.get("selected_transition") or {}).issubset(
             {
                 "outline_id",
                 "candidate_source",
@@ -3283,121 +3384,90 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
                     }
                 )
     assert [
-        json.loads(path.read_text(encoding="utf-8"))[
-            "remaining_blocked_issue_count"
-        ]
+        json.loads(path.read_text(encoding="utf-8"))["remaining_blocked_issue_count"]
         for path in outline_result_paths
-    ] == [2, 2, 2, 2, 0]
-    assert [row["candidate_source"] for row in trace] == [
-        "llm",
-        "llm",
-        "llm",
-        "robot_task_program",
-        "robot_task_program",
+    ] == [2, 2, 2, 2]
+    assert [row["candidate_source"] for row in trace] == ["llm", "llm"]
+    assert [row["event_name"] for row in trace] == [
+        "recover_to_home_idle", "place_mcp_to_prusa_mk4_2_temp",
     ]
-    seq3 = next(row for row in trace if row["outline_id"] == "RECOVERY_SEQ3")
-    assert seq3["event_name"] == "pick_lg_from_observed_pose"
-    assert seq3["resource_jid"] == "ur5e@localhost"
-    assert seq3["part_name"] == "LG"
-    assert seq3["expected_end_state"]["held_part"] == "LG"
-    assert seq3["expected_end_state"]["part_location"] == "ur5e@localhost"
-    seq3_audit = next(
-        payload
-        for payload in (
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in outline_audit_paths
+    for event in trace:
+        assert event["primitive_support"]["primitives"]
+        assert all(
+            witness["feasibility_status"] == "FEASIBLE"
+            for witness in event["primitive_support"]["primitives"]
         )
-        if payload.get("selected_transition_outline_id") == "RECOVERY_SEQ3"
-    )
+
+    seq3_audit = json.loads(outline_audit_paths[2].read_text(encoding="utf-8"))
     seq3_evaluation = seq3_audit["candidate_evaluation_summary"][0]
-    seq3_transition_stage = next(
-        stage
-        for stage in seq3_evaluation["validation_stages"]
-        if stage["validation_category"] == "transition_feasibility"
-    )
-    assert seq3_transition_stage["validator_role"] == "RA"
-    assert seq3_transition_stage["status"] == "passed"
-    assert seq3_audit["selection_status"] == "selected"
-    assert seq3_audit["selected_transition"]["candidate_source"] == "llm"
-    mcp_release_audit = json.loads(
-        outline_audit_paths[1].read_text(encoding="utf-8")
-    )
+    assert seq3_evaluation["task"]["event_name"] == "pick_lg_from_observed_pose"
+    assert seq3_evaluation["task"]["resource_jid"] == "ur5e@localhost"
+    assert seq3_evaluation["task"]["part_name"] == "LG"
+    assert seq3_evaluation["task"]["expected_end_state"]["held_part"] == "LG"
+    assert seq3_evaluation["task"]["expected_end_state"]["part_location"] == "ur5e@localhost"
+    assert [stage["status"] for stage in seq3_evaluation["validation_stages"]] == [
+        "passed", "passed", "rejected", "skipped",
+    ]
+    assert seq3_evaluation["constraint_codes"] == ["resource_validation_unavailable"]
+    assert seq3_audit["selection_status"] == "need_revision"
+
+    mcp_release_audit = json.loads(outline_audit_paths[1].read_text(encoding="utf-8"))
     selected_release_evaluation = next(
-        row
-        for row in mcp_release_audit["candidate_evaluation_summary"]
+        row for row in mcp_release_audit["candidate_evaluation_summary"]
         if row.get("selection_status") == "nondominated"
     )
-    enabledness_after = selected_release_evaluation[
-        "recovery_enabledness_validation_after"
-    ]
-    xarm6_lg_event_id = (
-        '{"event_name":"pick_approach","part_name":"LG",'
-        '"resource_jid":"xarm6@localhost"}'
+    enabledness_after = selected_release_evaluation["recovery_enabledness_validation_after"]
+    for resource_jid in ("xarm6@localhost", "ur5e@localhost"):
+        event_id = json.dumps(
+            {"event_name": "pick_approach", "part_name": "LG", "resource_jid": resource_jid},
+            separators=(",", ":"), sort_keys=True,
+        )
+        assert event_id in enabledness_after["symbolically_enabled_event_ids"]
+        assert event_id not in enabledness_after["ra_admissible_event_ids"]
+        evaluation = next(
+            row for row in enabledness_after["event_evaluations"] if row["event_id"] == event_id
+        )
+        assert evaluation["ra_status"] == "rejected"
+        assert evaluation["cca_status"] == "skipped"
+        assert evaluation["constraint_codes"] == ["resource_validation_unavailable"]
+    assert any(
+        '"task_id":"REQ_1_T1"' in event_id
+        for event_id in mcp_release_audit["selection_evidence"][
+            "admissible_nominal_reentry_event_ids_after"
+        ]
     )
-    ur5e_lg_event_id = (
-        '{"event_name":"pick_approach","part_name":"LG",'
-        '"resource_jid":"ur5e@localhost"}'
-    )
-    assert xarm6_lg_event_id in enabledness_after[
-        "symbolically_enabled_event_ids"
-    ]
-    assert xarm6_lg_event_id not in enabledness_after["ra_admissible_event_ids"]
-    assert ur5e_lg_event_id in enabledness_after["ra_admissible_event_ids"]
-    xarm6_lg_evaluation = next(
-        row
-        for row in enabledness_after["event_evaluations"]
-        if row["event_id"] == xarm6_lg_event_id
-    )
-    assert xarm6_lg_evaluation["ra_status"] == "rejected"
-    assert xarm6_lg_evaluation["cca_status"] == "skipped"
-    assert xarm6_lg_evaluation["constraint_codes"] == ["workspace_unreachable"]
 
     post_release_request = outline_request_paths[2].read_text(encoding="utf-8")
     post_release_message = post_release_request.split("Response Format", maxsplit=1)[0]
-    assert "workspace_unreachable" in post_release_message
-    assert "xarm6@localhost/LG" in post_release_message
-    assert "Accepted Transition Prefix (already applied; do not repeat)" in (
-        post_release_message
-    )
-    assert '"event_name": "place_mcp_to_prusa_mk4_2_temp"' in (
-        post_release_message
-    )
+    rejected_request = outline_request_paths[3].read_text(encoding="utf-8")
+    rejected_message = rejected_request.split("Response Format", maxsplit=1)[0]
+    assert "resource_validation_unavailable" in rejected_message
+    assert "ur5e@localhost/LG" in rejected_message
+    assert "NEEDS_CONTEXT" in rejected_message
+    assert "Accepted Transition Prefix (already applied; do not repeat)" in post_release_message
+    assert '"event_name": "place_mcp_to_prusa_mk4_2_temp"' in post_release_message
     assert "The only immediate blocker to recovering LG" not in post_release_message
-    assert '"held_part_location": "ur5e@localhost"' not in (
-        post_release_message
-    )
-    for stack_path in outline_stack_paths:
+    assert '"held_part_location": "ur5e@localhost"' not in post_release_message
+    for index, stack_path in enumerate(outline_stack_paths):
         stack_payload = json.loads(stack_path.read_text(encoding="utf-8"))
         assert isinstance(stack_payload, list)
-        assert stack_payload
+        assert len(stack_payload) == min(index + 1, 2)
+        assert [row["candidate_source"] for row in stack_payload] == ["llm"] * len(stack_payload)
         serialized_stack = json.dumps(stack_payload, sort_keys=True)
         assert "llm_outline_id" not in serialized_stack
         assert '"outline_id": "enabledness_' not in serialized_stack
-        expected_sources = [
-            "llm" if index < 3 else "robot_task_program"
-            for index in range(len(stack_payload))
-        ]
-        assert [row["candidate_source"] for row in stack_payload] == expected_sources
-    final_output = dict(result["multi_turn_session"].get("final_output") or {})
-    assert [
-        row["candidate_source"]
-        for row in (final_output.get("executable_recovery_trace") or [])
-    ] == ["llm", "llm", "llm", "robot_task_program", "robot_task_program"]
-    serialized_final_output = json.dumps(final_output, sort_keys=True)
-    assert "llm_outline_id" not in serialized_final_output
-    assert '"outline_id": "enabledness_' not in serialized_final_output
-    assert "recovery_sequence_source" not in final_output
+    assert _load_json(outline_stack_paths[1]) == _load_json(outline_stack_paths[2])
+    assert _load_json(outline_stack_paths[2]) == _load_json(outline_stack_paths[3])
+    session = result["multi_turn_session"]
+    assert session["status"] == "paused_after_outline_turn"
+    assert session["current_phase"] == "outline"
+    assert not session.get("final_output")
+    assert session["accepted_primitive_program"] == []
     latest_outline_turn = outline_turns[-1]
-    assert latest_outline_turn["candidate_source"] == "robot_task_program"
-    assert latest_outline_turn["llm_called"] is False
-    assert "request_artifact_path" not in latest_outline_turn
-    assert "prompt_artifact_path" not in latest_outline_turn
-    assert latest_outline_turn["outline_result_artifact_path"] == (
-        latest_outline_turn["response_artifact_path"]
-    )
+    assert latest_outline_turn["outline_result_artifact_path"] == latest_outline_turn["response_artifact_path"]
     assert Path(latest_outline_turn["outline_audit_artifact_path"]).exists()
-    assert "llm_response_artifact_path" not in latest_outline_turn
     assert Path(latest_outline_turn["outline_stack_artifact_path"]).exists()
+    assert "llm_response_artifact_path" not in latest_outline_turn
     assert "turn_index_artifact_path" not in latest_outline_turn
 
 
@@ -3442,65 +3512,49 @@ def test_case3_robot_capabilities_match_verified_plan_origins() -> None:
 def test_case3_mocked_novel_symbol_sequence_converges_without_semantic_cycles(
     tmp_path: Path,
 ) -> None:
-    result = run_recovery_outline_only(
-        debug_root=tmp_path,
-        scripted_responses=_novel_symbol_outline_responses(),
-    )
-    trace = result["transition_trace"]
+    """The historical novel-state sequence now requires supported successors."""
+    result = asyncio.run(_run_fixture_outline_prefix(
+        debug_root=tmp_path, responses=_novel_symbol_outline_responses(),
+    ))
     session_state = result["multi_turn_session"]
-
-    assert [row["event_name"] for row in trace] == [
-        "evt_q7",
-        "evt_z9",
-        "evt_n4",
-        "place_approach",
-        "place_insert",
-    ]
-    assert trace[0]["expected_end_state"]["resource_state"] == "xarm6_clear_state"
-    assert trace[1]["expected_end_state"]["part_state"] == "mcp_waiting_recovery"
-    assert trace[2]["expected_end_state"]["resource_state"] == "lg_secured"
-    assert [row["candidate_source"] for row in trace[:3]] == ["llm", "llm", "llm"]
-    assert trace[3]["candidate_source"] == "robot_task_program"
-    assert trace[4]["candidate_source"] == "robot_task_program"
-    assert trace[4]["expected_end_state"]["part_state"] == "assembled"
+    assert result["transition_trace"] == []
     assert "semantic_state_history" not in session_state
-    final_outline_turn = next(
-        turn
-        for turn in reversed(result["turns"])
-        if isinstance(turn, dict) and turn.get("phase") == "outline"
-    )
-    final_outline_result = _load_json(
-        Path(final_outline_turn["outline_result_artifact_path"])
-    )
-    assert isinstance(final_outline_result, dict)
-    assert final_outline_result["selection_status"] == "selected"
-    assert final_outline_result["remaining_blocked_issue_count"] == 0
-    assert session_state["status"] == "ready_for_primitive_generation"
+    assert session_state["status"] == "paused_after_outline_turn"
+    assert session_state["current_phase"] == "outline"
     assert session_state["accepted_primitive_program"] == []
-    assert result.get("accepted_primitive_program") in (None, [])
-    for turn in result["turns"]:
-        if not isinstance(turn, dict) or turn.get("phase") != "outline":
-            continue
-        for artifact_key in (
-            "outline_result_artifact_path",
-            "outline_audit_artifact_path",
-            "outline_stack_artifact_path",
-        ):
-            artifact_path = turn.get(artifact_key)
-            if not artifact_path:
-                continue
-            serialized_artifact = json.dumps(
-                _load_json(Path(artifact_path)), sort_keys=True
+    assert result["accepted_primitive_program"] == []
+    event_names = []
+    artifact_dir = tmp_path / "recovery_outline"
+    result_paths = sorted(artifact_dir.glob("*_outline_result_*.json"))
+    audit_paths = sorted(artifact_dir.glob("*_outline_audit_*.json"))
+    stack_paths = sorted(artifact_dir.glob("*_outline_stack_*.json"))
+    assert len(result_paths) == len(audit_paths) == len(stack_paths) == 4
+    for result_path, audit_path, stack_path in zip(
+        result_paths, audit_paths, stack_paths, strict=True,
+    ):
+        outline_result = _load_json(result_path)
+        assert outline_result["selection_status"] == "need_revision"
+        assert outline_result["remaining_blocked_issue_count"] > 0
+        assert outline_result["accepted_trace_length"] == 0
+        for evaluation in outline_result["candidate_evaluation_summary"]:
+            event_names.append(evaluation["task"]["event_name"])
+            assert evaluation["valid"] is False
+        audit_evaluations = _load_json(audit_path)["candidate_evaluation_summary"]
+        for evaluation in audit_evaluations:
+            expected_code = (
+                "unsupported_successor_condition"
+                if evaluation["task"]["event_name"] in {"evt_q7", "evt_z9"}
+                else "part_traceability_violation"
             )
+            assert evaluation["constraint_codes"] == [expected_code]
+            assert evaluation["findings"][0]["constraint_owner"] == "resource"
+        assert _load_json(stack_path) == []
+        for artifact_path in (result_path, audit_path, stack_path):
+            serialized_artifact = json.dumps(_load_json(artifact_path), sort_keys=True)
             assert "modeled_task_steps" not in serialized_artifact
             assert "primitive_steps" not in serialized_artifact
-    serialized_outline = json.dumps(
-        {
-            "transition_trace": result["transition_trace"],
-            "multi_turn_session": result["multi_turn_session"],
-        },
-        sort_keys=True,
-    )
+    assert event_names == ["evt_q7", "evt_z9", "evt_n4", "evt_v2"]
+    serialized_outline = json.dumps(session_state, sort_keys=True)
     assert "modeled_task_steps" not in serialized_outline
     assert "primitive_steps" not in serialized_outline
     assert result["llm_response_source"] == "mocked_scripted_fixture"
@@ -4211,8 +4265,8 @@ def test_candidate_prompt_shows_accepted_prefix_and_allows_new_event_state_symbo
     assert "new_clear_state" not in prompt
     assert "These transitions have already been applied" in prompt
     assert "`event_name` may be new" in prompt
-    assert "`resource_state` and `part_state` may be new nonempty exact strings" in prompt
-    assert "these labels alone do not establish capability" in prompt
+    assert "Its intended resource condition must match a predefined successor" in prompt
+    assert "requires feasible parameter assignments for every primitive in one alternative" in prompt
     assert '"resource_location": "station"' in prompt
     assert "known resource locations" not in prompt
     assert "Location tokens must belong to the same RA state field" in prompt
@@ -4474,7 +4528,7 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
         "event_name": "clear_board_home",
         "resource_jid": "xarm6@localhost",
         "expected_end_state": {
-            "resource_state": "home",
+            "resource_state": "idle",
             "resource_location": "home",
         },
         "rationale": "Clear the explicitly occupied destination.",
@@ -4504,12 +4558,12 @@ def test_gripper_state_is_private_and_nominal_reentry_selects_exact_origin() -> 
             "part_name": "MCP",
             "expected_end_state": {
                 "resource_state": "idle",
-                "resource_location": location,
+                "resource_location": "home",
                 "held_part": None,
                 "part_state": "placed",
                 "part_location": location,
             },
-            "rationale": "Release MCP at one exact reachable staging location.",
+            "rationale": "Release MCP at one exact reachable staging location and return to home.",
         }
 
     stage_prusa_mk3 = _stage_candidate("prusa-mk3")
@@ -4681,8 +4735,10 @@ def test_case3_unvalidated_pose_and_nonprogressing_home_remain_authoritative() -
     assert evaluations[0]["validation_findings"][0]["constraint_code"] == (
         "resource_validation_unavailable"
     )
-    assert evaluations[1]["valid"] is True
-    assert evaluations[1]["selection_status"] == "excluded_no_progress"
+    assert evaluations[1]["valid"] is False
+    assert evaluations[1]["validation_findings"][0]["constraint_code"] == (
+        "unsupported_successor_condition"
+    )
     assert decision == "need_revision"
 
 
@@ -4729,20 +4785,21 @@ def test_pa_allows_label_only_change_and_selection_rejects_no_progress() -> None
     )
     evaluation = turn_entry["candidate_evaluations"][0]
     assert decision == "need_revision"
-    assert evaluation["valid"] is True
-    assert evaluation["validation_findings"] == []
-    assert evaluation["selection_status"] == "excluded_no_progress"
-    assert evaluation["selection_constraint_codes"] == [
-        "label_only_state_change"
-    ]
+    assert evaluation["valid"] is False
+    assert evaluation["validation_findings"][0]["constraint_code"] == "unsupported_successor_condition"
+    progressing, codes = multi_turn_outline_generation._classify_candidate_selection_progress(
+        candidate={"surface_events": [validated]}, evaluation={}, progressing=False,
+    )
+    assert progressing is False
+    assert codes == ["label_only_state_change"]
     assert [
         (stage["validation_category"], stage["status"])
         for stage in evaluation["validation_stages"]
     ] == [
         ("syntax_and_grounding_validation", "passed"),
         ("transition_feasibility", "passed"),
-        ("physical_feasibility", "passed"),
-        ("safety", "passed"),
+        ("physical_feasibility", "rejected"),
+        ("safety", "skipped"),
     ]
 
     clear = {
@@ -4824,18 +4881,26 @@ def test_exact_no_op_passes_validators_and_is_excluded_by_selection() -> None:
 
     evaluation = turn_entry["candidate_evaluations"][0]
     assert decision == "need_revision"
-    assert evaluation["valid"] is True
-    assert evaluation["validation_findings"] == []
-    assert evaluation["selection_status"] == "excluded_no_progress"
-    assert evaluation["selection_constraint_codes"] == ["no_state_change"]
+    assert evaluation["valid"] is False
+    assert evaluation["validation_findings"][0]["constraint_code"] == "unsupported_successor_condition"
+    validated, findings = multi_turn_mode._derive_candidate_outline_task(
+        candidate_task=no_op, session_state=session_state,
+        prepared_recovery_request=prepared_recovery_request,
+    )
+    assert findings == []
+    progressing, codes = multi_turn_outline_generation._classify_candidate_selection_progress(
+        candidate={"surface_events": [validated]}, evaluation={}, progressing=False,
+    )
+    assert progressing is False
+    assert codes == ["no_state_change"]
     assert [
         (stage["validation_category"], stage["status"])
         for stage in evaluation["validation_stages"]
     ] == [
         ("syntax_and_grounding_validation", "passed"),
         ("transition_feasibility", "passed"),
-        ("physical_feasibility", "passed"),
-        ("safety", "passed"),
+        ("physical_feasibility", "rejected"),
+        ("safety", "skipped"),
     ]
     assert "candidate_revision_targets" not in turn_entry
 
@@ -6268,3 +6333,236 @@ def test_case3_one_step_candidate_count_rejects_more_than_three() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_recovery_dfa_accepting_self_loop_and_multiple_accepting_states() -> None:
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    monitor = OnlineSafetyMonitor({"SAFE_1": """
+        digraph DFA {
+            node [shape = doublecircle]; 2; 3;
+            node [shape = circle]; 1;
+            init -> 1;
+            1 -> 2 [label="ap1"];
+            1 -> 3 [label="!ap1"];
+            2 -> 2 [label="true"];
+            3 -> 3 [label="true"];
+        }
+    """}, [])
+    assert monitor.dfas["SAFE_1"]["accepting_states"] == ["2", "3"]
+    assert monitor.dfas["SAFE_1"]["violation_state"] is None
+    assert monitor.online_safety_validation(["ap1"])[0] is True
+    assert monitor.online_safety_validation([])[0] is True
+    assert monitor.current_states == {"SAFE_1": "1"}
+
+
+def test_recovery_dfa_rejects_nonaccepting_cycle_and_unsatisfiable_escape() -> None:
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    monitor = OnlineSafetyMonitor({"SAFE_1": """
+        digraph DFA {
+            node [shape = doublecircle]; 1;
+            node [shape = circle]; 2; 3;
+            init -> 1;
+            1 -> 2 [label="ap1"];
+            1 -> 1 [label="!ap1"];
+            2 -> 1 [label="ap1 & !ap1"];
+            2 -> 3 [label="true"];
+            3 -> 2 [label="true"];
+        }
+    """}, [])
+    assert monitor.dfas["SAFE_1"]["accepting_reachable_states"] == ["1"]
+    allowed, result = monitor.online_safety_validation(["ap1"])
+    assert allowed is False
+    assert result["violated_rule"] == "SAFE_1"
+    assert result["violated_to"] == "2"
+    assert monitor.current_states == {"SAFE_1": "1"}
+
+
+def test_recovery_dfa_allows_nonaccepting_prefix_with_accepting_continuation() -> None:
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    monitor = OnlineSafetyMonitor({"SAFE_1": """
+        digraph DFA {
+            node [shape = doublecircle]; 3;
+            node [shape = circle]; 1; 2;
+            init -> 1;
+            1 -> 2 [label="true"];
+            2 -> 3 [label="ap1"];
+            2 -> 2 [label="!ap1"];
+            3 -> 3 [label="true"];
+        }
+    """}, [])
+    allowed, result = monitor.online_safety_validation([])
+    assert allowed is True
+    assert result["next_states"] == {"SAFE_1": "2"}
+
+
+def test_recovery_dfa_empty_label_is_a_trace_step() -> None:
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    monitor = OnlineSafetyMonitor({"SAFE_1": """
+        digraph DFA {
+            node [shape = doublecircle]; 1;
+            node [shape = circle]; 2;
+            init -> 1;
+            1 -> 1 [label="ap1"];
+            1 -> 2 [label="!ap1"];
+            2 -> 2 [label="true"];
+        }
+    """}, [])
+    assert monitor.online_safety_validation([], successor_state_aps=[])[0] is False
+
+
+def test_recovery_successor_replaces_old_facts_and_keeps_running_tasks() -> None:
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    monitor = OnlineSafetyMonitor({"SAFE_2": """
+        digraph DFA {
+            node [shape = doublecircle]; 1;
+            node [shape = circle]; 2;
+            init -> 1;
+            1 -> 2 [label="ap1 & ap2"];
+            1 -> 1 [label="!ap1 | !ap2"];
+            2 -> 2 [label="true"];
+        }
+    """}, [])
+    monitor.resource_state_aps["recovery_scope"] = {"ap1"}
+    monitor.running_aps = {"ap2"}
+    allowed, result = monitor.online_safety_validation([], successor_state_aps=[])
+    assert allowed is True
+    assert result["successor_state_aps"] == []
+    assert result["running_snapshot"] == ["ap2"]
+    assert monitor.online_safety_validation([], successor_state_aps=["ap1"])[0] is False
+    assert monitor.resource_state_aps == {"recovery_scope": {"ap1"}}
+    assert monitor.current_states == {"SAFE_2": "1"}
+
+
+def test_recovery_macro_uses_successor_history_and_other_tasks() -> None:
+    rule = {
+        "id": "SAFE_1", "ap_scope": "nominal",
+        "text": "Require the projected idle condition while other work remains active.",
+        "dfa_dot": """
+            digraph DFA {
+                node [shape = doublecircle]; 3;
+                node [shape = circle]; 1; 2; 4;
+                init -> 1;
+                1 -> 4 [label="true"];
+                2 -> 3 [label="!ap1 & ap2 & ap3 & ap4"];
+                2 -> 4 [label="ap1 | !ap2 | !ap3 | !ap4"];
+                3 -> 3 [label="!ap1 & ap2 & ap3 & ap4"];
+                3 -> 4 [label="ap1 | !ap2 | !ap3 | !ap4"];
+                4 -> 4 [label="true"];
+            }
+        """,
+        "recovery_aps": [
+            {"label": "ap1", "full": "ap_state/p/any/xarm6/failed",
+             "selector": {"mode": "resource_state", "resource": "xarm6", "state": "failed"}},
+            {"label": "ap2", "full": "ap_state/p/any/xarm6/idle",
+             "selector": {"mode": "resource_state", "resource": "xarm6", "state": "idle"}},
+            {"label": "ap3", "full": "ap_state/p/any/ur5e/printing",
+             "selector": {"mode": "resource_state", "resource": "ur5e", "state": "printing"}},
+            {"label": "ap4", "full": "ap_event/p/MCP/ur5e/place_approach",
+             "selector": {"mode": "move_part_to_destination", "part": "MCP",
+                          "resource": "ur5e", "destination": "assembly_board-v1"}},
+        ],
+    }
+    pre_resources = {
+        "xarm6@localhost": {"current_state": "failed"},
+        "ur5e@localhost": {"current_state": "printing"},
+    }
+    projected = deepcopy(pre_resources)
+    projected["xarm6@localhost"]["current_state"] = "idle"
+    kwargs = {
+        "task": {"outline_id": "RECOVERY_SEQ1", "event_name": "evt_q7",
+                 "resource_jid": "xarm6@localhost"},
+        "signature": {}, "pre_resources": pre_resources, "pre_parts": {},
+        "projected_resources": projected, "projected_parts": {},
+        "llm_input": {"loaded_safety_rules": [rule],
+                      "recovery_safety_context": {"running_aps": ["ap4"]}},
+        "safety_dfa_states_before": {"SAFE_1": "2"},
+    }
+    before = deepcopy(kwargs)
+    accepted = validate_outline_macro_recovery_safety(**kwargs)
+    assert accepted["is_safe"] is True
+    assert accepted["safety_dfa_states_before"] == {"SAFE_1": "2"}
+    assert accepted["safety_dfa_states_after"] == {"SAFE_1": "3"}
+    assert set(accepted["safety_ctx"]["predicted_state_aps"]) == {"ap2", "ap3"}
+    assert kwargs == before
+
+    kwargs["safety_dfa_states_before"] = accepted["safety_dfa_states_after"]
+    kwargs["projected_resources"] = deepcopy(pre_resources)
+    rejected = validate_outline_macro_recovery_safety(**kwargs)
+    assert rejected["is_safe"] is False
+    assert rejected["safety_dfa_states_after"] == {"SAFE_1": "3"}
+    finding = rejected["findings"][0]
+    assert finding["rule_id"] == "SAFE_1"
+    assert finding["evidence"]["safety_rule"] == rule | {
+        "rule_id": "SAFE_1", "dfa_dot": rule["dfa_dot"].strip(),
+    }
+    assert finding["evidence"]["projected_resources"] == pre_resources
+    assert finding["evidence"]["projected_parts"] == {}
+
+
+def test_recovery_dfa_missing_or_ambiguous_step_cannot_stutter() -> None:
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    for edges in (
+        '1 -> 1 [label="ap1"];',
+        '1 -> 1 [label="true"]; 1 -> 2 [label="true"]; 2 -> 2 [label="true"];',
+    ):
+        monitor = OnlineSafetyMonitor({"SAFE_1": (
+            "digraph DFA { node [shape = doublecircle]; 1; 2; "
+            "node [shape = circle]; init -> 1; " + edges + " }"
+        )}, [])
+        allowed, evidence = monitor.online_safety_validation([], successor_state_aps=[])
+        assert allowed is False
+        assert evidence["violated_rule"] == "SAFE_1"
+        assert monitor.current_states == {"SAFE_1": "1"}
+
+
+def test_recovery_applicable_constant_rule_and_missing_projection() -> None:
+    import pytest
+
+    rule = {
+        "id": "SAFE_1", "ap_scope": "recovery",
+        "dfa_dot": 'digraph DFA { node [shape = doublecircle]; 1; node [shape = circle]; '
+                   'init -> 1; 1 -> 1 [label="true"]; }',
+        "recovery_aps": [],
+    }
+    kwargs = {
+        "task": {}, "signature": {}, "pre_resources": {}, "pre_parts": {},
+        "projected_resources": {}, "projected_parts": {},
+        "llm_input": {"loaded_safety_rules": [rule]},
+        "safety_dfa_states_before": {"SAFE_1": "1"},
+    }
+    assert validate_outline_macro_recovery_safety(**kwargs)["is_safe"] is True
+    rule["dfa_dot"] = rule["dfa_dot"].replace('"true"', '"ap1"')
+    with pytest.raises(ValueError, match="unprojected propositions"):
+        validate_outline_macro_recovery_safety(**kwargs)
+    rule["dfa_dot"] = ""
+    with pytest.raises(ValueError, match="no DFA"):
+        validate_outline_macro_recovery_safety(**kwargs)
+
+
+def test_recovery_completion_requires_admissible_nominal_reentry() -> None:
+    for reentry, expected in (([], "need_next_task"), (["REQ_1_T1"], "outline_ready")):
+        session = _candidate_session(recovery_selection_mode="pure_llm", action_horizon="k")
+        with patch.object(
+            multi_turn_outline_generation, "_nominal_reentry_event_rows",
+            return_value=[{"event_id": "REQ_1_T1"}],
+        ):
+            decision, _ = asyncio.run(_run_mocked_candidate_handler(
+                session_state=session,
+                parsed_response={
+                    "thought": "resolve conditions",
+                    "selected_candidate_index": 0,
+                    "candidate_traces": [{"events": [
+                        _candidate_event("step_a"), _candidate_event("step_b"),
+                    ]}],
+                },
+                admissible_nominal_reentry_event_ids_after=reentry,
+            ))
+        assert decision == expected
+        assert len(session["accepted_outline_prefix"]) == 2
+        assert not session.get("accepted_primitive_program")

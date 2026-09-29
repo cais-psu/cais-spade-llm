@@ -12,7 +12,7 @@
          Station to their right. This does not change the perception cameras. -->
     <gui>
       <camera name="user_camera">
-        <pose>-4.5 -9 11.0 0 0.80 1.57079632679</pose>
+        <pose>-3.1 -7.2 9.2 0 0.80 1.57079632679</pose>
         <view_controller>orbit</view_controller>
       </camera>
     </gui>
@@ -22,17 +22,17 @@
     <include>
       <uri>model://bantam_tools_desktop_cnc</uri>
       <name>M1</name>
-      <pose>-6.0 1.9 0.0 0.0 0.0 -1.5707963267948966</pose>
+      <pose>-4.05 1.9 0.0 0.0 0.0 -1.5707963267948966</pose>
     </include>
     <include>
       <uri>model://bantam_tools_desktop_cnc</uri>
       <name>M2</name>
-      <pose>-2.6 1.9 0.0 0.0 0.0 -1.5707963267948966</pose>
+      <pose>-2.05 1.9 0.0 0.0 0.0 -1.5707963267948966</pose>
     </include>
 
     <model name="M1_KMR_docking_pose">
       <static>true</static>
-      <pose>-6.65 2.2 0.004 0.0 0.0 1.5707963267948966</pose>
+      <pose>-4.7 2.2 0.004 0.0 0.0 1.5707963267948966</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
@@ -45,11 +45,11 @@
     <include>
       <uri>model://KMR</uri>
       <name>KMR</name>
-      <pose>-8.24 2.13 0.0 0.0 0.0 1.5707963267948966</pose>
+      <pose>-5.54 2.13 0.0 0.0 0.0 1.5707963267948966</pose>
     </include>
     <model name="M2_KMR_docking_pose">
       <static>true</static>
-      <pose>-3.25 2.20 0.004 0.0 0.0 1.5707963267948966</pose>
+      <pose>-2.7 2.20 0.004 0.0 0.0 1.5707963267948966</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
@@ -61,7 +61,7 @@
     <!-- Passive layout fixtures. Conveyor transport remains outside this increment. -->
     <model name="ur5e-1 pedestal">
       <static>true</static>
-      <pose>-6 1.1 0 0 0 0</pose>
+      <pose>-4.05 1.1 0 0 0 0</pose>
       <link name="link">
         <collision name="column">
           <pose>0 0 0.38 0 0 0</pose>
@@ -127,7 +127,7 @@
     </model>
     <model name="ur5e-2 pedestal">
       <static>true</static>
-      <pose>-2.6 1.1 0 0 0 0</pose>
+      <pose>-2.05 1.1 0 0 0 0</pose>
       <link name="link">
         <collision name="column">
           <pose>0 0 0.38 0 0 0</pose>
@@ -193,7 +193,7 @@
     </model>
     <model name="M1 staging tray">
       <static>true</static>
-      <pose>-6.55 1.1 0 0 0 0</pose>
+      <pose>-4.6 1.1 0 0 0 0</pose>
       <link name="link">
         <collision name="pedestal">
           <pose>0 0 0.48 0 0 0</pose>
@@ -249,7 +249,7 @@
     </model>
     <model name="M2 staging tray">
       <static>true</static>
-      <pose>-3.15 1.1 0 0 0 0</pose>
+      <pose>-2.6 1.1 0 0 0 0</pose>
       <link name="link">
         <collision name="pedestal">
           <pose>0 0 0.48 0 0 0</pose>
@@ -305,7 +305,7 @@
     </model>
     <model name="Storage">
       <static>true</static>
-      <pose>-9.15 2.3 0 0 0 1.57079632679</pose>
+      <pose>-6.45 2.3 0 0 0 1.57079632679</pose>
       <link name="link">
         <collision name="leg_0">
           <pose>-0.585 -0.46 0.3125 0 0 0</pose>
@@ -637,7 +637,7 @@
     </model>
     <model name="Storage_KMR_docking_pose">
       <static>true</static>
-      <pose>-8.24 2.13 0.004 0.0 0.0 1.5707963267948966</pose>
+      <pose>-5.54 2.13 0.004 0.0 0.0 1.5707963267948966</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>1.19 0.72 0.008</size></box></geometry>
@@ -648,13 +648,13 @@
     </model>
     <model name="Conveyor">
       <static>true</static>
-      <pose>-3.75 0.5 0 0 0 0</pose>
+      <pose>-2.85 0.5 0 0 0 0</pose>
       <link name="link">
         <collision name="belt">
           <pose>0 0 0.98 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0 0.3 0.07</size>
+              <size>4.2 0.3 0.07</size>
             </box>
           </geometry>
         </collision>
@@ -662,7 +662,7 @@
           <pose>0 0 0.98 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0 0.3 0.07</size>
+              <size>4.2 0.3 0.07</size>
             </box>
           </geometry>
           <material>
@@ -674,7 +674,7 @@
           <pose>0 -0.18 0.96 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0 0.06 0.13</size>
+              <size>4.2 0.06 0.13</size>
             </box>
           </geometry>
         </collision>
@@ -682,7 +682,7 @@
           <pose>0 -0.18 0.96 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0 0.06 0.13</size>
+              <size>4.2 0.06 0.13</size>
             </box>
           </geometry>
           <material>
@@ -694,7 +694,7 @@
           <pose>0 0.18 0.96 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0 0.06 0.13</size>
+              <size>4.2 0.06 0.13</size>
             </box>
           </geometry>
         </collision>
@@ -702,7 +702,7 @@
           <pose>0 0.18 0.96 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0 0.06 0.13</size>
+              <size>4.2 0.06 0.13</size>
             </box>
           </geometry>
           <material>
@@ -711,7 +711,7 @@
           </material>
         </visual>
         <collision name="leg_0_0">
-          <pose>-2.75 -0.17 0.46 0 0 0</pose>
+          <pose>-1.85 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -719,7 +719,7 @@
           </geometry>
         </collision>
         <visual name="leg_0_0">
-          <pose>-2.75 -0.17 0.46 0 0 0</pose>
+          <pose>-1.85 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -731,7 +731,7 @@
           </material>
         </visual>
         <collision name="leg_0_1">
-          <pose>-2.75 0.17 0.46 0 0 0</pose>
+          <pose>-1.85 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -739,7 +739,7 @@
           </geometry>
         </collision>
         <visual name="leg_0_1">
-          <pose>-2.75 0.17 0.46 0 0 0</pose>
+          <pose>-1.85 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -751,7 +751,7 @@
           </material>
         </visual>
         <collision name="leg_1_0">
-          <pose>-0.9 -0.17 0.46 0 0 0</pose>
+          <pose>-0.62 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -759,7 +759,7 @@
           </geometry>
         </collision>
         <visual name="leg_1_0">
-          <pose>-0.9 -0.17 0.46 0 0 0</pose>
+          <pose>-0.62 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -771,7 +771,7 @@
           </material>
         </visual>
         <collision name="leg_1_1">
-          <pose>-0.9 0.17 0.46 0 0 0</pose>
+          <pose>-0.62 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -779,7 +779,7 @@
           </geometry>
         </collision>
         <visual name="leg_1_1">
-          <pose>-0.9 0.17 0.46 0 0 0</pose>
+          <pose>-0.62 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -791,7 +791,7 @@
           </material>
         </visual>
         <collision name="leg_2_0">
-          <pose>0.9 -0.17 0.46 0 0 0</pose>
+          <pose>0.62 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -799,7 +799,7 @@
           </geometry>
         </collision>
         <visual name="leg_2_0">
-          <pose>0.9 -0.17 0.46 0 0 0</pose>
+          <pose>0.62 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -811,7 +811,7 @@
           </material>
         </visual>
         <collision name="leg_2_1">
-          <pose>0.9 0.17 0.46 0 0 0</pose>
+          <pose>0.62 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -819,7 +819,7 @@
           </geometry>
         </collision>
         <visual name="leg_2_1">
-          <pose>0.9 0.17 0.46 0 0 0</pose>
+          <pose>0.62 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -831,7 +831,7 @@
           </material>
         </visual>
         <collision name="leg_3_0">
-          <pose>2.75 -0.17 0.46 0 0 0</pose>
+          <pose>1.85 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -839,7 +839,7 @@
           </geometry>
         </collision>
         <visual name="leg_3_0">
-          <pose>2.75 -0.17 0.46 0 0 0</pose>
+          <pose>1.85 -0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -851,7 +851,7 @@
           </material>
         </visual>
         <collision name="leg_3_1">
-          <pose>2.75 0.17 0.46 0 0 0</pose>
+          <pose>1.85 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -859,7 +859,7 @@
           </geometry>
         </collision>
         <visual name="leg_3_1">
-          <pose>2.75 0.17 0.46 0 0 0</pose>
+          <pose>1.85 0.17 0.46 0 0 0</pose>
           <geometry>
             <box>
               <size>0.06 0.06 0.92</size>
@@ -871,7 +871,7 @@
           </material>
         </visual>
         <visual name="loading_position_1">
-          <pose>-2.25 0 1.016 0 0 0</pose>
+          <pose>-1.2 0 1.016 0 0 0</pose>
           <geometry>
             <box>
               <size>0.16 0.24 0.002</size>
@@ -883,7 +883,7 @@
           </material>
         </visual>
         <visual name="loading_position_2">
-          <pose>1.15 0 1.016 0 0 0</pose>
+          <pose>0.8 0 1.016 0 0 0</pose>
           <geometry>
             <box>
               <size>0.16 0.24 0.002</size>
@@ -895,7 +895,7 @@
           </material>
         </visual>
         <visual name="output_nest">
-          <pose>2.97 0 1.015 0 0 0</pose>
+          <pose>2.07 0 1.015 0 0 0</pose>
           <geometry>
             <box>
               <size>0.16 0.24 0.002</size>
@@ -1230,7 +1230,7 @@
     <!-- Storage camera faces the shelves from the front aisle. -->
     <model name="cam_storage">
       <static>true</static>
-      <pose>-8.20 0.75 2.35 0 0.694 2.047</pose>
+      <pose>-5.5 0.75 2.35 0 0.694 2.047</pose>
       <link name="link">
         <visual name="visual">
           <geometry><box><size>0.03 0.03 0.03</size></box></geometry>
@@ -1569,7 +1569,7 @@
 
     <!-- Exact NIST KET CAD on the upper Storage shelf. -->
     <model name="KET4_Square_4mm">
-      <pose>-8.95 1.88 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.25 1.88 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.01</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.004 0.004 0.05</size></box></geometry></collision>
@@ -1577,7 +1577,7 @@
       </link>
     </model>
     <model name="KET8_Square_8mm">
-      <pose>-8.95 2.16 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.25 2.16 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.03</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.008 0.007 0.05</size></box></geometry></collision>
@@ -1585,7 +1585,7 @@
       </link>
     </model>
     <model name="KET12_Square_12mm">
-      <pose>-8.95 2.44 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.25 2.44 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.04</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.012 0.008 0.05</size></box></geometry></collision>
@@ -1593,7 +1593,7 @@
       </link>
     </model>
     <model name="KET16_Square_16mm">
-      <pose>-8.95 2.72 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.25 2.72 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.07</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><box><size>0.016 0.010 0.05</size></box></geometry></collision>
@@ -1603,7 +1603,7 @@
 
     <!-- Exact NIST RGOCG CAD on the upper Storage shelf. -->
     <model name="RGOCG4-50_Round_4mm">
-      <pose>-8.77 1.88 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.07 1.88 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.01</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.002</radius><length>0.05</length></cylinder></geometry></collision>
@@ -1611,7 +1611,7 @@
       </link>
     </model>
     <model name="RGOCG8-50_8mm">
-      <pose>-8.77 2.16 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.07 2.16 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.02</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.004</radius><length>0.05</length></cylinder></geometry></collision>
@@ -1619,7 +1619,7 @@
       </link>
     </model>
     <model name="RGOCG12-50_12mm">
-      <pose>-8.77 2.44 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.07 2.44 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.006</radius><length>0.05</length></cylinder></geometry></collision>
@@ -1627,7 +1627,7 @@
       </link>
     </model>
     <model name="RGOCG16-50_16mm">
-      <pose>-8.77 2.72 0.645 0.0 0.0 1.57079632679</pose>
+      <pose>-6.07 2.72 0.645 0.0 0.0 1.57079632679</pose>
       <link name="link">
         <inertial><pose>0 0 0.025 0 0 0</pose><mass>0.08</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
         <collision name="collision"><pose>0 0 0.025 0 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.05</length></cylinder></geometry></collision>

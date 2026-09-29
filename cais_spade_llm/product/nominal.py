@@ -102,7 +102,7 @@ class NominalProductContext:
         """
         from cais_spade_llm.recovery_framework.delivery import validate_execution_evidence
 
-        validate_execution_evidence(acknowledgement)
+        validate_execution_evidence(acknowledgement, scene=self.inputs['scene'])
         return self._acknowledge(acknowledgement, evidence="gazebo")
 
     def _acknowledge(self, acknowledgement: dict, *, evidence: str) -> bool:

@@ -7,50 +7,33 @@ from typing import Any
 
 _PROGRAMS: dict[str, dict[str, Any]] = {
     "machine_part": {
+        "function_name": "trim_part",
         "entry_state": "loaded",
         "success_state": "completed",
         "status": "implemented",
-        "steps": [
-            {"id": "workholding", "op": "observe_workholding"},
-            {"id": "clearance", "op": "verify_process_clearance"},
-            {"id": "process", "op": "run_machining_clock"},
-            {"id": "observation", "op": "confirm_process_observation"},
-        ],
+        "steps": [{"id": "process", "op": "dwell"}],
     },
     "advance_conveyor": {
+        "function_name": "move_parts_downstream",
         "entry_state": "belt_stopped",
         "success_state": "belt_stopped",
         "status": "implemented",
-        "steps": [
-            {"id": "residents", "op": "observe_belt_residents"},
-            {"id": "displacement", "op": "compute_shared_displacement"},
-            {"id": "clearance", "op": "verify_transport_clearance"},
-            {"id": "transport", "op": "move_belt_residents"},
-            {"id": "arrival", "op": "confirm_arrival"},
-        ],
+        "steps": [{"id": "transport", "op": "move_relative"}],
     },
     "advance_part": {
+        "function_name": "move_to_next_zone",
         "entry_state": "occupied source zone",
         "success_state": "occupied downstream zone",
         "status": "implemented",
-        "steps": [
-            {"id": "part", "op": "observe_zone_part"},
-            {"id": "motion", "op": "compute_downstream_motion"},
-            {"id": "clearance", "op": "verify_transport_clearance"},
-            {"id": "transport", "op": "move_buffer_part"},
-            {"id": "arrival", "op": "confirm_arrival"},
-        ],
+        "steps": [{"id": "transport", "op": "move_relative"}],
     },
     "print_part": {
+        "function_name": "print_part",
         "entry_state": "output absent",
         "success_state": "output present",
         "status": "planned",
         "availability_note": "The current Gazebo scene starts with all supported printer outputs present; no printing executor is bound.",
-        "steps": [
-            {"id": "request", "op": "validate_print_request"},
-            {"id": "job", "op": "run_print_cycle"},
-            {"id": "output", "op": "confirm_printed_output"},
-        ],
+        "steps": [],
     },
 }
 

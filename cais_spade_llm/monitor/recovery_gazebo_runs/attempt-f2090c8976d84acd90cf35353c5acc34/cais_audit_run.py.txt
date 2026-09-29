@@ -1,0 +1,68 @@
+from __future__ import annotations
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+output=Path(sys.argv[1])
+run=json.loads((output/'run_before_stop.json').read_text())
+scene=run['inputs']['scene']
+resources=scene['resource_programs']['resources']
+errors=[]
+counts=Counter()
+functions=Counter()
+base=[]
+transitions=[]
+for transition in run['transitions']:
+    ack=transition['acknowledgement']
+    resource=ack['resource_id']
+    observation=transition.get('observations',{})
+    if resource.startswith('ur5e-'):
+        execution=observation.get('controller_result',{}).get('observations',{}).get('simulation_execution',{})
+    else:
+        execution=observation.get('observations',observation)
+    rows=execution.get('primitive_results',observation.get('primitive_trace',[]))
+    function=execution.get('function_name') or ack['event_name']
+    candidates=resources[resource]['functions']
+    definition=candidates.get(function) or candidates.get(ack['event_name'])
+    if definition is None:
+        errors.append(f"No saved function for {resource}.{function}")
+        continue
+    functions[f'{resource}.{function}']+=1
+    programs=[definition['program'],*definition.get('variants',{}).values()]
+    actual=[(row.get('step_id'),row.get('primitive')) for row in rows]
+    expected=[[(step['id'],step['op']) for step in program['steps']
+               if step.get('executor','primitive')=='primitive'] for program in programs]
+    if actual not in expected:
+        errors.append({'task':ack['task_id'],'resource':resource,'function':function,
+                       'actual':actual,'expected':expected})
+    for row in rows:
+        name=row['primitive']
+        counts[f'{resource}.{name}']+=1
+        if name not in resources[resource]['primitives']:
+            errors.append(f'Undeclared primitive {resource}.{name}')
+        if row.get('status') not in {'completed','skipped'}:
+            errors.append(f"Incomplete step {ack['task_id']}.{row.get('step_id')}")
+    if resource=='KMR':
+        outer=[o for o in execution.get('operations',[]) if o.get('operation') in {'/KMR/move_base','/KMR/dock'}]
+        owned=[(row,o) for row in rows for o in row.get('observations',[])
+               if o.get('operation') in {'/KMR/move_base','/KMR/dock'}]
+        if len(outer)!=len(owned) or any(row['primitive']!='move_base' for row,o in owned):
+            errors.append(f"Unowned base action in {ack['task_id']}")
+        for row,operation in owned:
+            base.append({'task_id':ack['task_id'],'function':function,'part_name':ack.get('part_name'),
+                         'target':row.get('parameters',{}).get('target_pose'),
+                         'success':operation.get('success'),
+                         'wall_time_sec':operation.get('controller_execution_wall_time_sec'),
+                         'simulation_time_sec':operation.get('simulation_time_sec'),
+                         'clearance_samples':len(operation.get('base_motion_samples',[])),
+                         'clearance_waits':sum('clearance_wait_reason' in sample for sample in operation.get('base_motion_samples',[]))})
+    transitions.append({'task_id':ack['task_id'],'resource':resource,'function':function,
+                        'part_name':ack.get('part_name'),'timing':observation.get('timing',{}),
+                        'primitive_steps':[name for _,name in actual]})
+audit={'run_id':run['run_id'],'status':run['outcome'].get('status'),'program_revision':scene['resource_programs']['revision'],
+       'errors':errors,'function_counts':dict(functions),'primitive_counts':dict(counts),
+       'base_actions':base,'transitions':transitions,'final_product_states':run['final_product_states']}
+(output/'trace_audit.json').write_text(json.dumps(audit,indent=2))
+print(json.dumps({'run_id':audit['run_id'],'transitions':len(transitions),'errors':errors,
+                  'base_actions':len(base),'output':str(output/'trace_audit.json')},indent=2))

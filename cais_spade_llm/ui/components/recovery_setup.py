@@ -448,9 +448,10 @@ def _render_recovery_options(draft: dict, changed, bridge: Any) -> None:
         ui.code(json.dumps(draft["recovery_experiment_settings"], indent=2), language="json")
 
 
-def _read_definitions(draft: dict, root: Path, message: Any) -> tuple[dict, list[str]]:
+def _load_definitions(draft: dict, root: Path) -> tuple[dict, list[str], str]:
     models: dict = {}
     parts: list[str] = []
+    error = ""
     try:
         inputs = settings.product_inputs(
             draft["selected_product"], draft["selected_product_order_file"], root
@@ -463,15 +464,30 @@ def _read_definitions(draft: dict, root: Path, message: Any) -> tuple[dict, list
                 "Geometry reference differs from the product manifest; reload referenced definitions"
             )
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        message.text = f"Configuration references need correction: {exc}"
+        error = f"Configuration references need correction: {exc}"
+    return models, parts, error
+
+
+
+def _read_definitions(draft: dict, root: Path, message: Any) -> tuple[dict, list[str]]:
+    models, parts, error = _load_definitions(draft, root)
+    if error:
+        message.text = error
     return models, parts
 
 
-def render_setup(bridge: Any, *, root: Path = ROOT) -> None:
+def load_setup_view(root: Path) -> tuple[dict, dict, list[str], str]:
+    """Prepare saved setup and resource models without touching UI elements."""
+    draft = settings.load_setup(root / settings.SETUP_RELATIVE, root=root)
+    models, parts, error = _load_definitions(draft, root)
+    return draft, models, parts, error
+
+
+def render_setup(bridge: Any, *, root: Path = ROOT, loaded: tuple | None = None) -> None:
     """Edit a local draft and save only when Save setup is explicitly clicked."""
     path = root / settings.SETUP_RELATIVE
     try:
-        draft = settings.load_setup(path, root=root)
+        draft, models, selected_parts, error = loaded if loaded is not None else load_setup_view(root)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         ui.label(f"Experiment setup could not be loaded: {exc}").classes("text-red-700")
         return
@@ -488,7 +504,8 @@ def render_setup(bridge: Any, *, root: Path = ROOT) -> None:
     message = ui.label(
         "Saved setup" if path.exists() else "Unsaved defaults — quantity: 1"
     ).classes("text-sm")
-    models, selected_parts = _read_definitions(draft, root, message)
+    if error:
+        message.text = error
 
     def changed() -> None:
         message.text = "Unsaved changes — run continues to show the saved setup."

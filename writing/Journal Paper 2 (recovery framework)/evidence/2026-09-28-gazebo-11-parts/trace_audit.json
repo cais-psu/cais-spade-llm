@@ -1,0 +1,4329 @@
+{
+  "run_id": "5096f2ba7cd2409bacd171b575cec86e",
+  "status": "completed",
+  "program_revision": 4,
+  "errors": [],
+  "function_counts": {
+    "ur5e-1.move_home": 5,
+    "ur5e-2.move_home": 5,
+    "ur5e-3.move_home": 9,
+    "ur5e-4.move_home": 4,
+    "ur5e-4.pick_approach": 3,
+    "KMR.pick_approach": 8,
+    "ur5e-4.pick_grasp": 3,
+    "KMR.pick_part": 8,
+    "ur5e-4.place_approach": 3,
+    "ur5e-4.place_insert": 3,
+    "KMR.move_to_resource": 16,
+    "KMR.place_approach": 8,
+    "KMR.place_release": 8,
+    "M1.machine_part": 4,
+    "ur5e-1.pick_approach": 4,
+    "ur5e-1.pick_grasp": 4,
+    "ur5e-1.place_approach": 4,
+    "ur5e-1.place_insert": 4,
+    "Conveyor.advance_conveyor": 16,
+    "Buffer For Machined parts.advance_part": 24,
+    "ur5e-3.pick_approach": 8,
+    "ur5e-3.pick_grasp": 8,
+    "ur5e-3.place_approach": 8,
+    "ur5e-3.place_insert": 8,
+    "M2.machine_part": 4,
+    "ur5e-2.pick_approach": 4,
+    "ur5e-2.pick_grasp": 4,
+    "ur5e-2.place_approach": 4,
+    "ur5e-2.place_insert": 4
+  },
+  "primitive_counts": {
+    "ur5e-1.move_to_named_pose": 13,
+    "ur5e-2.move_to_named_pose": 13,
+    "ur5e-3.move_to_named_pose": 25,
+    "ur5e-4.move_to_named_pose": 10,
+    "ur5e-4.detect_parts": 3,
+    "ur5e-4.compute_pick_targets": 3,
+    "ur5e-4.open_gripper": 3,
+    "ur5e-4.move_cartesian": 18,
+    "KMR.move_to_named_pose": 16,
+    "KMR.move_base": 24,
+    "KMR.open_gripper": 8,
+    "KMR.compute_pick_targets": 8,
+    "KMR.move_cartesian": 56,
+    "ur5e-4.grasp_part": 3,
+    "ur5e-4.move_relative": 6,
+    "KMR.grasp_part": 8,
+    "ur5e-4.compute_place_targets": 3,
+    "ur5e-4.release_part": 3,
+    "KMR.compute_place_targets": 8,
+    "KMR.release_part": 8,
+    "M1.dwell": 4,
+    "ur5e-1.detect_parts": 4,
+    "ur5e-1.compute_pick_targets": 4,
+    "ur5e-1.open_gripper": 4,
+    "ur5e-1.move_cartesian": 24,
+    "ur5e-1.grasp_part": 4,
+    "ur5e-1.move_relative": 8,
+    "ur5e-1.compute_place_targets": 4,
+    "ur5e-1.release_part": 4,
+    "Conveyor.move_relative": 16,
+    "Buffer For Machined parts.move_relative": 24,
+    "ur5e-3.detect_parts": 8,
+    "ur5e-3.compute_pick_targets": 8,
+    "ur5e-3.open_gripper": 8,
+    "ur5e-3.move_cartesian": 48,
+    "ur5e-3.grasp_part": 8,
+    "ur5e-3.move_relative": 16,
+    "ur5e-3.compute_place_targets": 8,
+    "ur5e-3.release_part": 8,
+    "M2.dwell": 4,
+    "ur5e-2.detect_parts": 4,
+    "ur5e-2.compute_pick_targets": 4,
+    "ur5e-2.open_gripper": 4,
+    "ur5e-2.move_cartesian": 24,
+    "ur5e-2.grasp_part": 4,
+    "ur5e-2.move_relative": 8,
+    "ur5e-2.compute_place_targets": 4,
+    "ur5e-2.release_part": 4
+  },
+  "base_actions": [
+    {
+      "task_id": "environment_10",
+      "function": "move_to_resource",
+      "part_name": "KET4_Square_4mm",
+      "target": [
+        -6.65,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 40.59414486800051,
+      "simulation_time_sec": 8.8,
+      "clearance_samples": 161,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_25",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 15.37364726299893,
+      "simulation_time_sec": 9.5,
+      "clearance_samples": 59,
+      "clearance_waits": 1
+    },
+    {
+      "task_id": "environment_32",
+      "function": "move_to_resource",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "target": [
+        -3.25,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 73.78970651999953,
+      "simulation_time_sec": 36.89999999999999,
+      "clearance_samples": 273,
+      "clearance_waits": 2
+    },
+    {
+      "task_id": "environment_47",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 73.74145764799869,
+      "simulation_time_sec": 38.900000000000006,
+      "clearance_samples": 269,
+      "clearance_waits": 6
+    },
+    {
+      "task_id": "environment_62",
+      "function": "pick_approach",
+      "part_name": "KET8_Square_8mm",
+      "target": [
+        -8.24,
+        2.41,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 4.228495474999363,
+      "simulation_time_sec": 2.799999999999983,
+      "clearance_samples": 17,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_66",
+      "function": "move_to_resource",
+      "part_name": "KET8_Square_8mm",
+      "target": [
+        -6.65,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 21.81518213399977,
+      "simulation_time_sec": 12.599999999999994,
+      "clearance_samples": 84,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_69",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 15.09362327800045,
+      "simulation_time_sec": 9.0,
+      "clearance_samples": 58,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_73",
+      "function": "pick_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "target": [
+        -8.24,
+        2.41,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 4.741697895999096,
+      "simulation_time_sec": 2.900000000000034,
+      "clearance_samples": 18,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_79",
+      "function": "move_to_resource",
+      "part_name": "RGOCG8-50_8mm",
+      "target": [
+        -3.25,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 62.38881913200021,
+      "simulation_time_sec": 34.5,
+      "clearance_samples": 230,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_92",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 70.13707029100078,
+      "simulation_time_sec": 38.5,
+      "clearance_samples": 254,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_107",
+      "function": "pick_approach",
+      "part_name": "KET12_Square_12mm",
+      "target": [
+        -8.24,
+        2.69,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 7.190091827998913,
+      "simulation_time_sec": 3.8000000000000114,
+      "clearance_samples": 27,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_110",
+      "function": "move_to_resource",
+      "part_name": "KET12_Square_12mm",
+      "target": [
+        -6.65,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 22.59586948099968,
+      "simulation_time_sec": 13.5,
+      "clearance_samples": 87,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_114",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 14.969030113999906,
+      "simulation_time_sec": 9.5,
+      "clearance_samples": 57,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_116",
+      "function": "pick_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "target": [
+        -8.24,
+        2.69,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 5.324585936999938,
+      "simulation_time_sec": 3.6999999999999886,
+      "clearance_samples": 21,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_121",
+      "function": "move_to_resource",
+      "part_name": "RGOCG12-50_12mm",
+      "target": [
+        -3.25,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 64.39867499200045,
+      "simulation_time_sec": 35.39999999999998,
+      "clearance_samples": 236,
+      "clearance_waits": 1
+    },
+    {
+      "task_id": "environment_135",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 70.62018780300059,
+      "simulation_time_sec": 39.89999999999998,
+      "clearance_samples": 259,
+      "clearance_waits": 2
+    },
+    {
+      "task_id": "environment_151",
+      "function": "pick_approach",
+      "part_name": "KET16_Square_16mm",
+      "target": [
+        -8.24,
+        2.97,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 11.782262595999782,
+      "simulation_time_sec": 5.399999999999977,
+      "clearance_samples": 43,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_154",
+      "function": "move_to_resource",
+      "part_name": "KET16_Square_16mm",
+      "target": [
+        -6.65,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 22.978073041000243,
+      "simulation_time_sec": 14.300000000000068,
+      "clearance_samples": 88,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_157",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 13.925589694999871,
+      "simulation_time_sec": 9.400000000000091,
+      "clearance_samples": 53,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_160",
+      "function": "pick_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "target": [
+        -8.24,
+        2.97,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 8.498951450999812,
+      "simulation_time_sec": 4.800000000000068,
+      "clearance_samples": 32,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_165",
+      "function": "move_to_resource",
+      "part_name": "RGOCG16-50_16mm",
+      "target": [
+        -3.25,
+        2.2,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 61.46766153200042,
+      "simulation_time_sec": 34.59999999999991,
+      "clearance_samples": 224,
+      "clearance_waits": 0
+    },
+    {
+      "task_id": "environment_180",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "target": [
+        -8.24,
+        2.13,
+        1.5707963267948966
+      ],
+      "success": true,
+      "wall_time_sec": 69.2243143579999,
+      "simulation_time_sec": 39.80000000000007,
+      "clearance_samples": 252,
+      "clearance_waits": 1
+    }
+  ],
+  "transitions": [
+    {
+      "task_id": "environment_1",
+      "resource": "ur5e-1",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 0.31406644900016545,
+        "simulation_time_sec": 0.10000000000000142,
+        "planning_wall_time_sec": 0.0,
+        "trajectory_duration_sec": 0.0,
+        "real_time_factor": 0.31840395660966875,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_2",
+      "resource": "ur5e-2",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 0.19618976400124666,
+        "simulation_time_sec": 0.0,
+        "planning_wall_time_sec": 0.0,
+        "trajectory_duration_sec": 0.0,
+        "real_time_factor": 0.0,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_3",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 0.11780325600011565,
+        "simulation_time_sec": 0.0,
+        "planning_wall_time_sec": 0.0,
+        "trajectory_duration_sec": 0.0,
+        "real_time_factor": 0.0,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_4",
+      "resource": "ur5e-4",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 1.1973882780002896,
+        "simulation_time_sec": 0.29999999999999893,
+        "planning_wall_time_sec": 0.017143972001576913,
+        "trajectory_duration_sec": 0.064234786,
+        "real_time_factor": 0.25054529555025956,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_6",
+      "resource": "ur5e-4",
+      "function": "pick_approach",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 16.16090373299994,
+        "simulation_time_sec": 3.3000000000000007,
+        "planning_wall_time_sec": 0.025144224000541726,
+        "trajectory_duration_sec": 3.205251026,
+        "real_time_factor": 0.20419650129228406,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_5",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 18.058604138999726,
+        "simulation_time_sec": 3.8000000000000007,
+        "planning_wall_time_sec": 0.6532324040017556,
+        "real_time_factor": 0.2104895771369284,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.374049694,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617498.5583723,
+        "first_motion_at_unix": 1790617499.5389824
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_7",
+      "resource": "ur5e-4",
+      "function": "pick_grasp",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 6.63283499300087,
+        "simulation_time_sec": 1.5,
+        "planning_wall_time_sec": 0.03894140999909723,
+        "trajectory_duration_sec": 1.2911371225870694,
+        "real_time_factor": 0.22614764298868234,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_8",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 16.364275412999632,
+        "simulation_time_sec": 4.200000000000003,
+        "planning_wall_time_sec": 0.8620833320001111,
+        "real_time_factor": 0.25669170673729474,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.770043994,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617517.0016859,
+        "first_motion_at_unix": 1790617517.3351524
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_9",
+      "resource": "ur5e-4",
+      "function": "place_approach",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 16.31549668200023,
+        "simulation_time_sec": 3.900000000000002,
+        "planning_wall_time_sec": 0.13825639599963324,
+        "trajectory_duration_sec": 3.7903614460000004,
+        "real_time_factor": 0.23903654764630028,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_11",
+      "resource": "ur5e-4",
+      "function": "place_insert",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 12.792135013000006,
+        "simulation_time_sec": 2.3000000000000007,
+        "planning_wall_time_sec": 0.10851068299962208,
+        "trajectory_duration_sec": 1.0259468788889432,
+        "real_time_factor": 0.17979797724638036,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_12",
+      "resource": "ur5e-4",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 6.595754239000598,
+        "simulation_time_sec": 1.5999999999999979,
+        "planning_wall_time_sec": 0.06462612499854004,
+        "trajectory_duration_sec": 1.4791343050000005,
+        "real_time_factor": 0.24258029362877429,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_13",
+      "resource": "ur5e-4",
+      "function": "pick_approach",
+      "part_name": "gear_medium",
+      "timing": {
+        "wall_time_sec": 15.393031133999102,
+        "simulation_time_sec": 3.8000000000000007,
+        "planning_wall_time_sec": 0.023732043999189045,
+        "trajectory_duration_sec": 3.486744746000001,
+        "real_time_factor": 0.24686495901426547,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_10",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 41.15845457500109,
+        "simulation_time_sec": 9.0,
+        "planning_wall_time_sec": 0.19456237300073553,
+        "real_time_factor": 0.2186949415824746,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617533.674376,
+        "first_motion_at_unix": 1790617534.1625185
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_14",
+      "resource": "ur5e-4",
+      "function": "pick_grasp",
+      "part_name": "gear_medium",
+      "timing": {
+        "wall_time_sec": 6.49179525100044,
+        "simulation_time_sec": 1.6999999999999957,
+        "planning_wall_time_sec": 0.1115396770001098,
+        "trajectory_duration_sec": 1.2216613874906344,
+        "real_time_factor": 0.2618690106928452,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_16",
+      "resource": "ur5e-4",
+      "function": "place_approach",
+      "part_name": "gear_medium",
+      "timing": {
+        "wall_time_sec": 11.37214998499985,
+        "simulation_time_sec": 4.100000000000001,
+        "planning_wall_time_sec": 0.27607659900058934,
+        "trajectory_duration_sec": 3.6794300890000002,
+        "real_time_factor": 0.3605298914812066,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_17",
+      "resource": "ur5e-4",
+      "function": "place_insert",
+      "part_name": "gear_medium",
+      "timing": {
+        "wall_time_sec": 7.342341479999959,
+        "simulation_time_sec": 2.6000000000000014,
+        "planning_wall_time_sec": 0.07880220499828283,
+        "trajectory_duration_sec": 0.9553385557891971,
+        "real_time_factor": 0.35411047103736937,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_18",
+      "resource": "ur5e-4",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 4.161192702000335,
+        "simulation_time_sec": 1.7000000000000028,
+        "planning_wall_time_sec": 0.036094298999159946,
+        "trajectory_duration_sec": 1.5145316619999996,
+        "real_time_factor": 0.40853671573123557,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_15",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 31.306829291001122,
+        "simulation_time_sec": 10.599999999999998,
+        "planning_wall_time_sec": 1.3678037419995235,
+        "real_time_factor": 0.33862667980475825,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.436134344,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617575.283382,
+        "first_motion_at_unix": 1790617580.007481
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_19",
+      "resource": "ur5e-4",
+      "function": "pick_approach",
+      "part_name": "gear_large",
+      "timing": {
+        "wall_time_sec": 12.148333271999945,
+        "simulation_time_sec": 3.9000000000000057,
+        "planning_wall_time_sec": 0.022042284999770345,
+        "trajectory_duration_sec": 3.552820814999997,
+        "real_time_factor": 0.321031693210863,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_21",
+      "resource": "ur5e-4",
+      "function": "pick_grasp",
+      "part_name": "gear_large",
+      "timing": {
+        "wall_time_sec": 5.471690895999927,
+        "simulation_time_sec": 2.6999999999999957,
+        "planning_wall_time_sec": 0.2015955450006004,
+        "trajectory_duration_sec": 1.1384704799317333,
+        "real_time_factor": 0.4934489267246122,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_22",
+      "resource": "ur5e-4",
+      "function": "place_approach",
+      "part_name": "gear_large",
+      "timing": {
+        "wall_time_sec": 6.668071986001451,
+        "simulation_time_sec": 5.200000000000003,
+        "planning_wall_time_sec": 0.6535802289999992,
+        "trajectory_duration_sec": 3.6144763070000003,
+        "real_time_factor": 0.7798356122904148,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_20",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 26.92326646499896,
+        "simulation_time_sec": 13.600000000000001,
+        "planning_wall_time_sec": 1.795788202998665,
+        "real_time_factor": 0.5052269724190274,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.92485358,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617607.1427863,
+        "first_motion_at_unix": 1790617607.614722
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_23",
+      "resource": "ur5e-4",
+      "function": "place_insert",
+      "part_name": "gear_large",
+      "timing": {
+        "wall_time_sec": 7.724834728000133,
+        "simulation_time_sec": 4.200000000000003,
+        "planning_wall_time_sec": 0.3831429349993414,
+        "trajectory_duration_sec": 0.8729582331311008,
+        "real_time_factor": 0.5437009525622993,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_26",
+      "resource": "ur5e-4",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 3.5151630630007276,
+        "simulation_time_sec": 2.200000000000003,
+        "planning_wall_time_sec": 0.11591198300084216,
+        "trajectory_duration_sec": 1.5768334049999986,
+        "real_time_factor": 0.6258600129127345,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_24",
+      "resource": "M1",
+      "function": "machine_part",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.000000000000007,
+        "wall_clock_sec": 11.453183849000197
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_25",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 20.182078138999714,
+        "simulation_time_sec": 12.300000000000004,
+        "planning_wall_time_sec": 0.7718575559993042,
+        "real_time_factor": 0.6095007541211949,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.7011410580000002,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617635.822811,
+        "first_motion_at_unix": 1790617636.3827994
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_27",
+      "resource": "ur5e-1",
+      "function": "pick_approach",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 7.016707001999748,
+        "simulation_time_sec": 5.099999999999994,
+        "planning_wall_time_sec": 0.08024699700035853,
+        "trajectory_duration_sec": 2.953142208,
+        "real_time_factor": 0.7268366768836869,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_28",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 7.134688071999335,
+        "simulation_time_sec": 4.900000000000006,
+        "planning_wall_time_sec": 0.9044493830006104,
+        "real_time_factor": 0.6870604115539329,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.131691859,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617658.600682,
+        "first_motion_at_unix": 1790617660.277129
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_29",
+      "resource": "ur5e-1",
+      "function": "pick_grasp",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 3.8882430640005623,
+        "simulation_time_sec": 2.9000000000000057,
+        "planning_wall_time_sec": 0.01008300200010126,
+        "trajectory_duration_sec": 1.9438044225516746,
+        "real_time_factor": 0.7458381465011176,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_30",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 6.586318581999876,
+        "simulation_time_sec": 4.8999999999999915,
+        "planning_wall_time_sec": 0.5300990180003282,
+        "real_time_factor": 0.744143444239482,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.685523618,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617666.3930106,
+        "first_motion_at_unix": 1790617666.844143
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_31",
+      "resource": "ur5e-1",
+      "function": "place_approach",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 6.921144043999448,
+        "simulation_time_sec": 5.099999999999994,
+        "planning_wall_time_sec": 0.1236371720005991,
+        "trajectory_duration_sec": 4.161813027999999,
+        "real_time_factor": 0.7368723967566656,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_33",
+      "resource": "ur5e-1",
+      "function": "place_insert",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 2.6387756029998855,
+        "simulation_time_sec": 1.7999999999999972,
+        "planning_wall_time_sec": 0.0249684040009015,
+        "trajectory_duration_sec": 0.9691756258965505,
+        "real_time_factor": 0.6821345467775554,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_35",
+      "resource": "ur5e-1",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 2.081941459000518,
+        "simulation_time_sec": 1.2000000000000028,
+        "planning_wall_time_sec": 0.05376473199976317,
+        "trajectory_duration_sec": 0.8826821729999992,
+        "real_time_factor": 0.5763850826891594,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_34",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 4.609993443678878,
+        "waiting_sec": 0.0,
+        "simulation_sec": 4.700000000000003,
+        "wall_clock_sec": 14.238398786999824
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_36",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6324555161574988,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 2.3520435749996977
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_37",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928201927647544,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000028,
+        "wall_clock_sec": 2.6751714290003292
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_38",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928202926434808,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000028,
+        "wall_clock_sec": 1.7150880459994369
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_39",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.692820289451647,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000028,
+        "wall_clock_sec": 2.021446996001032
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_40",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 9.745181446998686,
+        "simulation_time_sec": 5.599999999999994,
+        "planning_wall_time_sec": 0.06675755700052832,
+        "trajectory_duration_sec": 3.941379998,
+        "real_time_factor": 0.5746429689849109,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_41",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 5.095097748000626,
+        "simulation_time_sec": 2.5,
+        "planning_wall_time_sec": 0.021515260999876773,
+        "trajectory_duration_sec": 1.4239773085982343,
+        "real_time_factor": 0.49066772094431915,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_42",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 4.544678165999358,
+        "simulation_time_sec": 2.5999999999999943,
+        "planning_wall_time_sec": 0.058469974999752594,
+        "trajectory_duration_sec": 1.8335089720000006,
+        "real_time_factor": 0.5720977162809204,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_43",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "KET4_Square_4mm",
+      "timing": {
+        "wall_time_sec": 7.082106255000326,
+        "simulation_time_sec": 3.5,
+        "planning_wall_time_sec": 0.03805245500007004,
+        "trajectory_duration_sec": 1.0740260327092344,
+        "real_time_factor": 0.4942032601570786,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_44",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 2.3992215899997973,
+        "simulation_time_sec": 1.4000000000000057,
+        "planning_wall_time_sec": 0.01594168100018578,
+        "trajectory_duration_sec": 1.015658117000001,
+        "real_time_factor": 0.5835225915919354,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_32",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 75.04357455600075,
+        "simulation_time_sec": 37.7,
+        "planning_wall_time_sec": 0.9222140340007172,
+        "real_time_factor": 0.5024033245084594,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617673.6770341,
+        "first_motion_at_unix": 1790617674.8659494
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_45",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 19.93788119800047,
+        "simulation_time_sec": 12.299999999999997,
+        "planning_wall_time_sec": 1.670359384999756,
+        "real_time_factor": 0.6171043870841222,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.443529113,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617749.6328022,
+        "first_motion_at_unix": 1790617754.0028713
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_46",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 21.413368392999473,
+        "simulation_time_sec": 15.199999999999989,
+        "planning_wall_time_sec": 1.703585982999357,
+        "real_time_factor": 0.7099540643134947,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.933871723,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617770.7717686,
+        "first_motion_at_unix": 1790617771.4995902
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_48",
+      "resource": "M2",
+      "function": "machine_part",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 10.211580649000098
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_49",
+      "resource": "ur5e-2",
+      "function": "pick_approach",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 6.528723846999128,
+        "simulation_time_sec": 3.8000000000000114,
+        "planning_wall_time_sec": 0.09421747699889238,
+        "trajectory_duration_sec": 2.953144288,
+        "real_time_factor": 0.5820433041821257,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_50",
+      "resource": "ur5e-2",
+      "function": "pick_grasp",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 4.5225660640007845,
+        "simulation_time_sec": 2.5999999999999943,
+        "planning_wall_time_sec": 0.05291305600076157,
+        "trajectory_duration_sec": 1.943855860579787,
+        "real_time_factor": 0.5748948634925996,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_51",
+      "resource": "ur5e-2",
+      "function": "place_approach",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 8.771949431000394,
+        "simulation_time_sec": 5.200000000000017,
+        "planning_wall_time_sec": 0.1252868359988497,
+        "trajectory_duration_sec": 4.161804523000001,
+        "real_time_factor": 0.5927986750155017,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_52",
+      "resource": "ur5e-2",
+      "function": "place_insert",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 5.862747723000211,
+        "simulation_time_sec": 2.3000000000000114,
+        "planning_wall_time_sec": 0.03207319200009806,
+        "trajectory_duration_sec": 0.9691750399086363,
+        "real_time_factor": 0.3923075166575658,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_54",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 2.69793960681221,
+        "waiting_sec": 0.0,
+        "simulation_sec": 2.6999999999999886,
+        "wall_clock_sec": 7.247282316000565
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_55",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.632455439312906,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 1.8294397370009392
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_56",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928225897240479,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 1.7700783029995364
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_53",
+      "resource": "ur5e-2",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 13.365617352999834,
+        "simulation_time_sec": 5.199999999999989,
+        "planning_wall_time_sec": 0.03599632199984626,
+        "trajectory_duration_sec": 0.8826776370000005,
+        "real_time_factor": 0.3890579733552584,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_57",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928203272667102,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.700000000000017,
+        "wall_clock_sec": 1.8657387000002927
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_58",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928203507952753,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 1.6410882359996322
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_59",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 8.42327905899947,
+        "simulation_time_sec": 5.900000000000006,
+        "planning_wall_time_sec": 0.07776329100124713,
+        "trajectory_duration_sec": 3.9387509760000015,
+        "real_time_factor": 0.7004398119395581,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_60",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 4.739692040000591,
+        "simulation_time_sec": 2.4000000000000057,
+        "planning_wall_time_sec": 0.03512583799965796,
+        "trajectory_duration_sec": 1.4267934861655593,
+        "real_time_factor": 0.5063620124989611,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_47",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 80.0572508919995,
+        "simulation_time_sec": 42.099999999999994,
+        "planning_wall_time_sec": 1.5047575780008628,
+        "real_time_factor": 0.5258923665542954,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.688488395,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617792.967604,
+        "first_motion_at_unix": 1790617794.0916114
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_61",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 6.3236774369997875,
+        "simulation_time_sec": 3.6999999999999886,
+        "planning_wall_time_sec": 0.17614521799987415,
+        "trajectory_duration_sec": 1.9359531029999975,
+        "real_time_factor": 0.5851025826129773,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_63",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "RGOCG4-50_Round_4mm",
+      "timing": {
+        "wall_time_sec": 6.00138730099934,
+        "simulation_time_sec": 3.9000000000000057,
+        "planning_wall_time_sec": 0.03464336999968509,
+        "trajectory_duration_sec": 1.0335294632492165,
+        "real_time_factor": 0.6498497438001685,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_64",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 2.045403170001009,
+        "simulation_time_sec": 1.5999999999999943,
+        "planning_wall_time_sec": 0.2512050810000801,
+        "trajectory_duration_sec": 1.0732305499999981,
+        "real_time_factor": 0.7822418697039591,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_62",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 12.22918223600027,
+        "simulation_time_sec": 8.199999999999989,
+        "planning_wall_time_sec": 1.1406241819986462,
+        "real_time_factor": 0.6707500076297142,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.377695518,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617876.5867107,
+        "first_motion_at_unix": 1790617878.1912246
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_65",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 7.306490295000913,
+        "simulation_time_sec": 5.099999999999994,
+        "planning_wall_time_sec": 0.6316737360011757,
+        "real_time_factor": 0.6984380851696816,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.770256951,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617889.5265722,
+        "first_motion_at_unix": 1790617889.9520738
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_66",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 22.426802007999868,
+        "simulation_time_sec": 12.899999999999977,
+        "planning_wall_time_sec": 0.3328949520000606,
+        "real_time_factor": 0.5753589942721511,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617897.4015338,
+        "first_motion_at_unix": 1790617897.995732
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_67",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 18.68377044599947,
+        "simulation_time_sec": 12.700000000000017,
+        "planning_wall_time_sec": 1.719003469001109,
+        "real_time_factor": 0.6798269353778775,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.463336898,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617920.51485,
+        "first_motion_at_unix": 1790617925.3555596
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_68",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 24.331136261998836,
+        "simulation_time_sec": 15.0,
+        "planning_wall_time_sec": 2.3381598009982554,
+        "real_time_factor": 0.6166112738491755,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.950971048,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617940.082738,
+        "first_motion_at_unix": 1790617940.7911708
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_70",
+      "resource": "M1",
+      "function": "machine_part",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 8.509536134999507
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_69",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 20.218826289999924,
+        "simulation_time_sec": 11.900000000000034,
+        "planning_wall_time_sec": 0.7814853940017201,
+        "real_time_factor": 0.5886868314089704,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.692438992,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617965.393339,
+        "first_motion_at_unix": 1790617965.994078
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_71",
+      "resource": "ur5e-1",
+      "function": "pick_approach",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 6.767961120000109,
+        "simulation_time_sec": 4.0,
+        "planning_wall_time_sec": 0.06211612700099067,
+        "trajectory_duration_sec": 2.9527518730000004,
+        "real_time_factor": 0.5910199436843006,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_72",
+      "resource": "ur5e-1",
+      "function": "pick_grasp",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 5.063977817000705,
+        "simulation_time_sec": 3.599999999999966,
+        "planning_wall_time_sec": 0.01730175200100348,
+        "trajectory_duration_sec": 1.9437091421792498,
+        "real_time_factor": 0.710903588067488,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_73",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 12.108230780000667,
+        "simulation_time_sec": 8.0,
+        "planning_wall_time_sec": 0.9471435889972781,
+        "real_time_factor": 0.6608456614615494,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.119202986,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790617988.729728,
+        "first_motion_at_unix": 1790617990.4139357
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_74",
+      "resource": "ur5e-1",
+      "function": "place_approach",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 9.685388580001018,
+        "simulation_time_sec": 6.5,
+        "planning_wall_time_sec": 0.3789709309985483,
+        "trajectory_duration_sec": 4.161753231000002,
+        "real_time_factor": 0.6711140132695964,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_76",
+      "resource": "ur5e-1",
+      "function": "place_insert",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 3.7272152490004373,
+        "simulation_time_sec": 2.5,
+        "planning_wall_time_sec": 0.016637266999168787,
+        "trajectory_duration_sec": 0.9692618856742321,
+        "real_time_factor": 0.6707420508301604,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_77",
+      "resource": "ur5e-1",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 3.2877802399998473,
+        "simulation_time_sec": 1.3999999999999773,
+        "planning_wall_time_sec": 0.035091304998786654,
+        "trajectory_duration_sec": 0.8826867970000016,
+        "real_time_factor": 0.4258192147295229,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_75",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 8.920082335000188,
+        "simulation_time_sec": 5.0,
+        "planning_wall_time_sec": 0.7129419069988217,
+        "real_time_factor": 0.5607234625380512,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.68738615,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618001.7806907,
+        "first_motion_at_unix": 1790618002.3021019
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_78",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 4.609891401415524,
+        "waiting_sec": 0.0,
+        "simulation_sec": 4.699999999999989,
+        "wall_clock_sec": 11.178143207000176
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_80",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6324555282216019,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 2.1614782990000094
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_81",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928202977835658,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 2.35627324699999
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_82",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928202687556669,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 2.075038457000119
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_83",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928202116752128,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 1.6584269260001747
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_84",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 8.9160519750003,
+        "simulation_time_sec": 6.199999999999989,
+        "planning_wall_time_sec": 0.09650519199931296,
+        "trajectory_duration_sec": 3.9381475759999987,
+        "real_time_factor": 0.6953750401393078,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_85",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 3.163432590999946,
+        "simulation_time_sec": 1.8999999999999773,
+        "planning_wall_time_sec": 0.04524043999845162,
+        "trajectory_duration_sec": 1.4268083431733167,
+        "real_time_factor": 0.6006133986877199,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_86",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 4.892136521999419,
+        "simulation_time_sec": 2.8000000000000114,
+        "planning_wall_time_sec": 0.10651482699904591,
+        "trajectory_duration_sec": 1.9357585070000027,
+        "real_time_factor": 0.5723470690993002,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_87",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "KET8_Square_8mm",
+      "timing": {
+        "wall_time_sec": 6.4931490029994166,
+        "simulation_time_sec": 3.5,
+        "planning_wall_time_sec": 0.05357579900010023,
+        "trajectory_duration_sec": 1.0500971466461166,
+        "real_time_factor": 0.5390296754907712,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_88",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 2.3477640819983208,
+        "simulation_time_sec": 1.3999999999999773,
+        "planning_wall_time_sec": 0.04056423700058076,
+        "trajectory_duration_sec": 0.943499984999999,
+        "real_time_factor": 0.5963120446106981,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_79",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 64.07915536700057,
+        "simulation_time_sec": 35.19999999999999,
+        "planning_wall_time_sec": 1.2869986559999234,
+        "real_time_factor": 0.5493625851076396,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618012.2058976,
+        "first_motion_at_unix": 1790618013.8530958
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_89",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 18.141468946001623,
+        "simulation_time_sec": 12.800000000000011,
+        "planning_wall_time_sec": 1.5615880810000817,
+        "real_time_factor": 0.7056963842236724,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.490198537,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618077.0291471,
+        "first_motion_at_unix": 1790618081.878952
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_90",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 22.027080308998848,
+        "simulation_time_sec": 15.399999999999977,
+        "planning_wall_time_sec": 1.6900061619980988,
+        "real_time_factor": 0.6994507794209549,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.981459694,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618096.7491746,
+        "first_motion_at_unix": 1790618097.494256
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_91",
+      "resource": "M2",
+      "function": "machine_part",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 8.117558250000002
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_93",
+      "resource": "ur5e-2",
+      "function": "pick_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 7.117338923000716,
+        "simulation_time_sec": 4.199999999999989,
+        "planning_wall_time_sec": 0.08059143600075913,
+        "trajectory_duration_sec": 2.9527553739999988,
+        "real_time_factor": 0.5901081914796944,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_94",
+      "resource": "ur5e-2",
+      "function": "pick_grasp",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 4.218192457999976,
+        "simulation_time_sec": 2.599999999999966,
+        "planning_wall_time_sec": 0.03555766899989976,
+        "trajectory_duration_sec": 1.9437243204101886,
+        "real_time_factor": 0.6163777556116385,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_95",
+      "resource": "ur5e-2",
+      "function": "place_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 8.256741235998561,
+        "simulation_time_sec": 5.199999999999989,
+        "planning_wall_time_sec": 0.5301931260000856,
+        "trajectory_duration_sec": 4.161757681999999,
+        "real_time_factor": 0.6297884178964592,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_96",
+      "resource": "ur5e-2",
+      "function": "place_insert",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 2.8114236210003583,
+        "simulation_time_sec": 2.0,
+        "planning_wall_time_sec": 0.02430983600061154,
+        "trajectory_duration_sec": 0.9692584180506856,
+        "real_time_factor": 0.7113833664413625,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_97",
+      "resource": "ur5e-2",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 3.2675647769992793,
+        "simulation_time_sec": 1.5,
+        "planning_wall_time_sec": 0.5114238490004936,
+        "trajectory_duration_sec": 0.8826896839999989,
+        "real_time_factor": 0.4590574640045861,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_98",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 2.6977121629558662,
+        "waiting_sec": 0.0,
+        "simulation_sec": 2.6999999999999886,
+        "wall_clock_sec": 6.750062920000346
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_99",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6324555553949066,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 2.5535604510005214
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_100",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928258901318729,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 3.0015223780010274
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_101",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928204469675813,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 2.032316800999979
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_102",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928204780874382,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 1.983823920998475
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_103",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 7.944669692000389,
+        "simulation_time_sec": 5.300000000000011,
+        "planning_wall_time_sec": 0.08103753400064306,
+        "trajectory_duration_sec": 3.93799529,
+        "real_time_factor": 0.6671139525582371,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_104",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 2.6136697249985446,
+        "simulation_time_sec": 2.1999999999999886,
+        "planning_wall_time_sec": 0.02935958400121308,
+        "trajectory_duration_sec": 1.4268032611896366,
+        "real_time_factor": 0.8417283863213489,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_105",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 3.6934461370001372,
+        "simulation_time_sec": 3.0,
+        "planning_wall_time_sec": 0.039640287001020624,
+        "trajectory_duration_sec": 1.8831755930000043,
+        "real_time_factor": 0.8122495600914968,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_92",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 74.74514880300012,
+        "simulation_time_sec": 41.900000000000034,
+        "planning_wall_time_sec": 1.5050115840003855,
+        "real_time_factor": 0.5605992796880773,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.698802504,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618120.09885,
+        "first_motion_at_unix": 1790618121.494911
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_106",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "RGOCG8-50_8mm",
+      "timing": {
+        "wall_time_sec": 6.4978264960009255,
+        "simulation_time_sec": 4.699999999999989,
+        "planning_wall_time_sec": 0.09127487299883796,
+        "trajectory_duration_sec": 1.0326720471988793,
+        "real_time_factor": 0.7233187901973982,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_108",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 5.27746346099957,
+        "simulation_time_sec": 2.6999999999999886,
+        "planning_wall_time_sec": 0.043017877000238514,
+        "trajectory_duration_sec": 1.8380613440000033,
+        "real_time_factor": 0.5116094161433756,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_107",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 15.264323833000162,
+        "simulation_time_sec": 9.199999999999989,
+        "planning_wall_time_sec": 1.0546546740006306,
+        "real_time_factor": 0.6028362314371442,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.3864007039999997,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618198.5031059,
+        "first_motion_at_unix": 1790618200.1101866
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_109",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 6.525107178998951,
+        "simulation_time_sec": 5.199999999999989,
+        "planning_wall_time_sec": 0.5592220689995884,
+        "real_time_factor": 0.79789398252445,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.7700796,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618215.0334337,
+        "first_motion_at_unix": 1790618215.5344424
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_110",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 23.172438067000257,
+        "simulation_time_sec": 13.900000000000034,
+        "planning_wall_time_sec": 0.299082305000411,
+        "real_time_factor": 0.5999718491308955,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618222.1797485,
+        "first_motion_at_unix": 1790618222.7263224
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_111",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 16.737482777998594,
+        "simulation_time_sec": 12.700000000000045,
+        "planning_wall_time_sec": 1.7222095069992065,
+        "real_time_factor": 0.7589535565382934,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.475581732,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618246.0083168,
+        "first_motion_at_unix": 1790618250.724864
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_112",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 23.648175070000434,
+        "simulation_time_sec": 15.700000000000045,
+        "planning_wall_time_sec": 1.895564922999256,
+        "real_time_factor": 0.6640340452985433,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.962198422,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618263.9437358,
+        "first_motion_at_unix": 1790618264.4805872
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_113",
+      "resource": "M1",
+      "function": "machine_part",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 8.485880238999016
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_114",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 19.432194266000806,
+        "simulation_time_sec": 12.5,
+        "planning_wall_time_sec": 0.714283916999193,
+        "real_time_factor": 0.6434762141953473,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.7029417439999999,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618288.8258927,
+        "first_motion_at_unix": 1790618289.2983859
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_115",
+      "resource": "ur5e-1",
+      "function": "pick_approach",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 10.132616041999427,
+        "simulation_time_sec": 6.100000000000023,
+        "planning_wall_time_sec": 0.07807474199944409,
+        "trajectory_duration_sec": 2.9527561289999973,
+        "real_time_factor": 0.6020162981322575,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_117",
+      "resource": "ur5e-1",
+      "function": "pick_grasp",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 5.013346132998777,
+        "simulation_time_sec": 3.5,
+        "planning_wall_time_sec": 0.017680036000456312,
+        "trajectory_duration_sec": 1.9436968068788936,
+        "real_time_factor": 0.6981365154427198,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_116",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 13.004780098999618,
+        "simulation_time_sec": 8.599999999999966,
+        "planning_wall_time_sec": 1.208835438999813,
+        "real_time_factor": 0.6616363449863667,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.130560563,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618313.3533428,
+        "first_motion_at_unix": 1790618315.5579584
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_118",
+      "resource": "ur5e-1",
+      "function": "place_approach",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 8.069735181999931,
+        "simulation_time_sec": 6.099999999999966,
+        "planning_wall_time_sec": 0.42194370400102343,
+        "trajectory_duration_sec": 4.161777361999999,
+        "real_time_factor": 0.755910802823668,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_119",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 6.6772544470004505,
+        "simulation_time_sec": 5.099999999999966,
+        "planning_wall_time_sec": 0.5429651249996823,
+        "real_time_factor": 0.7640667008913004,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.687267672,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618327.492934,
+        "first_motion_at_unix": 1790618327.92443
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_120",
+      "resource": "ur5e-1",
+      "function": "place_insert",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 3.782412585000202,
+        "simulation_time_sec": 2.7000000000000455,
+        "planning_wall_time_sec": 0.017001898000671645,
+        "trajectory_duration_sec": 0.9691856768612794,
+        "real_time_factor": 0.713830112216566,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_122",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 4.609785116014828,
+        "waiting_sec": 0.0,
+        "simulation_sec": 4.699999999999989,
+        "wall_clock_sec": 12.052897167999618
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_123",
+      "resource": "ur5e-1",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 14.389535969999997,
+        "simulation_time_sec": 5.5,
+        "planning_wall_time_sec": 0.08424951400047576,
+        "trajectory_duration_sec": 0.8826856700000008,
+        "real_time_factor": 0.38222219336792146,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_124",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6324559135135142,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 2.6932994829985546
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_125",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928205723159755,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 1.8332298879995506
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_126",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928206920555676,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 1.6395369870006107
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_127",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928204365836295,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999886,
+        "wall_clock_sec": 1.3158519850003358
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_128",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 9.392297435999353,
+        "simulation_time_sec": 6.0,
+        "planning_wall_time_sec": 0.09825779200036777,
+        "trajectory_duration_sec": 3.9373598110000003,
+        "real_time_factor": 0.6388213364073039,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_129",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 3.146304649999365,
+        "simulation_time_sec": 1.900000000000034,
+        "planning_wall_time_sec": 0.04194632500002626,
+        "trajectory_duration_sec": 1.4267674311502887,
+        "real_time_factor": 0.6038830346579495,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_130",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 5.197440256000846,
+        "simulation_time_sec": 3.1000000000000227,
+        "planning_wall_time_sec": 0.09260525700119615,
+        "trajectory_duration_sec": 1.7023100879999973,
+        "real_time_factor": 0.5964474524590896,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_131",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "KET12_Square_12mm",
+      "timing": {
+        "wall_time_sec": 6.03169352400073,
+        "simulation_time_sec": 3.6999999999999886,
+        "planning_wall_time_sec": 0.057438363999608555,
+        "trajectory_duration_sec": 1.066966948070295,
+        "real_time_factor": 0.6134263926503075,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_132",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 2.98866384899884,
+        "simulation_time_sec": 1.599999999999966,
+        "planning_wall_time_sec": 0.040984151000884594,
+        "trajectory_duration_sec": 1.2002787650000002,
+        "real_time_factor": 0.5353562932599273,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_121",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 65.52452784399975,
+        "simulation_time_sec": 36.099999999999966,
+        "planning_wall_time_sec": 0.8606582310003432,
+        "real_time_factor": 0.5509582432618647,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618334.7932875,
+        "first_motion_at_unix": 1790618335.8743446
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_133",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 18.277355025998986,
+        "simulation_time_sec": 12.899999999999977,
+        "planning_wall_time_sec": 1.7851529029994708,
+        "real_time_factor": 0.7058897515155838,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.475474269,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618401.7905154,
+        "first_motion_at_unix": 1790618407.1981752
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_134",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 22.75663198899929,
+        "simulation_time_sec": 15.700000000000045,
+        "planning_wall_time_sec": 1.859343093001371,
+        "real_time_factor": 0.6899888358602049,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.961782037999999,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618421.0743084,
+        "first_motion_at_unix": 1790618421.7984104
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_136",
+      "resource": "M2",
+      "function": "machine_part",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 7.405595340000218
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_137",
+      "resource": "ur5e-2",
+      "function": "pick_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 7.255084798000098,
+        "simulation_time_sec": 4.0,
+        "planning_wall_time_sec": 0.08099030600169499,
+        "trajectory_duration_sec": 2.9527641009999996,
+        "real_time_factor": 0.5513374566073467,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_138",
+      "resource": "ur5e-2",
+      "function": "pick_grasp",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 5.916538523999407,
+        "simulation_time_sec": 3.2000000000000455,
+        "planning_wall_time_sec": 0.0601473349997832,
+        "trajectory_duration_sec": 1.9436520361448615,
+        "real_time_factor": 0.5408567842531243,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_139",
+      "resource": "ur5e-2",
+      "function": "place_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 7.789896067999507,
+        "simulation_time_sec": 5.100000000000023,
+        "planning_wall_time_sec": 0.15939361500022642,
+        "trajectory_duration_sec": 4.161749974999999,
+        "real_time_factor": 0.654694228970597,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_140",
+      "resource": "ur5e-2",
+      "function": "place_insert",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 3.5943405979996896,
+        "simulation_time_sec": 2.5,
+        "planning_wall_time_sec": 0.021349134000047343,
+        "trajectory_duration_sec": 0.9692402344306039,
+        "real_time_factor": 0.6955378690019781,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_142",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 2.6974767823662664,
+        "waiting_sec": 0.0,
+        "simulation_sec": 2.7000000000000455,
+        "wall_clock_sec": 6.864326225000696
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_143",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6324553976908223,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 1.9939625709994289
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_144",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.692812535409002,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 2.3131479960011347
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_141",
+      "resource": "ur5e-2",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 14.306647104000149,
+        "simulation_time_sec": 5.2999999999999545,
+        "planning_wall_time_sec": 0.044505849000415765,
+        "trajectory_duration_sec": 0.8826936850000031,
+        "real_time_factor": 0.3704571701162651,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_145",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928203811301575,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999318,
+        "wall_clock_sec": 2.267402116000085
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_146",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928201998285293,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999318,
+        "wall_clock_sec": 1.6781007070003398
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_147",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 7.813333641001009,
+        "simulation_time_sec": 5.5,
+        "planning_wall_time_sec": 0.09744337300071493,
+        "trajectory_duration_sec": 3.937125958000003,
+        "real_time_factor": 0.7039248869571331,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_148",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 3.0376346329994703,
+        "simulation_time_sec": 2.300000000000068,
+        "planning_wall_time_sec": 0.024481611000737757,
+        "trajectory_duration_sec": 1.4268018919140175,
+        "real_time_factor": 0.7571680856591252,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_135",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 75.10519426700012,
+        "simulation_time_sec": 43.39999999999998,
+        "planning_wall_time_sec": 1.3043583989983745,
+        "real_time_factor": 0.5779122557237875,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.694171683,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618445.0514843,
+        "first_motion_at_unix": 1790618446.1720965
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_149",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 3.820543813000768,
+        "simulation_time_sec": 3.0,
+        "planning_wall_time_sec": 0.07328815099936037,
+        "trajectory_duration_sec": 1.6445766789999965,
+        "real_time_factor": 0.7852285294547405,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_150",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "RGOCG12-50_12mm",
+      "timing": {
+        "wall_time_sec": 7.034660545999941,
+        "simulation_time_sec": 5.0,
+        "planning_wall_time_sec": 0.044400856999345706,
+        "trajectory_duration_sec": 1.090792638304194,
+        "real_time_factor": 0.7107663500327827,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_152",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 5.452322143999481,
+        "simulation_time_sec": 2.199999999999932,
+        "planning_wall_time_sec": 0.9562349469997571,
+        "trajectory_duration_sec": 1.227507199999998,
+        "real_time_factor": 0.4034978018349719,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_151",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 19.702567420001287,
+        "simulation_time_sec": 10.900000000000091,
+        "planning_wall_time_sec": 1.1471062079999683,
+        "real_time_factor": 0.5533703433402469,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.3800180699999998,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618524.136467,
+        "first_motion_at_unix": 1790618525.8709347
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_153",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 6.714257951000036,
+        "simulation_time_sec": 5.2000000000000455,
+        "planning_wall_time_sec": 0.6060152769987326,
+        "real_time_factor": 0.7748064939593365,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.7691359899999997,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618544.561915,
+        "first_motion_at_unix": 1790618544.9993682
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_154",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 23.554406602999734,
+        "simulation_time_sec": 14.700000000000045,
+        "planning_wall_time_sec": 0.32997052099926805,
+        "real_time_factor": 0.6241519583917569,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618551.7526805,
+        "first_motion_at_unix": 1790618552.3051465
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_155",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 17.112800132999837,
+        "simulation_time_sec": 12.899999999999977,
+        "planning_wall_time_sec": 1.6216886089987383,
+        "real_time_factor": 0.7539657440007485,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.496704040000001,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618575.6015396,
+        "first_motion_at_unix": 1790618580.189009
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_156",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 21.86558686099852,
+        "simulation_time_sec": 15.899999999999977,
+        "planning_wall_time_sec": 2.0767461249997723,
+        "real_time_factor": 0.7273661765509636,
+        "clock_reset": false,
+        "trajectory_duration_sec": 10.986005427999999,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618593.505874,
+        "first_motion_at_unix": 1790618594.063142
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_158",
+      "resource": "M1",
+      "function": "machine_part",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 7.626757726999131
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_157",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 18.28388038399862,
+        "simulation_time_sec": 12.5,
+        "planning_wall_time_sec": 0.7667371869993076,
+        "real_time_factor": 0.6837989606804423,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.6986962669999999,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618616.1212733,
+        "first_motion_at_unix": 1790618616.7116165
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_159",
+      "resource": "ur5e-1",
+      "function": "pick_approach",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 9.066072453000743,
+        "simulation_time_sec": 5.400000000000091,
+        "planning_wall_time_sec": 0.0765586789984809,
+        "trajectory_duration_sec": 2.952756147999999,
+        "real_time_factor": 0.5956272716762556,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_161",
+      "resource": "ur5e-1",
+      "function": "pick_grasp",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 5.469546865000666,
+        "simulation_time_sec": 3.2999999999999545,
+        "planning_wall_time_sec": 0.03661263100002543,
+        "trajectory_duration_sec": 1.943558900706286,
+        "real_time_factor": 0.6033406571788379,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_160",
+      "resource": "KMR",
+      "function": "pick_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 16.526745140001367,
+        "simulation_time_sec": 9.899999999999977,
+        "planning_wall_time_sec": 1.275557449000189,
+        "real_time_factor": 0.5991027550659964,
+        "clock_reset": false,
+        "trajectory_duration_sec": 3.1255593299999997,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618638.03998,
+        "first_motion_at_unix": 1790618639.5721502
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "move_base",
+        "open_gripper",
+        "compute_pick_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_162",
+      "resource": "ur5e-1",
+      "function": "place_approach",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 8.856269001998953,
+        "simulation_time_sec": 6.5,
+        "planning_wall_time_sec": 0.1373184250005579,
+        "trajectory_duration_sec": 4.161758884999998,
+        "real_time_factor": 0.7339433793771262,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_163",
+      "resource": "KMR",
+      "function": "pick_part",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 6.972879200000534,
+        "simulation_time_sec": 5.100000000000023,
+        "planning_wall_time_sec": 0.6006690609992802,
+        "real_time_factor": 0.7319732736286437,
+        "clock_reset": false,
+        "trajectory_duration_sec": 2.68730877,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618655.5594354,
+        "first_motion_at_unix": 1790618656.1182055
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "grasp_part",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_164",
+      "resource": "ur5e-1",
+      "function": "place_insert",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 5.004632342001059,
+        "simulation_time_sec": 3.5,
+        "planning_wall_time_sec": 0.02283867900041514,
+        "trajectory_duration_sec": 0.9692704415951781,
+        "real_time_factor": 0.6993520724042948,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_167",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 4.609675749867771,
+        "waiting_sec": 0.0,
+        "simulation_sec": 4.699999999999932,
+        "wall_clock_sec": 10.964320846000192
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_166",
+      "resource": "ur5e-1",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 13.380770015000962,
+        "simulation_time_sec": 6.0,
+        "planning_wall_time_sec": 0.02577266200023587,
+        "trajectory_duration_sec": 0.8826963309999982,
+        "real_time_factor": 0.4484046877177844,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_168",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.632456571125107,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 2.0095095169999695
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_169",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928201814283506,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999318,
+        "wall_clock_sec": 2.194417107000845
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_170",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928204341427066,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 1.7117522439984896
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_171",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928205780042176,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999318,
+        "wall_clock_sec": 1.6233499930003745
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_172",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 8.832510006999655,
+        "simulation_time_sec": 5.5,
+        "planning_wall_time_sec": 0.07227717799833044,
+        "trajectory_duration_sec": 3.9363013510000044,
+        "real_time_factor": 0.6226995492381348,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_173",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 4.245454264000728,
+        "simulation_time_sec": 3.099999999999909,
+        "planning_wall_time_sec": 0.02735802499955753,
+        "trajectory_duration_sec": 1.4268125398207516,
+        "real_time_factor": 0.7301927678944318,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_174",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 5.762136184001065,
+        "simulation_time_sec": 3.7000000000000455,
+        "planning_wall_time_sec": 0.06641387600029702,
+        "trajectory_duration_sec": 1.8415919790000004,
+        "real_time_factor": 0.6421229699973647,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_175",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "KET16_Square_16mm",
+      "timing": {
+        "wall_time_sec": 5.7698471390012855,
+        "simulation_time_sec": 3.900000000000091,
+        "planning_wall_time_sec": 0.11126417299783498,
+        "trajectory_duration_sec": 1.0302718877486967,
+        "real_time_factor": 0.6759277856146376,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_176",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 4.733617062000121,
+        "simulation_time_sec": 2.6000000000000227,
+        "planning_wall_time_sec": 0.9301255690006656,
+        "trajectory_duration_sec": 1.7705340840000048,
+        "real_time_factor": 0.549262850362769,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_165",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 62.801093727999614,
+        "simulation_time_sec": 35.39999999999998,
+        "planning_wall_time_sec": 0.9625558059997275,
+        "real_time_factor": 0.5637140479725812,
+        "clock_reset": false,
+        "trajectory_duration_sec": 0,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618663.1862745,
+        "first_motion_at_unix": 1790618664.4686067
+      },
+      "primitive_steps": [
+        "move_base"
+      ]
+    },
+    {
+      "task_id": "environment_177",
+      "resource": "KMR",
+      "function": "place_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 16.875611774999925,
+        "simulation_time_sec": 13.0,
+        "planning_wall_time_sec": 1.778028335000272,
+        "real_time_factor": 0.7706714145824368,
+        "clock_reset": false,
+        "trajectory_duration_sec": 9.52708694,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618727.196942,
+        "first_motion_at_unix": 1790618731.9660501
+      },
+      "primitive_steps": [
+        "compute_place_targets",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_178",
+      "resource": "KMR",
+      "function": "place_release",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 22.95988983999996,
+        "simulation_time_sec": 15.899999999999977,
+        "planning_wall_time_sec": 2.08180180400268,
+        "real_time_factor": 0.6926637321122957,
+        "clock_reset": false,
+        "trajectory_duration_sec": 11.02218719,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618744.9557338,
+        "first_motion_at_unix": 1790618745.6381369
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_179",
+      "resource": "M2",
+      "function": "machine_part",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.0,
+        "waiting_sec": 5.0,
+        "simulation_sec": 5.0,
+        "wall_clock_sec": 7.404579579999336
+      },
+      "primitive_steps": [
+        "dwell"
+      ]
+    },
+    {
+      "task_id": "environment_181",
+      "resource": "ur5e-2",
+      "function": "pick_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 9.108996560000378,
+        "simulation_time_sec": 4.5,
+        "planning_wall_time_sec": 0.05564451199825271,
+        "trajectory_duration_sec": 2.9527665170000006,
+        "real_time_factor": 0.4940170929211344,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_182",
+      "resource": "ur5e-2",
+      "function": "pick_grasp",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 5.330758771999172,
+        "simulation_time_sec": 3.5,
+        "planning_wall_time_sec": 0.02781967699957022,
+        "trajectory_duration_sec": 1.943624970876023,
+        "real_time_factor": 0.6565669447254711,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_183",
+      "resource": "ur5e-2",
+      "function": "place_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 7.684651253000993,
+        "simulation_time_sec": 5.899999999999977,
+        "planning_wall_time_sec": 0.1488047849998111,
+        "trajectory_duration_sec": 4.161783303,
+        "real_time_factor": 0.7677641841841453,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_184",
+      "resource": "ur5e-2",
+      "function": "place_insert",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 3.6827162680001493,
+        "simulation_time_sec": 2.3999999999999773,
+        "planning_wall_time_sec": 0.03780198500135157,
+        "trajectory_duration_sec": 0.969232709923034,
+        "real_time_factor": 0.651692887897461,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_186",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 2.6972312632976116,
+        "waiting_sec": 0.0,
+        "simulation_sec": 2.699999999999932,
+        "wall_clock_sec": 6.498902553999869
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_187",
+      "resource": "Conveyor",
+      "function": "advance_conveyor",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6324553750903241,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 1.5783646609997959
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_188",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928252370289075,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999318,
+        "wall_clock_sec": 1.8838608899986866
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_189",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.6928236579923419,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.7000000000000455,
+        "wall_clock_sec": 2.3062899639990064
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_190",
+      "resource": "Buffer For Machined parts",
+      "function": "advance_part",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "planning_sec": 0.0,
+        "motion_sec": 0.69282342157497,
+        "waiting_sec": 0.0,
+        "simulation_sec": 0.6999999999999318,
+        "wall_clock_sec": 2.2762865879994933
+      },
+      "primitive_steps": [
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_185",
+      "resource": "ur5e-2",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 21.30033514800016,
+        "simulation_time_sec": 9.0,
+        "planning_wall_time_sec": 0.05483941800048342,
+        "trajectory_duration_sec": 0.8826971220000033,
+        "real_time_factor": 0.42252856292944246,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_191",
+      "resource": "ur5e-3",
+      "function": "pick_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 8.245862846999444,
+        "simulation_time_sec": 6.100000000000023,
+        "planning_wall_time_sec": 0.07653105800272897,
+        "trajectory_duration_sec": 3.9363563969999973,
+        "real_time_factor": 0.7397649115907535,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "detect_parts",
+        "compute_pick_targets",
+        "open_gripper",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_180",
+      "resource": "KMR",
+      "function": "move_to_resource",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 73.73501083600058,
+        "simulation_time_sec": 43.19999999999993,
+        "planning_wall_time_sec": 1.4567111169999407,
+        "real_time_factor": 0.5859002358692663,
+        "clock_reset": false,
+        "trajectory_duration_sec": 1.685460196,
+        "dispatch_requested_at_unix": null,
+        "request_received_at_unix": 1790618769.5400605,
+        "first_motion_at_unix": 1790618770.8379116
+      },
+      "primitive_steps": [
+        "move_base",
+        "move_to_named_pose"
+      ]
+    },
+    {
+      "task_id": "environment_192",
+      "resource": "ur5e-3",
+      "function": "pick_grasp",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 3.654673298999114,
+        "simulation_time_sec": 3.0,
+        "planning_wall_time_sec": 0.01412489999893296,
+        "trajectory_duration_sec": 1.4267497899508896,
+        "real_time_factor": 0.8208668065683447,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "grasp_part",
+        "move_cartesian",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_193",
+      "resource": "ur5e-3",
+      "function": "place_approach",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 4.232804127999771,
+        "simulation_time_sec": 3.3999999999999773,
+        "planning_wall_time_sec": 0.06398609600000782,
+        "trajectory_duration_sec": 1.9066847090000039,
+        "real_time_factor": 0.8032500198885086,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose",
+        "compute_place_targets",
+        "move_cartesian",
+        "move_cartesian"
+      ]
+    },
+    {
+      "task_id": "environment_194",
+      "resource": "ur5e-3",
+      "function": "place_insert",
+      "part_name": "RGOCG16-50_16mm",
+      "timing": {
+        "wall_time_sec": 4.653672064001512,
+        "simulation_time_sec": 3.699999999999932,
+        "planning_wall_time_sec": 0.02537616299923684,
+        "trajectory_duration_sec": 1.0975960767724757,
+        "real_time_factor": 0.7950710641218766,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_cartesian",
+        "release_part",
+        "move_relative"
+      ]
+    },
+    {
+      "task_id": "environment_195",
+      "resource": "ur5e-3",
+      "function": "move_home",
+      "part_name": "gear_small",
+      "timing": {
+        "wall_time_sec": 2.477679501000239,
+        "simulation_time_sec": 1.7999999999999545,
+        "planning_wall_time_sec": 0.030806639000729774,
+        "trajectory_duration_sec": 0.9501652720000067,
+        "real_time_factor": 0.7264862139244784,
+        "clock_reset": false
+      },
+      "primitive_steps": [
+        "move_to_named_pose"
+      ]
+    }
+  ],
+  "final_product_states": {
+    "gear_small": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_11",
+      "processCompleted": [
+        {
+          "process": "print_part"
+        },
+        {
+          "process": "assembly",
+          "target": "Gear_Plate/Gear_Shaft_1"
+        }
+      ],
+      "target": "Gear_Plate/Gear_Shaft_1"
+    },
+    "gear_medium": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_17",
+      "processCompleted": [
+        {
+          "process": "print_part"
+        },
+        {
+          "process": "assembly",
+          "target": "Gear_Plate/Gear_Shaft_2"
+        }
+      ],
+      "target": "Gear_Plate/Gear_Shaft_2"
+    },
+    "gear_large": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_23",
+      "processCompleted": [
+        {
+          "process": "print_part"
+        },
+        {
+          "process": "assembly",
+          "target": "Gear_Plate/Gear_Shaft_3"
+        }
+      ],
+      "target": "Gear_Plate/Gear_Shaft_3"
+    },
+    "KET4_Square_4mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_43",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "square"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+    },
+    "KET8_Square_8mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_87",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "square"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/KET8_Square_8mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/KET8_Square_8mm"
+    },
+    "KET12_Square_12mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_131",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "square"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/KET12_Square_12mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/KET12_Square_12mm"
+    },
+    "KET16_Square_16mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_175",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "square"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/KET16_Square_16mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/KET16_Square_16mm"
+    },
+    "RGOCG4-50_Round_4mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_63",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "circle"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/RGOCG4-50_Round_4mm"
+    },
+    "RGOCG8-50_8mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_106",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "circle"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/RGOCG8-50_8mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/RGOCG8-50_8mm"
+    },
+    "RGOCG12-50_12mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_150",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "circle"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/RGOCG12-50_12mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/RGOCG12-50_12mm"
+    },
+    "RGOCG16-50_16mm": {
+      "location": "assembly_board-v1",
+      "state": "assembled",
+      "last_task": "environment_194",
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "circle"
+        },
+        {
+          "process": "assembly",
+          "target": "GMC_Laser_Plate_Virtual/RGOCG16-50_16mm"
+        }
+      ],
+      "target": "GMC_Laser_Plate_Virtual/RGOCG16-50_16mm"
+    },
+    "assembly_board-v1": {
+      "location": "assembly_board-v1",
+      "state": "ready",
+      "last_task": null,
+      "processCompleted": []
+    }
+  }
+}
