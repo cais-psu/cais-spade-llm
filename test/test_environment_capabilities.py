@@ -2475,3 +2475,228 @@ def test_function_contract_rejects_saved_state_disagreement():
     event["program"]["entry_state"] = "idle"
     with pytest.raises(ValueError, match="in state"):
         validated_function_contract(models, event["event_id"])
+    printer = next(
+        event for event in models["3D Printing Station"]["events"]
+        if event["event_name"] == "print_part"
+    )
+    printer["guards"].pop("resource_state")
+    with pytest.raises(ValueError, match="output conditions"):
+        validated_function_contract(models, printer["event_id"])
+
+
+def _printer_tasks(context, resource_id, event_name, part, desired):
+    return [
+        task for task in candidates(
+            context.models[resource_id], context.snapshot(), part, desired,
+            context.requirements.get(part, []),
+        )
+        if task["event_name"] == event_name
+    ]
+
+
+def test_printer_last_acknowledged_pickup_returns_to_idle_and_replays(inputs):
+    printer = "3D Printing Station"
+    parts = inputs["scene"][printer]["initial_products"][:]
+    inputs["product_order"]["parts"] = parts
+    context = EnvironmentProductContext(**inputs)
+    assert context.snapshot()[printer]["resource_state"] == "completed"
+    for index, part in enumerate(parts):
+        desired = context.requirements[part][-1]["processesToComplete"][0]
+
+        def complete(event_name):
+            task, = _printer_tasks(context, "ur5e-4", event_name, part, desired)
+            pending = context.prepare(task, simulated=True)
+            assert context.acknowledge({**pending, "status": "completed"})
+
+        complete("pick_approach")
+        variants = _printer_tasks(context, "ur5e-4", "pick_grasp", part, desired)
+        assert len(variants) == 2
+        expected = "idle" if index == len(parts) - 1 else "completed"
+        for task in variants:
+            peer = next(e for e in context.models[printer]["events"]
+                        if e["event_id"] == task["event_id"])
+            if peer["updates"]["resource_state"] == {"set": expected}:
+                accepted = task
+            else:
+                before = context.snapshot()
+                with pytest.raises(ValueError, match="Guard blocked"):
+                    context.prepare(task, simulated=True)
+                assert context.snapshot() == before
+        before = context.snapshot()
+        pending = context.prepare(accepted, simulated=True)
+        assert context.snapshot() == before
+        with pytest.raises(ValueError, match="Acknowledgement"):
+            context.acknowledge({**pending, "status": "failed"})
+        assert context.snapshot() == before
+        assert context.acknowledge({**pending, "status": "completed"})
+        assert not context.acknowledge({**pending, "status": "completed"})
+        assert context.snapshot()[printer]["resource_state"] == expected
+        assert context.snapshot()[printer][f"output.{part}"] is False
+        assert context.snapshot()["ur5e-4"]["held_part"] == part
+        for event_name in ("place_approach", "place_insert", "move_home"):
+            complete(event_name)
+    assert not any(value for field, value in context.snapshot()[printer].items()
+                   if field.startswith("output."))
+    verify_environment_run(context.report())
+
+
+def test_printer_requires_clear_bed_and_preserves_planned_execution(inputs):
+    printer = "3D Printing Station"
+    part = "gear_small"
+    inputs["product_order"]["parts"] = [part]
+    inputs["scene"][printer]["initial_products"].remove(part)
+    inputs["scene"][printer]["current_configuration"] = {
+        "program": {"evidence": "simulated test"}
+    }
+    context = EnvironmentProductContext(**inputs)
+    task, = _printer_tasks(context, printer, "print_part", part, {"process": "print_part"})
+    before = context.snapshot()
+    with pytest.raises(ValueError, match="Guard blocked"):
+        context.prepare(task, simulated=True)
+    assert context.snapshot() == before
+
+    inputs["scene"][printer]["initial_products"] = []
+    inputs["scene"][printer]["initial_state"] = "idle"
+    context = EnvironmentProductContext(**inputs)
+    task, = _printer_tasks(context, printer, "print_part", part, {"process": "print_part"})
+    with pytest.raises(ValueError, match="No execution adapter"):
+        context.prepare(task)
+    event = next(e for e in context.models[printer]["events"] if e["event_id"] == task["event_id"])
+    assert event["program_status"] == "planned" and event["program"]["steps"] == []
+    assert event["collection_guards"] == {"output.{part_name}": {"all_other_equals": False}}
+    assert (event["program"]["entry_state"], event["program"]["success_state"]) == (
+        "output absent", "output present"
+    )
+    pending = context.prepare(task, simulated=True)
+    assert context.snapshot()[printer]["resource_state"] == "idle"
+    context.acknowledge({**pending, "status": "completed"})
+    assert context.snapshot()[printer]["resource_state"] == "completed"
+    assert context.snapshot()[printer][f"output.{part}"] is True
+    assert context.part_tracker[part]["processCompleted"] == [{"process": "print_part"}]
+    verify_environment_run(context.report())
+
+
+def test_printer_rejects_inconsistent_state_and_duplicate_custody(inputs):
+    printer = "3D Printing Station"
+    inputs["product_order"]["parts"] = ["gear_small"]
+    for products, state in ((["gear_small"], "idle"), ([], "completed")):
+        changed = deepcopy(inputs["scene"])
+        changed[printer].update(initial_products=products, initial_state=state)
+        with pytest.raises(ValueError, match="output occupancy"):
+            build_environment_models(changed)
+
+    inputs["scene"][printer].update(
+        initial_products=[], initial_state="idle",
+        current_configuration={"program": {"evidence": "simulated test"}},
+    )
+    context = EnvironmentProductContext(**inputs)
+    task, = _printer_tasks(context, printer, "print_part", "gear_small", {"process": "print_part"})
+    before = context.snapshot()
+    before["Storage"]["inventory.gear_small"] = True
+    with pytest.raises(ValueError, match="duplicate part custody"):
+        project_transition(context.models, before, context.part_tracker, task,
+                           context.product_name, context.requirements)
+    assert before[printer]["resource_state"] == "idle"
+    assert before[printer]["output.gear_small"] is False
+
+    context.resources[printer].valuation["resource_state"] = "completed"
+    with pytest.raises(ValueError, match="output occupancy"):
+        context.prepare(task, simulated=True)
+
+
+def test_printer_saved_inputs_without_declaration_keep_historical_behavior(inputs):
+    printer = "3D Printing Station"
+    inputs["product_order"]["parts"] = ["gear_small"]
+    inputs["scene"][printer].pop("state_variables")
+    inputs["scene"][printer]["initial_products"].remove("gear_small")
+    inputs["scene"][printer]["current_configuration"] = {
+        "program": {"evidence": "simulated test"}
+    }
+    context = EnvironmentProductContext(**inputs)
+    assert "resource_state" not in context.models[printer]["state_variables"]
+    task, = _printer_tasks(context, printer, "print_part", "gear_small", {"process": "print_part"})
+    pending = context.prepare(task, simulated=True)
+    context.acknowledge({**pending, "status": "completed"})
+    assert context.snapshot()[printer]["output.gear_small"] is True
+    assert context.snapshot()[printer]["output.gear_medium"] is True
+    verify_environment_run(context.report())
+
+    scene = deepcopy(inputs["scene"])
+    scene[printer]["state_variables"] = {"resource_state": {
+        "scope": "resource", "domain": ["idle", "completed"],
+    }}
+    legacy = build_environment_models(scene, schema_version=2)
+    assert "resource_state" not in legacy[printer]["state_variables"]
+
+
+@pytest.mark.parametrize("condition,reason", [
+    ("staging_part", "Guard blocked: M1.staging_part"),
+    ("loading_position", "loading_position_1 is occupied"),
+    ("loading_reserved_by", "Guard blocked: Conveyor.loading_reserved_by"),
+    ("part_order", "contiguous, unique downstream order"),
+    ("zone_2_part", "Guard blocked: Buffer For Machined parts.zone_2_part"),
+    ("capacity", "Guard blocked: Buffer For Machined parts.zone_1_part"),
+    ("backpressure", "Guard blocked: Buffer For Machined parts.zone_1_part"),
+])
+def test_resource_diagram_preserves_hidden_runtime_guards(inputs, condition, reason):
+    from cais_spade_llm.ui.components.nominal_resource_des import nominal_resource_diagram
+
+    context = EnvironmentProductContext(**inputs)
+    parts = list(inputs["scene"]["Storage"]["slots"])
+    before = context.snapshot()
+    before["Storage"][f"inventory.{parts[0]}"] = False
+    if condition == "zone_2_part":
+        before[BUFFER]["zone_1_part"] = parts[0]
+        resource_id, event_name, displayed_resource = BUFFER, "advance_part", BUFFER
+        parameters = {"part_name": parts[0], "zone": 1, "downstream_zone": 2}
+    else:
+        resource_id, event_name = "ur5e-1", "place_approach"
+        displayed_resource = "M1" if condition == "staging_part" else "Conveyor"
+        destination = "M1 staging tray" if condition == "staging_part" else "Conveyor"
+        parameters = {"part_name": parts[0], "destination_location": destination}
+        before[resource_id].update(
+            resource_state="picked", held_part=parts[0],
+            part_location=resource_id, part_state="in_gripper",
+        )
+    event = next(
+        event for event in context.models[resource_id]["events"]
+        if event["event_name"] == event_name and all(
+            "equals" not in event["parameter_bindings"][name]
+            or event["parameter_bindings"][name]["equals"] == value
+            for name, value in parameters.items()
+        )
+    )
+    task = {
+        "resource_id": resource_id, "event_name": event_name, "event_id": event["event_id"],
+        "parameters": {
+            name: binding["equals"] if "equals" in binding else parameters[name]
+            for name, binding in event["parameter_bindings"].items()
+        },
+    }
+    diagram = nominal_resource_diagram(context.models[displayed_resource], context.models)
+    assert not any(part in diagram["mermaid"] for part in parts)
+    assert "staging_part" not in diagram["mermaid"]
+    project_transition(context.models, before, context.part_tracker, task,
+                       context.product_name, context.requirements)
+
+    if condition == "loading_reserved_by":
+        before["Conveyor"]["loading_reserved_by"] = "ur5e-2"
+    else:
+        before["Storage"][f"inventory.{parts[1]}"] = False
+        if condition == "staging_part":
+            before["M1"]["staging_part"] = parts[1]
+        elif condition in {"loading_position", "part_order"}:
+            before["Conveyor"][f"part_location.{parts[1]}"] = "loading_position_1"
+            before["Conveyor"][f"part_order.{parts[1]}"] = 1 if condition == "part_order" else 0
+        elif condition == "zone_2_part":
+            before[BUFFER]["zone_2_part"] = parts[1]
+        else:
+            for zone, part in enumerate(parts[1:5] if condition == "capacity" else parts[1:2], 1):
+                before["Storage"][f"inventory.{part}"] = False
+                before[BUFFER][f"zone_{zone}_part"] = part
+    unchanged, products = deepcopy(before), deepcopy(context.part_tracker)
+    with pytest.raises(ValueError, match=reason):
+        project_transition(context.models, before, context.part_tracker, task,
+                           context.product_name, context.requirements)
+    assert before == unchanged
+    assert context.part_tracker == products

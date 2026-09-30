@@ -430,6 +430,9 @@ def test_complete_pages_read_models_and_saved_runs_without_dispatch(
         def get_part_tracker(self):
             return {}
 
+        def get_runtime_recoveries(self):
+            return []
+
         def save_config(self, *args):
             writes.append(args)
             raise AssertionError("page display attempted a write")

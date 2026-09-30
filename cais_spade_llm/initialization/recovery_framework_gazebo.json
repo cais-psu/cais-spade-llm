@@ -1169,6 +1169,12 @@
       "gear_large"
     ],
     "initial_state": "completed",
+    "state_variables": {
+      "resource_state": {
+        "scope": "resource",
+        "domain": ["idle", "completed"]
+      }
+    },
     "initial_products": [
       "gear_small",
       "gear_medium",

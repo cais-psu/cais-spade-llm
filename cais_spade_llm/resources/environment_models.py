@@ -150,6 +150,8 @@ def build_environment_models(
         )
         model["controllable_event_alphabet"] = model["local_event_alphabet"][:]
         model["observable_event_alphabet"] = model["local_event_alphabet"][:]
+    if schema_version == 3:
+        _declare_printer_state(models, scene["3D Printing Station"])
     # Removing product-owned assembly guards also removes passive participants.
     for model in models.values():
         for event in model["events"]:
@@ -170,6 +172,60 @@ def build_environment_models(
     validate_environment_composition(models)
     validate_function_contracts(models)
     return models
+
+
+def _declare_printer_state(models: dict[str, dict], configuration: dict) -> None:
+    declaration = configuration.get("state_variables", {}).get("resource_state")
+    if declaration is None:
+        return
+    if declaration != {"scope": "resource", "domain": ["idle", "completed"]}:
+        raise ValueError("Invalid 3D Printing Station resource_state declaration")
+    printer = models["3D Printing Station"]
+    printer["state_variables"]["resource_state"] = deepcopy(declaration)
+    printer["current_valuation"]["resource_state"] = configuration["initial_state"]
+    _check_printer_state(printer["current_valuation"])
+    printer["marked_state_conditions"] = [tasks._equals(resource_state="idle")]
+    next_id = max(event["event_id"] for model in models.values() for event in model["events"]) + 1
+    for event in list(printer["events"]):
+        if event["event_name"] == "print_part":
+            event["guards"]["resource_state"] = {"equals": "idle"}
+            event["collection_guards"] = {
+                "output.{part_name}": {"all_other_equals": False}
+            }
+            event["updates"]["resource_state"] = {"set": "completed"}
+        elif "output.{part_name}" in event["guards"]:
+            event["guards"]["resource_state"] = {"equals": "completed"}
+            if event["event_name"] != "pick_grasp":
+                continue
+            # The shared pickup has two exclusive outcomes, selected by the
+            # remaining outputs rather than by a caller-supplied state.
+            event["updates"]["resource_state"] = {"set": "completed"}
+            event["collection_guards"] = {
+                "output.{part_name}": {"any_other_equals": True}
+            }
+            for model in models.values():
+                for peer in list(model["events"]):
+                    if peer["event_id"] != event["event_id"]:
+                        continue
+                    last_pickup = deepcopy(peer)
+                    last_pickup["event_id"] = next_id
+                    if model is printer:
+                        last_pickup["updates"]["resource_state"] = {"set": "idle"}
+                        last_pickup["collection_guards"] = {
+                            "output.{part_name}": {"all_other_equals": False}
+                        }
+                    model["events"].append(last_pickup)
+            next_id += 1
+
+
+def _check_printer_state(values: dict) -> None:
+    if "resource_state" not in values:
+        return
+    expected = "completed" if any(
+        value is True for field, value in values.items() if field.startswith("output.")
+    ) else "idle"
+    if values["resource_state"] != expected:
+        raise ValueError("3D Printing Station resource_state disagrees with output occupancy")
 
 
 def validate_environment_composition(models: dict[str, dict]) -> None:
@@ -214,6 +270,14 @@ def validate_environment_composition(models: dict[str, dict]) -> None:
 
 
 def _validate_composition_fields(model: dict, event: dict, resource_id: str) -> None:
+    output_guard = event.get("collection_guards", {}).get("output.{part_name}")
+    if output_guard is not None and (
+        resource_id != "3D Printing Station"
+        or "output.{part_name}" not in model["state_variables"]
+        or "part_name" not in event["parameter_bindings"]
+        or output_guard not in ({"any_other_equals": True}, {"all_other_equals": False})
+    ):
+        raise ValueError("Invalid printer output collection guard")
     for section in ("guards", "updates"):
         for field, rule in event[section].items():
             declaration = field
@@ -620,6 +684,8 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
             (values["resource_state"] == "idle") != (values["part_name"] is None)
         ):
             raise ValueError("Machine state disagrees with workholding")
+        if rid == "3D Printing Station":
+            _check_printer_state(values)
     for part, state in products.items():
         if state.get("state") == "assembled":
             if part in result:
@@ -722,6 +788,20 @@ def _apply_resource_effects(
         ):
             raise ValueError("Shared handoff participants disagree")
         local = peers[0]
+        output_guard = local.get("collection_guards", {}).get("output.{part_name}")
+        if output_guard is not None:
+            remaining = [
+                value for field, value in valuation[participant].items()
+                if field.startswith("output.") and field != f"output.{params['part_name']}"
+            ]
+            if output_guard == {"any_other_equals": True}:
+                allowed = any(value is True for value in remaining)
+            elif output_guard == {"all_other_equals": False}:
+                allowed = all(value is False for value in remaining)
+            else:
+                raise ValueError("Invalid printer output collection guard")
+            if not allowed:
+                raise ValueError(f"Guard blocked: {participant}.output collection")
         for field, guard in local["guards"].items():
             field = _bound(field, params)
             if len(guard) != 1:

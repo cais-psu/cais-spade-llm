@@ -47,6 +47,15 @@ def validated_function_contract(models: dict[str, dict], event_id: int) -> dict[
         raise ValueError(f"Planned function event_id {event_id} has executable steps")
     guard = owner["guards"].get("resource_state", {}).get("equals")
     update = owner["updates"].get("resource_state", {}).get("set")
+    if (actor == "3D Printing Station" and owner["event_name"] == "print_part"
+            and "resource_state" in models[actor]["state_variables"]):
+        if (owner["guards"].get("output.{part_name}") != {"equals": False}
+                or owner["updates"].get("output.{part_name}") != {"set": True}
+                or (guard, update) != ("idle", "completed")):
+            raise ValueError(f"Function event_id {event_id} disagrees with its output conditions")
+        # These saved labels describe the output condition. resource_state
+        # adds the shared-bed interlock without renaming the saved contract.
+        guard, update = "output absent", "output present"
     if guard is not None and not any(
         candidate.get("entry_state") in {guard, "any"}
         and (update is None or candidate.get("success_state") == update)
