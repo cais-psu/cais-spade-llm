@@ -93,6 +93,26 @@ class CentralControllerAgent(LlmAgent):
             "CentralControllerAgent '%s' initialized. safety_file=%s", name, str(self.safety_file)
         )
 
+    def _environment_runtime_for_sender(self, sender: str):
+        """Resolve a recovery run from registered agents, never caller-owned models."""
+        sender = str(sender).split("/", 1)[0]
+        for resource in self.resource_agents:
+            runtime = getattr(resource, "environment_runtime", None)
+            if runtime is not None and sender in {runtime.product_jid, *runtime.jids.values()}:
+                return runtime
+        return None
+
+    def _environment_admission(self, runtime):
+        """Reuse one run coordinator and its authoritative specification monitor."""
+        from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
+
+        with runtime.context.admission_lock:
+            if runtime.admission is None:
+                return EnvironmentAdmission(runtime, self.safety_monitor)
+            if runtime.admission.monitor is not self.safety_monitor:
+                runtime.admission.invalidate("specifications_changed_during_run")
+            return runtime.admission
+
     async def _wait_for_safety_monitor_ready(self, *, timeout_s: float = 30.0) -> bool:
         """Wait briefly for _InitCCA to publish the runtime safety monitor."""
         if self.safety_monitor is not None:
@@ -1632,6 +1652,35 @@ class CentralControllerAgent(LlmAgent):
                     )
                     return
 
+            runtime = agent._environment_runtime_for_sender(str(msg.sender))
+            if runtime is not None:
+                # Early RA completions are observations. Only PA-committed records
+                # can advance the authoritative monitor and acknowledged values.
+                try:
+                    data = json.loads(msg.body or "{}")
+                except (ValueError, TypeError):
+                    return
+                admission = agent._environment_admission(runtime)
+                sender = str(msg.sender).split("/", 1)[0]
+                task_id = data.get("task_id", "")
+                if data.get("run_id") != runtime.context.run_id:
+                    if data.get("status") == "safety_check":
+                        await self._send_decision(sender, task_id, "block")
+                    return
+                if data.get("status") == "safety_check":
+                    task = runtime.context.pending_for(task_id)
+                    if (task is None or sender != runtime.jids[task["resource_id"]]
+                            or data.get("function_name") != task["event_name"]
+                            or data.get("params") != task["parameters"]):
+                        await self._send_decision(sender, task_id, "block")
+                        return
+                    result = await admission.check(task, commit=True)
+                    await self._send_decision(sender, task_id,
+                                              "allow" if result["status"] == "allowed" else "block")
+                else:
+                    admission.synchronize()
+                return
+
             # 1. DELEGATE PARSING to the Monitor
             #
             event = agent.safety_monitor.parse_resource_event(msg)
@@ -2567,6 +2616,35 @@ class CentralControllerAgent(LlmAgent):
                 )
             except Exception:
                 agent.logger.exception("[CCA] Malformed plan_safety_check.")
+                return
+
+            runtime = agent._environment_runtime_for_sender(str(msg.sender))
+            if runtime is not None:
+                sender = str(msg.sender).split("/", 1)[0]
+                if sender != runtime.product_jid:
+                    return
+                local = data.get("local_composition") or {}
+                decisions = {}
+                ready = await agent._wait_for_safety_monitor_ready()
+                valid_request = (composition_backend == "local_parallel"
+                                 and local.get("run_id") == runtime.context.run_id)
+                for task in local.get("candidates", []):
+                    if ready and valid_request:
+                        admission = agent._environment_admission(runtime)
+                        decisions[task["task_id"]] = await admission.check(task, commit=False)
+                    else:
+                        decisions[task["task_id"]] = {
+                            "status": "inconclusive", "reason": "local_context_unavailable",
+                            "snapshot_revision": local.get("snapshot_revision"),
+                        }
+                reply = Message(to=sender)
+                reply.set_metadata("type", "plan_safety_result")
+                reply.body = json.dumps({
+                    "request_id": request_id,
+                    "ok": any(row["status"] == "allowed" for row in decisions.values()),
+                    "decisions": decisions, "composition_backend": "local_parallel",
+                })
+                await send_agent_message(self, reply, transport_label="cca_local_composition")
                 return
 
             if not fsa:

@@ -1,0 +1,109 @@
+{
+  "fixture_kind": "synthetic_checkpoint",
+  "bundle_root": "test/fixtures/part_slippage/bundle_reverse",
+  "failure_scenario_id": "part_slippage",
+  "product_geometry": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+  "goal_state": "assembled",
+  "default_resource_state": "idle",
+  "task_statuses": {
+    "REQ_1_T1": "completed",
+    "REQ_1_T2": "completed",
+    "REQ_1_T3": "pending",
+    "REQ_1_T4": "pending",
+    "REQ_1_T5": "pending",
+    "REQ_2_T1": "completed",
+    "REQ_2_T2": "completed",
+    "REQ_2_T3": "pending",
+    "REQ_2_T4": "pending",
+    "REQ_2_T5": "pending"
+  },
+  "failure_event": {
+    "failed_task_id": "REQ_2_T4",
+    "final_status": "interrupted",
+    "checkpoint": "after_both_pickups_before_place",
+    "part_name": "gear_large",
+    "state_before": {
+      "execution_mode": "simulation",
+      "controller_ready": true,
+      "held_part": "gear_large",
+      "current_state": "picked",
+      "gripper_state": "closed"
+    },
+    "state_after": {
+      "execution_mode": "simulation",
+      "controller_ready": true,
+      "held_part": null,
+      "current_state": "failed",
+      "gripper_state": "open"
+    }
+  },
+  "part_tracker": {
+    "KET4_Square_4mm": {
+      "state": "in_gripper",
+      "location": "recovery-resource-3@localhost",
+      "last_known_location": "recovery-resource-3@localhost",
+      "last_successful_task": "REQ_1_T2",
+      "origin_resource_location": "Buffer For Machined parts"
+    },
+    "gear_large": {
+      "state": "misplaced",
+      "location": null,
+      "last_known_location": null,
+      "last_successful_task": "REQ_2_T2",
+      "origin_resource_location": "3D Printing Station"
+    }
+  },
+  "resource_snapshots": [
+    {
+      "resource_id": "ur5e-3",
+      "resource_jid": "recovery-resource-3@localhost",
+      "resource_config": "test/fixtures/part_slippage/resources_reverse.json",
+      "resource_config_key": "ur5e-3",
+      "execution_env": "gazebo",
+      "current_state": "picked",
+      "held_part": "KET4_Square_4mm",
+      "gripper_state": "closed",
+      "current_pose_ref": null,
+      "current_pose": {
+        "x": -0.32,
+        "y": 0.5,
+        "z": 1.017
+      },
+      "current_location": "Buffer For Machined parts",
+      "observations": {}
+    },
+    {
+      "resource_id": "ur5e-4",
+      "resource_jid": "recovery-resource-4@localhost",
+      "resource_config": "test/fixtures/part_slippage/resources_reverse.json",
+      "resource_config_key": "ur5e-4",
+      "execution_env": "gazebo",
+      "current_state": "failed",
+      "held_part": null,
+      "gripper_state": "open",
+      "current_pose_ref": null,
+      "current_pose": {
+        "x": 0.44,
+        "y": -0.42,
+        "z": 1.11
+      },
+      "current_location": "3D Printing Station",
+      "observations": {
+        "gear_large": {
+          "part_name": "gear_large",
+          "x": 0.0,
+          "y": 0.2,
+          "z": 1.04,
+          "pose": {
+            "x": 0.0,
+            "y": 0.2,
+            "z": 1.04
+          }
+        }
+      }
+    }
+  ],
+  "obligation_targets": [],
+  "recovery_feedback": "",
+  "recovery_safety_context": {}
+}

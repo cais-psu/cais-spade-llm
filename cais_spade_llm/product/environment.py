@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import copy, deepcopy
-from typing import Any
+from functools import wraps
+from threading import RLock
+from typing import Any, Callable
 from uuid import uuid4
 
 from cais_spade_llm.product.order import validate_product_order
@@ -26,10 +28,21 @@ def fingerprint(value: Any) -> str:
     ).hexdigest()
 
 
+def admission_transaction(method):
+    """Serialize run snapshots and commits without holding a lock across awaits."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        context = getattr(self, "context", self)
+        with context.admission_lock:
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class EnvironmentResourceContext:
     """Own a resource's model, observed valuation, and execution adapters."""
 
     def __init__(self, model: dict) -> None:
+        self.admission_lock = RLock()
         self.resource_id = model["resource_id"]
         self.model = deepcopy(model)
         self.valuation = deepcopy(model["current_valuation"])
@@ -56,6 +69,7 @@ class EnvironmentResourceContext:
             "executable_tasks": sorted(self.executors),
         }
 
+    @admission_transaction
     def bind_executor(
         self, event_name: str, execute, validate_completion, *, validate_start
     ) -> None:
@@ -114,6 +128,8 @@ class EnvironmentProductContext:
         geometry: dict,
         permitted_resources: list[str] | None = None,
     ) -> None:
+        self.admission_lock = RLock()
+        self.acknowledgement_observer: Callable[[], None] | None = None
         validated = validate_product_order(
             product_order, geometry, require_process_requirements=True
         )
@@ -195,6 +211,8 @@ class EnvironmentProductContext:
             rid: EnvironmentResourceContext(model) for rid, model in self.models.items()
         }
         self.models = {rid: resource.model for rid, resource in self.resources.items()}
+        for resource in self.resources.values():
+            resource.admission_lock = self.admission_lock
         self.permitted_resources = (
             list(self.models) if permitted_resources is None else list(permitted_resources)
         )
@@ -245,6 +263,7 @@ class EnvironmentProductContext:
         self.run_id = uuid4().hex
         self.revision = 0
         self._task_sequence = 0
+        self.unavailable_resources: set[str] = set()
         self.pending_tasks: dict[str, dict] = {}
         self.reservations: dict[str, str] = {}
         self.acknowledgements: dict[str, dict] = {}
@@ -263,22 +282,28 @@ class EnvironmentProductContext:
             return deepcopy(next(iter(self.pending_tasks.values())))
         return {task_id: deepcopy(task) for task_id, task in self.pending_tasks.items()}
 
+    @admission_transaction
     def pending_for(self, task_id: str | None) -> dict | None:
         """Return one prepared task by identity."""
         task = self.pending_tasks.get(str(task_id or ""))
         return deepcopy(task) if task is not None else None
 
+    @admission_transaction
     def snapshot(self) -> dict:
         """Read one coherent resource valuation for discovery or commit."""
         return {rid: resource.snapshot() for rid, resource in self.resources.items()}
 
+    @admission_transaction
     def calculation_snapshot(self) -> EnvironmentProductContext:
         """Detach calculation inputs while reusing immutable revision snapshots."""
         self.revisions()
         snapshot = copy(self)
+        snapshot.admission_lock = RLock()
+        snapshot.acknowledgement_observer = None
         snapshot.resources = {}
         for rid, resource in self.resources.items():
             frozen = copy(resource)
+            frozen.admission_lock = snapshot.admission_lock
             # revisions() replaces this detached copy whenever inputs change;
             # calculations only read its model and valuation.
             frozen.model, frozen.valuation, executors = resource._revision_inputs
@@ -290,12 +315,20 @@ class EnvironmentProductContext:
         snapshot.geometry = deepcopy(self.geometry)
         snapshot.requirements = deepcopy(self.requirements)
         snapshot.permitted_resources = list(self.permitted_resources)
+        snapshot.unavailable_resources = set(self.unavailable_resources)
         snapshot.reservations = dict(self.reservations)
+        snapshot.pending_tasks = deepcopy(self.pending_tasks)
+        # Calculation workers use copied current values, never replay live history.
+        snapshot.completed_task_ids = frozenset(self.acknowledgements)
+        snapshot.acknowledgements = {}
+        snapshot.transitions = []
         snapshot.exploration_models = {}
         return snapshot
 
     def allows_task(self, task: dict) -> bool:
-        """Keep a bound one-part order on its declared machine lane."""
+        """Reject unavailable participants and keep a bound order on its machine lane."""
+        if self.unavailable_resources.intersection(self._task_participants(task)):
+            return False
         if self.machine_resource is None:
             return True
         references = (
@@ -310,6 +343,7 @@ class EnvironmentProductContext:
             for reference in references if reference in self.machine_ids
         )
 
+    @admission_transaction
     def revisions(self, resources=None) -> dict:
         """Detect changed offer inputs without repeatedly serializing unchanged models."""
         result = {}
@@ -488,6 +522,7 @@ class EnvironmentProductContext:
             "execution_unavailable": execution_unavailable,
         }
 
+    @admission_transaction
     def prepare(self, task: dict, *, simulated: bool = False) -> dict:
         """Recheck a transition and reserve its exact execution dependencies."""
         rid = task["resource_id"]
@@ -614,12 +649,14 @@ class EnvironmentProductContext:
             reservations.add(f"buffer-zone:{params.get('downstream_zone')}")
         return reservations
 
+    @admission_transaction
     def relevant_revisions_match(self, task: dict) -> bool:
         """Check only resources whose state or controller the task can change."""
         expected = task.get("participant_revisions", {})
         current = self.revisions(expected)
         return bool(expected) and all(current.get(rid) == value for rid, value in expected.items())
 
+    @admission_transaction
     def cancel_pending(self, task_id: str) -> dict | None:
         """Release reservations while retaining acknowledged state."""
         pending = self.pending_tasks.pop(task_id, None)
@@ -630,6 +667,7 @@ class EnvironmentProductContext:
                 self.reservations.pop(key, None)
         return deepcopy(pending)
 
+    @admission_transaction
     def acknowledge(self, acknowledgement: dict) -> bool:
         """Commit exactly matching acknowledged effects once, atomically."""
         task_id = acknowledgement.get("task_id")
@@ -683,6 +721,8 @@ class EnvironmentProductContext:
         self.transitions.append(record)
         self.acknowledgements[task_id] = deepcopy(acknowledgement)
         self.cancel_pending(task_id)
+        if self.acknowledgement_observer is not None:
+            self.acknowledgement_observer()
         return True
 
     def report(self, *, _memo: dict | None = None) -> dict:

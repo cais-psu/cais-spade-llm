@@ -1,0 +1,63 @@
+{
+  "thought": "Evaluate the supplied candidate effects.",
+  "selected_candidate_index": 0,
+  "candidate_events": [
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "event_name": "place_recovered_part",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "KET4_Square_4mm",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "KET4_Square_4mm",
+        "part_state": "misplaced",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "assembled",
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "event_name": "place_recovered_part_alternative_1",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "KET4_Square_4mm",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "KET4_Square_4mm",
+        "part_state": "misplaced",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "assembled",
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "event_name": "place_recovered_part_alternative_2",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "KET4_Square_4mm",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": "KET4_Square_4mm",
+        "part_state": "misplaced",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "assembled",
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    }
+  ]
+}

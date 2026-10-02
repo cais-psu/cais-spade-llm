@@ -22,7 +22,9 @@ from cais_spade_llm.agents.shared_information.environment_capabilities import (
     message,
 )
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
-from cais_spade_llm.product.environment import EnvironmentProductContext, fingerprint
+from cais_spade_llm.product.environment import (
+    EnvironmentProductContext, admission_transaction, fingerprint,
+)
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.resources.gazebo_programs import current_program_revision, resource_program_revision
 from cais_spade_llm.resources.function_contracts import validated_function_contract
@@ -259,6 +261,13 @@ class EnvironmentRuntime:
                  or not prepared.get("launch_identity"))
         ):
             raise ValueError("CCA bypass requires an explicitly prepared simulation launch")
+        # The recovery completion gate always enforces its result, including simulation.
+        self.requested_diagnostic_cca_bypass = self.diagnostic_cca_bypass
+        self.diagnostic_cca_bypass = False
+        self.operation_goals: dict[str, dict] = {}
+        self.admission = None
+        self.held_tasks: dict[str, dict] = {}
+        self.held_at_revision: dict[str, str] = {}
         self.agent = agent
         self.product_jid = str(agent.jid).split("/", 1)[0]
         self.context = EnvironmentProductContext(
@@ -308,6 +317,9 @@ class EnvironmentRuntime:
         )
 
         bind_environment_executors(self, resources)
+        from cais_spade_llm.recovery_framework.conveyor_fault import ConveyorFault
+
+        self.conveyor_fault = ConveyorFault(self, prepared["setup"])
         agent.part_tracker = deepcopy(self.context.part_tracker)
 
     async def calculate_capability(self, function, *args, request: dict, resource_id: str):
@@ -364,6 +376,8 @@ class EnvironmentRuntime:
             if self.context.part_tracker[part].get("state") == "assembled"
         ]
         return {
+            "conveyor_fault": self.conveyor_fault.snapshot(),
+            "unavailable_resources": sorted(self.context.unavailable_resources),
             "diagnostic_cca_bypass": self.diagnostic_cca_bypass,
             'collision_checks_bypassed': [
                 *[robot['resource_id'] for robot in self.context.inputs['scene']['robots']
@@ -424,6 +438,7 @@ class EnvironmentRuntime:
         environment = self.context.environment_model
         return (
             self.context.run_id,
+            self.conveyor_fault.revision,
             self.context.revision,
             tuple(
                 (
@@ -469,6 +484,8 @@ class EnvironmentRuntime:
             "environment_model": environment_model,
             "pending_tasks": deepcopy(context.pending_tasks), "reservations": dict(context.reservations),
             "final_valuation": context.snapshot(), "final_product_states": deepcopy(context.part_tracker),
+            "conveyor_fault": self.conveyor_fault.snapshot(),
+            "unavailable_resources": sorted(context.unavailable_resources),
             "revision": context.revision,
             "diagnostic_cca_bypass": self.diagnostic_cca_bypass,
             'collision_checks_bypassed': [
@@ -556,9 +573,12 @@ class EnvironmentRuntime:
                 "timestamp": time.time(), "delay_wall_time_sec": delay,
             })
 
+    @admission_transaction
     def stop(self, reason: str = "Stopped by operator") -> None:
         """Close discovery and suppress execution without altering acknowledged state."""
         self.stopped = True
+        if self.admission is not None:
+            self.admission.invalidate(reason)
         self._close_calculations()
         partial = {}
         for resource in self.resource_agents:
@@ -583,6 +603,13 @@ class EnvironmentRuntime:
                 "cancelled_tasks": [task for task in cancelled if task is not None],
                 "partial_execution": partial,
             }
+        fault = getattr(self, "conveyor_fault", None)
+        if fault is not None and fault.status == "triggered":
+            self.outcome.update(
+                status="blocked", reason=fault.configuration["scenario"],
+                failed_resource=fault.configuration["resource_id"],
+                failure_evidence=deepcopy(fault.evidence),
+            )
         self.context.environment_model["closed"] = True
         for model in self.context.exploration_models.values():
             model["closed"] = True
@@ -599,6 +626,11 @@ class EnvironmentRuntime:
             *(worker.cancel() for worker in workers if worker is not None),
             return_exceptions=True,
         )
+        await self.conveyor_fault.retain_worker_interruption()
+        injection = self.conveyor_fault._injection_task
+        if injection is not None and injection is not asyncio.current_task():
+            # Keep resource controllers alive until partial effects have been recorded.
+            await asyncio.shield(injection)
 
     def install(self, agent) -> None:
         """Install matching and execution inboxes instead of the legacy order planner."""
@@ -641,7 +673,7 @@ class EnvironmentRuntime:
         self.agent.process_planner.nodes = [node]
         self.agent.process_planner.compile_global_fsa()
 
-    def set_plans(self, tasks: list[dict]) -> None:
+    def set_plans(self, tasks: list[dict], *, compile_fsa: bool = True) -> None:
         """Expose one concurrently dispatched batch through the existing FSA surface."""
         nodes = []
         for index, task in enumerate(tasks):
@@ -672,7 +704,40 @@ class EnvironmentRuntime:
                 }
             )
         self.agent.process_planner.nodes = nodes
-        self.agent.process_planner.compile_global_fsa()
+        if compile_fsa:
+            self.agent.process_planner.compile_global_fsa()
+
+    @admission_transaction
+    def composition_request(self, tasks: list[dict], request_id: str) -> dict:
+        """Copy internal model context; CCA alone supplies live monitor history."""
+        context = self.context
+        return {
+            "request_id": request_id, "product_jid": self.product_jid,
+            "composition_backend": "local_parallel",
+            "plan": {"nodes": deepcopy(self.agent.process_planner.nodes)},
+            "local_composition": {
+                "run_id": context.run_id, "candidates": deepcopy(tasks),
+                "snapshot_revision": context.revision,
+                "model_identity": fingerprint(context.models),
+                "models": deepcopy(context.models),
+                "resource_values": context.snapshot(),
+                "product_values": deepcopy(context.part_tracker),
+                "reservations": dict(context.reservations),
+                "admitted_task_ids": list(self.admission.grants) if self.admission else [],
+                "completed_task_ids": list(context.acknowledgements),
+                "continuations": deepcopy(getattr(self, "retained_paths", {})),
+                "completion_conditions": deepcopy(self.operation_goals),
+            },
+        }
+
+
+
+@admission_transaction
+def _hold_revision(runtime: EnvironmentRuntime) -> str:
+    """Wake held goals after acknowledgements, arrivals or capability changes."""
+    context = runtime.context
+    return fingerprint([context.revision, context.revisions(), runtime.operation_goals,
+                        context.requirements, context.permitted_resources])
 
 
 class EnvironmentProductLoop(CyclicBehaviour):
@@ -767,7 +832,13 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         if not await self._dispatch_approved(runtime, approval, decision, attempted):
                             return
                         approval = None
-                all_goals = self._negotiation_goals(runtime)
+                hold_revision = _hold_revision(runtime)
+                for key, held_revision in list(runtime.held_at_revision.items()):
+                    if held_revision != hold_revision:
+                        runtime.held_at_revision.pop(key)
+                        attempted.pop(key, None)
+                all_goals = [goal for goal in self._negotiation_goals(runtime)
+                             if runtime.held_at_revision.get(goal[0]) != hold_revision]
                 for key, *_ in all_goals:
                     runtime.waiting_since.setdefault(key, time.monotonic())
                 waiting = [part for key, part, *_ in all_goals
@@ -850,8 +921,10 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         break
                     result = ready[key]
                     task = result["tasks"][0]
+                    if runtime.conveyor_fault.holds_task(task):
+                        continue
                     try:
-                        prepared = context.prepare(task)
+                        prepared = context.prepare({**task, "composition_goal_key": key})
                     except ValueError as exc:
                         reason = str(exc)
                         if reason.startswith("Task conflicts with active reservations:"):
@@ -888,28 +961,20 @@ class EnvironmentProductLoop(CyclicBehaviour):
                             "waiting_wall_time_sec": time.monotonic() - runtime.waiting_since.pop(key, time.monotonic()),
                         })
                 if pending:
-                    runtime.set_plans(list(context.pending_tasks.values()))
+                    runtime.set_plans(list(context.pending_tasks.values()), compile_fsa=False)
                     request_id = uuid4().hex
                     approval = {
                         "request_id": request_id, "tasks": pending, "new_admissions": new_admissions,
                         "requested_monotonic": time.monotonic(), "requested_at_unix": time.time(),
                     }
-                    if runtime.diagnostic_cca_bypass:
-                        decision = {
-                            "ok": True, "request_id": request_id,
-                            "diagnostic_cca_bypass": True,
-                        }
-                        if not await self._dispatch_approved(runtime, approval, decision, attempted):
-                            return
-                        approval = None
-                    else:
-                        payload = self.agent._build_plan_validation_payload(
-                            skip_revalidation=False, request_id=request_id,
-                            validation_scope="active_window", composition_backend="explicit_fsa_dfa",
-                        )
-                        self._awaiting_plan_request = request_id
-                        await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
+                    payload = runtime.composition_request(pending, request_id)
+                    self._awaiting_plan_request = request_id
+                    await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
                 if not discoveries and not context.pending_tasks:
+                    if ready and all(runtime.conveyor_fault.holds_task(row["tasks"][0]) for row in ready.values()):
+                        runtime.outcome = {"status": "blocked", "reason": "Both observed pickups could not be established"}
+                        runtime.conveyor_fault.not_reached()
+                        return
                     if context.outstanding() is None and _robots_at_home(context):
                         context.environment_model.update(status="completed", closed=True)
                         runtime.outcome = {"status": "completed", "tasks": []}
@@ -921,8 +986,10 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         unavailable = [result for result in failures.values()
                                        if result.get("tasks") and not result.get("executable")]
                         runtime.outcome = {
-                            "status": "execution_unavailable" if unavailable else "blocked",
-                            "reason": "No validated RA offer establishes remaining requirements",
+                            "status": "execution_unavailable" if unavailable else ("held" if runtime.held_tasks else "blocked"),
+                            "reason": "CCA holds remaining candidates" if runtime.held_tasks else
+                                      "No validated RA offer establishes remaining requirements",
+                            "held": deepcopy(runtime.held_tasks),
                             "executable": False,
                             "tasks": [deepcopy(task) for result in unavailable for task in result["tasks"]],
                             "details": deepcopy(failures),
@@ -945,6 +1012,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
             for discovery in discoveries.values():
                 discovery.cancel()
             await asyncio.gather(*discoveries.values(), return_exceptions=True)
+            runtime.conveyor_fault.not_reached()
             if runtime.outcome.get("status") == "completed":
                 runtime._close_calculations()
 
@@ -959,11 +1027,6 @@ class EnvironmentProductLoop(CyclicBehaviour):
             "waiting_wall_time_sec": time.monotonic() - approval["requested_monotonic"],
             "timestamp": time.time(), "decision": deepcopy(decision),
         })
-        if decision.get("ok") is not True:
-            runtime.stop("CCA rejected negotiated work")
-            await runtime.cancel_owned()
-            runtime.outcome = {"status": "blocked", "reason": "CCA rejected negotiated work", "details": decision}
-            return False
         if runtime.program_revision and runtime.scene_file:
             scene_path = ROOT / runtime.scene_file
             try:
@@ -978,8 +1041,26 @@ class EnvironmentProductLoop(CyclicBehaviour):
                 return False
         self._report_kickoff(runtime)
         for task in approval["tasks"]:
+            goal_key = task.get("composition_goal_key", task["part_name"])
+            candidate_result = decision.get("decisions", {}).get(task["task_id"], {})
+            permitted = candidate_result.get("status") == "allowed"
+            if not permitted:
+                context.cancel_pending(task["task_id"])
+                runtime.held_tasks[goal_key] = deepcopy(candidate_result or decision)
+                runtime.held_at_revision[goal_key] = _hold_revision(runtime)
+                context.negotiations.append({
+                    "kind": "candidate_held", "task_id": task["task_id"],
+                    "decision": deepcopy(candidate_result or decision),
+                })
+                continue
+            runtime.held_tasks.pop(goal_key, None)
             if runtime.stopped:
                 return False
+            fault = getattr(runtime, "conveyor_fault", None)
+            if fault is not None and fault.holds_task(task):
+                context.cancel_pending(task["task_id"])
+                attempted.clear()
+                continue
             if (context.pending_for(task["task_id"]) != task
                     or not context.relevant_revisions_match(task) or not context.allows_task(task)):
                 context.cancel_pending(task["task_id"])
@@ -995,7 +1076,11 @@ class EnvironmentProductLoop(CyclicBehaviour):
                 runtime.admitted_parts.add(task["part_name"])
         if runtime.stopped:
             return False
-        runtime.outcome = {"status": "executing", "tasks": deepcopy(list(context.pending_tasks.values()))}
+        runtime.outcome = {
+            "status": "executing" if context.pending_tasks else "held",
+            "tasks": deepcopy(list(context.pending_tasks.values())),
+            "held": deepcopy(runtime.held_tasks),
+        }
         runtime.queue_save()
         return True
 
@@ -1109,6 +1194,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
     async def _negotiate_goal(self, runtime, key, part, desired, resource_goal):
         """Ask the owning RA to revalidate a retained offer or discover a new path."""
         started = time.monotonic()
+        with runtime.context.admission_lock:
+            if desired is not None:
+                runtime.operation_goals[part] = deepcopy(desired)
         cache = runtime.retained_paths.get(key, {})
         desired_id = fingerprint([desired, resource_goal])
         capabilities = {rid: [resource.model, sorted(resource.executors)]
@@ -1155,7 +1243,8 @@ class EnvironmentProductLoop(CyclicBehaviour):
                     task["part_name"] = part
                 if result.get("executable"):
                     runtime.retained_paths[key] = {
-                        "desired": desired_id, "path": deepcopy(result["tasks"]),
+                        "desired": desired_id, "operation": deepcopy(desired),
+                        "resource_goal": deepcopy(resource_goal), "path": deepcopy(result["tasks"]),
                         "capabilities": {
                             rid: deepcopy(capabilities[rid])
                             for rid in {peer for task in result["tasks"]
@@ -1201,6 +1290,13 @@ class EnvironmentProductLoop(CyclicBehaviour):
         })
         if payload.get("status") in {"accepted", "running"}:
             return True
+        if payload.get("status") == "held":
+            runtime.context.cancel_pending(task["task_id"])
+            goal_key = task.get("composition_goal_key", task["part_name"])
+            runtime.held_tasks[goal_key] = deepcopy(payload)
+            runtime.held_at_revision[goal_key] = _hold_revision(runtime)
+            runtime.queue_save()
+            return True
         if payload.get("status") != "completed":
             runtime.stop("Resource did not complete negotiated work")
             await runtime.cancel_owned()
@@ -1222,6 +1318,8 @@ class EnvironmentProductLoop(CyclicBehaviour):
             if node["id"] == task["task_id"]:
                 node["status"] = "completed"
         runtime.queue_save()
+        if await runtime.conveyor_fault.after_acknowledgement():
+            return False
         return True
 
     async def receive_from(
@@ -1320,6 +1418,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             runtime.stopped
             or context.pending_for(task_id) != task
             or task["resource_id"] != actor.resource_id
+            or not context.allows_task(task)
         ):
             raise ValueError("Task does not match current prepared execution")
         contract = validated_function_contract(context.models, task["event_id"])
@@ -1349,39 +1448,35 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             is not True
         ):
             raise ValueError("Resource start conditions have not been validated")
-        if runtime.diagnostic_cca_bypass:
-            decision = "allow"
-            context.negotiations.append({
-                "kind": "resource_safety_bypassed", "task_id": task_id,
-                "resource_id": actor.resource_id, "timestamp": time.time(),
-            })
-        else:
-            await send_agent_message(
-                behaviour,
-                message(
-                    agent.cca_jid,
-                    "resource_event",
-                    {
-                        "task_id": task_id,
-                        "resource_jid": str(agent.jid),
-                        "function_name": name,
-                        "params": task["parameters"],
-                        "status": "safety_check",
-                    },
-                ),
-            )
-            context.negotiations.append({
-                "kind": "resource_safety_requested", "task_id": task_id,
-                "resource_id": actor.resource_id, "timestamp": time.time(),
-            })
-            decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id), 60)
-            context.negotiations.append({
-                "kind": "resource_safety_decision", "task_id": task_id,
-                "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
-            })
+        await send_agent_message(
+            behaviour,
+            message(
+                agent.cca_jid,
+                "resource_event",
+                {
+                    "task_id": task_id,
+                    "resource_jid": str(agent.jid),
+                    "run_id": context.run_id,
+                    "function_name": name,
+                    "params": task["parameters"],
+                    "status": "safety_check",
+                },
+            ),
+        )
+        context.negotiations.append({
+            "kind": "resource_safety_requested", "task_id": task_id,
+            "resource_id": actor.resource_id, "timestamp": time.time(),
+        })
+        decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id), 60)
+        context.negotiations.append({
+            "kind": "resource_safety_decision", "task_id": task_id,
+            "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
+        })
+        if decision != "allow":
+            await ack("held", reason="CCA requires a fresh admissible start")
+            return
         if (
-            decision != "allow"
-            or runtime.stopped
+            runtime.stopped
             or not context.relevant_revisions_match(task)
         ):
             raise ValueError("CCA permission missing or execution context changed")
@@ -1395,6 +1490,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
                     {
                         "task_id": task_id,
                         "resource_jid": str(agent.jid),
+                        "run_id": context.run_id,
                         "function_name": name,
                         "params": task["parameters"],
                         "status": "running",
@@ -1412,6 +1508,8 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             observations = await asyncio.wait_for(execution, agent.tool_timeout_s)
         finally:
             runtime.active_executions.discard(execution)
+        if await runtime.conveyor_fault.accept_machine_failure(task, observations):
+            return
         if runtime.stopped or actor.completion_validators[name](task, observations) is not True:
             raise ValueError("Resource completion evidence did not validate")
         if not context.relevant_revisions_match(task):
@@ -1433,6 +1531,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
                     {
                         "task_id": task_id,
                         "resource_jid": str(agent.jid),
+                        "run_id": context.run_id,
                         "function_name": name,
                         "params": task["parameters"],
                         "status": "completed",

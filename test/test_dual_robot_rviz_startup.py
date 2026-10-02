@@ -91,8 +91,8 @@ def test_gazebo_reset_reads_stored_nist_parts_without_robot_commands() -> None:
         "RGOCG4-50_Round_4mm", "RGOCG8-50_8mm", "RGOCG12-50_12mm", "RGOCG16-50_16mm",
         "gear_small", "gear_medium", "gear_large",
     }
-    assert poses["KET4_Square_4mm"] == (-8.95, 1.88, 0.645, 0.0, 0.0, 1.57079632679)
-    assert poses["RGOCG16-50_16mm"] == (-8.77, 2.72, 0.645, 0.0, 0.0, 1.57079632679)
+    assert poses["KET4_Square_4mm"] == (-6.25, 1.88, 0.645, 0.0, 0.0, 1.57079632679)
+    assert poses["RGOCG16-50_16mm"] == (-6.07, 2.72, 0.645, 0.0, 0.0, 1.57079632679)
     assert poses["gear_small"] == (0.44, -0.58, 1.11, 0.0, 0.0, 0.0)
     assert poses["gear_medium"] == (0.44, -0.50, 1.11, 0.0, 0.0, 0.0)
     assert poses["gear_large"] == (0.44, -0.42, 1.11, 0.0, 0.0, 0.0)
@@ -292,7 +292,7 @@ def test_spec2primitives_starts_and_reuses_only_the_exact_robot_agent() -> None:
         ("executables", {"pick_approach": object()}, "exposes task tools"),
         (
             "failure_scenarios",
-            [{"scenario_id": "lg_slippage"}],
+            [{"scenario_id": "part_slippage"}],
             "exposes failure scenarios",
         ),
         ("_controller", object(), "constructed a controller"),
@@ -396,6 +396,7 @@ def test_spec2primitives_replaces_an_earlier_context_only_robot_agent() -> None:
 
 def test_full_system_start_disposes_spec2primitives_robot_agent_first() -> None:
     bridge = object.__new__(SystemBridge)
+    bridge.product_agents = []
     bridge.system_running = False
     bridge._starting = False
     bridge._stopping = False

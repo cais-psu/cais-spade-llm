@@ -1,0 +1,11 @@
+{
+  "thought": "Locate the misplaced part using saved observation evidence.",
+  "decision": "observe",
+  "observe_requests": [
+    {
+      "fact_type": "part_pose",
+      "entity": "KET4_Square_4mm",
+      "reason": "Its current pose is required."
+    }
+  ]
+}

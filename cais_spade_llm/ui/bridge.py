@@ -4878,6 +4878,10 @@ class SystemBridge:
         if self.system_running or self._starting:
             return
 
+        if self.get_conveyor_fault()["status"] == "triggered":
+            self.last_error = "Reset Gazebo or Reset All after Conveyor breakdown before starting another run."
+            return
+
         execution_lock = getattr(self, "_ur5e_robot_function_execution_lock", None)
         if execution_lock is None:
             execution_lock = threading.Lock()
@@ -5310,6 +5314,7 @@ class SystemBridge:
 
     async def stop_system(self) -> None:
         """Stop all SPADE agents."""
+        self._conveyor_fault_owner()
         if not self.system_running or self._stopping:
             return
 
@@ -37673,6 +37678,13 @@ class SystemBridge:
                 "Stop the agent system before resetting Gazebo to avoid state mismatch.",
             )
 
+        fault_runtime = self._conveyor_fault_owner()
+        if (fault_runtime is not None and fault_runtime.conveyor_fault.status == "triggered"
+                and self._recovery_framework_gazebo()):
+            from cais_spade_llm.recovery_framework.conveyor_fault import reset_fault_scene
+
+            return reset_fault_scene(self, fault_runtime)
+
         # ── Discover the Gazebo reset service ──────────────────────
         ok, out = self._ros2_command_output(
             "ros2 service list",
@@ -37720,6 +37732,14 @@ class SystemBridge:
         if warning_messages:
             detail = " ; ".join([headline] + success_messages + warning_messages)
             return False, detail
+        if fault_runtime is not None and fault_runtime.conveyor_fault.status == "triggered":
+            from cais_spade_llm.recovery_framework.conveyor_fault import marker
+            cleared = marker(fault_runtime.context.inputs["scene"], "clear")
+            if cleared.get("status") != "completed":
+                return False, headline + " Breakdown marker could not be cleared: " + str(cleared)
+            fault_runtime.conveyor_fault.status = "reset"
+            fault_runtime.conveyor_fault.revision += 1
+            fault_runtime.conveyor_fault.visual = cleared
         detail = " ; ".join([headline] + success_messages) if success_messages else headline
         return True, detail
 
@@ -39102,6 +39122,37 @@ class SystemBridge:
     # ------------------------------------------------------------------
     # State accessors (called by UI pages via ui.timer)
     # ------------------------------------------------------------------
+    def _conveyor_fault_owner(self):
+        """Retain fault ownership across agent teardown until explicit Gazebo reset."""
+        for agent in self.product_agents:
+            runtime = getattr(agent, "environment_runtime", None)
+            if runtime is not None:
+                self._conveyor_fault_runtime = runtime
+                return runtime
+        return getattr(self, "_conveyor_fault_runtime", None)
+
+    def get_conveyor_fault(self) -> dict[str, Any]:
+        """Read the current simulation fault without dispatching work."""
+        runtime = self._conveyor_fault_owner()
+        return runtime.conveyor_fault.snapshot() if runtime is not None else {"status": "disabled", "ready": False}
+
+    async def arm_conveyor_fault(self, armed: bool = True) -> dict[str, Any]:
+        """Arm or disarm the once-per-run observed simulation fault."""
+        runtime = self._conveyor_fault_owner()
+        if runtime is None or self.execution_mode != "simulation":
+            raise ValueError("Start the configured Simulation system before arming")
+        async def change():
+            return runtime.conveyor_fault.arm(armed)
+
+        return await self._run_on_agent_runtime(change())
+
+    async def trigger_conveyor_fault(self) -> dict[str, Any]:
+        """Trigger only at the observed completed-M1 pickup checkpoint."""
+        runtime = self._conveyor_fault_owner()
+        if runtime is None or self.execution_mode != "simulation":
+            raise ValueError("Conveyor faults are available only in Simulation")
+        return await self._run_on_agent_runtime(runtime.conveyor_fault.trigger())
+
     def get_environment_capabilities(self) -> dict[str, Any]:
         """Read runtime resource graphs and the active product's environmental bids."""
         for agent in self.product_agents:

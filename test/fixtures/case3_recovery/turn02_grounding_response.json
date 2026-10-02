@@ -1,5 +1,0 @@
-{
-  "thought": "The blocked suffix is caused by xarm6 being failed and SAFE_1 requiring LG to be placed at the assembly station before ur5e can continue MCP place_approach. The key missing world-state uncertainty was LG's actual pose after the failed place_insert. That pose is already grounded in the session observation store: LG at (0.0, 0.2, 1.035). Resource states are also grounded: xarm6 is failed, open, not holding LG; ur5e is holding MCP and is not yet in the assembly destination area. With LG pose now known, the affected part is localized and available for recovery planning. No additional observation type is exposed beyond part_pose, and requesting LG pose again would duplicate an existing observation.",
-  "decision": "grounded",
-  "observe_requests": []
-}

@@ -43,7 +43,7 @@
         "linear_step_m": 0.01,
         "angular_step_rad": 0.05,
         "resource_id": "ur5e-1",
-        "avoid_collisions": false,
+        "avoid_collisions": true,
         "rotation_waypoint": [
           -4.6,
           0.7,
@@ -94,7 +94,7 @@
         "linear_step_m": 0.01,
         "angular_step_rad": 0.05,
         "resource_id": "ur5e-2",
-        "avoid_collisions": false,
+        "avoid_collisions": true,
         "rotation_waypoint": [
           -2.6,
           0.7,
@@ -149,7 +149,7 @@
             1.5011292266317149
           ]
         ],
-        "avoid_collisions": false,
+        "avoid_collisions": true,
         "rotation_waypoint": [
           0.0,
           0.05,
@@ -188,7 +188,7 @@
         "linear_step_m": 0.01,
         "angular_step_rad": 0.05,
         "resource_id": "ur5e-4",
-        "avoid_collisions": false,
+        "avoid_collisions": true,
         "rotation_waypoint": [
           0.3,
           -0.35,
@@ -1172,7 +1172,10 @@
     "state_variables": {
       "resource_state": {
         "scope": "resource",
-        "domain": ["idle", "completed"]
+        "domain": [
+          "idle",
+          "completed"
+        ]
       }
     },
     "initial_products": [

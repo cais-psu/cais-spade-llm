@@ -445,6 +445,7 @@ def test_recovery_rejects_unsupported_modes_before_runtime_checks(mode, running)
 
 def test_recovery_run_polling_does_not_write_mode_and_pauses_when_hidden(monkeypatch):
     bridge = MagicMock(spec=SystemBridge)
+    bridge.get_conveyor_fault.return_value = {"status": "disabled", "ready": False}
     for name, value in {
         "system_running": False,
         "_starting": False,

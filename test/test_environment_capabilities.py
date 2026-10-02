@@ -893,7 +893,7 @@ def test_resource_execution_requires_cca_and_validated_ack(inputs, monkeypatch, 
             before = context.snapshot()
             await execution.execute_environment_task(behaviour, incoming, pending)
             controller.assert_not_awaited()
-            assert packets[-1][1]["status"] == "blocked"
+            assert packets[-1][1]["status"] == ("blocked" if bypass else "held")
             start.return_value = True
             resource._wait_for_safety_decision = AsyncMock(return_value="allow")
             await execution.execute_environment_task(behaviour, incoming, pending)
@@ -903,15 +903,10 @@ def test_resource_execution_requires_cca_and_validated_ack(inputs, monkeypatch, 
             await execution.execute_environment_task(behaviour, incoming, pending)
             assert not context.acknowledge(packets[-1][1]["acknowledgement"])
             assert controller.await_count == 1
-            assert [data["status"] for kind, data in packets if kind == "resource_event"] == ([] if bypass else [
-                "safety_check",
-                "safety_check",
-                "running",
-                "completed",
-            ])
-            if bypass:
-                resource._wait_for_safety_decision.assert_not_awaited()
-                assert runtime._report_snapshot()[1]["diagnostic_cca_bypass"] is True
+            assert [data["status"] for kind, data in packets if kind == "resource_event"] == (
+                ([] if bypass else ["safety_check"]) + ["safety_check", "running", "completed"])
+            resource._wait_for_safety_decision.assert_awaited()
+            assert runtime._report_snapshot()[1]["diagnostic_cca_bypass"] is False
 
     asyncio.run(scenario())
 
@@ -1262,7 +1257,9 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                     message(
                         str(packet.sender),
                         "plan_safety_result",
-                        {"ok": True, "request_id": body["request_id"]},
+                        {"ok": True, "request_id": body["request_id"],
+                         "decisions": {task["task_id"]: {"status": "allowed"}
+                                       for task in body["local_composition"]["candidates"]}},
                     ),
                 )
             elif body["status"] == "safety_check":
@@ -1286,8 +1283,7 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
             product = driver.agent
             cca = ResourceAgent("cca@localhost", "none", name="cca")
             cca.container = product.container
-            if all_capabilities != "bypass":
-                cca.container.agents[str(cca.jid)] = cca
+            cca.container.agents[str(cca.jid)] = cca
             safety = SafetyInbox()
             cca.add_behaviour(
                 safety,
@@ -1403,7 +1399,7 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                     assert sorted(events[5:]) == ["machine_part", "move_to_resource"]
                     assert 6 <= len(checks) <= 7
                 if all_capabilities == "bypass":
-                    assert not checks
+                    assert checks
                     assert runtime.context.selected_parts == [SQUARE, "gear_small"]
                     assert all(product.part_tracker[part]["state"] == "assembled"
                                for part in runtime.context.selected_parts)
@@ -1415,10 +1411,9 @@ def test_task_ack_and_cca_exchange_uses_real_agent_inboxes(inputs, tmp_path, mon
                             if row["kind"] == "execution_completed" and row["task_id"] in starts}
                     assert len(starts) == len(ends) == 2
                     assert max(starts.values()) < min(ends.values())
-                    assert any(row["kind"] == "CCA_bypassed" for row in runtime.context.negotiations)
-                    assert not any(row["kind"] in {"CCA", "resource_safety_requested"}
-                                   for row in runtime.context.negotiations)
-                    assert runtime._report_snapshot()[1]["diagnostic_cca_bypass"] is True
+                    assert not any(row["kind"] == "CCA_bypassed" for row in runtime.context.negotiations)
+                    assert any(row["kind"] == "resource_safety_requested" for row in runtime.context.negotiations)
+                    assert runtime._report_snapshot()[1]["diagnostic_cca_bypass"] is False
                 else:
                     assert checks and all(check["request_id"] for check in checks)
                     approved = {node["id"] for check in checks for node in check["plan"]["nodes"]}
@@ -1854,6 +1849,13 @@ def test_intake_timeout_retries_without_resource_revision_change(inputs, monkeyp
                 return await match_intake(runtime, behaviour, parts)
 
             async def send(_behaviour, packet):
+                if packet.metadata['type'] == 'plan_safety_check':
+                    body = json.loads(packet.body)
+                    loop._plan_decision = {
+                        'ok': True, 'request_id': body['request_id'],
+                        'decisions': {task['task_id']: {'status': 'allowed'}
+                                      for task in body['local_composition']['candidates']}}
+                    return
                 assert packet.metadata['type'] == 'task'
                 sent.append(json.loads(packet.body))
                 runtime.stopped = True
@@ -2051,7 +2053,9 @@ def test_pa_commits_running_ack_while_another_CCA_approval_is_pending(inputs, mo
                 while active['task_id'] not in context.acknowledgements:
                     assert time.monotonic() < deadline, 'PA deferred an unrelated acknowledgement while waiting for CCA'
                     await asyncio.sleep(.01)
-                packet = message(runtime.product_jid, 'plan_safety_result', {'ok': True, 'request_id': request_id})
+                packet = message(runtime.product_jid, 'plan_safety_result', {
+                    'ok': True, 'request_id': request_id,
+                    'decisions': {task_id: {'status': 'allowed'} for task_id in context.pending_tasks}})
                 packet.sender = driver.agent.cca_jid
                 await queue.put(packet)
             async def send(_behaviour, packet):
@@ -2394,10 +2398,11 @@ def test_CCA_bypass_preserves_Stop_revisions_and_completion_evidence(inputs, mon
             packets = []
 
             async def capture(_behaviour, packet, **_kwargs):
-                assert packet.metadata["type"] == "ack"
-                packets.append(json.loads(packet.body))
+                if packet.metadata["type"] == "ack":
+                    packets.append(json.loads(packet.body))
 
             monkeypatch.setattr(execution, "send_agent_message", capture)
+            resource._wait_for_safety_decision = AsyncMock(return_value="allow")
             if blocker == "Stop":
                 runtime.stop()
             elif blocker == "stale":
@@ -2700,3 +2705,444 @@ def test_resource_diagram_preserves_hidden_runtime_guards(inputs, condition, rea
                            context.product_name, context.requirements)
     assert before == unchanged
     assert context.part_tracker == products
+
+
+def test_conveyor_breakdown_latches_after_resource_acknowledgement_before_next_dispatch(inputs, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime
+    from cais_spade_llm.recovery_framework.conveyor_fault import CHECKPOINT, ConveyorFault
+
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
+                        Mock(return_value={"status": "completed", "visible": True}))
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            robot = context.resources["ur5e-1"]
+            robot.valuation.update(resource_state="at_pick", held_part=None,
+                                   **{"task_ctx.origin_resource_location": "M1",
+                                      "task_ctx.part_name": SQUARE})
+            context.resources["Storage"].valuation[f"inventory.{SQUARE}"] = False
+            context.resources["M1"].valuation.update(resource_state="completed", part_name=SQUARE)
+            context.part_tracker[SQUARE].update(location="M1", state="ready")
+            robot.bind_executor("pick_grasp", AsyncMock(), lambda *args: True,
+                                validate_start=AsyncMock(return_value=True))
+            event = next(event for event in robot.model["events"]
+                         if event["event_name"] == "pick_grasp"
+                         and event["parameter_bindings"]["origin_resource_location"]["equals"] == "M1")
+            task = {"resource_id": "ur5e-1", "event_id": event["event_id"],
+                    "event_name": "pick_grasp", "parameters": {
+                        "resource_id": "ur5e-1", "origin_resource_location": "M1",
+                        "part_name": SQUARE, "handoff_acknowledged": True,
+                        "source_clear": True, "robot_clear": True}}
+            active = context.prepare(task)
+            acknowledgement = {**active, "status": "completed"}
+            robot.validated_completions[active["task_id"]] = acknowledgement
+            robot.completion_observations[active["task_id"]] = {
+                "controller_result": {"status": "completed", "gripper_state": "closed"}}
+            runtime.conveyor_fault = ConveyorFault(runtime, {"execution_mode": "simulation",
+                "failure_scenario": {"scenario": "Conveyor breakdown", "resource_id": "Conveyor",
+                                     "checkpoint": CHECKPOINT, "mode": "once"}})
+            loop = environment_runtime.EnvironmentProductLoop()
+            driver.agent.add_behaviour(loop)
+            packet = message(runtime.product_jid, "ack", {"task_id": active["task_id"],
+                "status": "completed", "acknowledgement": acknowledgement})
+            packet.sender = runtime.jids["ur5e-1"]
+            loop._deferred_acks = [packet]
+            runtime.retained_paths = {}
+            assert not await loop._collect_acknowledgement(runtime)
+            assert active["task_id"] in context.acknowledgements
+            assert context.snapshot()["ur5e-1"]["held_part"] == SQUARE
+            assert context.part_tracker[SQUARE]["location"] == "ur5e-1"
+            assert runtime.conveyor_fault.status == "triggered"
+            assert runtime.stopped and not context.pending_tasks
+            assert context.unavailable_resources == {"Conveyor"}
+            assert runtime._report_snapshot()[1]["conveyor_fault"]["status"] == "triggered"
+    asyncio.run(scenario())
+
+def _composition_assembly_context(inputs):
+    """Place two acknowledged parts in their assembly grippers."""
+    inputs = deepcopy(inputs)
+    inputs["product_order"]["parts"] = [SQUARE, "gear_small"]
+    context = EnvironmentProductContext(**inputs, permitted_resources=["ur5e-3", "ur5e-4"])
+    for part, rid, origin in (
+        (SQUARE, "ur5e-3", BUFFER), ("gear_small", "ur5e-4", "3D Printing Station")
+    ):
+        for actor in context.resources.values():
+            for field in (f"inventory.{part}", f"output.{part}"):
+                if field in actor.valuation:
+                    actor.valuation[field] = False
+        actor = context.resources[rid]
+        actor.valuation.update(resource_state="picked", held_part=part,
+                               resource_location=origin, part_state="in_gripper", part_location=rid)
+        actor.valuation.update({"task_ctx.part_name": part, "task_ctx.origin_resource_location": origin})
+        context.part_tracker[part].update(
+            state="in_gripper", location=rid,
+            processCompleted=([{"process": "trim", "result": "square"}]
+                              if part == SQUARE else [{"process": "print_part"}]))
+        for event_name in actor.model["local_event_alphabet"]:
+            actor.bind_executor(event_name, lambda task: None, lambda task, obs: True,
+                                validate_start=lambda task, state, geometry: True)
+    return context
+
+
+def _composition_monitors(*, ordering=True, mutex=True):
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    dots, rules = {}, []
+    if ordering:
+        dots["experimental_order"] = """
+        digraph DFA { node [shape = doublecircle]; 0; 1; init -> 0;
+          0 -> 2 [label="ap2"]; 0 -> 1 [label="ap1 & !ap2"];
+          0 -> 0 [label="!ap1 & !ap2"]; 1 -> 1 [label="true"]; 2 -> 2 [label="true"]; }
+        """
+        rules.append({"id": "experimental_order", "aps": [
+            {"label": "ap1", "full": "ap_event/assembly/gear_small/ur5e-4/place_insert/any"},
+            {"label": "ap2", "full": "ap_event/assembly/KET4_Square_4mm/ur5e-3/place_insert/any"},
+        ]})
+    if mutex:
+        dots["workspace_mutex"] = """
+        digraph DFA { node [shape = doublecircle]; 0; init -> 0;
+          0 -> 1 [label="ap3 & ap4"]; 0 -> 0 [label="!ap3 | !ap4"]; 1 -> 1 [label="true"]; }
+        """
+        rules.append({"id": "workspace_mutex", "aps": [
+            {"label": "ap3", "full": "ap_state/assembly/any/ur5e-3/resource_location=assembly_board-v1/any"},
+            {"label": "ap4", "full": "ap_state/assembly/any/ur5e-4/resource_location=assembly_board-v1/any"},
+        ]})
+    return OnlineSafetyMonitor(dots, rules)
+
+
+def _composition_task(context, part, name):
+    rid = "ur5e-3" if part == SQUARE else "ur5e-4"
+    task = next(task for task in candidates(
+        context.models[rid], context.snapshot(), part, context.requirements[part][-1],
+        context.requirements[part]) if task["event_name"] == name)
+    return {**task, "part_name": part}
+
+
+def _composition_runtime(context):
+    return SimpleNamespace(context=context, jids={rid: rid + "@localhost" for rid in context.models},
+                           stopped=False, admission=None,
+                           operation_goals={part: context.requirements[part][-1]
+                                            for part in context.selected_parts})
+
+
+@pytest.mark.parametrize("part,expected", [(SQUARE, "held"), ("gear_small", "allowed")])
+def test_real_projector_joint_mutex_precedence_lookahead(inputs, part, expected):
+    from cais_spade_llm.agents.central_controller.local_composition import analyze
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    context, checker = _composition_assembly_context(inputs), _composition_monitors()
+    runtime = _composition_runtime(context)
+    task = _composition_task(context, part, "place_approach")
+    results = []
+    for full in (False, True):
+        plant = EnvironmentPlant(context.calculation_snapshot(), checker, runtime.jids,
+                                 runtime.operation_goals)
+        candidate = plant.action(task)
+        plant.proposed = candidate
+        results.append(analyze(plant, checker, dict(checker.current_states), candidate, full=full))
+    assert results[0].status == results[1].status == expected
+    assert results[0].scope.rules == {"experimental_order", "workspace_mutex"}
+    assert results[0].scope.products == {SQUARE, "gear_small"}
+    assert checker.current_states == {"experimental_order": "0", "workspace_mutex": "0"}
+    assert context.resources["ur5e-3"].valuation["held_part"] == SQUARE
+
+
+def test_composition_atomic_grants_and_stale_snapshot(inputs, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_admission as admission_module
+
+    async def scenario():
+        context = _composition_assembly_context(inputs)
+        checker = _composition_monitors(ordering=False)
+        admission = admission_module.EnvironmentAdmission(_composition_runtime(context), checker)
+        tasks = [context.prepare(_composition_task(context, part, "place_approach"), simulated=True)
+                 for part in (SQUARE, "gear_small")]
+        for task in tasks:
+            assert (await admission.check(task, commit=False))["status"] == "allowed"
+        results = await asyncio.gather(*(admission.check(task, commit=True) for task in tasks))
+        assert sum(result["status"] == "allowed" for result in results) == 1
+        assert len(admission.grants) == 1
+        allowed = next(task for task in tasks if task["task_id"] in admission.grants)
+        epoch = admission.epoch
+        assert (await admission.check(allowed, commit=True))["reason"] == "already_admitted"
+        assert admission.epoch == epoch
+
+        other_context = _composition_assembly_context(inputs)
+        other = admission_module.EnvironmentAdmission(_composition_runtime(other_context),
+                                                     _composition_monitors())
+        pending = other_context.prepare(_composition_task(other_context, "gear_small", "place_approach"),
+                                        simulated=True)
+        real_analyze = admission_module.analyze
+
+        def changed(*args, **kwargs):
+            result = real_analyze(*args, **kwargs)
+            with other_context.admission_lock:
+                other_context.revision += 1
+            return result
+
+        monkeypatch.setattr(admission_module, "analyze", changed)
+        result = await other.check(pending, commit=True)
+        assert result["status"] == "inconclusive" and result["reason"] == "stale_snapshot"
+        assert not other.grants
+
+    asyncio.run(scenario())
+
+
+def test_composition_ack_history_cache_and_batch_rollover(inputs):
+    from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
+
+    async def scenario():
+        context, checker = _composition_assembly_context(inputs), _composition_monitors()
+        admission = EnvironmentAdmission(_composition_runtime(context), checker)
+        reused = []
+        for part in ("gear_small", SQUARE):
+            for name in ("place_approach", "place_insert", "move_home"):
+                task = context.prepare(_composition_task(context, part, name), simulated=True)
+                result = await admission.check(task, commit=True)
+                assert result["status"] == "allowed", result
+                reused.append(result["cache_hit"])
+                before = dict(checker.current_states)
+                admission.synchronize()  # No PA acknowledgement: no live history advance.
+                assert checker.current_states == before
+                assert task["task_id"] in admission.grants
+                ack = {**task, "status": "completed"}
+                assert context.acknowledge(ack)
+                admission.synchronize()
+                history = dict(checker.current_states)
+                assert not context.acknowledge(ack)
+                admission.synchronize()
+                assert checker.current_states == history
+                assert task["task_id"] not in admission.grants
+                if name == "place_approach":
+                    assert context.resources[task["resource_id"]].valuation["resource_location"] == "assembly_board-v1"
+                if name == "place_insert":
+                    assert checker.current_states["experimental_order"] == "1"
+        assert any(reused)
+        assert not admission.grants
+        assert not checker.running_aps
+        assert context.part_tracker[SQUARE]["state"] == "assembled"
+        assert context.part_tracker["gear_small"]["state"] == "assembled"
+        assert all(context.resources[rid].valuation["resource_location"] == "home"
+                   for rid in ("ur5e-3", "ur5e-4"))
+        assert not admission.components
+        assert checker.current_states["experimental_order"] == "1"
+
+    asyncio.run(scenario())
+
+
+def test_composition_shared_running_APs_and_ordered_acknowledgements(inputs):
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+    from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
+
+    async def scenario():
+        context = _composition_assembly_context(inputs)
+        checker = OnlineSafetyMonitor({"history": """
+            digraph DFA { node [shape = doublecircle]; 2; init -> 0;
+              0 -> 1 [label="true"]; 1 -> 2 [label="true"]; 2 -> 2 [label="true"]; }
+        """}, [{"id": "history", "aps": [
+            {"label": "ap1", "full": "ap_event/assembly/any/robot/place_approach/any"}]}])
+        admission = EnvironmentAdmission(_composition_runtime(context), checker)
+        tasks = []
+        for part in (SQUARE, "gear_small"):
+            task = context.prepare(_composition_task(context, part, "place_approach"), simulated=True)
+            assert (await admission.check(task, commit=True))["status"] == "allowed"
+            tasks.append(task)
+        assert checker.current_states == {"history": "0"}
+        assert checker.running_aps == {"ap1"}
+        context.acknowledge({**tasks[0], "status": "completed"})
+        admission.synchronize()
+        assert checker.current_states == {"history": "1"}
+        assert checker.running_aps == {"ap1"}
+        context.acknowledge({**tasks[1], "status": "completed"})
+        admission.synchronize()
+        assert checker.current_states == {"history": "2"}
+        assert not checker.running_aps
+
+    asyncio.run(scenario())
+
+@pytest.mark.parametrize("full_buffer", [False, True])
+def test_local_selector_follows_capacity_chain_before_composition(inputs, full_buffer):
+    from cais_spade_llm.agents.central_controller.local_composition import Budget
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    inputs["product_order"]["parts"] = "all"
+    context = EnvironmentProductContext(**inputs)
+    for actor in context.resources.values():
+        actor.executors = {name: lambda task: None for name in actor.model["local_event_alphabet"]}
+    context.resources["Storage"].valuation[f"inventory.{SQUARE}"] = False
+    context.resources["M1"].valuation.update(part_name=SQUARE, resource_state="loaded")
+    context.part_tracker[SQUARE].update(location="M1", state="loaded")
+    if full_buffer:
+        residents = [name for name in context.part_tracker
+                     if name not in {SQUARE, context.product_name}
+                     and name in context.inputs["scene"]["Storage"]["slots"]][:4]
+        assert len(residents) == 4
+        for zone, name in enumerate(residents, 1):
+            context.resources["Storage"].valuation[f"inventory.{name}"] = False
+            context.resources[BUFFER].valuation[f"zone_{zone}_part"] = name
+            context.part_tracker[name].update(location=BUFFER, state="ready")
+    checker = OnlineSafetyMonitor({}, [])
+    goal = context.requirements[SQUARE][0]
+    task = next(task for task in candidates(context.models["M1"], context.snapshot(), SQUARE,
+                                           goal, context.requirements[SQUARE])
+                if task["event_name"] == "machine_part")
+    plant = EnvironmentPlant(context.calculation_snapshot(), checker,
+                             {rid: rid + "@localhost" for rid in context.models}, {SQUARE: goal})
+    candidate = plant.action(task)
+    plant.proposed = candidate
+    scope = plant.select(candidate, (), checker, Budget(), full=False)
+    assert {"M1", "Conveyor", BUFFER} <= scope.resources
+    assert ("ur5e-3" in scope.resources) is full_buffer
+    assert any(task["event_name"] == "place_insert" for task in scope.task_bindings.values()) is full_buffer
+    assert scope.reasons and scope.task_bindings
+    assert not context.pending_tasks and not context.reservations
+
+
+def test_local_holds_release_only_unstarted_candidate_reservations(inputs, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime
+
+    async def scenario():
+        context = _composition_assembly_context(inputs)
+        runtime = _composition_runtime(context)
+        runtime.program_revision = ""
+        runtime.scene_file = ""
+        runtime.held_tasks = {}
+        runtime.held_at_revision = {}
+        runtime.admitted_parts = set()
+        runtime.diagnostic_cca_bypass = False
+        runtime.queue_save = Mock()
+        tasks = [context.prepare(_composition_task(context, part, "place_approach"), simulated=True)
+                 for part in (SQUARE, "gear_small")]
+        loop = environment_runtime.EnvironmentProductLoop()
+        loop._report_kickoff = Mock()
+        sent = []
+
+        async def send(_behaviour, packet):
+            sent.append(json.loads(packet.body))
+
+        monkeypatch.setattr(environment_runtime, "send_agent_message", send)
+        decision = {"ok": True, "decisions": {
+            tasks[0]["task_id"]: {"status": "inconclusive", "reason": "time_limit"},
+            tasks[1]["task_id"]: {"status": "allowed"},
+        }}
+        approval = {"request_id": "batch", "tasks": tasks, "new_admissions": {tasks[1]["task_id"]},
+                    "requested_at_unix": time.time(), "requested_monotonic": time.monotonic()}
+        assert await loop._dispatch_approved(runtime, approval, decision, {})
+        assert not runtime.stopped
+        assert sent == [tasks[1]]
+        assert context.pending_for(tasks[0]["task_id"]) is None
+        assert context.pending_for(tasks[1]["task_id"]) == tasks[1]
+        assert all(owner != tasks[0]["task_id"] for owner in context.reservations.values())
+
+    asyncio.run(scenario())
+
+
+def test_CCA_ignores_early_RA_completion_until_PA_commit(inputs):
+    from cais_spade_llm.agents.central_controller.central_controller_agent import CentralControllerAgent
+
+    async def scenario():
+        context, checker = _composition_assembly_context(inputs), _composition_monitors()
+        runtime = _composition_runtime(context)
+        runtime.product_jid = "product@localhost"
+        resource = SimpleNamespace(environment_runtime=runtime)
+        cca = CentralControllerAgent("cca@localhost", "none", name="cca", resource_agents=[resource])
+        cca.safety_monitor = checker
+        behaviour = cca._Monitor()
+        cca.add_behaviour(behaviour)
+        behaviour._send_decision = AsyncMock()
+        task = context.prepare(_composition_task(context, "gear_small", "place_approach"), simulated=True)
+        payload = {"task_id": task["task_id"], "resource_jid": runtime.jids[task["resource_id"]],
+                   "function_name": task["event_name"], "params": task["parameters"],
+                   "run_id": context.run_id, "status": "safety_check"}
+        packet = message("cca@localhost", "resource_event", payload)
+        packet.sender = payload["resource_jid"]
+        behaviour.receive = AsyncMock(return_value=packet)
+        await behaviour.run()
+        behaviour._send_decision.assert_awaited_with(payload["resource_jid"], task["task_id"], "allow")
+        assert task["task_id"] in runtime.admission.grants
+        for _ in range(2):
+            packet.body = json.dumps({**payload, "status": "completed"})
+            await behaviour.run()
+            assert task["task_id"] in runtime.admission.grants
+            assert runtime.admission.ack_cursor == 0
+        context.acknowledge({**task, "status": "completed"})
+        packet.body = json.dumps({**payload, "status": "acknowledged"})
+        packet.sender = runtime.product_jid
+        await behaviour.run()
+        assert runtime.admission.ack_cursor == 1
+        assert task["task_id"] not in runtime.admission.grants
+        await behaviour.run()
+        assert runtime.admission.ack_cursor == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("slipping", ["ur5e-3", "ur5e-4"])
+def test_slippage_checkpoint_hold_is_rechecked_after_CCA_approval(inputs, monkeypatch, slipping):
+    from cais_spade_llm.recovery_framework import environment_runtime
+    from cais_spade_llm.recovery_framework.conveyor_fault import ConveyorFault
+    from cais_spade_llm.ui.recovery_setup import slippage_example
+
+    inputs["product_order"]["parts"] = [SQUARE, "gear_large"]
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            part = SQUARE if slipping == "ur5e-3" else "gear_large"
+            config = slippage_example(context.models, slipping, part)
+            runtime.conveyor_fault = ConveyorFault(runtime, {
+                "execution_mode": "simulation", "failure_scenario": config,
+            })
+            context.resources[slipping].valuation.update(resource_state="picked", held_part=part)
+            context.part_tracker[part].update(state="in_gripper", location=slipping)
+            context.transitions.append({
+                "acknowledgement": {"run_id": context.run_id, "resource_id": slipping,
+                                    "task_id": "pickup", "event_name": "pick_grasp",
+                                    "evidence": "resource", "parameters": {"part_name": part}},
+                "observations": {"controller_result": {"status": "completed"}},
+            })
+            task = {"task_id": "awaiting_approval", "resource_id": slipping,
+                    "event_name": "place_approach", "part_name": part}
+            context.pending_tasks[task["task_id"]] = task
+            approval = {"request_id": "approval", "tasks": [task], "new_admissions": set(),
+                        "requested_at_unix": time.time(), "requested_monotonic": time.monotonic()}
+            decision = {"decisions": {task["task_id"]: {"status": "allowed"}}}
+            sent = AsyncMock()
+            monkeypatch.setattr(environment_runtime, "send_agent_message", sent)
+            loop = environment_runtime.EnvironmentProductLoop()
+            driver.agent.add_behaviour(loop)
+            attempted = {"previous_offer": "value"}
+            assert await loop._dispatch_approved(runtime, approval, decision, attempted)
+            sent.assert_not_awaited()
+            assert not context.pending_tasks and not attempted
+            assert context.resources[slipping].valuation["held_part"] == part
+            peer = config["additional_condition"]["resource_id"]
+            assert not runtime.conveyor_fault.holds_task({"resource_id": peer, "event_name": "pick_grasp"})
+            assert runtime.conveyor_fault.checkpoint() is None
+            assert not runtime.stopped
+            assert any(row["kind"] == "CCA" for row in context.negotiations)
+
+    asyncio.run(scenario())
+
+
+def test_environment_teardown_waits_for_fault_effects_without_self_awaiting(inputs):
+    async def scenario():
+        async with network(inputs) as (runtime, _driver):
+            entered, finish = asyncio.Event(), asyncio.Event()
+
+            async def effects():
+                await runtime.cancel_owned()
+                entered.set()
+                await finish.wait()
+
+            runtime.conveyor_fault._injection_task = asyncio.create_task(effects())
+            await asyncio.wait_for(entered.wait(), 1.)
+            teardown = asyncio.create_task(runtime.cancel_owned())
+            await asyncio.sleep(0.)
+            assert not teardown.done()
+            finish.set()
+            await asyncio.wait_for(teardown, 1.)
+            assert runtime.conveyor_fault._injection_task.done()
+
+    asyncio.run(scenario())

@@ -38,7 +38,7 @@ _IDENTITY_POSE = {
 @pytest.fixture
 def historical_product_geometry() -> dict[str, Any]:
     """Load the physical demo's geometry independently of the active NIST catalog."""
-    path = _ROOT / "test/fixtures/case3_recovery/assembly_board-v1.json"
+    path = _ROOT / "test/fixtures/product_geometry/assembly_board-v1-historical.json"
     return json.loads(path.read_text(encoding="utf-8"))["real"]
 
 

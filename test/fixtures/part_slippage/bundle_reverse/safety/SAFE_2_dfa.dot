@@ -1,0 +1,14 @@
+digraph MONA_DFA {
+ rankdir = LR;
+ center = true;
+ size = "7.5,10.5";
+ edge [fontname = Courier];
+ node [height = .5, width = .5];
+ node [shape = doublecircle]; 1;
+ node [shape = circle]; 1;
+ init [shape = plaintext, label = ""];
+ init -> 1;
+ 1 -> 1 [label="(~ap001 | ~ap002) & (~ap001 | ~ap007) & (~ap001 | ~ap008) & (~ap002 | ~ap005) & (~ap002 | ~ap006) & (~ap005 | ~ap007) & (~ap005 | ~ap008) & (~ap006 | ~ap007) & (~ap006 | ~ap008)"];
+ 1 -> 2 [label="(ap001 & ap002) | (ap001 & ap007) | (ap001 & ap008) | (ap002 & ap005) | (ap002 & ap006) | (ap005 & ap007) | (ap005 & ap008) | (ap006 & ap007) | (ap006 & ap008)"];
+ 2 -> 2 [label="true"];
+}

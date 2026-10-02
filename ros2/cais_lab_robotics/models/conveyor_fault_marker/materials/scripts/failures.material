@@ -1,0 +1,67 @@
+material CAIS/RobotBreakdown
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   cull_hardware none
+   texture_unit
+   {
+    texture RobotBreakdown.png
+    filtering anisotropic
+   }
+  }
+ }
+}
+
+material CAIS/M1Breakdown
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   cull_hardware none
+   texture_unit
+   {
+    texture M1Breakdown.png
+    filtering anisotropic
+   }
+  }
+ }
+}
+
+material CAIS/M2Breakdown
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   cull_hardware none
+   texture_unit
+   {
+    texture M2Breakdown.png
+    filtering anisotropic
+   }
+  }
+ }
+}
+
+material CAIS/PartSlippage
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   cull_hardware none
+   texture_unit
+   {
+    texture PartSlippage.png
+    filtering anisotropic
+   }
+  }
+ }
+}

@@ -13,13 +13,13 @@ from cais_spade_llm.recovery_framework import scenario_runner as runner
 
 from cais_spade_llm.recovery_framework import diagnostics
 
-CONTEXT = diagnostics.ROOT / "test/fixtures/case3_recovery/runtime_context.json"
-SCENARIO = diagnostics.ROOT / "cais_spade_llm/initialization/failure_scenarios/lg_slippage.json"
+CONTEXT = diagnostics.ROOT / "test/fixtures/part_slippage/runtime_context.json"
+SCENARIO = diagnostics.ROOT / "cais_spade_llm/initialization/failure_scenarios/part_slippage.json"
 TRACE = [
     {
         "outline_id": "RECOVERY_SEQ1",
         "event_name": "recover_to_home",
-        "resource_jid": "xarm6@localhost",
+        "resource_jid": "recovery-resource-3@localhost",
     }
 ]
 
@@ -335,3 +335,31 @@ def test_live_diagnostics_require_saved_cca_history_and_running_evidence():
     agent._saved_safety_context["history_error"] = {"reason": "malformed step"}
     with pytest.raises(ValueError, match="history"):
         agent._saved_monitor_states(monitor)
+
+
+@pytest.mark.parametrize("suffix,slipping,held", [
+    ("", "KET4_Square_4mm", "gear_large"),
+    ("_reverse", "gear_large", "KET4_Square_4mm"),
+])
+def test_current_slippage_diagnostics_preserve_both_interrupted_tasks(suffix, slipping, held, tmp_path):
+    path = CONTEXT.with_name("runtime_context" + suffix + ".json")
+    inputs = diagnostics.inspect_inputs(path, SCENARIO)
+    assert inputs["scenario"] == "part_slippage"
+    context = inputs["runtime_context"]
+    assert context["fixture_kind"] == "synthetic_checkpoint"
+    assert context["task_statuses"]["REQ_1_T3"] == "pending"
+    assert context["task_statuses"]["REQ_2_T3"] == "pending"
+    assert context["part_tracker"][slipping]["state"] == "misplaced"
+    assert context["part_tracker"][held]["state"] == "in_gripper"
+    fixture, product, _, request = asyncio.run(runner._prepare_recovery_dryrun_harness(
+        runtime_context_path=path, debug_root=tmp_path, scripted_responses=[],
+    ))
+    failure = request["failure_context_raw"]
+    assert failure["failed_task_id"] == context["failure_event"]["failed_task_id"]
+    affected = failure["failure_context"]["affected_entities"]
+    assert any(row["entity_type"] == "part" and row["entity_id"] == slipping for row in affected)
+    snapshots = {row["resource_jid"]: row for row in context["resource_snapshots"]}
+    custodian = context["part_tracker"][held]["location"]
+    assert snapshots[custodian]["held_part"] == held
+    assert all(row["resource_id"] in {"ur5e-3", "ur5e-4"} for row in snapshots.values())
+    assert not product.turn_log

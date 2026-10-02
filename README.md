@@ -536,59 +536,39 @@ Global `~/.ros/log` is never changed by UI startup or `make cleanup`. Review the
 dry-run report first, then explicitly run `make cleanup-global-ros` to remove
 only global ROS log entries older than seven days.
 
-## Case 3 Recovery Dry-Run Prerequisites
+## Part slippage diagnostic regression fixtures
 
-The Case 3 recovery debugger and its focused pytest suite are in
-`test/test_case3_recovery_dryrun.py`. Run them from the repository root after
-installing the Poetry environment.
+The saved-context diagnostic tests remain in `test/test_case3_recovery_dryrun.py`.
+Their current inputs live in `test/fixtures/part_slippage/`: two synthetic
+checkpoints cover ur5e-3 dropping KET4_Square_4mm and ur5e-4 dropping gear_large,
+with the other robot retaining a different part. The bundles contain current
+resource bindings, NIST geometry references, interrupted plans, and compiled
+test safety rules. They are diagnostic fixtures, not approved recovery programs
+or recorded Gazebo evidence.
 
-The test depends on the immutable verified bundle at this exact path:
-
-```text
-cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery/
-```
-
-The directory must contain `bundle_manifest.json` and every artifact referenced
-by the manifest, including the tools catalogue, requirements, plan, safety
-logic, and validation artifacts. The tracked runtime context at
-`test/fixtures/case3_recovery/runtime_context.json` intentionally uses the fixed
-`case3_llm_recovery` bundle name. Do not substitute or rename another bundle.
-
-Most generated verified bundles remain machine-local and Git-ignored. The
-`.gitignore` file makes a narrow exception for `case3_llm_recovery` because this
-bundle is a prerequisite for the tracked test. After generating and verifying
-the bundle on the school laptop, commit the entire directory:
+Run the mocked regression suite without live model calls:
 
 ```bash
-git add \
-  cais_spade_llm/user_verified_plan/bundles/case3_llm_recovery \
-  .gitignore README.md
-git status --short
+OPENAI_API_KEY=ci-placeholder poetry run pytest -q \
+  test/test_case3_recovery_dryrun.py test/test_recovery_diagnostics.py
 ```
 
-Do not commit `.env`, API keys, credentials, logs, or other generated bundles.
+Rebuild the checkpoint inputs and CCA automata from the configured plant with
+`PYTHONPATH=. poetry run python test/fixtures/part_slippage/build_fixtures.py`
+(MONA is required). The separately authored response files exercise grounding
+and validation rather than supplying expected answers in the runtime context.
 
-The module creates its shared OpenAI client during import, so
-`OPENAI_API_KEY` must be non-empty even while pytest uses mocked LLM response
-fixtures. CI can use a non-secret placeholder for this mocked suite:
+For a diagnostic using live LLM calls, provide an explicit saved context and a
+real API key in the ignored environment:
 
 ```bash
-OPENAI_API_KEY=ci-placeholder poetry run pytest -q test/test_case3_recovery_dryrun.py
+poetry run python -m cais_spade_llm.recovery_framework.scenario_runner \
+  --runtime-context test/fixtures/part_slippage/runtime_context.json --mode outline
 ```
 
-Direct script execution is different: it performs live LLM requests and needs
-a real key in the ignored `.env` file or process environment:
-
-```bash
-poetry run python test/test_case3_recovery_dryrun.py --mode outline
-poetry run python test/test_case3_recovery_dryrun.py --mode primitive
-poetry run python test/test_case3_recovery_dryrun.py --mode safety
-poetry run python test/test_case3_recovery_dryrun.py --mode full
-```
-
-If `bundle_manifest.json` is missing after a clone, copy the complete
-`case3_llm_recovery` directory from the machine that generated it or retrieve it
-as a CI artifact. Creating only an empty manifest is not sufficient.
+See [simulation failure injection](docs/conveyor_breakdown.md) for the four
+runtime scenarios, Gazebo indicators, and reset behavior. Historical experiment
+records and unrelated legacy product geometry remain available.
 
 ## Troubleshooting
 

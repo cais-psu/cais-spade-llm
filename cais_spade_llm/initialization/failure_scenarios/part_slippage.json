@@ -1,0 +1,23 @@
+{
+  "scenario_id": "part_slippage",
+  "scenario": "Part slippage",
+  "trigger": {
+    "resource_type": "robot",
+    "function_names": [
+      "place_insert"
+    ],
+    "checkpoints": [
+      "after_both_pickups_before_place"
+    ],
+    "execution_modes": [
+      "simulation",
+      "dry_run"
+    ]
+  },
+  "observation_template": {
+    "observation_required": true
+  },
+  "effects": [],
+  "injection_owner": "recovery_framework",
+  "description": "The owning environment runtime observes both pickups and injects loss of custody before placement. This descriptor supports saved-context diagnostics."
+}

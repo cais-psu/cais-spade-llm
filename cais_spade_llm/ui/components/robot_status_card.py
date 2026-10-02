@@ -86,7 +86,10 @@ def render_robot_status_card(
     current = state.get("resource_state", state.get("current_state", _UNAVAILABLE))
     has_control_state = model is None or "resource_state" in variables
     phases = variables.get("resource_state", {}).get("domain", [])
-    with ui.card().classes("w-full"):
+    failed = state.get("fault_status") == "breakdown"
+    with ui.card().classes("w-full" + (" border-2 border-red-600" if failed else "")):
+        if failed:
+            ui.label("Conveyor breakdown — execution unavailable").classes("text-red-700 font-semibold")
         with ui.row().classes("items-center gap-4"):
             ui.label(name).classes("text-lg font-bold")
             if has_control_state:

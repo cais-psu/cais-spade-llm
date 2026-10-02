@@ -51,7 +51,7 @@ def project(tmp_path):
 def slippage(setup, root, resource="ur5e-3", part="KET4_Square_4mm"):
     models = settings.validate_setup({**setup, "failure_scenario": None}, root=root)["models"]
     failure = settings.slippage_example(models, resource, part)
-    failure["drop_pose"] = {"x": 0.0, "y": -0.2, "z": 1.04}
+    failure["drop_pose"] = {"x": 0.0, "y": -0.2 if resource == "ur5e-3" else 0.2, "z": 1.04}
     return failure
 
 
@@ -145,9 +145,7 @@ def test_all_exact_nist_parts_can_be_saved_with_their_assembly_resource(project,
     path = project / settings.SETUP_RELATIVE
     settings.save_setup(setup, path, root=project)
     assert settings.load_setup(path, root=project)["failure_scenario"]["part_name"] == part
-    assert "Part slippage: execution not integrated" in settings.startup_block_reason(
-        setup, root=project
-    )
+    assert settings.startup_block_reason(setup, root=project) == ""
 
 
 def test_registered_part_binding_is_not_a_resource_eligibility_list(project):
@@ -387,7 +385,7 @@ def test_complete_setup_form_only_saves_explicitly_and_preserves_nist_bindings(
             await asyncio.sleep(0)
             assert _element(client, ui.select, "NIST part").value == "KET4_Square_4mm"
             assert settings.load_setup(path, root=project) == saved
-            _element(client, ui.select, "Failure resource").value = "ur5e-2"
+            _element(client, ui.select, "Failure resource").value = "ur5e-4"
             await asyncio.sleep(0)
             parts = _element(client, ui.select, "NIST part")
             assert "LG" not in parts.options
@@ -395,7 +393,9 @@ def test_complete_setup_form_only_saves_explicitly_and_preserves_nist_bindings(
             parts.value = "RGOCG4-50_Round_4mm"
             await asyncio.sleep(0)
             task = _element(client, ui.select, "Task")
-            task.value = next(iter(task.options))
+            task.value = next(key for key, label in task.options.items() if label.startswith("place_insert"))
+            _element(client, ui.select, "Other held part").value = "gear_large"
+            _element(client, ui.number, "drop_pose.y").value = 0.2
             bridge.system_running = True
             buttons["Save setup"]()
             assert settings.load_setup(path, root=project) == saved
@@ -403,7 +403,7 @@ def test_complete_setup_form_only_saves_explicitly_and_preserves_nist_bindings(
             buttons["Save setup"]()
             assert (
                 settings.load_setup(path, root=project)["failure_scenario"]["resource_id"]
-                == "ur5e-2"
+                == "ur5e-4"
             )
             after = snapshot(project)
             after.pop(settings.SETUP_RELATIVE)
@@ -418,6 +418,7 @@ def test_complete_setup_form_only_saves_explicitly_and_preserves_nist_bindings(
 
 def _run_bridge():
     bridge = MagicMock(spec=SystemBridge)
+    bridge.get_conveyor_fault.return_value = {"status": "disabled", "ready": False}
     for name, value in {
         "system_running": False,
         "_starting": False,
@@ -456,6 +457,7 @@ def test_run_reads_saved_setup_and_blocks_unsupported_settings_before_dispatch(
     setup = settings.default_setup(project)
     if failure:
         setup["failure_scenario"] = slippage(setup, project)
+        setup["failure_scenario"]["checkpoint"] = "before_execute"
     else:
         setup["permitted_resources"].remove("KMR")
     path = project / settings.SETUP_RELATIVE
@@ -537,6 +539,7 @@ def test_start_rechecks_saved_settings_and_stop_keeps_existing_dispatch(project,
             recovery_run.render(bridge)
             bridge.start_system.assert_not_called()
             setup["failure_scenario"] = slippage(setup, project)
+            setup["failure_scenario"]["checkpoint"] = "before_execute"
             settings.save_setup(setup, path, root=project)
             await buttons["Start System"]()
             bridge.start_system.assert_not_called()

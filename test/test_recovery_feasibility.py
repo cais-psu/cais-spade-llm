@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -222,9 +223,10 @@ def test_ra_catalog_exposes_printer_support_and_constraints() -> None:
     assert model["primitive_catalog"] == catalog
 
 
-def test_pa_commits_support_and_composition_receives_it() -> None:
+def test_pa_commits_support_and_composition_receives_it(tmp_path) -> None:
     from test_case3_recovery_dryrun import (
         _fixture_outline_responses,
+        _load_case3_runtime_context,
         _prepare_recovery_dryrun_harness,
         multi_turn_outline_generation,
     )
@@ -234,14 +236,24 @@ def test_pa_commits_support_and_composition_receives_it() -> None:
         _primitive_batch_session_state,
     )
 
+    # Exercise primitive composition after explicit destination occupancy.
+    context = _load_case3_runtime_context()
+    for snapshot in context["resource_snapshots"]:
+        if snapshot["resource_id"] == "ur5e-3":
+            snapshot.update(current_location="assembly_board-v1",
+                            occupancy={"location": "assembly_board-v1"})
+        else:
+            snapshot.pop("current_location")
+    path = tmp_path / "occupied_context.json"
+    path.write_text(json.dumps(context))
     _, _, planner, request = asyncio.run(
-        _prepare_recovery_dryrun_harness(scripted_responses=_fixture_outline_responses())
+        _prepare_recovery_dryrun_harness(runtime_context_path=path, scripted_responses=_fixture_outline_responses())
     )
     session = deepcopy(request["multi_turn_session_seed"])
     candidate = {
         "outline_id": "recovery_home",
         "event_name": "evt_q7",
-        "resource_jid": "xarm6@localhost",
+        "resource_jid": "recovery-resource-3@localhost",
         "expected_end_state": {"resource_state": "idle", "resource_location": "home"},
         "rationale": "Clear the occupied destination using supported resource conditions.",
     }

@@ -84,3 +84,38 @@ integration, dual-robot execution, and a NiceGUI operator UI.
 - Run any focused tests you create or restore for the touched feature.
 - If live ROS2 or hardware validation is unavailable, say so and report the
   static, import, compile, CLI, or focused tests that did run.
+
+## Home and school development
+
+- The school laptop is the main development machine. It holds the
+  working code and runs ROS/Gazebo. Keep it plugged in, online, and awake.
+- The home Windows laptop should remotely access the school laptop
+  to edit the same files and run experiments.
+- For recovery-framework work, use the school laptop's Ubuntu-22.04
+  WSL checkout at /home/jongh/projects/cais-spade-llm on
+  recovery-framework-journal.
+- The school laptop's Windows checkout is a separate copy. Verify
+  the machine, Linux path, branch, and git status before editing.
+- VS Code Remote Tunnels is configured on the school Windows host as
+  school-laptop, authenticated with GitHub, and installed as a background
+  service. Use the same GitHub account on the home laptop.
+- On the home laptop, install Remote - Tunnels in VS Code, run
+  Remote Tunnels: Connect to Tunnel, and select school-laptop. Connect
+  onward to the school laptop's Ubuntu-22.04 WSL environment and open
+  /home/jongh/projects/cais-spade-llm.
+- Chrome Remote Desktop Remote Access is enabled on the school Windows
+  host as school-laptop. The user confirmed it shows Online, and the
+  chromoting service is running with Automatic startup.
+  Connect at https://remotedesktop.google.com/access using the same Google
+  account and the private PIN chosen during setup. Do not store the PIN
+  in this repository.
+- Plugged-in sleep and hibernation are disabled; closing the lid while
+  plugged in does nothing. Battery power settings are unchanged.
+- tmux is installed in WSL. Use a tmux session for long experiments
+  that should continue when the remote client disconnects.
+- Home-to-school connectivity, remote WSL checkout access, Gazebo
+  visibility, and reconnection after reboot still need verification.
+- Git is for version history and backups; switching locations should
+  not require a commit or push.
+- Giving Codex access to the school laptop is a separate task.
+  Do not assume the user's remote connection grants Codex access.

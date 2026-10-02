@@ -230,6 +230,9 @@ def test_compact_dispatch_rejects_scene_revision_changed_after_start(scene, tmp_
         "product_order": read_json(delivery.ORDER_PATH),
         "geometry": read_json(ROOT / product["product_geometry_file"])["gazebo"],
     }
+    from threading import Event
+
+    monkeypatch.setattr(delivery, "_cancelled", Event())
     monkeypatch.setattr(delivery, "RUN_DIRECTORY", tmp_path / "runs")
     actor = SimpleNamespace(agent_name="KMR", jid="kmr@localhost", configure_nominal=Mock())
     runtime = delivery.DeliveryRuntime(
@@ -377,3 +380,78 @@ def test_kmr_recovery_uses_its_own_probe_and_measured_hold_after_an_unrelated_ev
     assert nominal["KMR"]["held_part"] is None
     assert nominal["KMR"]["resource_state"] == "idle"
     assert agent._primitive_state["resource_location"] is None
+
+
+@pytest.mark.parametrize("ticks,armed,observation_fails", [
+    ([0., 0., 1., 1., 2.5], True, False),
+    ([0., 2.49, 2.51], True, False),
+    ([0., 0.25, 5.], False, False),
+    ([0., 0., 0.], True, False),
+    ([0., 1., 2.5], True, True),
+])
+def test_machine_fault_uses_simulation_clock_and_preserves_WIP(scene, tmp_path, ticks, armed, observation_fails):
+    from cais_spade_llm.recovery_framework.workflow_gazebo import WorkflowPrimitiveRunner
+
+    path = tmp_path / "fault.json"
+    path.write_text(json.dumps({"run_id": "run", "resource_id": "M1",
+                                "status": "armed" if armed else "disarmed"}))
+    machine = next(row for row in scene["machines"] if row["resource_id"] == "M1")
+    position = SimpleNamespace(**dict(zip(("x", "y", "z"), machine["workholding_pose"][:3])))
+    state = SimpleNamespace(pose=SimpleNamespace(position=position))
+    visited = []
+    def wait(duration, observe):
+        for elapsed in ticks:
+            visited.append(elapsed)
+            observe(elapsed)
+        if ticks[-1] < duration:
+            raise InterruptedError("Operator stopped while /clock was paused")
+        return 10., 10. + ticks[-1]
+    def entity(_name):
+        if observation_fails and visited and visited[-1] >= 2.5:
+            raise ValueError("Workholding observation unavailable")
+        return state
+
+    runner = WorkflowPrimitiveRunner(
+        {"scene": scene, "geometry": {"KET4_Square_4mm": {"model_name": "KET4_Square_4mm"}},
+         "task": {"run_id": "run", "task_id": "machining", "resource_id": "M1",
+                  "event_name": "machine_part", "parameters": {
+                      "part_name": "KET4_Square_4mm", "process": "trim", "result": "square"}},
+         "failure_injection": {"run_id": "run", "task_id": "machining", "resource_id": "M1",
+                               "checkpoint": "during_processing_halfway", "control_path": str(path),
+                               "evidence_path": str(tmp_path / "interruption.json")}},
+        entity=entity, set_pose=Mock(),
+        robot_clearance=lambda _names, _states: {machine["handling_robot"]: 1.},
+        current_clock=lambda: 10., wait_simulation=wait,
+    )
+    runner._kmr_clearance = lambda: {"link": 1.}
+    if max(ticks) < 2.5:
+        with pytest.raises(InterruptedError, match="/clock"):
+            runner.execute()
+        assert "failure_injection" not in runner.state
+        assert not runner.observations
+        assert not (tmp_path / "interruption.json").exists()
+    elif observation_fails:
+        with pytest.raises(ValueError, match="Workholding"):
+            runner.execute()
+        evidence = json.loads((tmp_path / "interruption.json").read_text())
+        assert evidence["source"] == "gazebo_processing_checkpoint"
+        assert evidence["observation_status"] == "failed"
+        assert not evidence["process_completed"]
+        assert "observed_pose" not in evidence
+        assert not runner.observations
+    elif armed:
+        with pytest.raises(RuntimeError, match="Machining breakdown"):
+            runner.execute()
+        failure = runner.state["failure_injection"]
+        assert failure["simulation_elapsed_sec"] == ticks[-1]
+        assert failure["processing_fraction"] >= .5
+        assert json.loads((tmp_path / "interruption.json").read_text()) == failure
+        assert failure["observed_pose"]["z"] == machine["workholding_pose"][2]
+        assert not failure["process_completed"]
+        assert runner.observations == {}
+        assert runner.primitive_trace[-1]["status"] == "failed"
+    else:
+        runner.execute()
+        assert "failure_injection" not in runner.state
+        assert runner.observations["processing_time_sec"] == 5.
+    assert visited == ticks

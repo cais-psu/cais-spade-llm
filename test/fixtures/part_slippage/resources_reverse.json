@@ -1,0 +1,354 @@
+{
+  "ur5e-3": {
+    "type": "robot",
+    "jid": "recovery-resource-3@localhost",
+    "functions": "auto",
+    "failure_scenarios": [],
+    "gazebo": {
+      "controller": {
+        "move_group": {
+          "group_name": "ur5e_3_ur_manipulator",
+          "ee_link": "ur5e_3_tool0",
+          "tcp_link": "ur5e_3_rg2_gripper_tcp",
+          "position_tolerance_m": 0.005,
+          "orientation_tolerance_rad": 0.02,
+          "frame_id": "world"
+        },
+        "gripper": {
+          "joint": "ur5e_3_rg2_finger_width",
+          "topic": "/ur5e_3_rg2_gripper_traj_controller/joint_trajectory",
+          "open": 0.11,
+          "close": 0.02,
+          "move_time_sec": 0.35,
+          "settle_sec": 0.05,
+          "feedback_timeout_pad_sec": 1.0,
+          "position_tolerance": 0.01
+        },
+        "services": {
+          "detect_all": "/detect_all",
+          "motion_plan": "/plan_kinematic_path",
+          "cartesian_path": "/compute_cartesian_path",
+          "execute_trajectory": "/execute_trajectory",
+          "attach": "/ATTACHLINK",
+          "detach": "/DETACHLINK",
+          "set_entity_state": "/set_entity_state",
+          "get_entity_state": "/get_entity_state"
+        },
+        "attach": {
+          "robot_model_name": "dual_robot",
+          "attach_link_candidates": [
+            "ur5e_3_rg2_gripper_tcp",
+            "ur5e_3_tool0",
+            "ur5e_3_wrist_3_link"
+          ],
+          "release_detach_link_candidates": [
+            "ur5e_3_rg2_gripper_tcp",
+            "ur5e_3_tool0",
+            "ur5e_3_wrist_3_link"
+          ],
+          "primary_attach_link": "ur5e_3_rg2_gripper_tcp",
+          "detach_timeout_sec": 3.0,
+          "detach_max_link_attempts": 3,
+          "release_detach_timeout_sec": 6.0
+        },
+        "motion": {
+          "approach_height_m": 0.2,
+          "recovery_observed_pick_approach_height_m": 0.06,
+          "recovery_observed_pick_surface_clearance_m": 0.005,
+          "pick_tcp_z_bias_max_m": 0.02,
+          "pick_tcp_z_bias_min_m": 0.003,
+          "min_pick_tcp_z_m": 1.07,
+          "place_surface_gap_m": -0.01,
+          "release_preopen_settle_sec": 0.05,
+          "release_postopen_settle_sec": 0.2,
+          "release_postdetach_settle_sec": 0.15,
+          "release_descend_time_scale": 1.35,
+          "release_detach_retry_count": 1,
+          "release_detach_retry_delay_sec": 0.15,
+          "snap_to_slot_position_tolerance_m": 0.001,
+          "snap_to_slot_observation_samples": 3,
+          "snap_to_slot_observation_interval_sec": 0.1,
+          "simulation_insert_start_position_tolerance_m": 0.006,
+          "release_retry_lift_m": 0.012,
+          "named_pose_duration_sec": 1.0,
+          "move_home_duration_sec": 1.0,
+          "trajectory_time_scale": 1.0,
+          "tf_lookup_timeout_sec": 5.0
+        },
+        "parts_tuning": {
+          "insertion_depth_m": 0.0025,
+          "pick_z_adjustments_m": {
+            "LG": -0.003
+          }
+        },
+        "node_name": "ur5e_3_workflow_controller",
+        "arm_joint_names": [
+          "ur5e_3_shoulder_pan_joint",
+          "ur5e_3_shoulder_lift_joint",
+          "ur5e_3_elbow_joint",
+          "ur5e_3_wrist_1_joint",
+          "ur5e_3_wrist_2_joint",
+          "ur5e_3_wrist_3_joint"
+        ],
+        "arm_trajectory_topic": "/ur5e_3_joint_trajectory_controller/joint_trajectory",
+        "cartesian_motion": {
+          "only": true,
+          "max_joint_step_rad": 0.35,
+          "transit_waypoints": [],
+          "linear_step_m": 0.01,
+          "angular_step_rad": 0.05,
+          "resource_id": "ur5e-3",
+          "pick_transit_waypoints": [
+            [
+              0.4,
+              0.15,
+              1.5011292266317149
+            ],
+            [
+              0.0,
+              0.05,
+              1.5011292266317149
+            ],
+            [
+              -0.4,
+              0.15,
+              1.5011292266317149
+            ]
+          ],
+          "avoid_collisions": true,
+          "rotation_waypoint": [
+            0.0,
+            0.05,
+            1.5011292266317149
+          ]
+        },
+        "payload_collision": {
+          "enabled": true,
+          "robot_prefix": "ur5e_3_",
+          "observation_link": "ur5e_3_wrist_3_link",
+          "support_contact_allowance_m": 0.001
+        },
+        "background_preparation_enabled": false,
+        "retain_observed_clear_pose_as_home": false
+      },
+      "named_positions": {
+        "home": [
+          2.232023449619252,
+          -1.5960064086763361,
+          1.615863605277993,
+          -1.592172956911188,
+          -1.5690505595531368,
+          2.232159020791153
+        ]
+      },
+      "static_capabilities": {
+        "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
+        "reachability": [
+          "Buffer For Machined parts",
+          "assembly_board-v1",
+          "Exit"
+        ],
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": 0.0,
+            "y": 0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "Buffer For Machined parts": {
+            "anchor_pose": {
+              "x": -0.32,
+              "y": 0.5,
+              "z": 1.017
+            },
+            "board_center": {
+              "x": -0.32,
+              "y": 0.5,
+              "z": 1.017
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.017
+          }
+        }
+      }
+    }
+  },
+  "ur5e-4": {
+    "type": "robot",
+    "jid": "recovery-resource-4@localhost",
+    "functions": "auto",
+    "failure_scenarios": [],
+    "gazebo": {
+      "controller": {
+        "move_group": {
+          "group_name": "ur5e_4_ur_manipulator",
+          "ee_link": "ur5e_4_tool0",
+          "tcp_link": "ur5e_4_rg2_gripper_tcp",
+          "position_tolerance_m": 0.005,
+          "orientation_tolerance_rad": 0.02,
+          "frame_id": "world"
+        },
+        "gripper": {
+          "joint": "ur5e_4_rg2_finger_width",
+          "topic": "/ur5e_4_rg2_gripper_traj_controller/joint_trajectory",
+          "open": 0.11,
+          "close": 0.02,
+          "move_time_sec": 0.35,
+          "settle_sec": 0.05,
+          "feedback_timeout_pad_sec": 1.0,
+          "position_tolerance": 0.01
+        },
+        "services": {
+          "detect_all": "/detect_all",
+          "motion_plan": "/plan_kinematic_path",
+          "cartesian_path": "/compute_cartesian_path",
+          "execute_trajectory": "/execute_trajectory",
+          "attach": "/ATTACHLINK",
+          "detach": "/DETACHLINK",
+          "set_entity_state": "/set_entity_state",
+          "get_entity_state": "/get_entity_state"
+        },
+        "attach": {
+          "robot_model_name": "dual_robot",
+          "attach_link_candidates": [
+            "ur5e_4_rg2_gripper_tcp",
+            "ur5e_4_tool0",
+            "ur5e_4_wrist_3_link"
+          ],
+          "release_detach_link_candidates": [
+            "ur5e_4_rg2_gripper_tcp",
+            "ur5e_4_tool0",
+            "ur5e_4_wrist_3_link"
+          ],
+          "primary_attach_link": "ur5e_4_rg2_gripper_tcp",
+          "detach_timeout_sec": 3.0,
+          "detach_max_link_attempts": 3,
+          "release_detach_timeout_sec": 6.0
+        },
+        "motion": {
+          "approach_height_m": 0.2,
+          "recovery_observed_pick_approach_height_m": 0.06,
+          "recovery_observed_pick_surface_clearance_m": 0.005,
+          "pick_tcp_z_bias_max_m": 0.02,
+          "pick_tcp_z_bias_min_m": 0.003,
+          "min_pick_tcp_z_m": 1.07,
+          "place_surface_gap_m": -0.01,
+          "release_preopen_settle_sec": 0.05,
+          "release_postopen_settle_sec": 0.2,
+          "release_postdetach_settle_sec": 0.15,
+          "release_descend_time_scale": 1.35,
+          "release_detach_retry_count": 1,
+          "release_detach_retry_delay_sec": 0.15,
+          "snap_to_slot_position_tolerance_m": 0.001,
+          "snap_to_slot_observation_samples": 3,
+          "snap_to_slot_observation_interval_sec": 0.1,
+          "simulation_insert_start_position_tolerance_m": 0.006,
+          "release_retry_lift_m": 0.012,
+          "named_pose_duration_sec": 1.0,
+          "move_home_duration_sec": 1.0,
+          "trajectory_time_scale": 1.0,
+          "tf_lookup_timeout_sec": 5.0
+        },
+        "parts_tuning": {
+          "insertion_depth_m": 0.0025,
+          "pick_z_adjustments_m": {
+            "LG": -0.003
+          }
+        },
+        "node_name": "ur5e_4_workflow_controller",
+        "arm_joint_names": [
+          "ur5e_4_shoulder_pan_joint",
+          "ur5e_4_shoulder_lift_joint",
+          "ur5e_4_elbow_joint",
+          "ur5e_4_wrist_1_joint",
+          "ur5e_4_wrist_2_joint",
+          "ur5e_4_wrist_3_joint"
+        ],
+        "arm_trajectory_topic": "/ur5e_4_joint_trajectory_controller/joint_trajectory",
+        "cartesian_motion": {
+          "only": true,
+          "max_joint_step_rad": 0.35,
+          "transit_waypoints": [],
+          "linear_step_m": 0.01,
+          "angular_step_rad": 0.05,
+          "resource_id": "ur5e-4",
+          "avoid_collisions": true,
+          "rotation_waypoint": [
+            0.3,
+            -0.35,
+            1.5011292266317149
+          ],
+          "home_preserve_orientation": true,
+          "pick_rotation_at_current_pose": true
+        },
+        "payload_collision": {
+          "enabled": true,
+          "robot_prefix": "ur5e_4_",
+          "observation_link": "ur5e_4_wrist_3_link",
+          "support_contact_allowance_m": 0.001
+        },
+        "background_preparation_enabled": false,
+        "retain_observed_clear_pose_as_home": false
+      },
+      "named_positions": {
+        "home": [
+          -0.2705423585528064,
+          -1.5960064086763361,
+          1.615863605277993,
+          -1.592172956911188,
+          -1.5690505595531368,
+          2.232159020791153
+        ]
+      },
+      "static_capabilities": {
+        "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
+        "reachability": [
+          "3D Printing Station",
+          "assembly_board-v1"
+        ],
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": 0.0,
+            "y": -0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "3D Printing Station": {
+            "anchor_pose": {
+              "x": 0.44,
+              "y": -0.42,
+              "z": 1.11
+            },
+            "board_center": {
+              "x": 0.44,
+              "y": -0.42,
+              "z": 1.11
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.11
+          }
+        }
+      }
+    }
+  }
+}

@@ -13,6 +13,7 @@ from typing import Any
 from cais_spade_llm.product.order import validate_completion_conditions, validate_product_order
 from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, read_json
 from cais_spade_llm.resources.nominal_des import build_nominal_resource_des_models
+from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS as FAILURE_CHECKPOINTS
 
 SETUP_PATH = ROOT / "cais_spade_llm/initialization/recovery_framework_setup.json"
 SETUP_RELATIVE = SETUP_PATH.relative_to(ROOT)
@@ -30,6 +31,10 @@ FAILURE_SCENARIOS = (
     "Part slippage",
 )
 CHECKPOINTS = {
+    "after_M1_processing_before_pick": "After M1 finishes processing, before ur5e-1 pickup",
+    "during_processing_halfway": "At 50% of the configured machining duration",
+    "after_both_pickups_before_place": "After both robots acquire their parts, before placement",
+    "after_M1_pick_before_release": "After ur5e-1 acquires the completed M1 part, before release",
     "before_execute": "Before executing the selected task",
     "after_execute_before_commit": "After execution, before successful completion is recorded",
 }
@@ -280,6 +285,12 @@ def _validate_failure(failure: Any, models: dict, parts: list[str], permitted: l
         raise ValueError("Part slippage task bindings do not match the configured capability")
     _validate_drop_pose(failure)
     _validate_additional_condition(failure, models, parts, permitted)
+    if failure["checkpoint"] == FAILURE_CHECKPOINTS["Part slippage"]:
+        other = failure.get("additional_condition") or {}
+        if {rid, other.get("resource_id")} != {"ur5e-3", "ur5e-4"}:
+            raise ValueError("Part slippage requires ur5e-3 and ur5e-4 holding different parts")
+        if failure["event_name"] != "place_insert":
+            raise ValueError("Part slippage must retain the interrupted place_insert obligation")
 
 
 def _validate_additional_condition(
@@ -363,6 +374,16 @@ def validate_setup(setup: dict, *, root: Path = ROOT) -> dict[str, Any]:
             "Recovery experiment settings changed; reload their current values before saving"
         )
     _validate_failure(setup.get("failure_scenario"), models, parts, permitted)
+    failure = setup.get("failure_scenario") or {}
+    if failure.get("checkpoint") == FAILURE_CHECKPOINTS["Part slippage"]:
+        robots = {row["resource_id"]: row for row in scene["robots"]}
+        rid = failure["resource_id"]
+        other = failure["additional_condition"]["resource_id"]
+        point = [failure["drop_pose"][axis] for axis in ("x", "y")]
+        source = robots[rid]["base_xyz"][:2]
+        destination = robots[other]["base_xyz"][:2]
+        if math.dist(point, destination) >= math.dist(point, source):
+            raise ValueError("drop_pose must lie in the other robot's region, measured from configured bases")
     return {**inputs, "scene": scene, "models": models}
 
 
@@ -398,7 +419,19 @@ def startup_block_reason(setup: dict, *, root: Path = ROOT) -> str:
         if setup["execution_mode"] != "simulation" or not is_delivery_order(inputs["product_order"]):
             reasons.append("Selected completion_conditions have no integrated execution path")
     if setup["failure_scenario"] is not None:
-        reasons.append(f"{setup['failure_scenario']['scenario']}: execution not integrated")
+        failure = setup["failure_scenario"]
+        required = {
+            "Conveyor breakdown": {"ur5e-1", "M1", "Conveyor"},
+            "ur5e-1 breakdown": {"ur5e-1", "M1"},
+            "Machining breakdown during part processing": {failure["resource_id"]},
+            "Part slippage": {"ur5e-3", "ur5e-4"},
+        }[failure["scenario"]]
+        supported = (failure["checkpoint"] == FAILURE_CHECKPOINTS[failure["scenario"]]
+                     and setup["execution_mode"] == "simulation"
+                     and "completion_conditions" not in inputs["product_order"]
+                     and required.issubset(setup["permitted_resources"]))
+        if not supported:
+            reasons.append(f"{failure['scenario']}: execution not integrated for these settings")
     excluded = [rid for rid in inputs["models"] if rid not in setup["permitted_resources"]]
     if excluded and "completion_conditions" in inputs["product_order"]:
         reasons.append("Resource restrictions are not integrated: " + ", ".join(excluded))
@@ -530,9 +563,12 @@ def slippage_example(models: dict, resource_id: str, part_name: str) -> dict:
         "event_id": event["event_id"],
         "event_name": event["event_name"],
         "parameter_bindings": deepcopy(event["parameter_bindings"]),
-        "checkpoint": "after_execute_before_commit",
+        "checkpoint": FAILURE_CHECKPOINTS["Part slippage"],
         "mode": "once",
         "drop_pose": {axis: None for axis in ("x", "y", "z")},
         "orientation_quat": {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
-        "additional_condition": None,
+        "additional_condition": {
+            "resource_id": "ur5e-4" if resource_id == "ur5e-3" else "ur5e-3",
+            "part_name": "gear_large" if part_name != "gear_large" else "KET4_Square_4mm",
+        },
     }

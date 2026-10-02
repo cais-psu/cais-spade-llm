@@ -197,6 +197,9 @@ def _render_slippage(
         else []
     )
 
+    if failure["checkpoint"] == settings.FAILURE_CHECKPOINTS["Part slippage"]:
+        events = [event for event in events if event["event_name"] == "place_insert"]
+
     def task_changed(e) -> None:
         event = next(event for event in events if event["event_id"] == e.value)
         failure.update(
@@ -216,7 +219,7 @@ def _render_slippage(
         on_change=task_changed,
     ).classes("w-full")
     ui.label(
-        "Configured drop pose in world — a future Gazebo injection target, not an observation or a validated reachable pose."
+        "Drop target in world coordinates, in the other robot’s region. The failure record reports the observed pose separately."
     ).classes("text-sm")
     with ui.row().classes("flex-wrap"):
         for key in ("x", "y", "z"):
@@ -237,16 +240,19 @@ def _render_slippage(
         refresh()
 
     condition = failure.get("additional_condition")
-    ui.checkbox(
+    required = failure["checkpoint"] == settings.FAILURE_CHECKPOINTS["Part slippage"]
+    condition_checkbox = ui.checkbox(
         "Another resource holds a selected part",
         value=condition is not None,
         on_change=condition_changed,
     )
+    condition_checkbox.set_enabled(not required)
     if condition is not None:
         others = [
             resource
             for resource in permitted
             if resource != rid
+            and (not required or resource in {"ur5e-3", "ur5e-4"})
             and resource in models
             and settings.eligible_parts(models[resource], selected_parts)
         ]
@@ -278,7 +284,7 @@ def _render_slippage(
             on_change=lambda _: changed(),
         ).bind_value(condition, "part_name").classes("w-full")
         ui.label(
-            "A future trigger condition; saving it does not change custody or select a recovery robot."
+            "Both selected parts must have acknowledged pickups before injection. Their interrupted tasks are retained."
         ).classes("text-sm")
 
 
@@ -302,7 +308,7 @@ def _render_failure_form(
                 "scenario": scenario,
                 "resource_id": rid,
                 "mode": "once",
-                "checkpoint": "before_execute",
+                "checkpoint": settings.FAILURE_CHECKPOINTS[scenario],
             }
             if scenario == "Part slippage":
                 draft["failure_scenario"].update(
@@ -313,7 +319,7 @@ def _render_failure_form(
                         "parameter_bindings": {},
                         "drop_pose": {axis: None for axis in ("x", "y", "z")},
                         "orientation_quat": {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
-                        "additional_condition": None,
+                        "additional_condition": {"resource_id": "ur5e-4", "part_name": None},
                     }
                 )
         changed()
@@ -344,13 +350,19 @@ def _render_failure_form(
                     and part in settings.eligible_parts(models[rid], selected_parts)
                 )
         ui.label(
-            "Failure injection and recovery execution are not integrated. Examples fill a draft only."
+            "All four failures support Simulation checkpoints, observed stopped-state evidence, and Gazebo markers. Examples fill a draft; save explicit drop coordinates."
         ).classes("text-amber-800 text-sm")
         if not failure:
             return
         ui.label("Occurrence: once per run").classes("text-sm")
+        if failure["scenario"] == "Conveyor breakdown":
+            failure["checkpoint"] = "after_M1_pick_before_release"
+            ui.label("Automatically armed on Start System. Run provides Arm, Disarm and checkpoint-guarded Trigger controls.").classes("text-sm")
+            ui.label(settings.CHECKPOINTS[failure["checkpoint"]]).classes("font-semibold")
+            ui.label("Conveyor becomes unavailable while ur5e-1 keeps the completed part. Reset Gazebo or Reset All clears the latched breakdown.").classes("text-sm")
+            return
         ui.select(
-            _keep_value(settings.CHECKPOINTS, failure.get("checkpoint")),
+            _keep_value({settings.FAILURE_CHECKPOINTS[failure["scenario"]]: settings.CHECKPOINTS[settings.FAILURE_CHECKPOINTS[failure["scenario"]]]}, failure.get("checkpoint")),
             label="Trigger point",
             on_change=lambda _: changed(),
         ).bind_value(failure, "checkpoint").classes("w-full")
@@ -376,14 +388,15 @@ def _render_failure_form(
             choices = [
                 resource
                 for resource in choices
-                if settings.eligible_parts(models[resource], selected_parts)
+                if resource in {"ur5e-3", "ur5e-4"} and settings.eligible_parts(models[resource], selected_parts)
             ]
 
         def resource_changed(e) -> None:
             failure["resource_id"] = e.value
             if scenario == "Part slippage":
                 failure.update(
-                    part_name=None, event_id=None, event_name=None, parameter_bindings={}
+                    part_name=None, event_id=None, event_name=None, parameter_bindings={},
+                    additional_condition={"resource_id": "ur5e-4" if e.value == "ur5e-3" else "ur5e-3", "part_name": None},
                 )
             changed()
             refresh()

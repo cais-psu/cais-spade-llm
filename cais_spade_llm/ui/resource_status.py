@@ -93,6 +93,7 @@ class ResourceStatusReader:
                 logger.warning("%s", error)
 
         resources = {}
+        fault = self.bridge.get_conveyor_fault()
         outcome = deepcopy(self._outcome)
         for name, state in states.items():
             live = self._runtime_models.get(name)
@@ -110,6 +111,8 @@ class ResourceStatusReader:
                     {key: deepcopy(state[key]) for key in TELEMETRY_FIELDS if key in state}
                 )
                 evidence = live.get("state_evidence") or SNAPSHOT_EVIDENCE
+            if name == fault.get("resource_id") and fault.get("status") == "triggered":
+                values.update(execution_available=False, fault_status="breakdown")
             resources[name] = {
                 "state": values,
                 "model": (

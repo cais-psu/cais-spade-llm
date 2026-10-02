@@ -1,0 +1,63 @@
+{
+  "thought": "Evaluate the supplied candidate effects.",
+  "selected_candidate_index": 0,
+  "candidate_events": [
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "event_name": "stage_held_part",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "gear_large",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "gear_large",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": "3D Printing Station"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "event_name": "stage_held_part_alternative_1",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "gear_large",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "gear_large",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": "3D Printing Station"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "event_name": "stage_held_part_alternative_2",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "gear_large",
+      "expected_start_state": {
+        "resource_state": "picked",
+        "held_part": "gear_large",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": "3D Printing Station"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    }
+  ]
+}

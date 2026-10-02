@@ -20,7 +20,7 @@
   ],
   "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
   "execution_mode": "simulation",
-  "diagnostic_cca_bypass": true,
+  "diagnostic_cca_bypass": false,
   "runtime_recovery_mode": "pre_ran",
   "runtime_recovery_validation_policy": "validated",
   "runtime_recovery_archive_path": "",
@@ -33,7 +33,12 @@
     "candidate_count": "adaptive",
     "candidate_proposal_budget": 5
   },
-  "failure_scenario": null,
+  "failure_scenario": {
+    "scenario": "Conveyor breakdown",
+    "resource_id": "Conveyor",
+    "mode": "once",
+    "checkpoint": "after_M1_pick_before_release"
+  },
   "simulation": {
     "speed": 1,
     "ur_controller_rate_hz": 250,

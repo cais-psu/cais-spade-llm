@@ -31,7 +31,7 @@ GEOMETRY_PATH = (
 ORDER_PATH = (
     ROOT / "cais_spade_llm/specification/products/orders/assembly_board-v1-recovery-framework.json"
 )
-LEGACY_GEOMETRY_PATH = ROOT / "test/fixtures/case3_recovery/assembly_board-v1.json"
+LEGACY_GEOMETRY_PATH = ROOT / "test/fixtures/product_geometry/assembly_board-v1-historical.json"
 CAD_DIR = ROOT / "ros2/cais_lab_robotics/cad_models"
 
 COMPONENTS = [
@@ -253,9 +253,10 @@ def test_incomplete_known_nist_maps_are_rejected() -> None:
 def test_historical_recovery_fixture_retains_its_original_component_symbols() -> None:
     legacy_geometry = json.loads(LEGACY_GEOMETRY_PATH.read_text(encoding="utf-8"))
     runtime_context = json.loads(
-        (LEGACY_GEOMETRY_PATH.parent / "runtime_context.json").read_text(encoding="utf-8")
+        (ROOT / "test/fixtures/part_slippage/runtime_context.json").read_text(encoding="utf-8")
     )
-    assert ROOT / runtime_context["product_geometry"] == LEGACY_GEOMETRY_PATH
+    assert ROOT / runtime_context["product_geometry"] == GEOMETRY_PATH
+    assert set(runtime_context["part_tracker"]) == {"KET4_Square_4mm", "gear_large"}
     assert legacy_geometry["gazebo"]["parts"]["model_map"] == {
         "SG": "gear_small",
         "MG": "gear_medium",

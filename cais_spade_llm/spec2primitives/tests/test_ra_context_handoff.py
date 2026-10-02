@@ -728,7 +728,7 @@ def test_default_xarm6_robot_agent_owns_eight_synthesis_primitives(
 
     assert "pick_approach" in agent.executables
     assert "execute_recovery_macro" in agent.executables
-    assert [binding["scenario_id"] for binding in agent.failure_scenarios] == ["lg_slippage"]
+    assert agent.failure_scenarios == []
     assert [
         entry["name"] for entry in agent.recovery_synthesis_primitive_catalog()
     ] == _EXPECTED_XARM6_SYNTHESIS_SYMBOLS

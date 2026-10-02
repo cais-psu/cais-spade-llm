@@ -408,6 +408,9 @@ def _worker_executor(runtime, agent: WorkflowResourceAgent):
             "valuation": runtime.context.snapshot(),
             "task": task,
         }
+        fault = getattr(runtime, "conveyor_fault", None)
+        if fault is not None:
+            request["failure_injection"] = fault.worker_request(task)
         try:
             return await agent.workflow_worker.run(request)
         except GazeboExecutionError as exc:

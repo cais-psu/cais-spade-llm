@@ -19,6 +19,7 @@ from cais_spade_llm.ui.resource_status import ResourceStatusReader
 from cais_spade_llm.ui import recovery_setup as settings
 from cais_spade_llm.ui.components.agent_chat import render_chat
 from cais_spade_llm.ui.components.simulation_controls import render_simulation_controls
+from cais_spade_llm.ui.components.conveyor_fault import render_conveyor_fault
 from cais_spade_llm.ui.components.dag_graph import nodes_to_mermaid
 from cais_spade_llm.ui.components.robot_status_card import render_environment_outcome, render_robot_status_card
 from cais_spade_llm.recovery_framework.delivery import prepare_start, request_stop, reset_stop
@@ -284,6 +285,9 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                                 return
                             if not bundle_ok:
                                 _set_action_banner("warning", bundle_msg, auto_hide_s=8.0)
+                                return
+                            if bridge.get_conveyor_fault()["status"] == "triggered":
+                                _set_action_banner("warning", "Reset Gazebo or Reset All before starting another run after a failure.")
                                 return
                             internal = selected_setup["execution_mode"]
                             bridge.execution_mode = internal
@@ -924,6 +928,8 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                 ui.label("Live Resource Status").classes("text-lg font-semibold mb-2")
                 robot_status_container = ui.column().classes("w-full gap-4")
 
+                render_conveyor_fault(bridge, _managed_timer)
+
                 async def _refresh_robot_status():
                     if status_lock.locked():
                         return
@@ -1046,7 +1052,6 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
 
                 guidance_buffers: dict[str, str] = {}
                 recovery_feedback_buffers: dict[str, str] = {}
-                preprogrammed_recovery_buffers: dict[str, str] = {}
                 action_feedback_buffers: dict[str, dict[str, str]] = {}
                 pending_action_buffers: dict[str, str] = {}
 
@@ -1899,16 +1904,8 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                             recovery_feedback = str(
                                 recovery_feedback_buffers.get(product_jid, "") or ""
                             )
-                            selected_preprogrammed = str(
-                                preprogrammed_recovery_buffers.get(
-                                    product_jid,
-                                    "recover_lg_v1",
-                                )
-                                or "recover_lg_v1"
-                            )
                             guidance_buffers[product_jid] = operator_guidance
                             recovery_feedback_buffers[product_jid] = recovery_feedback
-                            preprogrammed_recovery_buffers[product_jid] = selected_preprogrammed
                             action_feedback = (
                                 action_feedback_buffers.get(product_jid)
                                 if isinstance(action_feedback_buffers.get(product_jid), dict)

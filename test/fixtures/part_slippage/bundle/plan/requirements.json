@@ -1,0 +1,30 @@
+{
+  "nodes": [
+    {
+      "id": "REQ_1",
+      "type": "requirement",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
+      "product": "gear_large",
+      "raw_text": "ur5e-4 assembles gear_large from 3D Printing Station.",
+      "context": {
+        "origin": "3D Printing Station",
+        "destination": "assembly_board-v1",
+        "robot_id": "recovery-resource-4"
+      }
+    },
+    {
+      "id": "REQ_2",
+      "type": "requirement",
+      "phase": "ASSEMBLY",
+      "process_type": "PICK_PLACE",
+      "product": "KET4_Square_4mm",
+      "raw_text": "ur5e-3 assembles KET4_Square_4mm from Buffer For Machined parts.",
+      "context": {
+        "origin": "Buffer For Machined parts",
+        "destination": "assembly_board-v1",
+        "robot_id": "recovery-resource-3"
+      }
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "thought": "Evaluate the supplied candidate effects.",
+  "selected_candidate_index": 0,
+  "candidate_events": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle",
+      "resource_jid": "recovery-resource-3@localhost",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle_alternative_1",
+      "resource_jid": "recovery-resource-3@localhost",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "recover_to_home_idle_alternative_2",
+      "resource_jid": "recovery-resource-3@localhost",
+      "expected_start_state": {
+        "resource_state": "failed"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "home"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    }
+  ]
+}

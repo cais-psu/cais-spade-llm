@@ -26,9 +26,6 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_a
     DEFAULT_RECOVERY_DEBUG_DIR,
     write_recovery_artifacts,
 )
-from cais_spade_llm.agents.intelligent_product.replanner.preprogrammed_recovery_scenarios import (
-    build_preprogrammed_recovery_proposal,
-)
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.product.profile import ProductProfile
 
@@ -230,10 +227,7 @@ class ProductRecoveryController:
         "approve_runtime_recovery_primitives",
         "refine_runtime_recovery_primitives",
         "reject_runtime_recovery_primitives",
-        "_build_preprogrammed_runtime_recovery_bundle",
         "_derive_preprogrammed_part_observations",
-        "_cache_preprogrammed_runtime_recovery_scenario",
-        "_resolve_preprogrammed_runtime_recovery_bundle",
         "load_preprogrammed_runtime_recovery_scenario_sync",
         "load_preprogrammed_runtime_recovery_scenario",
         "approve_runtime_recovery_proposal_sync",
@@ -5845,7 +5839,6 @@ class ProductRecoveryController:
             ),
         )
 
-        scenario_hint = ""
         recovery_generation_mode = "auto" if session_recovery_mode == "auto" else "manual"
 
         self._runtime_repair_inflight = True
@@ -5897,63 +5890,6 @@ class ProductRecoveryController:
                         self.logger.exception(
                             "[Product] Failed to emit prepare-trace summary for runtime recovery request."
                         )
-                recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
-                active_recovery_phase = str(recovery_session.get("phase") or "").strip().lower()
-                allow_preprogrammed_autoload = active_recovery_phase not in {"prepare_trace"}
-                if scenario_hint and allow_preprogrammed_autoload:
-                    self.logger.info(
-                        "[Product] Auto-loading preprogrammed recovery scenario after DES handoff: scenario_id=%s",
-                        scenario_hint,
-                    )
-                    try:
-                        (
-                            scenario_key,
-                            normalized,
-                            recovery_debug,
-                            recovery_summary,
-                        ) = self._resolve_preprogrammed_runtime_recovery_bundle(
-                            scenario_id=scenario_hint,
-                            prepared_recovery_request=prepared_recovery_request,
-                        )
-                        recovery_text = (
-                            ", ".join(str(item) for item in recovery_summary if item) or scenario_key
-                        )
-                        recovery = self._set_runtime_recovery(
-                            status="llm_recovery",
-                            trigger=trigger,
-                            failed_task_id=failed_task_id,
-                            message="Preprogrammed recovery scenario loaded; auto-approving.",
-                            attempts_used=attempt_number,
-                            attempts_max=self._runtime_repair_max_attempts,
-                            used_llm_recovery=False,
-                            recovery_proposal=normalized,
-                            recovery_debug=recovery_debug,
-                            recovery_approval_state="pending",
-                            active_recovery_sequence=None,
-                            recovery_feedback_history=feedback_history,
-                            violations=violations,
-                            append_history=True,
-                            history_message=(
-                                f"Automatically loaded preprogrammed recovery scenario: {recovery_text}."
-                            ),
-                        )
-                        self._clear_plan_safety_alert()
-                        self.logger.info(
-                            "[Product] Auto-approving preprogrammed recovery scenario after DES handoff: scenario_id=%s",
-                            scenario_key,
-                        )
-                        return self.approve_runtime_recovery_proposal_sync()
-                    except Exception:
-                        self.logger.exception(
-                            "[Product] Auto-loading preprogrammed recovery scenario failed: scenario_id=%s",
-                            scenario_hint,
-                        )
-                elif scenario_hint and not allow_preprogrammed_autoload:
-                    self.logger.info(
-                        "[Product] Active recovery mode left runtime recovery at prepare-trace checkpoint; "
-                        "skipping preprogrammed auto-load for scenario_id=%s",
-                        scenario_hint,
-                    )
                 selected_archive_path = self._runtime_recovery_session_archive_path()
                 selected_archive_label = self._runtime_recovery_session_archive_label()
                 message = base_message or (
@@ -8055,38 +7991,6 @@ class ProductRecoveryController:
         await asyncio.to_thread(self._persist_product_state)
         return recovery
 
-    def _build_preprogrammed_runtime_recovery_bundle(
-        self,
-        *,
-        scenario_id: str,
-        prepared_recovery_request: dict[str, Any],
-    ) -> dict[str, Any]:
-        scenario_request = deepcopy(prepared_recovery_request)
-        preprogrammed_part_observations = self._derive_preprogrammed_part_observations()
-        if preprogrammed_part_observations:
-            scenario_request["preprogrammed_part_observations"] = preprogrammed_part_observations
-        proposal = build_preprogrammed_recovery_proposal(
-            scenario_id=scenario_id,
-            prepared_recovery_request=scenario_request,
-        )
-        normalized = self.process_planner.validate_preprogrammed_recovery_proposal(
-            proposal=proposal,
-            prepared_recovery_request=scenario_request,
-            source="preprogrammed_scenario",
-            scenario_id=scenario_id,
-        )
-        raw_recovery_debug = self.process_planner.get_last_recovery_debug()
-        recovery_debug = deepcopy(raw_recovery_debug) if isinstance(raw_recovery_debug, dict) else {}
-        recovery_debug["source"] = "preprogrammed_scenario"
-        recovery_debug["scenario_id"] = scenario_id
-        recovery_debug["execution_policy"] = {"complete_full_tail": True}
-        recovery_summary = self.process_planner._recovery_summary(normalized)
-        return {
-            "proposal": normalized,
-            "recovery_debug": recovery_debug,
-            "recovery_summary": recovery_summary,
-        }
-
     def _derive_preprogrammed_part_observations(self) -> dict[str, dict[str, float]]:
         derived: dict[str, dict[str, float]] = {}
         violations = list(self._runtime_recovery_context.get("violations") or [])
@@ -8129,152 +8033,12 @@ class ProductRecoveryController:
                 derived[part_name] = deepcopy(pose_candidate)
         return derived
 
-    def _cache_preprogrammed_runtime_recovery_scenario(
-        self,
-        *,
-        scenario_id: str,
-        prepared_recovery_request: dict[str, Any],
-    ) -> dict[str, Any]:
-        bundle = self._build_preprogrammed_runtime_recovery_bundle(
-            scenario_id=scenario_id,
-            prepared_recovery_request=prepared_recovery_request,
-        )
-        cache = dict(self._runtime_recovery_context.get("preprogrammed_recovery_cache") or {})
-        cache[str(scenario_id)] = deepcopy(bundle)
-        self._runtime_recovery_context["preprogrammed_recovery_cache"] = cache
-        return bundle
-
-    def _resolve_preprogrammed_runtime_recovery_bundle(
-        self,
-        *,
-        scenario_id: str,
-        prepared_recovery_request: dict[str, Any],
-        started_at: float | None = None,
-    ) -> tuple[str, dict[str, Any], dict[str, Any], list[str]]:
-        scenario_key = str(scenario_id or "").strip()
-        if not scenario_key:
-            raise ValueError("scenario_id is empty")
-
-        elapsed = time.perf_counter() - started_at if started_at is not None else 0.0
-        cached_bundle = deepcopy(
-            (self._runtime_recovery_context.get("preprogrammed_recovery_cache") or {}).get(
-                scenario_key
-            )
-            or {}
-        )
-        if isinstance(cached_bundle.get("proposal"), dict):
-            normalized = deepcopy(cached_bundle["proposal"])
-            recovery_debug = deepcopy(cached_bundle.get("recovery_debug") or {})
-            recovery_summary = list(cached_bundle.get("recovery_summary") or [])
-            self.logger.info(
-                "[Product] Preprogrammed runtime recovery scenario cache hit: scenario_id=%s elapsed=%.3fs",
-                scenario_key,
-                elapsed,
-            )
-        else:
-            bundle = self._cache_preprogrammed_runtime_recovery_scenario(
-                scenario_id=scenario_key,
-                prepared_recovery_request=prepared_recovery_request,
-            )
-            normalized = deepcopy(bundle.get("proposal") or {})
-            recovery_debug = deepcopy(bundle.get("recovery_debug") or {})
-            recovery_summary = list(bundle.get("recovery_summary") or [])
-            self.logger.info(
-                "[Product] Preprogrammed runtime recovery scenario built+validated: scenario_id=%s elapsed=%.3fs",
-                scenario_key,
-                elapsed,
-            )
-
-        if not isinstance(recovery_debug, dict):
-            recovery_debug = {}
-        recovery_debug["source"] = "preprogrammed_scenario"
-        recovery_debug["scenario_id"] = scenario_key
-        recovery_debug["execution_policy"] = {"complete_full_tail": True}
-        return scenario_key, normalized, recovery_debug, recovery_summary
-
     def load_preprogrammed_runtime_recovery_scenario_sync(self, scenario_id: str) -> dict[str, Any]:
-        started_at = time.perf_counter()
-        if not self._runtime_recovery_context:
-            raise RuntimeError("no active runtime DES recovery context is available")
-
-        prepared_recovery_request = deepcopy(
-            self._runtime_recovery_context.get("prepared_recovery_request") or {}
-        )
-        if not prepared_recovery_request:
-            raise RuntimeError("no prepared recovery request is available")
-        if self._runtime_repair_inflight:
-            raise RuntimeError("runtime recovery is already in progress")
-
-        status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
-        if status != "recovery_ready":
-            raise RuntimeError(
-                "preprogrammed recovery scenarios can only be loaded from the recovery-ready state"
-            )
-
-        scenario_key = str(scenario_id or "").strip()
-        if not scenario_key:
-            raise ValueError("scenario_id is empty")
-        self.logger.info(
-            "[Product] Loading preprogrammed runtime recovery scenario start: scenario_id=%s elapsed=%.3fs",
-            scenario_key,
-            time.perf_counter() - started_at,
-        )
-        try:
-            scenario_key, normalized, recovery_debug, recovery_summary = (
-                self._resolve_preprogrammed_runtime_recovery_bundle(
-                    scenario_id=scenario_key,
-                    prepared_recovery_request=prepared_recovery_request,
-                    started_at=started_at,
-                )
-            )
-        except Exception:
-            self.logger.exception(
-                "[Product] Loading preprogrammed runtime recovery scenario failed: scenario_id=%s",
-                scenario_key,
-            )
-            raise
-
-        failed_task_id = str(
-            self.runtime_recovery.get("failed_task_id")
-            or self._runtime_recovery_context.get("failed_task_id", "")
-        ).strip()
-        violations = deepcopy(list(self._runtime_recovery_context.get("violations") or []))
-        if not recovery_summary:
-            recovery_summary = self.process_planner._recovery_summary(normalized)
-        recovery_text = ", ".join(str(item) for item in recovery_summary if item) or scenario_key
-        self._set_runtime_recovery(
-            status="llm_recovery",
-            resolution_class="none",
-            trigger=str(self._runtime_recovery_context.get("trigger", "")),
-            failed_task_id=failed_task_id,
-            message="Preprogrammed recovery scenario loaded; auto-approving.",
-            attempts_used=self._runtime_repair_fail_streak,
-            attempts_max=self._runtime_repair_max_attempts,
-            used_llm_recovery=False,
-            recovery_proposal=normalized,
-            recovery_debug=recovery_debug if recovery_debug else None,
-            recovery_approval_state="pending",
-            active_recovery_sequence=None,
-            recovery_feedback_history=list(
-                self._runtime_recovery_context.get("recovery_feedback_history") or []
-            ),
-            violations=violations,
-            append_history=True,
-            history_message=f"Loaded preprogrammed recovery scenario: {recovery_text}.",
-        )
-        self._clear_plan_safety_alert()
-        self.logger.info(
-            "[Product] Preprogrammed runtime recovery scenario ready: scenario_id=%s elapsed=%.3fs",
-            scenario_key,
-            time.perf_counter() - started_at,
-        )
-        self.logger.info(
-            "[Product] Auto-approving preprogrammed runtime recovery scenario: scenario_id=%s",
-            scenario_key,
-        )
-        return self.approve_runtime_recovery_proposal_sync()
+        """Reject retired recipes while preserving the existing bridge call signature."""
+        raise ValueError("Preprogrammed scenario recipes are retired; select a validated recovery archive.")
 
     async def load_preprogrammed_runtime_recovery_scenario(self, scenario_id: str) -> dict[str, Any]:
+        """Report retired recipes through the existing asynchronous interface."""
         return self.load_preprogrammed_runtime_recovery_scenario_sync(scenario_id)
 
     def approve_runtime_recovery_proposal_sync(self) -> dict[str, Any]:

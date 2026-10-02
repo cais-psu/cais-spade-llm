@@ -168,7 +168,8 @@ class WorkflowPrimitiveRunner:
     def progress_evidence(self) -> dict[str, Any]:
         """Return serializable physical progress without implying event completion."""
         fields = ("initial_x", "target_x", "last_commanded_x", "observed_x",
-                  "observation_errors", "simulation_elapsed_sec", "displacement")
+                  "observation_errors", "simulation_elapsed_sec", "displacement",
+                  "failure_injection")
         return {key: deepcopy(self.state[key]) for key in fields if key in self.state}
 
     def _observe_transport_progress(self) -> None:
@@ -240,12 +241,36 @@ class WorkflowPrimitiveRunner:
         interval = float(machine["simulation_process"].get("observation_interval_sec", 0.25))
         last_observation = -math.inf
 
+        started_sim = self.current_clock()
+
         def observe_machine(elapsed: float) -> None:
             nonlocal last_observation
             self.state["simulation_elapsed_sec"] = elapsed
-            if elapsed - last_observation < interval and elapsed + 1e-9 < duration:
+            inject = self._machine_fault_armed() and elapsed >= minimum_duration * 0.5
+            if not inject and elapsed - last_observation < interval and elapsed + 1e-9 < duration:
                 return
-            observed_state = self.entity(model)
+            if inject:
+                self.state["failure_injection"] = {
+                    "run_id": self.task["run_id"], "task_id": self.task["task_id"],
+                    "resource_id": self.task["resource_id"], "part_name": self.part_name,
+                    "checkpoint": "during_processing_halfway",
+                    "source": "gazebo_processing_checkpoint", "observation_status": "pending",
+                    "simulation_started_sec": started_sim,
+                    "simulation_elapsed_sec": elapsed, "processing_time_sec": minimum_duration,
+                    "processing_fraction": min(elapsed / minimum_duration, 1.0),
+                    "process": self.params["process"], "result": self.params["result"],
+                    "process_completed": False,
+                }
+                self._publish_machine_interruption()
+            try:
+                observed_state = self.entity(model)
+            except (OSError, ValueError, RuntimeError, TimeoutError, InterruptedError) as exc:
+                if inject:
+                    self.state["failure_injection"].update(
+                        observation_status="failed", observation_error=str(exc),
+                    )
+                    self._publish_machine_interruption()
+                raise
             observed = observed_state.pose.position
             if math.dist((observed.x, observed.y, observed.z), expected[:3]) > 0.08:
                 raise ValueError("The part left machine workholding during machining")
@@ -261,10 +286,40 @@ class WorkflowPrimitiveRunner:
                 self.state["robot_distances"][robot], clearance[robot]
             )
             last_observation = elapsed
+            if inject:
+                self.state["failure_injection"].update(
+                    source="gazebo_workholding_observation", observation_status="completed",
+                    observed_pose={axis: float(getattr(observed, axis)) for axis in ("x", "y", "z")},
+                )
+                self._publish_machine_interruption()
+                raise RuntimeError("Machining breakdown during part processing")
 
         start, end = self.wait_simulation(duration, observe_machine)
         self.state.update(process_duration=duration, started_sim=start, completed_sim=end)
         self.confirm_process_observation()
+
+    def _publish_machine_interruption(self) -> None:
+        path = self.request.get("failure_injection", {}).get("evidence_path")
+        if path:
+            destination = Path(path)
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.state["failure_injection"]))
+            temporary.replace(destination)
+
+    def _machine_fault_armed(self) -> bool:
+        fault = self.request.get("failure_injection")
+        if not fault:
+            return False
+        if (any(fault.get(key) != self.task.get(key)
+                for key in ("run_id", "task_id", "resource_id"))
+                or fault.get("checkpoint") != "during_processing_halfway"):
+            raise ValueError("Machining fault request does not match the executing task")
+        control = json.loads(Path(fault["control_path"]).read_text())
+        if any(control.get(key) != self.task.get(key) for key in ("run_id", "resource_id")):
+            raise ValueError("Machining fault control belongs to another run or resource")
+        if control.get("status") not in {"armed", "disarmed"}:
+            raise ValueError("Machining fault control is no longer active")
+        return control["status"] == "armed"
 
     def confirm_process_observation(self) -> None:
         """Return the observations required by the existing completion validator."""
@@ -700,6 +755,7 @@ def run(request: dict, session: dict | None = None) -> dict:
             "error": str(exc),
             "primitive_trace": runner.primitive_trace,
             "partial_motion": runner.progress_evidence(),
+            "failure_injection": deepcopy(runner.state.get("failure_injection")),
             "physical_state_reconciliation_required": bool(runner.state.get("last_commanded_x")) or any(
                 abs(position - runner.state.get("initial_x", {}).get(name, position)) > 1e-6
                 for name, position in runner.state.get("observed_x", {}).items()

@@ -69,7 +69,7 @@ from cais_spade_llm.resources.resource_primitives import (  # noqa: E402
 )
 
 DEBUG_ROOT = ROOT / "cais_spade_llm" / "monitor" / "debug"
-CASE3_RESPONSE_FIXTURES = ROOT / "test" / "fixtures" / "case3_recovery"
+CASE3_RESPONSE_FIXTURES = ROOT / "test" / "fixtures" / "part_slippage"
 CASE3_RUNTIME_CONTEXT = CASE3_RESPONSE_FIXTURES / "runtime_context.json"
 AUTO_CANDIDATE_COUNT_CAP = 8
 
@@ -386,7 +386,7 @@ class FakeProductAgent:
         self.jid = "assembly_board-v1@localhost"
         self.cca_jid = "central_controller@localhost"
         self.agent_name = "assembly_board-v1"
-        self.instructions = "Case 3 runtime recovery dry-run product agent."
+        self.instructions = "Part slippage saved-context recovery diagnostic product agent."
         self.logger = logging.getLogger("case3_recovery_dryrun")
         self.tools_catalog = deepcopy(tools_catalog)
         self.product_geometry = deepcopy(product_geometry)

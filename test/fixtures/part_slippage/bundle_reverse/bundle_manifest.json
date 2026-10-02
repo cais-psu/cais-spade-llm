@@ -1,0 +1,14 @@
+{
+  "bundle_id": "part_slippage_test_reverse",
+  "status": "test_fixture",
+  "verified": false,
+  "product_name": "assembly_board-v1",
+  "execution_mode": "simulation",
+  "robot_env": "gazebo",
+  "artifacts": {
+    "tools_json": "catalog/tools.json",
+    "plan_json": "plan/plan.json",
+    "requirements_json": "plan/requirements.json",
+    "safety_logic_json": "safety/cca_safety_logic.json"
+  }
+}

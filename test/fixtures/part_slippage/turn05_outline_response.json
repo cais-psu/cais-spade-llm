@@ -1,0 +1,63 @@
+{
+  "thought": "Evaluate the supplied candidate effects.",
+  "selected_candidate_index": 0,
+  "candidate_events": [
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "pick_observed_part",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "KET4_Square_4mm",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": null
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "KET4_Square_4mm",
+        "part_state": "misplaced",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "pick_observed_part_alternative_1",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "KET4_Square_4mm",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": null
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "KET4_Square_4mm",
+        "part_state": "misplaced",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "pick_observed_part_alternative_2",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "KET4_Square_4mm",
+      "expected_start_state": {
+        "resource_state": "idle",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": null
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "held_part": "KET4_Square_4mm",
+        "part_state": "misplaced",
+        "part_location": "recovery-resource-4@localhost"
+      },
+      "rationale": "Synthetic proposal to exercise independent validators and recovery selection."
+    }
+  ]
+}

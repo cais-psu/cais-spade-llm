@@ -463,6 +463,7 @@ def test_agent_handlers_authenticate_bindings_and_preserve_cca_dispatch(inputs, 
 
         bridge = SimpleNamespace(
             get_robot_states=lambda: SystemBridge.get_robot_states(SimpleNamespace(resource_agents=resources)),
+            get_conveyor_fault=lambda: {"status": "disabled"},
             load_config=lambda _path: deepcopy(inputs['scene']),
         )
         status = ResourceStatusReader(bridge).read()
@@ -599,6 +600,7 @@ def test_gazebo_report_selection_and_refresh_are_read_only(tmp_path, monkeypatch
     from nicegui import context, ui
     from nicegui.client import Client
     from cais_spade_llm.ui.components.gazebo_delivery_run import render_gazebo_delivery_runs
+    from test_project_pages import _finish_reads
     from test_recovery_setup import _capture_buttons
 
     path = tmp_path/'trial'/'run.json'
@@ -613,11 +615,13 @@ def test_gazebo_report_selection_and_refresh_are_read_only(tmp_path, monkeypatch
         selector = next(e for e in client.elements.values() if isinstance(e, ui.select))
         selector.set_value(str(path))
         buttons['Refresh Gazebo reports']()
+        _finish_reads(client)
         assert any(getattr(e, 'text', '') == 'Outcome: completed' for e in client.elements.values())
         assert path.read_bytes() == before
         path.write_text('{}')
         buttons['Refresh Gazebo reports']()
-        assert any('Unsupported Gazebo report format' in getattr(e, 'text', '') for e in client.elements.values())
+        _finish_reads(client)
+        assert any('Unsupported report format' in getattr(e, 'text', '') for e in client.elements.values())
         delivery.prepare_start.assert_not_called()
         client.delete()
 

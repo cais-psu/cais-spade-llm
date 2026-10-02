@@ -1,0 +1,82 @@
+{
+  "test_only": true,
+  "rules": [
+    {
+      "id": "SAFE_1",
+      "raw_text": "KET4_Square_4mm placement precedes gear_large placement in this diagnostic test.",
+      "constraint_type": "ordering_place_approach_priority",
+      "process": "assembly",
+      "product": [
+        "KET4_Square_4mm",
+        "gear_large"
+      ],
+      "resources": [
+        "recovery-resource-3",
+        "recovery-resource-4"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": "place_approach",
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap004",
+          "full": "ap_event/assembly/gear_large/recovery-resource-4/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap003",
+          "full": "ap_event/assembly/ket4_square_4mm/recovery-resource-3/place_approach/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "(!(ap004) U ap003)"
+    },
+    {
+      "id": "SAFE_2",
+      "raw_text": "The two robots must not occupy the assembly destination together.",
+      "constraint_type": "mutual_exclusion_in_destination_area",
+      "process": null,
+      "product": [],
+      "resources": [
+        "recovery-resource-4",
+        "recovery-resource-3"
+      ],
+      "resource_types": [
+        "robot"
+      ],
+      "event": null,
+      "context": {
+        "destination": "assembly_board-v1"
+      },
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap_event/assembly/any/recovery-resource-4/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap006",
+          "full": "ap_state/assembly/any/recovery-resource-4/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap005",
+          "full": "ap_state/assembly/any/recovery-resource-4/placed/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap002",
+          "full": "ap_event/assembly/any/recovery-resource-3/place_approach/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap008",
+          "full": "ap_state/assembly/any/recovery-resource-3/positioned/destination=assembly_board-v1"
+        },
+        {
+          "label": "ap007",
+          "full": "ap_state/assembly/any/recovery-resource-3/placed/destination=assembly_board-v1"
+        }
+      ],
+      "ltlf": "G (!(((ap001 | ap006 | ap005) & (ap002 | ap008 | ap007))))"
+    }
+  ]
+}

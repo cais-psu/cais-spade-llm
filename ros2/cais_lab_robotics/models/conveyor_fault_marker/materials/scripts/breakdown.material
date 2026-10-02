@@ -1,0 +1,16 @@
+material CAIS/ConveyorBreakdown
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   cull_hardware none
+   texture_unit
+   {
+    texture breakdown.png
+    filtering anisotropic
+   }
+  }
+ }
+}
