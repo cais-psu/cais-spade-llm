@@ -1,4 +1,12 @@
 {
+    "remote.autoForwardPorts": true,
+    "remote.restoreForwardedPorts": true,
+    "remote.portsAttributes": {
+        "8080": {
+            "label": "CAIS-SPADE-LLM",
+            "onAutoForward": "openBrowser"
+        }
+    },
     // Disable auto-activation of Poetry venv in NEW terminals
     // This prevents the .venv from being activated when you open a terminal
     "python.terminal.activateEnvironment": false,

@@ -14,6 +14,7 @@ from starlette.responses import RedirectResponse, Response, StreamingResponse
 
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.gazebo_cleanup import keep_gazebo_on_exit
+from cais_spade_llm.ui.home_gazebo_viewer import register_home_gazebo_viewer_routes
 from cais_spade_llm.ui.refresh import PageRefresh
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -193,6 +194,7 @@ def create_app() -> None:
     """Register all NiceGUI pages and configure the app."""
     _patch_nicegui_lifecycle()
     bridge = SystemBridge.instance()
+    register_home_gazebo_viewer_routes(bridge)
     watchdog_task: asyncio.Task | None = None
     perception_recovery_task: asyncio.Task | None = None
     ros2_process_watchdog_task: asyncio.Task | None = None

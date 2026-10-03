@@ -14,6 +14,10 @@ from typing import Any
 from nicegui import context, ui
 
 from cais_spade_llm.ui.bridge import SystemBridge
+from cais_spade_llm.ui.home_gazebo_viewer import (
+    home_gazebo_viewer_connected,
+    request_home_gazebo_viewer,
+)
 from cais_spade_llm.ui.refresh import PageRefresh
 from cais_spade_llm.ui.resource_status import ResourceStatusReader
 from cais_spade_llm.ui import recovery_setup as settings
@@ -499,14 +503,19 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                         )
                         try:
                             if await asyncio.to_thread(bridge.simulation_environment_running):
+                                opening_home = request_home_gazebo_viewer(client.ip)
                                 _set_action_banner(
-                                    "warning", "Gazebo stack is already running.", auto_hide_s=4.0
+                                    "info" if opening_home else "warning",
+                                    "Gazebo stack is already running. Opening Gazebo at home..."
+                                    if opening_home else "Gazebo stack is already running.",
+                                    auto_hide_s=4.0,
                                 )
                                 return
                             err = await asyncio.to_thread(bridge.ros2_start, "gazebo_dual")
                             if err:
                                 _set_action_banner("warning", err, auto_hide_s=8.0)
                             else:
+                                request_home_gazebo_viewer(client.ip)
                                 _set_action_banner(
                                     "success",
                                     "Manufacturing Gazebo + MoveIt launched. Waiting for ROS services...",
@@ -765,7 +774,7 @@ def render(bridge: SystemBridge, *, is_active: Callable[[], bool] | None = None)
                     start_btn.set_enabled(can_start)
                     simulation_btn.set_enabled(
                         mode == "simulation"
-                        and not gazebo_running
+                        and (not gazebo_running or home_gazebo_viewer_connected(client.ip))
                         and not gazebo_launch_state["busy"]
                     )
                     stop_btn.set_enabled(
