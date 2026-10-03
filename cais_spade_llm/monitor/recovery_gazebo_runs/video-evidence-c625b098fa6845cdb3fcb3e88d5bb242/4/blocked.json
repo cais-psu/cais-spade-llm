@@ -1,0 +1,4 @@
+{
+  "scenario": "Part slippage (ur5e-3 part slips into ur5e-4\u2019s region)",
+  "reason": "Run stopped before acceptance: {'status': 'stopped', 'reason': 'Resource did not complete negotiated work'}"
+}

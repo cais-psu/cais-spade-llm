@@ -1,0 +1,16 @@
+{
+  "status": "failed",
+  "started_at_unix": 1790974699.8142285,
+  "ended_at_unix": 1790974790.467006,
+  "encoder_finalize_time_sec": 0.2146799859992825,
+  "fps": 15.0,
+  "frames": 1274,
+  "captures": 1050,
+  "repeated_frames": 224,
+  "encoder": "h264_nvenc",
+  "preset": "p1",
+  "capture_cpu_time_sec": 63.607834000000004,
+  "encoder_cpu_time_sec": 18.792942,
+  "max_capture_gap_sec": 0.6169316169998638,
+  "wall_duration_sec": 84.94296689100065
+}

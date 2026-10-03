@@ -57,8 +57,26 @@ class EnvironmentPlant:
         """Bind an immutable calculation context to existing nominal semantics."""
         self.context = context
         self.checker = checker
-        self._has_state_aps = any(ap.get("full", "").startswith(("ap_state/", "sp/"))
-                                 for rule in checker.safety_rules for ap in rule.get("aps", []))
+        state_aps = [ap for rule in checker.safety_rules for ap in rule.get("aps", [])
+                     if ap.get("full", "").startswith(("ap_state/", "sp/"))]
+        self._has_state_aps = bool(state_aps)
+        self._has_state_context = self._has_state_aps
+        for ap in state_aps:
+            parts = ap.get("full", "").split("/")
+            if (len(parts) != 6 or parts[2] != "any" or parts[5] != "any"
+                    or ap.get("source_task_ids") or ap.get("field") or ap.get("value")
+                    or "=" not in parts[4]
+                    or parts[4].partition("=")[0] not in context.models.get(parts[3], {}).get("state_variables", {})):
+                break
+        else:
+            # These APs read owned valuations only. Their future truth cannot
+            # depend on previous task parameters or task identities.
+            overrides = {"outline_expected_start_state", "expected_end_state", "projected_outline_state"}
+            self._has_state_context = self._has_state_aps and (any(
+                overrides.intersection(event["parameter_bindings"])
+                for model in context.models.values() for event in model["events"]
+            ) or any(overrides.intersection(task["parameters"])
+                     for task in context.pending_tasks.values()))
         self.jids = dict(jids)
         self.initial = {"resources": context.snapshot(),
                         "products": deepcopy(context.part_tracker), "contexts": {}}
@@ -128,6 +146,10 @@ class EnvironmentPlant:
         rows = []
         desired = self._desired(part)
         requirements = self.context.requirements.get(part, [])
+        if desired in requirements[1:]:
+            # A later processPlan step must continue beyond the previous
+            # operation's stable collection, while ordered guards still apply.
+            self._extended.add(part)
         desired_items = []
         # Later operation effects may be prerequisites of a release or a DFA
         # obligation. Ordered product guards still govern when they can execute.
@@ -221,7 +243,7 @@ class EnvironmentPlant:
             token = descriptor["resource"]
             resources.update(rid for rid, jid in self.jids.items()
                              if token in {"any", "robot"}
-                             or token == self.checker._resource_short_name(jid))
+                             or token == rid or token == self.checker._resource_short_name(jid))
         return resources
 
     def _unmatched_stutters(self, rule_id: str, rule: dict, budget: Budget) -> bool:
@@ -375,7 +397,7 @@ class EnvironmentPlant:
             if conditions:
                 scope.goals.append({"resource_id": rid, "release": deepcopy(conditions)})
         for action in running:
-            if action.task["parameters"].get("part_name") in scope.products:
+            if (action.task["parameters"].get("part_name") or action.task.get("part_name")) in scope.products:
                 scope.tasks.add(action.key)
         if full:
             scope.terminal_rules = set(scope.rules)
@@ -411,6 +433,7 @@ class EnvironmentPlant:
                 available = [task]
             for bound in available:
                 budget.check()
+                bound = {**bound, "part_name": part}
                 if bound["event_id"] != event["event_id"]:
                     continue
                 key = task_key(bound)
@@ -476,9 +499,14 @@ class EnvironmentPlant:
             name: {key: value for key, value in state["products"][name].items()
                    if key != "last_task"} for name in sorted(scope.products)
         }
+        contexts = state.get("contexts", {})
+        retain_contexts = self._has_state_context or (self._has_state_aps and any(
+            {"outline_expected_start_state", "expected_end_state", "projected_outline_state"}.intersection(params)
+            for params in contexts.values()
+        ))
         key = json.dumps([
             {rid: state["resources"][rid] for rid in sorted(scope.resources)},
-            products, sorted(self.labels(state)), state.get("contexts", {}) if self._has_state_aps else {},
+            products, sorted(self.labels(state)), contexts if retain_contexts else {},
         ], sort_keys=True, separators=(",", ":"))
         self._key_cache[cache_key] = (state, key)
         return key

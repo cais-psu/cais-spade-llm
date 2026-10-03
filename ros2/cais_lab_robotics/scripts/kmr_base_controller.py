@@ -1235,9 +1235,21 @@ def main() -> None:
                 or not self._arm_is_parked()
                 or not client_ready
             ):
+                custody_age = (time.monotonic() - self._transport_custody_monotonic
+                               if self._transport_custody_monotonic is not None else None)
+                self.get_logger().warning(
+                    f"KMR base action rejected: pose_fresh={pose is not None}, "
+                    f"initial_arm_parked={self._initial_arm_parked}, "
+                    f"arm_parked={self._arm_is_parked()}, client_ready={client_ready}, "
+                    f"transport_custody_age_sec={custody_age}"
+                )
                 return False
             with self._lock:
                 if self._active_goal or self._follow_path_active:
+                    self.get_logger().warning(
+                        f"KMR base action rejected: active_goal={self._active_goal}, "
+                        f"follow_path_active={self._follow_path_active}"
+                    )
                     return False
                 self._active_goal = True
                 self._cancel_base_motion_requested = False
@@ -1331,6 +1343,9 @@ def main() -> None:
             except (TypeError, ValueError):
                 return GoalResponse.REJECT
             if not all(base_path_is_clear(self._occupancy_map, (pose,)) for pose in poses):
+                self.get_logger().warning(
+                    f"KMR move_base rejected poses: {poses}; map_available={self._occupancy_map is not None}"
+                )
                 return GoalResponse.REJECT
             if not self._claim_base_action(
                 self.compute_path_client.server_is_ready()

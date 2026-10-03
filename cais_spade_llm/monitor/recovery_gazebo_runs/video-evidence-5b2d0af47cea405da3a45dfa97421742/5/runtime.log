@@ -1,0 +1,166 @@
+[INFO] [1790982254.952801411] [ur5e_1_workflow_controller]: [ur5e-1] Controller initialized (execution_mode=simulation)
+[INFO] [1790982254.953291098] [ur5e_1_workflow_controller]: Waiting for services/actions...
+[INFO] [1790982256.426128873] [ur5e_1_workflow_controller]: All services ready.
+[INFO] [1790982256.531144289] [ur5e_2_workflow_controller]: [ur5e-2] Controller initialized (execution_mode=simulation)
+[INFO] [1790982256.531479386] [ur5e_2_workflow_controller]: Waiting for services/actions...
+[INFO] [1790982256.636236955] [ur5e_2_workflow_controller]: All services ready.
+[INFO] [1790982256.793336092] [ur5e_3_workflow_controller]: [ur5e-3] Controller initialized (execution_mode=simulation)
+[INFO] [1790982256.793859531] [ur5e_3_workflow_controller]: Waiting for services/actions...
+[INFO] [1790982256.854398659] [ur5e_3_workflow_controller]: All services ready.
+[INFO] [1790982257.001170112] [ur5e_4_workflow_controller]: [ur5e-4] Controller initialized (execution_mode=simulation)
+[INFO] [1790982257.001785893] [ur5e_4_workflow_controller]: Waiting for services/actions...
+[INFO] [1790982257.127820906] [ur5e_4_workflow_controller]: All services ready.
+2026-10-02 19:04:21,316 __main__ INFO Recording mutex rule applied into ur5e 3 and ur5e4
+2026-10-02 19:04:36,398 - agent:ur5e-1 - INFO - [Robot] Using prewarmed controller for ur5e-1
+2026-10-02 19:04:36,398 agent:ur5e-1 INFO [Robot] Using prewarmed controller for ur5e-1
+2026-10-02 19:04:36,400 - agent:ur5e-1 - INFO - RobotAgent 'ur5e-1' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,400 agent:ur5e-1 INFO RobotAgent 'ur5e-1' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,425 - agent:ur5e-2 - INFO - [Robot] Using prewarmed controller for ur5e-2
+2026-10-02 19:04:36,425 agent:ur5e-2 INFO [Robot] Using prewarmed controller for ur5e-2
+2026-10-02 19:04:36,425 - agent:ur5e-2 - INFO - RobotAgent 'ur5e-2' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,425 agent:ur5e-2 INFO RobotAgent 'ur5e-2' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,427 - agent:ur5e-3 - INFO - [Robot] Using prewarmed controller for ur5e-3
+2026-10-02 19:04:36,427 agent:ur5e-3 INFO [Robot] Using prewarmed controller for ur5e-3
+2026-10-02 19:04:36,427 - agent:ur5e-3 - INFO - RobotAgent 'ur5e-3' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,427 agent:ur5e-3 INFO RobotAgent 'ur5e-3' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,428 - agent:ur5e-4 - INFO - [Robot] Using prewarmed controller for ur5e-4
+2026-10-02 19:04:36,428 agent:ur5e-4 INFO [Robot] Using prewarmed controller for ur5e-4
+2026-10-02 19:04:36,433 - agent:ur5e-4 - INFO - RobotAgent 'ur5e-4' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,433 agent:ur5e-4 INFO RobotAgent 'ur5e-4' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-02 19:04:36,482 - agent:assembly_board-v1 - INFO - [Product] Loaded geometry for env='gazebo' from cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json
+2026-10-02 19:04:36,482 agent:assembly_board-v1 INFO [Product] Loaded geometry for env='gazebo' from cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json
+2026-10-02 19:04:36,483 - agent:assembly_board-v1 - INFO - ProductAgent 'assembly_board-v1' initialized.
+2026-10-02 19:04:36,483 agent:assembly_board-v1 INFO ProductAgent 'assembly_board-v1' initialized.
+2026-10-02 19:04:36,940 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/5/safety.txt
+2026-10-02 19:04:36,940 agent:cca INFO CentralControllerAgent 'cca' initialized. safety_file=/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/5/safety.txt
+wrote 0 capability rows to /home/jongh/projects/cais-spade-llm/cais_spade_llm/initialization/tools.json
+2026-10-02 19:04:38,611 - agent:ur5e-4 - INFO - [ready] recovery-resource-4@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert'])
+2026-10-02 19:04:38,611 agent:ur5e-4 INFO [ready] recovery-resource-4@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert'])
+2026-10-02 19:04:39,977 - agent:M1 - INFO - [ready] recovery-resource-5@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:39,977 agent:M1 INFO [ready] recovery-resource-5@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:39,977 - agent:ur5e-3 - INFO - [ready] recovery-resource-3@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert'])
+2026-10-02 19:04:39,977 agent:ur5e-3 INFO [ready] recovery-resource-3@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert'])
+2026-10-02 19:04:40,208 - agent:ur5e-2 - INFO - [ready] recovery-resource-2@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home'])
+2026-10-02 19:04:40,208 agent:ur5e-2 INFO [ready] recovery-resource-2@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home'])
+2026-10-02 19:04:40,216 - agent:ur5e-1 - INFO - [ready] recovery-resource-1@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home'])
+2026-10-02 19:04:40,216 agent:ur5e-1 INFO [ready] recovery-resource-1@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home'])
+2026-10-02 19:04:40,217 - agent:M2 - INFO - [ready] recovery-resource-6@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:40,217 agent:M2 INFO [ready] recovery-resource-6@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,236 - agent:KMR - INFO - [ready] recovery-resource-8@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,236 agent:KMR INFO [ready] recovery-resource-8@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,451 - agent:Buffer For Machined parts - INFO - [ready] recovery-resource-10@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,451 agent:Buffer For Machined parts INFO [ready] recovery-resource-10@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,453 - agent:Storage - INFO - [ready] recovery-resource-7@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,453 agent:Storage INFO [ready] recovery-resource-7@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,463 - agent:3D Printing Station - INFO - [ready] recovery-resource-11@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,463 agent:3D Printing Station INFO [ready] recovery-resource-11@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,464 - agent:Conveyor - INFO - [ready] recovery-resource-9@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,464 agent:Conveyor INFO [ready] recovery-resource-9@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,911 - agent:Exit - INFO - [ready] recovery-resource-12@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:42,911 agent:Exit INFO [ready] recovery-resource-12@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:43,504 - agent:cca - INFO - [ready] cca@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:43,504 agent:cca INFO [ready] cca@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:43,505 - agent:cca - INFO - [CCA] setup completed.
+2026-10-02 19:04:43,505 agent:cca INFO [CCA] setup completed.
+2026-10-02 19:04:43,505 - agent:cca - INFO - [SafetyLogic] Loaded NL safety text from /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/5/safety.txt
+2026-10-02 19:04:43,505 agent:cca INFO [SafetyLogic] Loaded NL safety text from /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/5/safety.txt
+2026-10-02 19:04:43,534 - agent:cca - INFO - [SafetyLogic] Loaded structured safety rules from /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-10-02 19:04:43,534 agent:cca INFO [SafetyLogic] Loaded structured safety rules from /home/jongh/projects/cais-spade-llm/cais_spade_llm/safety/cca_safety_logic.json
+2026-10-02 19:04:43,538 - agent:cca - INFO - [CCA] Loaded cached safety logic from cais_spade_llm/safety/cca_safety_logic.json (rules=1).
+2026-10-02 19:04:43,538 agent:cca INFO [CCA] Loaded cached safety logic from cais_spade_llm/safety/cca_safety_logic.json (rules=1).
+2026-10-02 19:04:43,563 - agent:cca - INFO - [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-10-02 19:04:43,563 agent:cca INFO [CCA] _InitCCA completed. Monitor online with 1 rules.
+2026-10-02 19:04:44,037 - agent:assembly_board-v1 - INFO - [ready] assembly_board-v1@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+2026-10-02 19:04:44,037 agent:assembly_board-v1 INFO [ready] assembly_board-v1@localhost (LLM=gpt-5.4 effort=medium, non_function=gpt-5.4 effort=medium, tools=[])
+[INFO] [1790982290.781966094] [KMR_delivery_worker]: [KMR] Controller initialized (execution_mode=simulation)
+[INFO] [1790982290.871549773] [KMR_delivery_worker]: [KMR] probe: part=KET4_Square_4mm; target=M1
+[INFO] [1790982290.872038337] [KMR_delivery_worker]: [KMR] Waiting for services/actions and fresh joint feedback...
+[INFO] [1790982296.252915759] [KMR_delivery_worker]: [KMR] All services/actions ready; fresh joint feedback, startup pose, clearance, and scene identity verified.
+2026-10-02 19:06:48,172 - agent:ur5e-4 - INFO - [Resource] Stored safety_decision=allow for task=environment_1
+2026-10-02 19:06:48,172 agent:ur5e-4 INFO [Resource] Stored safety_decision=allow for task=environment_1
+2026-10-02 19:06:48,522 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_2
+2026-10-02 19:06:48,522 agent:KMR INFO [Resource] Stored safety_decision=allow for task=environment_2
+[INFO] [1790982408.693655585] [KMR_delivery_worker]: [KMR] pick_approach: part=KET4_Square_4mm; target=M1
+[INFO] [1790982409.185372521] [ur5e_4_workflow_controller]: [ComputePickTargets] part=gear_small current=(0.499, -0.500, 1.499) target=(0.440, -0.580, 1.110) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.115 pick_tool0_z_adjustment_m=0.000 travel_z=1.499 pick_z=1.333 tcp_offset_z=-0.218
+[INFO] [1790982418.512123096] [KMR_delivery_worker]: [KMR] pick_approach completed: part=KET4_Square_4mm; task=environment_2
+2026-10-02 19:07:00,712 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_3
+2026-10-02 19:07:00,712 agent:KMR INFO [Resource] Stored safety_decision=allow for task=environment_3
+[INFO] [1790982420.835362979] [KMR_delivery_worker]: [KMR] pick_part: part=KET4_Square_4mm; target=M1
+2026-10-02 19:07:05,540 - agent:ur5e-4 - INFO - [Resource] Stored safety_decision=allow for task=environment_4
+2026-10-02 19:07:05,540 agent:ur5e-4 INFO [Resource] Stored safety_decision=allow for task=environment_4
+[INFO] [1790982425.892675877] [ur5e_4_workflow_controller]: Gripper: CLOSE (position=0.022)
+[INFO] [1790982442.547448967] [KMR_delivery_worker]: [KMR] pick_part completed: part=KET4_Square_4mm; task=environment_3
+2026-10-02 19:09:41,139 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_6
+2026-10-02 19:09:41,139 agent:KMR INFO [Resource] Stored safety_decision=allow for task=environment_6
+[INFO] [1790982581.380671955] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET4_Square_4mm; target=M1
+2026-10-02 19:09:41,415 - agent:ur5e-4 - INFO - [Resource] Stored safety_decision=allow for task=environment_7
+2026-10-02 19:09:41,415 agent:ur5e-4 INFO [Resource] Stored safety_decision=allow for task=environment_7
+[INFO] [1790982597.858882092] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET4_Square_4mm; task=environment_6
+2026-10-02 19:09:58,753 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_8
+2026-10-02 19:09:58,753 agent:KMR INFO [Resource] Stored safety_decision=allow for task=environment_8
+[INFO] [1790982598.975662888] [KMR_delivery_worker]: [KMR] place_approach: part=KET4_Square_4mm; target=M1
+[INFO] [1790982626.222962799] [KMR_delivery_worker]: [KMR] place_approach completed: part=KET4_Square_4mm; task=environment_8
+2026-10-02 19:10:27,183 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_9
+2026-10-02 19:10:27,183 agent:KMR INFO [Resource] Stored safety_decision=allow for task=environment_9
+[INFO] [1790982627.339017550] [KMR_delivery_worker]: [KMR] place_release: part=KET4_Square_4mm; target=M1
+[INFO] [1790982661.823652021] [KMR_delivery_worker]: [KMR] place_release completed: part=KET4_Square_4mm; task=environment_9
+2026-10-02 19:11:36,545 - agent:KMR - INFO - [Resource] Stored safety_decision=allow for task=environment_10
+2026-10-02 19:11:36,545 agent:KMR INFO [Resource] Stored safety_decision=allow for task=environment_10
+[INFO] [1790982696.645994680] [KMR_delivery_worker]: [KMR] move_to_resource: part=KET4_Square_4mm; target=Storage
+2026-10-02 19:11:36,658 - agent:M1 - INFO - [Resource] Stored safety_decision=allow for task=environment_11
+2026-10-02 19:11:36,658 agent:M1 INFO [Resource] Stored safety_decision=allow for task=environment_11
+[INFO] [1790982715.058834836] [KMR_delivery_worker]: [KMR] move_to_resource completed: part=KET4_Square_4mm; task=environment_10
+2026-10-02 19:12:34,488 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_12
+2026-10-02 19:12:34,488 agent:ur5e-1 INFO [Resource] Stored safety_decision=allow for task=environment_12
+[INFO] [1790982755.222511170] [ur5e_1_workflow_controller]: [ComputePickTargets] part=KET4_Square_4mm current=(-4.348, 0.699, 1.278) target=(-4.130, 1.820, 1.060) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.085 pick_tool0_z_adjustment_m=0.000 travel_z=1.303 pick_z=1.303 tcp_offset_z=-0.218
+2026-10-02 19:12:43,857 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_13
+2026-10-02 19:12:43,857 agent:ur5e-1 INFO [Resource] Stored safety_decision=allow for task=environment_13
+[INFO] [1790982764.804664974] [ur5e_1_workflow_controller]: Gripper: CLOSE (position=0.020)
+2026-10-02 19:12:51,260 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_14
+2026-10-02 19:12:51,260 agent:ur5e-1 INFO [Resource] Stored safety_decision=allow for task=environment_14
+2026-10-02 19:13:06,924 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_15
+2026-10-02 19:13:06,924 agent:ur5e-1 INFO [Resource] Stored safety_decision=allow for task=environment_15
+[INFO] [1790982787.599060366] [ur5e_1_workflow_controller]: Gripper: OPEN (position=0.110)
+2026-10-02 19:13:23,889 - agent:ur5e-1 - INFO - [Resource] Stored safety_decision=allow for task=environment_16
+2026-10-02 19:13:23,889 agent:ur5e-1 INFO [Resource] Stored safety_decision=allow for task=environment_16
+2026-10-02 19:13:24,252 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_17
+2026-10-02 19:13:24,252 agent:Conveyor INFO [Resource] Stored safety_decision=allow for task=environment_17
+2026-10-02 19:13:39,475 - agent:Conveyor - INFO - [Resource] Stored safety_decision=allow for task=environment_18
+2026-10-02 19:13:39,475 agent:Conveyor INFO [Resource] Stored safety_decision=allow for task=environment_18
+2026-10-02 19:13:42,553 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_19
+2026-10-02 19:13:42,553 agent:Buffer For Machined parts INFO [Resource] Stored safety_decision=allow for task=environment_19
+2026-10-02 19:13:48,827 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_20
+2026-10-02 19:13:48,827 agent:Buffer For Machined parts INFO [Resource] Stored safety_decision=allow for task=environment_20
+2026-10-02 19:13:51,988 - agent:Buffer For Machined parts - INFO - [Resource] Stored safety_decision=allow for task=environment_21
+2026-10-02 19:13:51,988 agent:Buffer For Machined parts INFO [Resource] Stored safety_decision=allow for task=environment_21
+2026-10-02 19:13:55,998 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_22
+2026-10-02 19:13:55,998 agent:ur5e-3 INFO [Resource] Stored safety_decision=allow for task=environment_22
+[INFO] [1790982838.471084591] [ur5e_3_workflow_controller]: [ComputePickTargets] part=KET4_Square_4mm current=(0.401, 0.202, 1.499) target=(-0.320, 0.500, 1.017) source=live_detection source_stl=<none> surface_clearance=0.000 pick_tcp_z=1.070 pick_tool0_z_adjustment_m=0.000 travel_z=1.499 pick_z=1.288 tcp_offset_z=-0.218
+2026-10-02 19:14:12,885 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_23
+2026-10-02 19:14:12,885 agent:ur5e-3 INFO [Resource] Stored safety_decision=allow for task=environment_23
+[INFO] [1790982854.085162903] [ur5e_3_workflow_controller]: Gripper: CLOSE (position=0.020)
+2026-10-02 19:14:33,725 - agent:ur5e-4 - INFO - [Resource] Stored safety_decision=allow for task=environment_26
+2026-10-02 19:14:33,725 agent:ur5e-4 INFO [Resource] Stored safety_decision=allow for task=environment_26
+[INFO] [1790982876.037985793] [ur5e_4_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790982882.243967388] [ur5e_4_workflow_controller]: snap_to_slot stabilized gear_small at (0.029, 0.145, 1.039)
+2026-10-02 19:14:46,633 - agent:ur5e-4 - INFO - [Resource] Stored safety_decision=allow for task=environment_29
+2026-10-02 19:14:46,633 agent:ur5e-4 INFO [Resource] Stored safety_decision=allow for task=environment_29
+2026-10-02 19:15:44,300 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_31
+2026-10-02 19:15:44,300 agent:ur5e-3 INFO [Resource] Stored safety_decision=allow for task=environment_31
+2026-10-02 19:15:55,131 __main__ INFO Observed CCA mutex enforcement and withdrawal; capturing final condition
+2026-10-02 19:15:55,114 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_32
+2026-10-02 19:15:55,114 agent:ur5e-3 INFO [Resource] Stored safety_decision=allow for task=environment_32
+[INFO] [1790982955.955595856] [ur5e_3_workflow_controller]: Gripper: OPEN (position=0.110)
+[INFO] [1790982959.273382231] [ur5e_3_workflow_controller]: snap_to_slot stabilized KET4_Square_4mm at (-0.001, -0.005, 1.024)
+2026-10-02 19:16:01,464 - agent:ur5e-3 - INFO - [Resource] Stored safety_decision=allow for task=environment_33
+2026-10-02 19:16:01,464 agent:ur5e-3 INFO [Resource] Stored safety_decision=allow for task=environment_33
+2026-10-02 19:17:34,992 - agent:ur5e-1 - INFO - [Robot] Controller shutdown complete for ur5e-1
+2026-10-02 19:17:34,992 agent:ur5e-1 INFO [Robot] Controller shutdown complete for ur5e-1
+2026-10-02 19:17:35,057 - agent:ur5e-2 - INFO - [Robot] Controller shutdown complete for ur5e-2
+2026-10-02 19:17:35,057 agent:ur5e-2 INFO [Robot] Controller shutdown complete for ur5e-2
+2026-10-02 19:17:35,116 - agent:ur5e-3 - INFO - [Robot] Controller shutdown complete for ur5e-3
+2026-10-02 19:17:35,116 agent:ur5e-3 INFO [Robot] Controller shutdown complete for ur5e-3
+2026-10-02 19:17:35,159 - agent:ur5e-4 - INFO - [Robot] Controller shutdown complete for ur5e-4
+2026-10-02 19:17:35,159 agent:ur5e-4 INFO [Robot] Controller shutdown complete for ur5e-4
+2026-10-02 19:17:42,605 __main__ INFO Validated /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/videos-20x/mutex rule applied into ur5e 3 and ur5e4-20x.mp4
+2026-10-02 19:17:42,611 __main__ INFO Results: /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/results.json

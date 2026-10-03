@@ -1,0 +1,129 @@
+{
+  "run_id": "317845b2cd0d4572b70f43324fc8611a",
+  "observations": {
+    "ur5e-1": {
+      "joint_names": [
+        "ur5e_1_shoulder_pan_joint",
+        "ur5e_1_shoulder_lift_joint",
+        "ur5e_1_elbow_joint",
+        "ur5e_1_wrist_1_joint",
+        "ur5e_1_wrist_2_joint",
+        "ur5e_1_wrist_3_joint"
+      ],
+      "target_positions": [
+        2.232023449619252,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        -0.9094336327986401
+      ],
+      "observed_positions": [
+        2.2319165835258836,
+        -1.5960204678665393,
+        1.6208341135383453,
+        -1.5968298343571428,
+        -1.5688363910441017,
+        -0.9095410971480017
+      ],
+      "missing_joints": [],
+      "fresh_stable": true,
+      "tolerance_rad": 0.02,
+      "observed_at_unix": 1790978299.9518578
+    },
+    "ur5e-2": {
+      "joint_names": [
+        "ur5e_2_shoulder_pan_joint",
+        "ur5e_2_shoulder_lift_joint",
+        "ur5e_2_elbow_joint",
+        "ur5e_2_wrist_1_joint",
+        "ur5e_2_wrist_2_joint",
+        "ur5e_2_wrist_3_joint"
+      ],
+      "target_positions": [
+        2.232023449619252,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        -0.9094336327986401
+      ],
+      "observed_positions": [
+        2.2319165730011186,
+        -1.59602051408293,
+        1.6208341203969372,
+        -1.5968298416822406,
+        -1.5688364292855455,
+        -0.9095411047762819
+      ],
+      "missing_joints": [],
+      "fresh_stable": true,
+      "tolerance_rad": 0.02,
+      "observed_at_unix": 1790978299.9519103
+    },
+    "ur5e-3": {
+      "joint_names": [
+        "ur5e_3_shoulder_pan_joint",
+        "ur5e_3_shoulder_lift_joint",
+        "ur5e_3_elbow_joint",
+        "ur5e_3_wrist_1_joint",
+        "ur5e_3_wrist_2_joint",
+        "ur5e_3_wrist_3_joint"
+      ],
+      "target_positions": [
+        2.232023449619252,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        2.232159020791153
+      ],
+      "observed_positions": [
+        2.2319062640671916,
+        -1.5960264300001457,
+        1.6208332806663366,
+        -1.596827743373145,
+        -1.568828228045392,
+        2.2320419532146696
+      ],
+      "missing_joints": [],
+      "fresh_stable": true,
+      "tolerance_rad": 0.02,
+      "observed_at_unix": 1790978299.95194
+    },
+    "ur5e-4": {
+      "joint_names": [
+        "ur5e_4_shoulder_pan_joint",
+        "ur5e_4_shoulder_lift_joint",
+        "ur5e_4_elbow_joint",
+        "ur5e_4_wrist_1_joint",
+        "ur5e_4_wrist_2_joint",
+        "ur5e_4_wrist_3_joint"
+      ],
+      "target_positions": [
+        -0.2705423585528064,
+        -1.5960064086763361,
+        1.615863605277993,
+        -1.592172956911188,
+        -1.5690505595531368,
+        2.232159020791153
+      ],
+      "observed_positions": [
+        -0.2706591325423249,
+        -1.5960262114324626,
+        1.6208333086435793,
+        -1.5968278479964289,
+        -1.5688284195378381,
+        2.2320423544469508
+      ],
+      "missing_joints": [],
+      "fresh_stable": true,
+      "tolerance_rad": 0.02,
+      "observed_at_unix": 1790978299.9519677
+    }
+  },
+  "composition_budget": {
+    "max_states": 200000,
+    "seconds": 120.0
+  }
+}

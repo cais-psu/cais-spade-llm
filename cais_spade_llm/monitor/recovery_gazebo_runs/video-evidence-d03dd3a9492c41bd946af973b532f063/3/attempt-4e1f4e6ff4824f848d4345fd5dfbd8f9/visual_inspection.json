@@ -1,0 +1,8 @@
+{
+  "status": "accepted",
+  "captions_readable": true,
+  "event_visible": true,
+  "notes": "M1 outline and stopped condition visible; incomplete operation at 0.5 confirmed by native workholding evidence.",
+  "frame": "visual-inspection-event.png",
+  "sha256": "a49491e710de8445110eaf65267e289df1fd2b5013188869e977a53bc2355dd4"
+}

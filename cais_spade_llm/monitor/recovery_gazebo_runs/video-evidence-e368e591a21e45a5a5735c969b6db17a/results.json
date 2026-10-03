@@ -1,0 +1,14 @@
+{
+  "videos": [],
+  "blocked": [
+    {
+      "scenario": "Machining breakdown during part processing (M1)",
+      "reason": "ur5e-1 has no measured stable startup home"
+    },
+    {
+      "scenario": "Part slippage (ur5e-3 part slips into ur5e-4\u2019s region)",
+      "reason": "ur5e-1 preparation failed: tf not ready for world -> ur5e_1_tool0"
+    }
+  ],
+  "output_directory": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/videos-20x"
+}

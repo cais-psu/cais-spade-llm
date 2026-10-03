@@ -1,0 +1,280 @@
+{
+  "observed_at_unix": 1790982144.0020366,
+  "run_id": "7312a54970a5416d9e6df8336f874fb0",
+  "values": {
+    "ur5e-1": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "home",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": "in_transit",
+      "part_location": "Conveyor"
+    },
+    "ur5e-2": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "home",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": null,
+      "part_location": null
+    },
+    "ur5e-3": {
+      "resource_state": "picked",
+      "held_part": "KET4_Square_4mm",
+      "resource_location": "Buffer For Machined parts",
+      "task_ctx.origin_resource_location": "Buffer For Machined parts",
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": "KET4_Square_4mm",
+      "part_state": "in_gripper",
+      "part_location": "ur5e-3"
+    },
+    "ur5e-4": {
+      "resource_state": "placed",
+      "held_part": null,
+      "resource_location": "assembly_board-v1",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": "assembled",
+      "part_location": "assembly_board-v1"
+    },
+    "M1": {
+      "resource_state": "idle",
+      "part_name": null,
+      "staging_part": null
+    },
+    "M2": {
+      "resource_state": "idle",
+      "part_name": null,
+      "staging_part": null
+    },
+    "Storage": {
+      "inventory.gear_small": false,
+      "inventory.gear_medium": false,
+      "inventory.gear_large": false,
+      "inventory.KET4_Square_4mm": false,
+      "inventory.KET8_Square_8mm": true,
+      "inventory.KET12_Square_12mm": true,
+      "inventory.KET16_Square_16mm": true,
+      "inventory.RGOCG4-50_Round_4mm": true,
+      "inventory.RGOCG8-50_8mm": true,
+      "inventory.RGOCG12-50_12mm": true,
+      "inventory.RGOCG16-50_16mm": true,
+      "inventory.assembly_board-v1": false
+    },
+    "KMR": {
+      "resource_state": "idle",
+      "held_part": null,
+      "approached_part": null,
+      "resource_location": "Storage"
+    },
+    "Conveyor": {
+      "belt_stopped": true,
+      "loading_reserved_by": null,
+      "part_location.gear_small": null,
+      "part_location.gear_medium": null,
+      "part_location.gear_large": null,
+      "part_location.KET4_Square_4mm": null,
+      "part_location.KET8_Square_8mm": null,
+      "part_location.KET12_Square_12mm": null,
+      "part_location.KET16_Square_16mm": null,
+      "part_location.RGOCG4-50_Round_4mm": null,
+      "part_location.RGOCG8-50_8mm": null,
+      "part_location.RGOCG12-50_12mm": null,
+      "part_location.RGOCG16-50_16mm": null,
+      "part_location.assembly_board-v1": null,
+      "part_order.gear_small": null,
+      "part_order.gear_medium": null,
+      "part_order.gear_large": null,
+      "part_order.KET4_Square_4mm": null,
+      "part_order.KET8_Square_8mm": null,
+      "part_order.KET12_Square_12mm": null,
+      "part_order.KET16_Square_16mm": null,
+      "part_order.RGOCG4-50_Round_4mm": null,
+      "part_order.RGOCG8-50_8mm": null,
+      "part_order.RGOCG12-50_12mm": null,
+      "part_order.RGOCG16-50_16mm": null,
+      "part_order.assembly_board-v1": null
+    },
+    "Buffer For Machined parts": {
+      "zone_1_part": null,
+      "zone_2_part": null,
+      "zone_3_part": null,
+      "zone_4_part": null
+    },
+    "3D Printing Station": {
+      "output.gear_small": false,
+      "output.gear_medium": true,
+      "output.gear_large": true,
+      "output.KET4_Square_4mm": false,
+      "output.KET8_Square_8mm": false,
+      "output.KET12_Square_12mm": false,
+      "output.KET16_Square_16mm": false,
+      "output.RGOCG4-50_Round_4mm": false,
+      "output.RGOCG8-50_8mm": false,
+      "output.RGOCG12-50_12mm": false,
+      "output.RGOCG16-50_16mm": false,
+      "output.assembly_board-v1": false,
+      "resource_state": "completed"
+    },
+    "Exit": {
+      "resource_state": "empty",
+      "part_name": null,
+      "product_location": "assembly_board-v1"
+    }
+  },
+  "fault": {
+    "scenario": "Conveyor breakdown",
+    "resource_id": "Conveyor",
+    "checkpoint": "after_M1_pick_before_release",
+    "affected_resources": [
+      "Conveyor"
+    ],
+    "status": "disabled",
+    "run_active": true,
+    "run_id": "7312a54970a5416d9e6df8336f874fb0",
+    "revision": 0,
+    "ready": false,
+    "evidence": {},
+    "visual": {}
+  },
+  "outcome": {
+    "status": "executing"
+  },
+  "stopped": false,
+  "diagnostic_cca_bypass": false,
+  "pending_tasks": [
+    {
+      "resource_id": "ur5e-4",
+      "event_id": 77,
+      "event_name": "move_home",
+      "parameters": {
+        "resource_id": "ur5e-4",
+        "home_available": true
+      },
+      "offer_request_id": "f04f1007c6be4859862a920687f5e0b7",
+      "offer_resource_revisions": {
+        "ur5e-1": {
+          "revision": 6,
+          "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+        },
+        "ur5e-2": {
+          "revision": 1,
+          "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+        },
+        "ur5e-3": {
+          "revision": 3,
+          "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+        },
+        "ur5e-4": {
+          "revision": 5,
+          "model": "61b5dca291e2e73a2ec7ca2b3b73760b384b41727eaffa79815826c924065b78"
+        },
+        "M1": {
+          "revision": 3,
+          "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+        },
+        "M2": {
+          "revision": 0,
+          "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+        },
+        "Storage": {
+          "revision": 1,
+          "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+        },
+        "KMR": {
+          "revision": 6,
+          "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+        },
+        "Conveyor": {
+          "revision": 3,
+          "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+        },
+        "Buffer For Machined parts": {
+          "revision": 5,
+          "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+        },
+        "3D Printing Station": {
+          "revision": 1,
+          "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+        },
+        "Exit": {
+          "revision": 0,
+          "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+        }
+      },
+      "part_name": "KET4_Square_4mm",
+      "composition_goal_key": "resource:ur5e-4",
+      "task_id": "environment_29",
+      "run_id": "7312a54970a5416d9e6df8336f874fb0",
+      "revision": 24,
+      "resource_revisions": {
+        "ur5e-1": {
+          "revision": 6,
+          "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+        },
+        "ur5e-2": {
+          "revision": 1,
+          "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+        },
+        "ur5e-3": {
+          "revision": 3,
+          "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+        },
+        "ur5e-4": {
+          "revision": 5,
+          "model": "61b5dca291e2e73a2ec7ca2b3b73760b384b41727eaffa79815826c924065b78"
+        },
+        "M1": {
+          "revision": 3,
+          "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+        },
+        "M2": {
+          "revision": 0,
+          "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+        },
+        "Storage": {
+          "revision": 1,
+          "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+        },
+        "KMR": {
+          "revision": 6,
+          "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+        },
+        "Conveyor": {
+          "revision": 3,
+          "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+        },
+        "Buffer For Machined parts": {
+          "revision": 5,
+          "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+        },
+        "3D Printing Station": {
+          "revision": 1,
+          "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+        },
+        "Exit": {
+          "revision": 0,
+          "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+        }
+      },
+      "participant_revisions": {
+        "ur5e-4": {
+          "revision": 5,
+          "model": "61b5dca291e2e73a2ec7ca2b3b73760b384b41727eaffa79815826c924065b78"
+        }
+      },
+      "reservations": [
+        "resource:ur5e-4",
+        "workspace:assembly_board-v1"
+      ],
+      "evidence": "resource"
+    }
+  ],
+  "unavailable_resources": [],
+  "run_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/environment_runs/latest"
+}

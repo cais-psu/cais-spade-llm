@@ -1,0 +1,12 @@
+{
+  "status": "accepted",
+  "captions_readable": true,
+  "event_visible": true,
+  "inspected_frames": [
+    "visual-inspection-0.png",
+    "visual-inspection-1.png",
+    "visual-inspection-2.png"
+  ],
+  "notes": "Both robots and assembly_board-v1 are visible. ur5e-3 remains outside during ur5e-4 occupancy, then approaches the board after ur5e-4 withdrawal. Native CCA hold and allow decisions confirm the sequence.",
+  "sha256": "240fb2932293d9fe5793389dad68a9f1cb1bd2d651c7b4f4e700f6083d448b4b"
+}

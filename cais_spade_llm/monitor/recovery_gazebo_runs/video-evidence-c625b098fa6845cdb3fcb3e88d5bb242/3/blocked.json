@@ -1,0 +1,4 @@
+{
+  "scenario": "Machining breakdown during part processing (M1)",
+  "reason": "Run stopped before acceptance: {'status': 'stopped', 'reason': 'Resource did not complete negotiated work'}"
+}

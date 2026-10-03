@@ -1,0 +1,10 @@
+{
+  "started_at_unix": 1790972421.6428857,
+  "size": [
+    1908,
+    998
+  ],
+  "encoder": "h264_nvenc",
+  "initial_frame_contrast": 107.0,
+  "initial_frame": "first_frame.png"
+}

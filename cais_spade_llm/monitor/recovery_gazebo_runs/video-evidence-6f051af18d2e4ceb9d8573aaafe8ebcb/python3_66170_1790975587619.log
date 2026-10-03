@@ -1,0 +1,2 @@
+[INFO] [1790975610.912853427] [KMR_base_controller]: KMR initialized at the configured parked arm position
+[WARN] [1790975692.991761186] [KMR_base_controller]: KMR move_base rejected obstructed poses: ((-4.7, 2.2, 1.5707963267948966),)

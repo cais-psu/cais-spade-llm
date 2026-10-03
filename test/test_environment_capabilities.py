@@ -1900,6 +1900,26 @@ def test_intake_timeout_is_reported_and_late_reply_window_closed(inputs, monkeyp
 
 
 
+def test_resource_home_negotiation_preserves_uncompleted_part_operation(inputs, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            trim = deepcopy(runtime.context.requirements[SQUARE][0])
+            assembly = runtime.context.requirements[SQUARE][-1]
+            runtime.operation_goals[SQUARE] = trim
+            runtime.retained_paths = {}
+            monkeypatch.setattr(environment_runtime, "explore", AsyncMock(return_value={"status": "blocked"}))
+            loop = environment_runtime.EnvironmentProductLoop()
+            loop.set_agent(driver.agent)
+            await loop._negotiate_goal(runtime, "resource:KMR", SQUARE, assembly,
+                                       {"resource_id": "KMR", "values": {"resource_location": "Storage"}})
+            assert runtime.operation_goals[SQUARE] == trim
+            assert not matches_requirement(runtime.context.part_tracker[SQUARE], trim)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("home_completed", [False, True])
 def test_retained_assembly_path_reuses_home_ack_from_another_part(inputs, home_completed):
     from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentProductLoop
@@ -2888,6 +2908,54 @@ def test_composition_atomic_grants_and_stale_snapshot(inputs, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_held_goal_revision_changes_after_admission_without_acknowledgement(inputs):
+    from cais_spade_llm.recovery_framework.environment_runtime import _hold_revision
+
+    runtime = _composition_runtime(_composition_assembly_context(inputs))
+    runtime.admission = SimpleNamespace(epoch=4)
+    before = _hold_revision(runtime)
+    values = runtime.context.snapshot()
+    runtime.admission.epoch += 1
+    assert _hold_revision(runtime) != before
+    assert runtime.context.snapshot() == values
+
+
+@pytest.mark.parametrize("occupied,expected", [(True, "held"), (False, "inconclusive")])
+def test_direct_mutex_violation_remains_held_with_unavailable_continuation(inputs, monkeypatch,
+                                                                         occupied, expected):
+    from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    original = EnvironmentPlant._part_templates
+
+    def unavailable(self, part, budget):
+        rows = original(self, part, budget)
+        self.missing_capabilities.add("3D Printing Station:85:bindings")
+        return rows
+
+    monkeypatch.setattr(EnvironmentPlant, "_part_templates", unavailable)
+
+    async def scenario():
+        context = _composition_assembly_context(inputs)
+        checker = _composition_monitors()
+        if occupied:
+            context.resources["ur5e-4"].valuation["resource_location"] = "assembly_board-v1"
+        admission = EnvironmentAdmission(_composition_runtime(context), checker)
+        task = context.prepare(_composition_task(context, SQUARE, "place_approach"), simulated=True)
+        result = await admission.check(task, commit=True)
+        assert result["status"] == expected, result
+        assert not admission.grants
+        assert any(row["kind"] == "unavailable_behavior" for row in result["dependency_reasons"])
+        violations = [row for row in result["dependency_reasons"]
+                      if row["kind"] == "specification_violation"]
+        assert bool(violations) is occupied
+        if occupied:
+            assert violations[0]["transitions"][0]["rule_id"] == "workspace_mutex"
+            assert violations[0]["transitions"][0]["reason"] == "accepting_state_unreachable"
+
+    asyncio.run(scenario())
+
+
 def test_composition_ack_history_cache_and_batch_rollover(inputs):
     from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
 
@@ -2999,7 +3067,142 @@ def test_local_selector_follows_capacity_chain_before_composition(inputs, full_b
     assert not context.pending_tasks and not context.reservations
 
 
-def test_local_holds_release_only_unstarted_candidate_reservations(inputs, monkeypatch):
+def test_local_selector_retains_assembly_continuation_from_completed_M1(inputs):
+    from cais_spade_llm.agents.central_controller.local_composition import Budget, analyze
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    context = EnvironmentProductContext(**inputs)
+    for actor in context.resources.values():
+        actor.executors = {name: lambda task: None for name in actor.model["local_event_alphabet"]}
+        if actor.resource_id in {"ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"}:
+            actor.valuation["resource_location"] = "home"
+    context.resources["Storage"].valuation[f"inventory.{SQUARE}"] = False
+    context.resources["M1"].valuation.update(part_name=SQUARE, resource_state="completed")
+    context.part_tracker[SQUARE].update(location="M1", state="completed",
+                                      processCompleted=[{"process": "trim", "result": "square"}])
+    goal = context.requirements[SQUARE][1]
+    task = next(task for task in candidates(context.models["ur5e-1"], context.snapshot(), SQUARE,
+                                           goal, context.requirements[SQUARE])
+                if task["event_name"] == "pick_approach"
+                and task["parameters"]["origin_resource_location"] == "M1")
+    checker = OnlineSafetyMonitor({}, [])
+    plant = EnvironmentPlant(context.calculation_snapshot(), checker,
+                             {rid: rid + "@localhost" for rid in context.models}, {SQUARE: goal})
+    candidate = plant.action(task)
+    plant.proposed = candidate
+    scope = plant.select(candidate, (), checker, Budget(), full=False)
+    assert {"M1", "Conveyor", BUFFER, "ur5e-3"} <= scope.resources
+    assert any(row["event_name"] == "place_insert" and row["resource_id"] == "ur5e-3"
+               for row in scope.task_bindings.values())
+    assert scope.goals[0] == {"part_name": SQUARE, "operation": goal}
+    result = analyze(plant, checker, {}, candidate, (), budget=Budget(seconds=20))
+    assert result.status == "allowed", result.evidence("fixture")
+
+
+def test_completed_M1_pickup_retains_admitted_withdrawal_task_binding(inputs):
+    from cais_spade_llm.agents.central_controller.local_composition import Budget, analyze
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    context = _composition_assembly_context(inputs)
+    context.permitted_resources = [rid for rid in context.models if rid not in {"M2", "ur5e-2"}]
+    for actor in context.resources.values():
+        actor.executors = {name: lambda task: None for name in actor.model["local_event_alphabet"]}
+        if actor.resource_id in {"ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4"}:
+            actor.valuation.update(resource_state="idle", held_part=None, resource_location="home",
+                                   part_state=None, part_location=None)
+            actor.valuation.update({"task_ctx.part_name": None, "task_ctx.origin_resource_location": None,
+                                    "task_ctx.destination_location": None})
+    context.resources["M1"].valuation.update(part_name=SQUARE, resource_state="completed")
+    context.part_tracker[SQUARE].update(location="M1", state="completed",
+                                      processCompleted=[{"process": "trim", "result": "square"}])
+    context.resources["ur5e-4"].valuation.update(resource_state="placed", resource_location="assembly_board-v1",
+                                               part_state="assembled", part_location="assembly_board-v1")
+    context.part_tracker["gear_small"].update(location="assembly_board-v1", state="assembled",
+                                            processCompleted=context.part_tracker["gear_small"]["processCompleted"]
+                                            + deepcopy(context.requirements["gear_small"][-1]["processesToComplete"]))
+    goal = context.requirements[SQUARE][1]
+    task = next(task for task in candidates(context.models["ur5e-1"], context.snapshot(), SQUARE,
+                                           goal, context.requirements[SQUARE])
+                if task["event_name"] == "pick_approach"
+                and task["parameters"]["origin_resource_location"] == "M1")
+    task["part_name"] = SQUARE
+    home = next(task for task in candidates(context.models["ur5e-4"], context.snapshot(), SQUARE,
+                                           goal, context.requirements[SQUARE])
+                if task["event_name"] == "move_home")
+    home["part_name"] = SQUARE
+    assert "part_name" not in home["parameters"]
+    checker = _composition_monitors(ordering=False)
+    plant = EnvironmentPlant(context.calculation_snapshot(), checker,
+                             {rid: rid + "@localhost" for rid in context.models}, {SQUARE: goal})
+    candidate, withdrawal = plant.action(task), plant.action(home)
+    plant.proposed = candidate
+    result = analyze(plant, checker, dict(checker.current_states), candidate, (withdrawal,),
+                     budget=Budget(seconds=30))
+    assert withdrawal.key in result.scope.tasks
+    assert result.status == "allowed", result.evidence("fixture")
+
+
+@pytest.mark.parametrize("dependency", [None, "product", "context", "task_ids", "override"])
+def test_composition_occupancy_keys_retain_only_required_task_context(inputs, dependency):
+    from cais_spade_llm.agents.central_controller.local_composition import Scope
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    context = _composition_assembly_context(inputs)
+    ap = {"label": "ap4", "full": "ap_state/assembly/any/ur5e-4/resource_location=assembly_board-v1/any"}
+    if dependency == "product":
+        ap["full"] = ap["full"].replace("/any/ur5e-4", "/gear_small/ur5e-4")
+    elif dependency == "context":
+        ap["full"] = ap["full"].removesuffix("/any") + "/part_name=gear_small"
+    elif dependency == "task_ids":
+        ap["source_task_ids"] = ["pickup-4"]
+    checker = OnlineSafetyMonitor({}, [{"id": "workspace_mutex", "aps": [ap]}])
+    plant = EnvironmentPlant(context.calculation_snapshot(), checker,
+                             {rid: rid + "@localhost" for rid in context.models}, {})
+    first, second = deepcopy(plant.initial), deepcopy(plant.initial)
+    first["contexts"] = {"ur5e-4": {"task_id": "pickup-4", "part_name": "gear_small"}}
+    second["contexts"] = {"ur5e-4": {"task_id": "other-pickup", "part_name": "gear_small"}}
+    if dependency == "override":
+        first["contexts"]["ur5e-4"]["expected_end_state"] = {"resource_location": "home"}
+        second["contexts"]["ur5e-4"]["expected_end_state"] = {"resource_location": "Storage"}
+    scope = Scope(products={SQUARE, "gear_small"}, resources=set(context.models))
+    assert (plant.key(first, scope) == plant.key(second, scope)) is (dependency is None)
+    assert plant._has_state_context is (dependency not in {None, "override"})
+
+
+def test_composition_conveyor_outcomes_retain_the_exact_part_binding(inputs):
+    from cais_spade_llm.agents.central_controller.local_composition import Budget
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+    from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
+
+    context = EnvironmentProductContext(**inputs)
+    for actor in context.resources.values():
+        actor.executors = {name: lambda task: None for name in actor.model["local_event_alphabet"]}
+    context.resources["Storage"].valuation[f"inventory.{SQUARE}"] = False
+    context.resources["Conveyor"].valuation.update({
+        f"part_location.{SQUARE}": "loading_position_1", f"part_order.{SQUARE}": 0})
+    context.part_tracker[SQUARE].update(location="Conveyor", state="ready",
+                                      processCompleted=[{"process": "trim", "result": "square"}])
+    goal = context.requirements[SQUARE][1]
+    task = next(candidates(context.models["Conveyor"], context.snapshot(), SQUARE,
+                           goal, context.requirements[SQUARE]))
+    task["part_name"] = SQUARE
+    checker = OnlineSafetyMonitor({}, [])
+    plant = EnvironmentPlant(context.calculation_snapshot(), checker,
+                             {rid: rid + "@localhost" for rid in context.models}, {SQUARE: goal})
+    candidate = plant.action(task)
+    plant.proposed = candidate
+    scope = plant.select(candidate, (), checker, Budget(), full=False)
+    outcomes = [action for action in plant.actions(plant.initial, scope, Budget())
+                if action.task["event_name"] == "advance_conveyor"]
+    assert outcomes
+    assert all(action.task["part_name"] == SQUARE for action in outcomes)
+    assert any(action.task["parameters"]["delivered_part"] == SQUARE for action in outcomes)
+
+
+@pytest.mark.parametrize("reason", ["time_limit", "stale_snapshot"])
+def test_local_holds_release_only_unstarted_candidate_reservations(inputs, monkeypatch, reason):
     from cais_spade_llm.recovery_framework import environment_runtime
 
     async def scenario():
@@ -3023,7 +3226,7 @@ def test_local_holds_release_only_unstarted_candidate_reservations(inputs, monke
 
         monkeypatch.setattr(environment_runtime, "send_agent_message", send)
         decision = {"ok": True, "decisions": {
-            tasks[0]["task_id"]: {"status": "inconclusive", "reason": "time_limit"},
+            tasks[0]["task_id"]: {"status": "inconclusive", "reason": reason},
             tasks[1]["task_id"]: {"status": "allowed"},
         }}
         approval = {"request_id": "batch", "tasks": tasks, "new_admissions": {tasks[1]["task_id"]},
@@ -3034,6 +3237,35 @@ def test_local_holds_release_only_unstarted_candidate_reservations(inputs, monke
         assert context.pending_for(tasks[0]["task_id"]) is None
         assert context.pending_for(tasks[1]["task_id"]) == tasks[1]
         assert all(owner != tasks[0]["task_id"] for owner in context.reservations.values())
+        held_revision = runtime.held_at_revision[SQUARE]
+        assert (held_revision == "") is (reason == "stale_snapshot")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("reason", ["time_limit", "stale_snapshot"])
+def test_resource_start_hold_rechecks_only_stale_composition(inputs, reason):
+    from cais_spade_llm.recovery_framework import environment_runtime
+
+    async def scenario():
+        context = _composition_assembly_context(inputs)
+        runtime = _composition_runtime(context)
+        runtime.diagnostic_cca_bypass = False
+        runtime.held_tasks = {}
+        runtime.held_at_revision = {}
+        runtime.queue_save = Mock()
+        task = context.prepare(_composition_task(context, "gear_small", "place_approach"), simulated=True)
+        context.negotiations.append({"kind": "local_composition", "task_id": task["task_id"],
+                                     "status": "inconclusive", "reason": reason})
+        packet = message("product@localhost", "ack", {"task_id": task["task_id"], "status": "held"})
+        packet.sender = runtime.jids[task["resource_id"]]
+        loop = environment_runtime.EnvironmentProductLoop()
+        loop.agent = SimpleNamespace(cca_jid="cca@localhost")
+        loop._deferred_acks = []
+        loop.receive = AsyncMock(return_value=packet)
+        assert await loop._collect_acknowledgement(runtime)
+        assert context.pending_for(task["task_id"]) is None
+        assert (runtime.held_at_revision["gear_small"] == "") is (reason == "stale_snapshot")
 
     asyncio.run(scenario())
 

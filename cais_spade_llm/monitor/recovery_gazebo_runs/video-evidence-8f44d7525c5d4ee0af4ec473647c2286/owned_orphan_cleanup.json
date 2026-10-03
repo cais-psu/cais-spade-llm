@@ -1,0 +1,25 @@
+{
+  "launch_log": "cais_spade_llm/log/ros/2026-10-02-16-43-27-742292-Jonghan-48733/launch.log",
+  "processes": [
+    {
+      "pid": 48774,
+      "command": "/opt/ros/humble/lib/robot_state_publisher/robot_state_publisher --ros-args -r __node:=robot_state_publisher --params-file /tmp/launch_params_b1oei0v1 ",
+      "launch_evidence": "1790973809.8501730 [INFO] [robot_state_publisher-2]: process started with pid [48774]"
+    },
+    {
+      "pid": 48784,
+      "command": "python3 /home/jongh/ros2_ws/install/cais_lab_robotics/lib/cais_lab_robotics/kmr_base_controller.py --ros-args -r __node:=KMR_base_controller --params-file /tmp/launch_params_eydc8rrr ",
+      "launch_evidence": "1790973809.8504653 [INFO] [kmr_base_controller.py-7]: process started with pid [48784]"
+    },
+    {
+      "pid": 48786,
+      "command": "python3 /home/jongh/ros2_ws/install/cais_lab_robotics/lib/cais_lab_robotics/simulation_performance.py --ros-args -r __node:=simulation_performance --params-file /tmp/launch_params_zfrdky5e ",
+      "launch_evidence": "1790973809.8505142 [INFO] [simulation_performance.py-8]: process started with pid [48786]"
+    },
+    {
+      "pid": 49118,
+      "command": "/opt/ros/humble/lib/moveit_ros_move_group/move_group --ros-args --params-file /tmp/launch_params_uz4rkt9o ",
+      "launch_evidence": "1790973821.2470222 [INFO] [move_group-10]: process started with pid [49118]"
+    }
+  ]
+}

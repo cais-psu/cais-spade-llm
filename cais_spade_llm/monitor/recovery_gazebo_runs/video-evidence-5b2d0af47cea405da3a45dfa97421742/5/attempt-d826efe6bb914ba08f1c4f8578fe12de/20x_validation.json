@@ -1,0 +1,1290 @@
+{
+  "validated": true,
+  "run_id": "03e8ba43b43c4af6b112274a39384f28",
+  "rule": {
+    "id": "workspace_mutex",
+    "raw_text": "ur5e-3 and ur5e-4 must not be in the assembly_board-v1 destination area at the same time.",
+    "constraint_type": "mutex",
+    "process": "assembly",
+    "product": "any",
+    "resources": [
+      "ur5e-3",
+      "ur5e-4"
+    ],
+    "ltlf": "G !((ap3 | ap5) & (ap4 | ap6))",
+    "aps": [
+      {
+        "label": "ap3",
+        "full": "ap_state/assembly/any/ur5e-3/resource_location=assembly_board-v1/any"
+      },
+      {
+        "label": "ap4",
+        "full": "ap_state/assembly/any/ur5e-4/resource_location=assembly_board-v1/any"
+      },
+      {
+        "label": "ap5",
+        "full": "ap_event/assembly/any/ur5e-3/place_approach/destination_location=assembly_board-v1"
+      },
+      {
+        "label": "ap6",
+        "full": "ap_event/assembly/any/ur5e-4/place_approach/destination_location=assembly_board-v1"
+      }
+    ]
+  },
+  "hold": {
+    "kind": "candidate_held",
+    "task_id": "environment_25",
+    "decision": {
+      "status": "held",
+      "reason": "no_joint_completion",
+      "snapshot_revision": {
+        "run_id": "03e8ba43b43c4af6b112274a39384f28",
+        "revision": 23,
+        "resources": {
+          "ur5e-1": {
+            "revision": 6,
+            "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+          },
+          "ur5e-2": {
+            "revision": 1,
+            "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+          },
+          "ur5e-3": {
+            "revision": 3,
+            "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+          },
+          "ur5e-4": {
+            "revision": 4,
+            "model": "53baf0915502bd6090cd3df8ff7262106cf24e39b2d6ef92223323812eaa8dd3"
+          },
+          "M1": {
+            "revision": 3,
+            "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+          },
+          "M2": {
+            "revision": 0,
+            "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+          },
+          "Storage": {
+            "revision": 1,
+            "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+          },
+          "KMR": {
+            "revision": 6,
+            "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+          },
+          "Conveyor": {
+            "revision": 3,
+            "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+          },
+          "Buffer For Machined parts": {
+            "revision": 5,
+            "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+          },
+          "3D Printing Station": {
+            "revision": 1,
+            "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+          },
+          "Exit": {
+            "revision": 0,
+            "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+          }
+        },
+        "admission_epoch": 44,
+        "unavailable_resources": [],
+        "stopped": false,
+        "context_identity": "e0a8013b1c36f9995f408f17332b04d95dec44e0851371f0ef34dd4fe57a114c"
+      },
+      "included_resources": [
+        "Exit",
+        "KMR",
+        "ur5e-1",
+        "ur5e-2",
+        "ur5e-3",
+        "ur5e-4"
+      ],
+      "included_products": [
+        "KET4_Square_4mm",
+        "gear_small"
+      ],
+      "included_specifications": [
+        "workspace_mutex"
+      ],
+      "included_tasks": [
+        "0cd36ca694e11a0886fa186a1f7296e0039ecefce5bf855bc2bca3903802577b",
+        "2bebe29d9cd69ce3470f3e56765e373495da54aa853cfd763df35bcac1cdeaea",
+        "33097909e76236aae48230c6c37e9340bd88449cb43c92224359affc8bd1f0c1",
+        "3a29b6a07cebbdd5c7013ba5b5f18b4ffea397e2bf1ab2786044b14338401ec3",
+        "5096aa237456ee53384a05c39d91344db119a13c9204c7f006fd2b3c17dc2f6a",
+        "54c7bc3cbb763cec99e862a53b62b84b71fb7e9390440906970ae4e3cf11f374",
+        "8a0152e32857b6ac817d7c1e8e9435210a9a63161bfd93c4ba5af36813b053cf",
+        "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee",
+        "a4d9d4d665a4308c687fa9bcf4e642f9351e8f1e14507d6255a2134156749ce0",
+        "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8",
+        "d20aea96e97340c174e9032cb2aa0a8a8d0a56f0759900960b1c96d6c674572b",
+        "ea77d6f33a1575100bb35bbfadc7df736e098bf2a1dacb4b3f3cc1139af269de"
+      ],
+      "included_reservations": [
+        "access:M1",
+        "access:M2",
+        "part:KET4_Square_4mm",
+        "part:gear_small",
+        "resource:Exit",
+        "resource:KMR",
+        "resource:ur5e-1",
+        "resource:ur5e-2",
+        "resource:ur5e-3",
+        "resource:ur5e-4",
+        "workspace:assembly_board-v1"
+      ],
+      "task_bindings": {
+        "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee": {
+          "resource_id": "ur5e-3",
+          "event_id": 58,
+          "event_name": "place_approach",
+          "parameters": {
+            "resource_id": "ur5e-3",
+            "destination_location": "assembly_board-v1",
+            "part_name": "KET4_Square_4mm"
+          },
+          "offer_request_id": "7a5c1a743b2f4be782dc61e3382947be",
+          "offer_resource_revisions": {
+            "ur5e-1": {
+              "revision": 6,
+              "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+            },
+            "ur5e-2": {
+              "revision": 1,
+              "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+            },
+            "ur5e-3": {
+              "revision": 3,
+              "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+            },
+            "ur5e-4": {
+              "revision": 4,
+              "model": "53baf0915502bd6090cd3df8ff7262106cf24e39b2d6ef92223323812eaa8dd3"
+            },
+            "M1": {
+              "revision": 3,
+              "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+            },
+            "M2": {
+              "revision": 0,
+              "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+            },
+            "Storage": {
+              "revision": 1,
+              "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+            },
+            "KMR": {
+              "revision": 6,
+              "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+            },
+            "Conveyor": {
+              "revision": 3,
+              "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+            },
+            "Buffer For Machined parts": {
+              "revision": 5,
+              "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+            },
+            "3D Printing Station": {
+              "revision": 1,
+              "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+            },
+            "Exit": {
+              "revision": 0,
+              "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+            }
+          },
+          "offer_product_state": {
+            "location": "ur5e-3",
+            "state": "in_gripper",
+            "last_task": "environment_23",
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          },
+          "part_name": "KET4_Square_4mm",
+          "composition_goal_key": "KET4_Square_4mm",
+          "task_id": "environment_25",
+          "run_id": "03e8ba43b43c4af6b112274a39384f28",
+          "revision": 23,
+          "resource_revisions": {
+            "ur5e-1": {
+              "revision": 6,
+              "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+            },
+            "ur5e-2": {
+              "revision": 1,
+              "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+            },
+            "ur5e-3": {
+              "revision": 3,
+              "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+            },
+            "ur5e-4": {
+              "revision": 4,
+              "model": "53baf0915502bd6090cd3df8ff7262106cf24e39b2d6ef92223323812eaa8dd3"
+            },
+            "M1": {
+              "revision": 3,
+              "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+            },
+            "M2": {
+              "revision": 0,
+              "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+            },
+            "Storage": {
+              "revision": 1,
+              "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+            },
+            "KMR": {
+              "revision": 6,
+              "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+            },
+            "Conveyor": {
+              "revision": 3,
+              "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+            },
+            "Buffer For Machined parts": {
+              "revision": 5,
+              "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+            },
+            "3D Printing Station": {
+              "revision": 1,
+              "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+            },
+            "Exit": {
+              "revision": 0,
+              "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+            }
+          },
+          "participant_revisions": {
+            "ur5e-3": {
+              "revision": 3,
+              "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+            }
+          },
+          "reservations": [
+            "part:KET4_Square_4mm",
+            "resource:ur5e-3"
+          ],
+          "evidence": "resource"
+        },
+        "d20aea96e97340c174e9032cb2aa0a8a8d0a56f0759900960b1c96d6c674572b": {
+          "resource_id": "ur5e-3",
+          "event_id": 59,
+          "event_name": "place_insert",
+          "parameters": {
+            "resource_id": "ur5e-3",
+            "destination_location": "assembly_board-v1",
+            "handoff_acknowledged": true,
+            "assembly_acknowledged": true,
+            "part_name": "KET4_Square_4mm",
+            "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "3a29b6a07cebbdd5c7013ba5b5f18b4ffea397e2bf1ab2786044b14338401ec3": {
+          "resource_id": "ur5e-3",
+          "event_id": 70,
+          "event_name": "place_approach",
+          "parameters": {
+            "resource_id": "ur5e-3",
+            "destination_location": "Exit",
+            "part_name": "KET4_Square_4mm"
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "0cd36ca694e11a0886fa186a1f7296e0039ecefce5bf855bc2bca3903802577b": {
+          "resource_id": "ur5e-3",
+          "event_id": 72,
+          "event_name": "place_release",
+          "parameters": {
+            "resource_id": "ur5e-3",
+            "destination_location": "Exit",
+            "handoff_acknowledged": true,
+            "robot_clear": true,
+            "part_name": "KET4_Square_4mm"
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "ea77d6f33a1575100bb35bbfadc7df736e098bf2a1dacb4b3f3cc1139af269de": {
+          "resource_id": "ur5e-3",
+          "event_id": 76,
+          "event_name": "move_home",
+          "parameters": {
+            "resource_id": "ur5e-3",
+            "home_available": true
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8": {
+          "resource_id": "KMR",
+          "event_id": 0,
+          "event_name": "move_to_resource",
+          "parameters": {
+            "resource_id": "KMR",
+            "target_resource": "M1",
+            "source_resource": "Storage",
+            "arrival_acknowledged": true,
+            "arm_parked": true
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "5096aa237456ee53384a05c39d91344db119a13c9204c7f006fd2b3c17dc2f6a": {
+          "resource_id": "KMR",
+          "event_id": 1,
+          "event_name": "move_to_resource",
+          "parameters": {
+            "resource_id": "KMR",
+            "target_resource": "Storage",
+            "source_resource": "M1",
+            "arrival_acknowledged": true,
+            "arm_parked": true
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "2bebe29d9cd69ce3470f3e56765e373495da54aa853cfd763df35bcac1cdeaea": {
+          "resource_id": "KMR",
+          "event_id": 2,
+          "event_name": "move_to_resource",
+          "parameters": {
+            "resource_id": "KMR",
+            "target_resource": "M2",
+            "source_resource": "Storage",
+            "arrival_acknowledged": true,
+            "arm_parked": true
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "54c7bc3cbb763cec99e862a53b62b84b71fb7e9390440906970ae4e3cf11f374": {
+          "resource_id": "KMR",
+          "event_id": 3,
+          "event_name": "move_to_resource",
+          "parameters": {
+            "resource_id": "KMR",
+            "target_resource": "Storage",
+            "source_resource": "M2",
+            "arrival_acknowledged": true,
+            "arm_parked": true
+          },
+          "part_name": "KET4_Square_4mm"
+        },
+        "33097909e76236aae48230c6c37e9340bd88449cb43c92224359affc8bd1f0c1": {
+          "resource_id": "ur5e-4",
+          "event_id": 64,
+          "event_name": "place_approach",
+          "parameters": {
+            "resource_id": "ur5e-4",
+            "destination_location": "assembly_board-v1",
+            "part_name": "gear_small"
+          },
+          "part_name": "gear_small"
+        },
+        "a4d9d4d665a4308c687fa9bcf4e642f9351e8f1e14507d6255a2134156749ce0": {
+          "resource_id": "ur5e-4",
+          "event_id": 65,
+          "event_name": "place_insert",
+          "parameters": {
+            "resource_id": "ur5e-4",
+            "destination_location": "assembly_board-v1",
+            "handoff_acknowledged": true,
+            "assembly_acknowledged": true,
+            "part_name": "gear_small",
+            "target": "Gear_Plate/Gear_Shaft_1"
+          },
+          "offer_request_id": "ec8e5683f9c14dfdb73924c8ecfe3907",
+          "offer_resource_revisions": {
+            "ur5e-1": {
+              "revision": 6,
+              "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+            },
+            "ur5e-2": {
+              "revision": 1,
+              "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+            },
+            "ur5e-3": {
+              "revision": 3,
+              "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+            },
+            "ur5e-4": {
+              "revision": 4,
+              "model": "53baf0915502bd6090cd3df8ff7262106cf24e39b2d6ef92223323812eaa8dd3"
+            },
+            "M1": {
+              "revision": 3,
+              "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+            },
+            "M2": {
+              "revision": 0,
+              "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+            },
+            "Storage": {
+              "revision": 1,
+              "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+            },
+            "KMR": {
+              "revision": 6,
+              "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+            },
+            "Conveyor": {
+              "revision": 3,
+              "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+            },
+            "Buffer For Machined parts": {
+              "revision": 5,
+              "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+            },
+            "3D Printing Station": {
+              "revision": 1,
+              "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+            },
+            "Exit": {
+              "revision": 0,
+              "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+            }
+          },
+          "offer_product_state": {
+            "location": "ur5e-4",
+            "state": "in_transit",
+            "last_task": "environment_7",
+            "processCompleted": [
+              {
+                "process": "print_part"
+              }
+            ]
+          },
+          "part_name": "gear_small",
+          "composition_goal_key": "gear_small",
+          "task_id": "environment_26",
+          "run_id": "03e8ba43b43c4af6b112274a39384f28",
+          "revision": 23,
+          "resource_revisions": {
+            "ur5e-1": {
+              "revision": 6,
+              "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+            },
+            "ur5e-2": {
+              "revision": 1,
+              "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+            },
+            "ur5e-3": {
+              "revision": 3,
+              "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+            },
+            "ur5e-4": {
+              "revision": 4,
+              "model": "53baf0915502bd6090cd3df8ff7262106cf24e39b2d6ef92223323812eaa8dd3"
+            },
+            "M1": {
+              "revision": 3,
+              "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+            },
+            "M2": {
+              "revision": 0,
+              "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+            },
+            "Storage": {
+              "revision": 1,
+              "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+            },
+            "KMR": {
+              "revision": 6,
+              "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+            },
+            "Conveyor": {
+              "revision": 3,
+              "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+            },
+            "Buffer For Machined parts": {
+              "revision": 5,
+              "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+            },
+            "3D Printing Station": {
+              "revision": 1,
+              "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+            },
+            "Exit": {
+              "revision": 0,
+              "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+            }
+          },
+          "participant_revisions": {
+            "ur5e-4": {
+              "revision": 4,
+              "model": "53baf0915502bd6090cd3df8ff7262106cf24e39b2d6ef92223323812eaa8dd3"
+            }
+          },
+          "reservations": [
+            "part:gear_small",
+            "resource:ur5e-4",
+            "workspace:assembly_board-v1"
+          ],
+          "evidence": "resource"
+        },
+        "8a0152e32857b6ac817d7c1e8e9435210a9a63161bfd93c4ba5af36813b053cf": {
+          "resource_id": "ur5e-4",
+          "event_id": 77,
+          "event_name": "move_home",
+          "parameters": {
+            "resource_id": "ur5e-4",
+            "home_available": true
+          },
+          "part_name": "gear_small"
+        }
+      },
+      "dependency_reasons": [
+        {
+          "kind": "candidate",
+          "task": "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee",
+          "part": "KET4_Square_4mm"
+        },
+        {
+          "kind": "event_participant_or_reservation",
+          "resource": "ur5e-3",
+          "task": "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee"
+        },
+        {
+          "kind": "event_participant_or_reservation",
+          "resource": "Exit",
+          "task": "3a29b6a07cebbdd5c7013ba5b5f18b4ffea397e2bf1ab2786044b14338401ec3"
+        },
+        {
+          "kind": "event_participant_or_reservation",
+          "resource": "KMR",
+          "task": "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8"
+        },
+        {
+          "kind": "event_participant_or_reservation",
+          "resource": "ur5e-1",
+          "task": "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8"
+        },
+        {
+          "kind": "event_participant_or_reservation",
+          "resource": "ur5e-2",
+          "task": "2bebe29d9cd69ce3470f3e56765e373495da54aa853cfd763df35bcac1cdeaea"
+        },
+        {
+          "kind": "specification",
+          "rule": "workspace_mutex",
+          "empty_event_changes_state": true,
+          "resources": [
+            "ur5e-3",
+            "ur5e-4"
+          ]
+        },
+        {
+          "kind": "occupied_resource",
+          "part": "gear_small",
+          "resource": "ur5e-4"
+        },
+        {
+          "kind": "specification_violation",
+          "transitions": [
+            {
+              "rule_id": "workspace_mutex",
+              "from": "0",
+              "label": [
+                "ap3",
+                "ap4",
+                "ap5"
+              ],
+              "rule_label": [
+                "ap3",
+                "ap4",
+                "ap5"
+              ],
+              "matched_transitions": [
+                {
+                  "guard": "(ap3 | ap5) & (ap4 | ap6)",
+                  "to": "1"
+                }
+              ],
+              "to": "1",
+              "accepting": false,
+              "accepting_reachable": false,
+              "status": "rejected",
+              "reason": "accepting_state_unreachable"
+            }
+          ]
+        },
+        {
+          "kind": "unavailable_behavior",
+          "capabilities": [
+            "3D Printing Station:85:bindings"
+          ]
+        }
+      ],
+      "completion_conditions": [
+        {
+          "part_name": "KET4_Square_4mm",
+          "operation": {
+            "processesToComplete": [
+              {
+                "process": "assembly",
+                "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+              }
+            ]
+          }
+        },
+        {
+          "part_name": "gear_small",
+          "operation": {
+            "processesToComplete": [
+              {
+                "process": "assembly",
+                "target": "Gear_Plate/Gear_Shaft_1"
+              }
+            ]
+          }
+        },
+        {
+          "resource_id": "KMR",
+          "release": [
+            {
+              "resource_state": {
+                "equals": "idle"
+              },
+              "held_part": {
+                "equals": null
+              },
+              "approached_part": {
+                "equals": null
+              },
+              "resource_location": {
+                "equals": "Storage"
+              }
+            }
+          ]
+        },
+        {
+          "resource_id": "ur5e-1",
+          "release": [
+            {
+              "resource_state": {
+                "equals": "idle"
+              },
+              "held_part": {
+                "equals": null
+              },
+              "resource_location": {
+                "equals": "home"
+              }
+            }
+          ]
+        },
+        {
+          "resource_id": "ur5e-2",
+          "release": [
+            {
+              "resource_state": {
+                "equals": "idle"
+              },
+              "held_part": {
+                "equals": null
+              },
+              "resource_location": {
+                "equals": "home"
+              }
+            }
+          ]
+        },
+        {
+          "resource_id": "ur5e-3",
+          "release": [
+            {
+              "resource_state": {
+                "equals": "idle"
+              },
+              "held_part": {
+                "equals": null
+              },
+              "resource_location": {
+                "equals": "home"
+              }
+            }
+          ]
+        },
+        {
+          "resource_id": "ur5e-4",
+          "release": [
+            {
+              "resource_state": {
+                "equals": "idle"
+              },
+              "held_part": {
+                "equals": null
+              },
+              "resource_location": {
+                "equals": "home"
+              }
+            }
+          ]
+        }
+      ],
+      "explored_states": 113,
+      "analysis_time_sec": 0.46635032999984105,
+      "cache_hit": false,
+      "counterexample": [
+        {
+          "action": "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee",
+          "event": "start"
+        }
+      ]
+    }
+  },
+  "allow": {
+    "kind": "CCA",
+    "request_id": "f158eef0f600451aa1f027d519ace06c",
+    "task_ids": [
+      "environment_31"
+    ],
+    "requested_at_unix": 1790982942.8868377,
+    "waiting_wall_time_sec": 0.8601488789990981,
+    "timestamp": 1790982943.7469883,
+    "decision": {
+      "request_id": "f158eef0f600451aa1f027d519ace06c",
+      "ok": true,
+      "decisions": {
+        "environment_31": {
+          "status": "allowed",
+          "reason": "",
+          "snapshot_revision": {
+            "run_id": "03e8ba43b43c4af6b112274a39384f28",
+            "revision": 25,
+            "resources": {
+              "ur5e-1": {
+                "revision": 6,
+                "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+              },
+              "ur5e-2": {
+                "revision": 1,
+                "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+              },
+              "ur5e-3": {
+                "revision": 3,
+                "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+              },
+              "ur5e-4": {
+                "revision": 6,
+                "model": "d3fce489d68ab54c16cb23d5fc86d18c1748807fb026857fccbba5c9e21d1234"
+              },
+              "M1": {
+                "revision": 3,
+                "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+              },
+              "M2": {
+                "revision": 0,
+                "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+              },
+              "Storage": {
+                "revision": 1,
+                "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+              },
+              "KMR": {
+                "revision": 6,
+                "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+              },
+              "Conveyor": {
+                "revision": 3,
+                "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+              },
+              "Buffer For Machined parts": {
+                "revision": 5,
+                "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+              },
+              "3D Printing Station": {
+                "revision": 1,
+                "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+              },
+              "Exit": {
+                "revision": 0,
+                "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+              }
+            },
+            "admission_epoch": 48,
+            "unavailable_resources": [],
+            "stopped": false,
+            "context_identity": "1215d9424cfcb9b807fa4af3fe094306cd8be5ed3f7f4b5e750b06b3e4d14847"
+          },
+          "included_resources": [
+            "Exit",
+            "KMR",
+            "ur5e-1",
+            "ur5e-2",
+            "ur5e-3",
+            "ur5e-4"
+          ],
+          "included_products": [
+            "KET4_Square_4mm"
+          ],
+          "included_specifications": [
+            "workspace_mutex"
+          ],
+          "included_tasks": [
+            "0cd36ca694e11a0886fa186a1f7296e0039ecefce5bf855bc2bca3903802577b",
+            "2bebe29d9cd69ce3470f3e56765e373495da54aa853cfd763df35bcac1cdeaea",
+            "3a29b6a07cebbdd5c7013ba5b5f18b4ffea397e2bf1ab2786044b14338401ec3",
+            "5096aa237456ee53384a05c39d91344db119a13c9204c7f006fd2b3c17dc2f6a",
+            "54c7bc3cbb763cec99e862a53b62b84b71fb7e9390440906970ae4e3cf11f374",
+            "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee",
+            "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8",
+            "d20aea96e97340c174e9032cb2aa0a8a8d0a56f0759900960b1c96d6c674572b",
+            "ea77d6f33a1575100bb35bbfadc7df736e098bf2a1dacb4b3f3cc1139af269de"
+          ],
+          "included_reservations": [
+            "access:M1",
+            "access:M2",
+            "part:KET4_Square_4mm",
+            "resource:Exit",
+            "resource:KMR",
+            "resource:ur5e-1",
+            "resource:ur5e-2",
+            "resource:ur5e-3",
+            "workspace:assembly_board-v1"
+          ],
+          "task_bindings": {
+            "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee": {
+              "resource_id": "ur5e-3",
+              "event_id": 58,
+              "event_name": "place_approach",
+              "parameters": {
+                "resource_id": "ur5e-3",
+                "destination_location": "assembly_board-v1",
+                "part_name": "KET4_Square_4mm"
+              },
+              "offer_request_id": "d2a16aa9ee004697b50b39bf398391a6",
+              "offer_resource_revisions": {
+                "ur5e-1": {
+                  "revision": 6,
+                  "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+                },
+                "ur5e-2": {
+                  "revision": 1,
+                  "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+                },
+                "ur5e-3": {
+                  "revision": 3,
+                  "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+                },
+                "ur5e-4": {
+                  "revision": 6,
+                  "model": "d3fce489d68ab54c16cb23d5fc86d18c1748807fb026857fccbba5c9e21d1234"
+                },
+                "M1": {
+                  "revision": 3,
+                  "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+                },
+                "M2": {
+                  "revision": 0,
+                  "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+                },
+                "Storage": {
+                  "revision": 1,
+                  "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+                },
+                "KMR": {
+                  "revision": 6,
+                  "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+                },
+                "Conveyor": {
+                  "revision": 3,
+                  "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+                },
+                "Buffer For Machined parts": {
+                  "revision": 5,
+                  "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+                },
+                "3D Printing Station": {
+                  "revision": 1,
+                  "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+                },
+                "Exit": {
+                  "revision": 0,
+                  "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+                }
+              },
+              "offer_product_state": {
+                "location": "ur5e-3",
+                "state": "in_gripper",
+                "last_task": "environment_23",
+                "processCompleted": [
+                  {
+                    "process": "trim",
+                    "result": "square"
+                  }
+                ]
+              },
+              "part_name": "KET4_Square_4mm",
+              "composition_goal_key": "KET4_Square_4mm",
+              "task_id": "environment_31",
+              "run_id": "03e8ba43b43c4af6b112274a39384f28",
+              "revision": 25,
+              "resource_revisions": {
+                "ur5e-1": {
+                  "revision": 6,
+                  "model": "bb4b882e1106c4b1d1c75153360cd8ceb3fc4bf62f664ce3a4a2788533800ada"
+                },
+                "ur5e-2": {
+                  "revision": 1,
+                  "model": "3c094b960aa87ffb6d595bd994b3b5e66204965260b685e7b0b132b6641d5592"
+                },
+                "ur5e-3": {
+                  "revision": 3,
+                  "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+                },
+                "ur5e-4": {
+                  "revision": 6,
+                  "model": "d3fce489d68ab54c16cb23d5fc86d18c1748807fb026857fccbba5c9e21d1234"
+                },
+                "M1": {
+                  "revision": 3,
+                  "model": "ab0d1d8420ef1a46195e89d22deb8e9acb478fac5b133a3345cbcd5be3f7ead8"
+                },
+                "M2": {
+                  "revision": 0,
+                  "model": "d966248916145a3b58a471db456ca78eadb025694cb603b55ed4ca1e0eda41bd"
+                },
+                "Storage": {
+                  "revision": 1,
+                  "model": "29819e760cbbeb8b9ee22622cf07dd6d61705b061a195c190c774a01f5873b15"
+                },
+                "KMR": {
+                  "revision": 6,
+                  "model": "7ae6944bb1ebdd537f2cfc26f03ab3caf00cc07d1e9b53b7e60919d70fed5d09"
+                },
+                "Conveyor": {
+                  "revision": 3,
+                  "model": "cba4ea3d34719ff3029b7f9edfa81f8cb5ea8241bcad033ce2202abf9e1e71f7"
+                },
+                "Buffer For Machined parts": {
+                  "revision": 5,
+                  "model": "8256c81c3699b621fbddd47a0230eb2632ccfa88b483a0cb1d2b6b004501f962"
+                },
+                "3D Printing Station": {
+                  "revision": 1,
+                  "model": "625fce64b8832450b8e19886d0aee7904e0a6a9e37804d03aaa5f66c17d7e5bb"
+                },
+                "Exit": {
+                  "revision": 0,
+                  "model": "06aa913b9f7d61b7ab51957315bcd8844a24efe20e685eccbd4bcaba2e2cfa3e"
+                }
+              },
+              "participant_revisions": {
+                "ur5e-3": {
+                  "revision": 3,
+                  "model": "c09ddd43b5f44cd99ff7cbf415edeb52086390530bc80a30f94727130f789e98"
+                }
+              },
+              "reservations": [
+                "part:KET4_Square_4mm",
+                "resource:ur5e-3"
+              ],
+              "evidence": "resource"
+            },
+            "d20aea96e97340c174e9032cb2aa0a8a8d0a56f0759900960b1c96d6c674572b": {
+              "resource_id": "ur5e-3",
+              "event_id": 59,
+              "event_name": "place_insert",
+              "parameters": {
+                "resource_id": "ur5e-3",
+                "destination_location": "assembly_board-v1",
+                "handoff_acknowledged": true,
+                "assembly_acknowledged": true,
+                "part_name": "KET4_Square_4mm",
+                "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "3a29b6a07cebbdd5c7013ba5b5f18b4ffea397e2bf1ab2786044b14338401ec3": {
+              "resource_id": "ur5e-3",
+              "event_id": 70,
+              "event_name": "place_approach",
+              "parameters": {
+                "resource_id": "ur5e-3",
+                "destination_location": "Exit",
+                "part_name": "KET4_Square_4mm"
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "0cd36ca694e11a0886fa186a1f7296e0039ecefce5bf855bc2bca3903802577b": {
+              "resource_id": "ur5e-3",
+              "event_id": 72,
+              "event_name": "place_release",
+              "parameters": {
+                "resource_id": "ur5e-3",
+                "destination_location": "Exit",
+                "handoff_acknowledged": true,
+                "robot_clear": true,
+                "part_name": "KET4_Square_4mm"
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "ea77d6f33a1575100bb35bbfadc7df736e098bf2a1dacb4b3f3cc1139af269de": {
+              "resource_id": "ur5e-3",
+              "event_id": 76,
+              "event_name": "move_home",
+              "parameters": {
+                "resource_id": "ur5e-3",
+                "home_available": true
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8": {
+              "resource_id": "KMR",
+              "event_id": 0,
+              "event_name": "move_to_resource",
+              "parameters": {
+                "resource_id": "KMR",
+                "target_resource": "M1",
+                "source_resource": "Storage",
+                "arrival_acknowledged": true,
+                "arm_parked": true
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "5096aa237456ee53384a05c39d91344db119a13c9204c7f006fd2b3c17dc2f6a": {
+              "resource_id": "KMR",
+              "event_id": 1,
+              "event_name": "move_to_resource",
+              "parameters": {
+                "resource_id": "KMR",
+                "target_resource": "Storage",
+                "source_resource": "M1",
+                "arrival_acknowledged": true,
+                "arm_parked": true
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "2bebe29d9cd69ce3470f3e56765e373495da54aa853cfd763df35bcac1cdeaea": {
+              "resource_id": "KMR",
+              "event_id": 2,
+              "event_name": "move_to_resource",
+              "parameters": {
+                "resource_id": "KMR",
+                "target_resource": "M2",
+                "source_resource": "Storage",
+                "arrival_acknowledged": true,
+                "arm_parked": true
+              },
+              "part_name": "KET4_Square_4mm"
+            },
+            "54c7bc3cbb763cec99e862a53b62b84b71fb7e9390440906970ae4e3cf11f374": {
+              "resource_id": "KMR",
+              "event_id": 3,
+              "event_name": "move_to_resource",
+              "parameters": {
+                "resource_id": "KMR",
+                "target_resource": "Storage",
+                "source_resource": "M2",
+                "arrival_acknowledged": true,
+                "arm_parked": true
+              },
+              "part_name": "KET4_Square_4mm"
+            }
+          },
+          "dependency_reasons": [
+            {
+              "kind": "candidate",
+              "task": "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee",
+              "part": "KET4_Square_4mm"
+            },
+            {
+              "kind": "event_participant_or_reservation",
+              "resource": "ur5e-3",
+              "task": "98fb1d987ae574064bb2a6680056a7c7c908d70793ebb72982d2b8685a11b9ee"
+            },
+            {
+              "kind": "event_participant_or_reservation",
+              "resource": "Exit",
+              "task": "3a29b6a07cebbdd5c7013ba5b5f18b4ffea397e2bf1ab2786044b14338401ec3"
+            },
+            {
+              "kind": "event_participant_or_reservation",
+              "resource": "KMR",
+              "task": "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8"
+            },
+            {
+              "kind": "event_participant_or_reservation",
+              "resource": "ur5e-1",
+              "task": "cacfa616709714963fb0520d8eab0ac0a105a1963ecb7ee8ec111fb3f50f51d8"
+            },
+            {
+              "kind": "event_participant_or_reservation",
+              "resource": "ur5e-2",
+              "task": "2bebe29d9cd69ce3470f3e56765e373495da54aa853cfd763df35bcac1cdeaea"
+            },
+            {
+              "kind": "specification",
+              "rule": "workspace_mutex",
+              "empty_event_changes_state": true,
+              "resources": [
+                "ur5e-3",
+                "ur5e-4"
+              ]
+            }
+          ],
+          "completion_conditions": [
+            {
+              "part_name": "KET4_Square_4mm",
+              "operation": {
+                "processesToComplete": [
+                  {
+                    "process": "assembly",
+                    "target": "GMC_Laser_Plate_Virtual/KET4_Square_4mm"
+                  }
+                ]
+              }
+            },
+            {
+              "resource_id": "KMR",
+              "release": [
+                {
+                  "resource_state": {
+                    "equals": "idle"
+                  },
+                  "held_part": {
+                    "equals": null
+                  },
+                  "approached_part": {
+                    "equals": null
+                  },
+                  "resource_location": {
+                    "equals": "Storage"
+                  }
+                }
+              ]
+            },
+            {
+              "resource_id": "ur5e-1",
+              "release": [
+                {
+                  "resource_state": {
+                    "equals": "idle"
+                  },
+                  "held_part": {
+                    "equals": null
+                  },
+                  "resource_location": {
+                    "equals": "home"
+                  }
+                }
+              ]
+            },
+            {
+              "resource_id": "ur5e-2",
+              "release": [
+                {
+                  "resource_state": {
+                    "equals": "idle"
+                  },
+                  "held_part": {
+                    "equals": null
+                  },
+                  "resource_location": {
+                    "equals": "home"
+                  }
+                }
+              ]
+            },
+            {
+              "resource_id": "ur5e-3",
+              "release": [
+                {
+                  "resource_state": {
+                    "equals": "idle"
+                  },
+                  "held_part": {
+                    "equals": null
+                  },
+                  "resource_location": {
+                    "equals": "home"
+                  }
+                }
+              ]
+            }
+          ],
+          "explored_states": 52,
+          "analysis_time_sec": 0.42404166699998314,
+          "cache_hit": false,
+          "counterexample": []
+        }
+      },
+      "composition_backend": "local_parallel"
+    }
+  },
+  "held_at_unix": 1790982873.4570472,
+  "first_robot": "ur5e-4",
+  "waiting_robot": "ur5e-3",
+  "withdrawn_at_unix": 1790982943.451297,
+  "entered_at_unix": 1790982954.6296122,
+  "overlapping_occupancy": false,
+  "final_outcome": {
+    "status": "completed"
+  },
+  "video_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/videos-20x/mutex rule applied into ur5e 3 and ur5e4-20x.mp4",
+  "speed": 20,
+  "source_duration_sec": 713.334,
+  "duration_sec": 35.667,
+  "frames_decoded": 535,
+  "captions": [
+    {
+      "text": "ur5e-3 waits | ur5e-4 occupies assembly_board-v1",
+      "start": 576.8,
+      "end": 643.4666666666667
+    },
+    {
+      "text": "ur5e-4 withdrew from assembly_board-v1",
+      "start": 643.4666666666667,
+      "end": 652.6666666666666
+    },
+    {
+      "text": "ur5e-3 enters after withdrawal",
+      "start": 652.6666666666666,
+      "end": 713.334
+    }
+  ],
+  "capture": {
+    "status": "captured",
+    "started_at_unix": 1790982261.270071,
+    "ended_at_unix": 1790983019.525493,
+    "encoder_finalize_time_sec": 0.16570731600040745,
+    "fps": 15.0,
+    "frames": 10700,
+    "captures": 10085,
+    "repeated_frames": 615,
+    "encoder": "h264_nvenc",
+    "preset": "p1",
+    "capture_cpu_time_sec": 543.833184,
+    "encoder_cpu_time_sec": 142.995532,
+    "max_capture_gap_sec": 0.3775734539995028,
+    "wall_duration_sec": 713.3125012740002
+  },
+  "previous_captions": [
+    {
+      "text": "ur5e-3 waits | ur5e-4 occupies assembly_board-v1",
+      "start": 576.8,
+      "end": 643.4666666666667
+    },
+    {
+      "text": "ur5e-3 enters after withdrawal",
+      "start": 652.6666666666666,
+      "end": 713.3125012740002
+    }
+  ],
+  "caption_timing": "recorded_frame_observations",
+  "caption_validation": {
+    "validated": true,
+    "complete_decode": true,
+    "frames_decoded": 535,
+    "duration_sec": 35.667,
+    "previous_sha256": "69420f537a1899c244d73eae0ba734810e8c3b581bc5f156986990d67258a27e",
+    "sha256": "240fb2932293d9fe5793389dad68a9f1cb1bd2d651c7b4f4e700f6083d448b4b"
+  }
+}

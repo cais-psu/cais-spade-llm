@@ -1,0 +1,4 @@
+{
+  "scenario": "Conveyor breakdown",
+  "reason": "Gazebo recording did not become ready; see /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-201b0b4673ba48a6984ae438ff8bc5ed/1/attempt-b99d3cc4115341be9cdd42f6f0b94f2f/recorder.log"
+}

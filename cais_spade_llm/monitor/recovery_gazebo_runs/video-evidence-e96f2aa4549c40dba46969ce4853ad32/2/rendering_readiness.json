@@ -1,0 +1,11 @@
+{
+  "observations": [
+    {
+      "observed_at_unix": 1790972668.234054,
+      "width": 1908,
+      "height": 999,
+      "contrast": 107.0,
+      "ready": true
+    }
+  ]
+}

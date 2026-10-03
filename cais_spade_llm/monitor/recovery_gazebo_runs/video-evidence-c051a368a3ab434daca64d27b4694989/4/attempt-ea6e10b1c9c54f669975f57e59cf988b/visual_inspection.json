@@ -1,0 +1,8 @@
+{
+  "status": "accepted",
+  "captions_readable": true,
+  "event_visible": true,
+  "notes": "Both robots and pickup motions visible; slipped part visible inside the outline beside assembly_board-v1 from the higher camera.",
+  "frame": "visual-inspection-event.png",
+  "sha256": "d766e525dee86bde6789d1d5bca0ab56ac79537d9641fedf5a1fcb2d80061d93"
+}

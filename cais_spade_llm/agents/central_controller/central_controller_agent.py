@@ -649,6 +649,10 @@ class CentralControllerAgent(LlmAgent):
     def _seed_safety_monitor_resource_states(self) -> None:
         if not self.safety_monitor:
             return
+        self.safety_monitor.resource_bindings = {
+            str(ra.jid).split("/", 1)[0]: ra.agent_name for ra in self.resource_agents
+            if getattr(ra, "agent_name", None)
+        }
         self.safety_monitor.seed_resource_states(
             {
                 str(getattr(ra, "jid", "")): ra._snapshot_state()

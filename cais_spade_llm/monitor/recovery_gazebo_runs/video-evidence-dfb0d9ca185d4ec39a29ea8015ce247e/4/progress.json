@@ -1,0 +1,155 @@
+{
+  "observed_at_unix": 1790975693.40085,
+  "run_id": "0819707034c84b95b17c4c39d0164603",
+  "values": {
+    "ur5e-1": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "home",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": null,
+      "part_location": null
+    },
+    "ur5e-2": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "home",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": null,
+      "part_location": null
+    },
+    "ur5e-3": {
+      "resource_state": "idle",
+      "held_part": null,
+      "resource_location": "home",
+      "task_ctx.origin_resource_location": null,
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": null,
+      "part_state": null,
+      "part_location": null
+    },
+    "ur5e-4": {
+      "resource_state": "at_pick",
+      "held_part": null,
+      "resource_location": "3D Printing Station",
+      "task_ctx.origin_resource_location": "3D Printing Station",
+      "task_ctx.destination_location": null,
+      "task_ctx.part_name": "gear_small",
+      "part_state": null,
+      "part_location": null
+    },
+    "M1": {
+      "resource_state": "idle",
+      "part_name": null,
+      "staging_part": null
+    },
+    "M2": {
+      "resource_state": "idle",
+      "part_name": null,
+      "staging_part": null
+    },
+    "Storage": {
+      "inventory.gear_small": false,
+      "inventory.gear_medium": false,
+      "inventory.gear_large": false,
+      "inventory.KET4_Square_4mm": false,
+      "inventory.KET8_Square_8mm": true,
+      "inventory.KET12_Square_12mm": true,
+      "inventory.KET16_Square_16mm": true,
+      "inventory.RGOCG4-50_Round_4mm": true,
+      "inventory.RGOCG8-50_8mm": true,
+      "inventory.RGOCG12-50_12mm": true,
+      "inventory.RGOCG16-50_16mm": true,
+      "inventory.assembly_board-v1": false
+    },
+    "KMR": {
+      "resource_state": "carrying",
+      "held_part": "KET4_Square_4mm",
+      "approached_part": null,
+      "resource_location": "Storage"
+    },
+    "Conveyor": {
+      "belt_stopped": true,
+      "loading_reserved_by": null,
+      "part_location.gear_small": null,
+      "part_location.gear_medium": null,
+      "part_location.gear_large": null,
+      "part_location.KET4_Square_4mm": null,
+      "part_location.KET8_Square_8mm": null,
+      "part_location.KET12_Square_12mm": null,
+      "part_location.KET16_Square_16mm": null,
+      "part_location.RGOCG4-50_Round_4mm": null,
+      "part_location.RGOCG8-50_8mm": null,
+      "part_location.RGOCG12-50_12mm": null,
+      "part_location.RGOCG16-50_16mm": null,
+      "part_location.assembly_board-v1": null,
+      "part_order.gear_small": null,
+      "part_order.gear_medium": null,
+      "part_order.gear_large": null,
+      "part_order.KET4_Square_4mm": null,
+      "part_order.KET8_Square_8mm": null,
+      "part_order.KET12_Square_12mm": null,
+      "part_order.KET16_Square_16mm": null,
+      "part_order.RGOCG4-50_Round_4mm": null,
+      "part_order.RGOCG8-50_8mm": null,
+      "part_order.RGOCG12-50_12mm": null,
+      "part_order.RGOCG16-50_16mm": null,
+      "part_order.assembly_board-v1": null
+    },
+    "Buffer For Machined parts": {
+      "zone_1_part": null,
+      "zone_2_part": null,
+      "zone_3_part": null,
+      "zone_4_part": null
+    },
+    "3D Printing Station": {
+      "output.gear_small": true,
+      "output.gear_medium": true,
+      "output.gear_large": true,
+      "output.KET4_Square_4mm": false,
+      "output.KET8_Square_8mm": false,
+      "output.KET12_Square_12mm": false,
+      "output.KET16_Square_16mm": false,
+      "output.RGOCG4-50_Round_4mm": false,
+      "output.RGOCG8-50_8mm": false,
+      "output.RGOCG12-50_12mm": false,
+      "output.RGOCG16-50_16mm": false,
+      "output.assembly_board-v1": false,
+      "resource_state": "completed"
+    },
+    "Exit": {
+      "resource_state": "empty",
+      "part_name": null,
+      "product_location": "assembly_board-v1"
+    }
+  },
+  "fault": {
+    "scenario": "Part slippage",
+    "resource_id": "ur5e-3",
+    "checkpoint": "after_both_pickups_before_place",
+    "affected_resources": [
+      "ur5e-3",
+      "ur5e-4"
+    ],
+    "status": "armed",
+    "run_active": false,
+    "run_id": "0819707034c84b95b17c4c39d0164603",
+    "revision": 0,
+    "ready": false,
+    "evidence": {},
+    "visual": {}
+  },
+  "outcome": {
+    "status": "stopped",
+    "reason": "Resource did not complete negotiated work"
+  },
+  "stopped": true,
+  "diagnostic_cca_bypass": false,
+  "pending_tasks": [],
+  "unavailable_resources": [],
+  "run_file": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/environment_runs/latest"
+}

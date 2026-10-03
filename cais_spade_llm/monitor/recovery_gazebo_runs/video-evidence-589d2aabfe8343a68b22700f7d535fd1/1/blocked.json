@@ -1,0 +1,4 @@
+{
+  "scenario": "Conveyor breakdown",
+  "reason": "Failure checkpoint not reached: CCA holds remaining candidates"
+}

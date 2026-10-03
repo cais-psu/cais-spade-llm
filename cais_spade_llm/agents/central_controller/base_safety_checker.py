@@ -252,8 +252,10 @@ class BaseSafetyChecker:
         """
         labels: list[str] = []
 
-        # Normalize "<resource>@<host>" -> "<resource>"
-        res_short = self._resource_short_name(resource_jid)
+        # Registered resource names can differ from their transport JIDs.
+        res_short = getattr(self, "resource_bindings", {}).get(
+            str(resource_jid).split("/", 1)[0], self._resource_short_name(resource_jid)
+        )
 
         # Task-level fields
         task_product = self._task_product_name(params)
@@ -336,7 +338,9 @@ class BaseSafetyChecker:
     ) -> list[str]:
         """Maps a structured state surface to matching state AP labels."""
         labels: list[str] = []
-        res_short = self._resource_short_name(resource_jid)
+        res_short = getattr(self, "resource_bindings", {}).get(
+            str(resource_jid).split("/", 1)[0], self._resource_short_name(resource_jid)
+        )
         task_product = self._task_product_name(params)
         state_tokens = self._state_surface_tokens(surface)
         current_state = str(surface.get("resource_state") or "").strip()

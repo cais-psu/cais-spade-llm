@@ -1,0 +1,43 @@
+{
+  "observations": [
+    {
+      "observed_at_unix": 1790982251.4402514,
+      "states": {
+        "/KMR/map_server": {
+          "id": 3,
+          "label": "active"
+        },
+        "/KMR/controller_server": {
+          "id": 3,
+          "label": "active"
+        },
+        "/KMR/bt_navigator": {
+          "id": 3,
+          "label": "active"
+        },
+        "/KMR/planner_server": {
+          "id": 3,
+          "label": "active"
+        },
+        "/KMR/behavior_server": {
+          "id": 3,
+          "label": "active"
+        }
+      },
+      "map": {
+        "frame_id": "world",
+        "width": 240,
+        "height": 176,
+        "cells": 42240
+      },
+      "node_counts": {
+        "/KMR/map_server": 1,
+        "/KMR/planner_server": 1,
+        "/KMR/controller_server": 1,
+        "/KMR/behavior_server": 1,
+        "/KMR/bt_navigator": 1
+      },
+      "ready": true
+    }
+  ]
+}

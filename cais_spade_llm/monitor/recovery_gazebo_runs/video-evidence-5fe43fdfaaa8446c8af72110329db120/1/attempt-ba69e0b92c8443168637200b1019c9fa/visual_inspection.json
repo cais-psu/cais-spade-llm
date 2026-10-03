@@ -1,0 +1,8 @@
+{
+  "status": "accepted",
+  "captions_readable": true,
+  "event_visible": true,
+  "notes": "Conveyor outline and stopped condition visible; completed M1 pickup confirmed by injection evidence.",
+  "frame": "visual-inspection-event.png",
+  "sha256": "424f0bf8b321670ad35f902bef9bd0e6cf89e664f6cf75fcf4c3bf55a223048d"
+}

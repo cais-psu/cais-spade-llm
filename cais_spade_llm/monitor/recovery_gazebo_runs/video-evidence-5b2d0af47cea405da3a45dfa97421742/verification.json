@@ -1,0 +1,35 @@
+{
+  "focused_tests": {
+    "passed": 325,
+    "runs": [
+      {
+        "passed": 188,
+        "seconds": 62.25,
+        "log": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/recording-tests.log"
+      },
+      {
+        "passed": 137,
+        "seconds": 211.51,
+        "log": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/capability-tests.log"
+      }
+    ],
+    "combined_run": {
+      "exit_code": 139,
+      "status": "segmentation_fault",
+      "log": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/combined-tests-segfault.log"
+    }
+  },
+  "poetry_check": "passed with existing metadata deprecation warnings",
+  "compileall": "passed",
+  "ui_main_help": "passed",
+  "failure_videos_help": "passed",
+  "git_diff_check": "passed",
+  "bootstrap_gazebo": "passed; installed KMR script verified",
+  "validation_index": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/validation-index.json",
+  "source_sha256": {
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/environment_composition.py": "caca845770000840a172d7e6cdd58573548ad16daab3aa3bbab6ff84c35115b2",
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/environment_admission.py": "f717cc95aa195ace8a6cf02839aea2ac2e1c3f16401c393d742924bd65032651",
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/environment_runtime.py": "6adc3f31fd40649ed98620c79a8615c9afc1f3c9d9f1f9fdb6df20f26248af03",
+    "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/failure_videos.py": "d99e9fa336df10faaedc55676b4ce1ae1f7678cfe5c42507e087f97c2be5214d"
+  }
+}

@@ -1,0 +1,189 @@
+{
+  "validated": true,
+  "archives": [
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-589d2aabfe8343a68b22700f7d535fd1/1/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-589d2aabfe8343a68b22700f7d535fd1/1/observations.jsonl.gz",
+      "uncompressed_bytes": 2580762,
+      "archive_bytes": 26887,
+      "uncompressed_sha256": "b7ca52c64bd7d66b379d2ddabcf55a3c17a89d4259ed6e89d09e3e3dc522d8ae",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5b2d0af47cea405da3a45dfa97421742/5/observations.jsonl.gz",
+      "uncompressed_bytes": 7876787,
+      "archive_bytes": 74364,
+      "uncompressed_sha256": "65e502567a73801cc9c99bb6372d2da25f32e77767f39ee459b5e8a1cb0e4c24",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5c82950467c34f679e9377f0b6ef2bc3/1/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5c82950467c34f679e9377f0b6ef2bc3/1/observations.jsonl.gz",
+      "uncompressed_bytes": 26579977,
+      "archive_bytes": 775315,
+      "uncompressed_sha256": "8cb283c69982d66bb4df395afed8a488b4167c3859a4c6b111f61a3e8d41f14d",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5fe43fdfaaa8446c8af72110329db120/1/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-5fe43fdfaaa8446c8af72110329db120/1/observations.jsonl.gz",
+      "uncompressed_bytes": 70834875,
+      "archive_bytes": 6116603,
+      "uncompressed_sha256": "ab9ce5c3a0756eb39b688789ed7cfc03da5adefdf517d401c5a95e6581788ed3",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-6f051af18d2e4ceb9d8573aaafe8ebcb/4/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-6f051af18d2e4ceb9d8573aaafe8ebcb/4/observations.jsonl.gz",
+      "uncompressed_bytes": 82394381,
+      "archive_bytes": 6972344,
+      "uncompressed_sha256": "dc2527091f77cc9ccc783db8b66b92fb75d2922877e67f69dd69fea0b37bab4b",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-6f051af18d2e4ceb9d8573aaafe8ebcb/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-6f051af18d2e4ceb9d8573aaafe8ebcb/5/observations.jsonl.gz",
+      "uncompressed_bytes": 1926588,
+      "archive_bytes": 18119,
+      "uncompressed_sha256": "4fe9614684e629d2e3165a162ea25365d1711fe3d626507dc1dc91c80baec7f6",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-79c78d403d11484fa3daeb08f8e9b591/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-79c78d403d11484fa3daeb08f8e9b591/5/observations.jsonl.gz",
+      "uncompressed_bytes": 7676219,
+      "archive_bytes": 71759,
+      "uncompressed_sha256": "f470b364eacc3079b4835437925ae60a1deab3a56f9cfadff4925c5cd3c44375",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-7c90bebfc68c4e4dba0bd4ead943708d/1/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-7c90bebfc68c4e4dba0bd4ead943708d/1/observations.jsonl.gz",
+      "uncompressed_bytes": 5391232,
+      "archive_bytes": 93227,
+      "uncompressed_sha256": "2f6b8345f1b2f00675d467c97a0eea8d466e099293fbdec492cb1ed84d3d3141",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-7e6eb4010fa54f8cbe57d96bbdccdc23/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-7e6eb4010fa54f8cbe57d96bbdccdc23/5/observations.jsonl.gz",
+      "uncompressed_bytes": 8105468,
+      "archive_bytes": 75122,
+      "uncompressed_sha256": "845fe722e6b115b711c6cb9fae4dafe21169497e19fca1643f76ba90a9273a1a",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-8f44d7525c5d4ee0af4ec473647c2286/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-8f44d7525c5d4ee0af4ec473647c2286/5/observations.jsonl.gz",
+      "uncompressed_bytes": 1403940,
+      "archive_bytes": 14589,
+      "uncompressed_sha256": "b9bb1b3bd0daa8d6dbb50cf6bc695e8a0a68132d0c7532e53f79c0b683dbcdec",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-affbcfea40574fbc9ab43593c1f6e35e/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-affbcfea40574fbc9ab43593c1f6e35e/5/observations.jsonl.gz",
+      "uncompressed_bytes": 4699351,
+      "archive_bytes": 44054,
+      "uncompressed_sha256": "81feaf2ead47d1329504bd2f228c37900ed9c44adbb687cc0902efac52c47e14",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-b397f839f81c4f338772cb8f22ffeef4/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-b397f839f81c4f338772cb8f22ffeef4/5/observations.jsonl.gz",
+      "uncompressed_bytes": 2175413,
+      "archive_bytes": 21528,
+      "uncompressed_sha256": "00166b68edd34b540c0023e0ff3999a1f75e751d04b50a289fab92a891191039",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-c051a368a3ab434daca64d27b4694989/4/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-c051a368a3ab434daca64d27b4694989/4/observations.jsonl.gz",
+      "uncompressed_bytes": 87801934,
+      "archive_bytes": 7465217,
+      "uncompressed_sha256": "2158f7902e6e5991f57ad1020034a81fb712eb6ba2ec8e45fb606bd2d873dadd",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-c625b098fa6845cdb3fcb3e88d5bb242/3/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-c625b098fa6845cdb3fcb3e88d5bb242/3/observations.jsonl.gz",
+      "uncompressed_bytes": 563193,
+      "archive_bytes": 7828,
+      "uncompressed_sha256": "8f81d826a617f24d2735fd97b7183d85e8c7525d0759cf02f6c951d1fe1cf80d",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-c625b098fa6845cdb3fcb3e88d5bb242/4/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-c625b098fa6845cdb3fcb3e88d5bb242/4/observations.jsonl.gz",
+      "uncompressed_bytes": 640103,
+      "archive_bytes": 8641,
+      "uncompressed_sha256": "ac0746ee0816ec4413e87c51866755e958a732f2a6b9920c9e1bb6fc773e95eb",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-d03dd3a9492c41bd946af973b532f063/3/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-d03dd3a9492c41bd946af973b532f063/3/observations.jsonl.gz",
+      "uncompressed_bytes": 48699429,
+      "archive_bytes": 4034950,
+      "uncompressed_sha256": "f4946b8dafd7ef8cb2a40890f133c69be47357b31623cea02a9da19c46b3cb8f",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-d03dd3a9492c41bd946af973b532f063/4/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-d03dd3a9492c41bd946af973b532f063/4/observations.jsonl.gz",
+      "uncompressed_bytes": 519489,
+      "archive_bytes": 7590,
+      "uncompressed_sha256": "e651996970a19cc172d2767a1ad6cefdc5a23efdf3bc25306898e7deb8010d92",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-dfb0d9ca185d4ec39a29ea8015ce247e/4/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-dfb0d9ca185d4ec39a29ea8015ce247e/4/observations.jsonl.gz",
+      "uncompressed_bytes": 497018,
+      "archive_bytes": 7025,
+      "uncompressed_sha256": "8382885c85f74e859117772bde2abd6a907644a224b21bfcf34aacc299cad055",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-dfb0d9ca185d4ec39a29ea8015ce247e/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-dfb0d9ca185d4ec39a29ea8015ce247e/5/observations.jsonl.gz",
+      "uncompressed_bytes": 570092,
+      "archive_bytes": 7185,
+      "uncompressed_sha256": "3b9f5dbecb76f81cebc52228691b16d4e0db4a6d979949af8e87ff73a5bdb95a",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e203cceb169d4c7a969369980f236407/5/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e203cceb169d4c7a969369980f236407/5/observations.jsonl.gz",
+      "uncompressed_bytes": 10756523,
+      "archive_bytes": 95208,
+      "uncompressed_sha256": "0b353069c7a72d6d55497674e60f18a08f0b588ffab7b3ec5ba07b3a01d41924",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e96f2aa4549c40dba46969ce4853ad32/1/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e96f2aa4549c40dba46969ce4853ad32/1/observations.jsonl.gz",
+      "uncompressed_bytes": 2367901,
+      "archive_bytes": 25333,
+      "uncompressed_sha256": "e8659ea9f2e2adc6b1ed1156fdba7b55ebdbb58f18c3999c32b8a783869fdd82",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e96f2aa4549c40dba46969ce4853ad32/2/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e96f2aa4549c40dba46969ce4853ad32/2/observations.jsonl.gz",
+      "uncompressed_bytes": 49630456,
+      "archive_bytes": 4269715,
+      "uncompressed_sha256": "1d33ecf9d8d0a95f4bdb7c220fb2ca0903af81d4b5a91a151142b61856e08012",
+      "complete_decode": true
+    },
+    {
+      "original_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e96f2aa4549c40dba46969ce4853ad32/3/observations.jsonl",
+      "archive_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/video-evidence-e96f2aa4549c40dba46969ce4853ad32/3/observations.jsonl.gz",
+      "uncompressed_bytes": 10489597,
+      "archive_bytes": 744709,
+      "uncompressed_sha256": "dd5d2b91111f5ee86788c667c6da6b522fb68773051ef4af0f03eea6c7e90f24",
+      "complete_decode": true
+    }
+  ]
+}

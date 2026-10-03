@@ -154,12 +154,13 @@ class EnvironmentAdmission:
             task: Exact prepared task, including run and task identity.
             commit: Resource permission commits a grant; plan checks only warm caches.
             full: Use the reference selection for controlled small-model experiments.
-            budget: Optional deterministic budget for tests.
+            budget: Explicit search budget, otherwise the run's configured budget
+                or the existing defaults.
 
         Returns:
             Structured allowed, held or inconclusive evidence.
         """
-        budget = budget or Budget()
+        budget = budget or Budget(**getattr(self.runtime, "composition_budget", {}))
         task_id = task.get("task_id", "")
         with self.context.admission_lock:
             self.synchronize()
@@ -197,6 +198,7 @@ class EnvironmentAdmission:
                                   for rid, actor in snapshot.resources.items()},
                 checker.safety_rules, getattr(checker, "dfa_dots", checker.dfas),
                 snapshot.requirements, snapshot.geometry, snapshot.permitted_resources,
+                getattr(plant, "_has_state_context", True),
             ])
             for component in components:
                 if full or component.model_identity != model_identity:
@@ -231,8 +233,26 @@ class EnvironmentAdmission:
             result = analyze(plant, checker, monitors, candidate, running,
                              budget=budget, full=full)
             if result.status == "held" and plant.missing_capabilities:
-                result.status = "inconclusive"
-                result.reason = "missing_required_capability"
+                # A directly observed DFA violation remains proven even when
+                # an unrelated continuation has unavailable behavior.
+                try:
+                    projected = plant.project(plant.initial, candidate)
+                except ValueError:
+                    violations = []
+                else:
+                    sigma = (plant.labels(plant.initial) | plant.labels(projected)
+                             | candidate.labels | frozenset(
+                                 label for action in running for label in action.labels))
+                    violations = [checker.transition_evidence(rule, monitors[rule], sigma)
+                                  for rule in sorted(result.scope.rules)]
+                    violations = [row for row in violations
+                                  if row["reason"] == "accepting_state_unreachable"]
+                if not violations:
+                    result.status = "inconclusive"
+                    result.reason = "missing_required_capability"
+                else:
+                    result.scope.reasons.append({"kind": "specification_violation",
+                                                 "transitions": violations})
                 result.scope.reasons.append({"kind": "unavailable_behavior",
                                              "capabilities": sorted(plant.missing_capabilities)})
             return plant, candidate, result, model_identity, False

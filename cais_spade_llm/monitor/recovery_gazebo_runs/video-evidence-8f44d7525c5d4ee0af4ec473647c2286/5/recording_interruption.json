@@ -1,0 +1,4 @@
+{
+  "status": "blocked",
+  "reason": "Both initial CCA analyses returned inconclusive/time_limit at 120 seconds; no mutex demonstration accepted."
+}

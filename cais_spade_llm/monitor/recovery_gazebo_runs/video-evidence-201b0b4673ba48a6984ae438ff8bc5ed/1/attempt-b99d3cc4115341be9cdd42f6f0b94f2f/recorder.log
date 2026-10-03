@@ -1,0 +1,15 @@
+ERROR:__main__:Gazebo recording failed
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/gazebo_recording.py", line 664, in main
+    {"capture": _capture, "preview": _preview, "clock": _record_clock}[args.operation](args.directory)
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/gazebo_recording.py", line 362, in _capture
+    raise RuntimeError("Gazebo capture is too small or blank")
+RuntimeError: Gazebo capture is too small or blank
+Traceback (most recent call last):
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/gazebo_recording.py", line 673, in <module>
+    main()
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/gazebo_recording.py", line 664, in main
+    {"capture": _capture, "preview": _preview, "clock": _record_clock}[args.operation](args.directory)
+  File "/home/jongh/projects/cais-spade-llm/cais_spade_llm/recovery_framework/gazebo_recording.py", line 362, in _capture
+    raise RuntimeError("Gazebo capture is too small or blank")
+RuntimeError: Gazebo capture is too small or blank

@@ -734,10 +734,11 @@ class EnvironmentRuntime:
 
 @admission_transaction
 def _hold_revision(runtime: EnvironmentRuntime) -> str:
-    """Wake held goals after acknowledgements, arrivals or capability changes."""
+    """Wake held goals after admissions, acknowledgements or capability changes."""
     context = runtime.context
     return fingerprint([context.revision, context.revisions(), runtime.operation_goals,
-                        context.requirements, context.permitted_resources])
+                        context.requirements, context.permitted_resources,
+                        getattr(getattr(runtime, "admission", None), "epoch", 0)])
 
 
 class EnvironmentProductLoop(CyclicBehaviour):
@@ -823,7 +824,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
             await runtime.prepare_execution()
             while not runtime.stopped:
                 if approval is not None:
-                    if time.monotonic() - approval["requested_monotonic"] > 60:
+                    if time.monotonic() - approval["requested_monotonic"] > getattr(runtime, "composition_timeout_s", 60):
                         raise TimeoutError("Timed out awaiting plan_safety_result")
                     if self._plan_decision is not None:
                         decision = self._plan_decision
@@ -1047,7 +1048,10 @@ class EnvironmentProductLoop(CyclicBehaviour):
             if not permitted:
                 context.cancel_pending(task["task_id"])
                 runtime.held_tasks[goal_key] = deepcopy(candidate_result or decision)
-                runtime.held_at_revision[goal_key] = _hold_revision(runtime)
+                runtime.held_at_revision[goal_key] = (
+                    "" if candidate_result.get("status") == "inconclusive"
+                    and candidate_result.get("reason") == "stale_snapshot" else _hold_revision(runtime)
+                )
                 context.negotiations.append({
                     "kind": "candidate_held", "task_id": task["task_id"],
                     "decision": deepcopy(candidate_result or decision),
@@ -1195,7 +1199,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
         """Ask the owning RA to revalidate a retained offer or discover a new path."""
         started = time.monotonic()
         with runtime.context.admission_lock:
-            if desired is not None:
+            if desired is not None and resource_goal is None:
                 runtime.operation_goals[part] = deepcopy(desired)
         cache = runtime.retained_paths.get(key, {})
         desired_id = fingerprint([desired, resource_goal])
@@ -1294,7 +1298,13 @@ class EnvironmentProductLoop(CyclicBehaviour):
             runtime.context.cancel_pending(task["task_id"])
             goal_key = task.get("composition_goal_key", task["part_name"])
             runtime.held_tasks[goal_key] = deepcopy(payload)
-            runtime.held_at_revision[goal_key] = _hold_revision(runtime)
+            composition = next((row for row in reversed(runtime.context.negotiations)
+                                if row.get("kind") == "local_composition"
+                                and row.get("task_id") == task["task_id"]), {})
+            runtime.held_at_revision[goal_key] = (
+                "" if composition.get("status") == "inconclusive"
+                and composition.get("reason") == "stale_snapshot" else _hold_revision(runtime)
+            )
             runtime.queue_save()
             return True
         if payload.get("status") != "completed":
@@ -1467,7 +1477,8 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             "kind": "resource_safety_requested", "task_id": task_id,
             "resource_id": actor.resource_id, "timestamp": time.time(),
         })
-        decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id), 60)
+        decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id),
+                                         getattr(runtime, "composition_timeout_s", 60))
         context.negotiations.append({
             "kind": "resource_safety_decision", "task_id": task_id,
             "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,

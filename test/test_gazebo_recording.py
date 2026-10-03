@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -10,6 +11,27 @@ from unittest.mock import Mock
 import pytest
 
 from cais_spade_llm.recovery_framework import gazebo_recording as recording
+from cais_spade_llm.recovery_framework import failure_videos
+
+
+def test_caption_timing_uses_captured_frames_despite_wall_clock_drift():
+    frames = [dict(frame=0, observed_at_unix=100.),
+              dict(frame=150, observed_at_unix=115.),
+              dict(frame=300, observed_at_unix=130.)]
+    assert failure_videos._caption_elapsed(115.02, frames, 15.) == 10.
+    with pytest.raises(ValueError, match='no nearby recorded observation'):
+        failure_videos._caption_elapsed(140., frames, 15.)
+
+
+def test_navigation_readiness_timeout_does_not_accept_unobserved_controllers(tmp_path, monkeypatch):
+    probe = Mock(side_effect=[subprocess.TimeoutExpired('readiness', 30),
+                              subprocess.CompletedProcess([], 0, stdout=json.dumps({'ready': True}))])
+    monkeypatch.setattr(failure_videos.subprocess, 'run', probe)
+    asyncio.run(failure_videos._wait_for_navigation(tmp_path))
+    observations = json.loads((tmp_path / 'navigation_readiness.json').read_text())['observations']
+    assert [row['ready'] for row in observations] == [False, True]
+    assert observations[0]['error'] == 'Nav2 readiness observation timed out'
+    assert probe.call_count == 2
 
 
 def test_recording_start_failure_discards_only_owned_video(tmp_path, monkeypatch):
@@ -22,6 +44,171 @@ def test_recording_start_failure_discards_only_owned_video(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match='did not become ready'):
         attempt.start()
     assert not video.exists() and unrelated.read_bytes() == b'preserve'
+
+
+@pytest.mark.parametrize('change', ['run_id', 'injection', 'marker', 'cca'])
+def test_failure_video_rejects_unconfirmed_or_unrelated_failure(change):
+    sample = {
+        'run_id': 'observed-run', 'diagnostic_cca_bypass': False,
+        'unavailable_resources': ['Conveyor'],
+        'fault': {'status': 'triggered', 'run_id': 'observed-run',
+                  'scenario': 'Conveyor breakdown', 'visual': {'status': 'completed'},
+                  'evidence': {'run_id': 'observed-run', 'injection_status': 'completed',
+                               'checkpoint': 'after_M1_pick_before_release', 'source': 'M1',
+                               'part_name': 'KET4_Square_4mm',
+                               'resource_values_before': {'ur5e-1': {'held_part': 'KET4_Square_4mm'}},
+                               'part_tracker_before': {'KET4_Square_4mm': {
+                                   'location': 'ur5e-1', 'processCompleted': [{'process': 'trim', 'result': 'square'}]}}}},
+    }
+    config = {'scenario': 'Conveyor breakdown', 'resource_id': 'Conveyor',
+              'checkpoint': 'after_M1_pick_before_release'}
+    assert failure_videos.validate_failure(sample, config)['validated']
+    if change == 'run_id':
+        sample['fault']['evidence']['run_id'] = 'previous-run'
+    elif change == 'injection':
+        sample['fault']['evidence']['injection_status'] = 'failed'
+    elif change == 'marker':
+        sample['fault']['visual']['status'] = 'failed'
+    else:
+        sample['diagnostic_cca_bypass'] = True
+    with pytest.raises(ValueError):
+        failure_videos.validate_failure(sample, config)
+
+
+@pytest.mark.parametrize('fraction', [None, .4, .6, float('nan')])
+def test_machining_video_requires_observed_halfway_interruption(fraction):
+    config = {'scenario': 'Machining breakdown during part processing', 'resource_id': 'M1',
+              'checkpoint': 'during_processing_halfway'}
+    evidence = {'run_id': 'observed-run', 'injection_status': 'completed',
+                'checkpoint': config['checkpoint'], 'process_completed': False,
+                'source': 'gazebo_workholding_observation', 'processing_fraction': .5}
+    sample = {'run_id': 'observed-run', 'diagnostic_cca_bypass': False,
+              'unavailable_resources': ['M1'],
+              'fault': {'status': 'triggered', 'run_id': 'observed-run',
+                        'scenario': config['scenario'], 'visual': {'status': 'completed'},
+                        'evidence': evidence}}
+    assert failure_videos.validate_failure(sample, config)['validated']
+    evidence['processing_fraction'] = fraction
+    with pytest.raises(ValueError, match='halfway'):
+        failure_videos.validate_failure(sample, config)
+
+
+@pytest.mark.parametrize('change', ['pickup', 'other_pickup', 'region', 'assumed_release'])
+def test_slippage_video_requires_both_pickups_and_observed_region(change):
+    config = {'scenario': 'Part slippage', 'resource_id': 'ur5e-3', 'part_name': 'KET4_Square_4mm',
+              'checkpoint': 'after_both_pickups_before_place', 'drop_pose': {'x': 0., 'y': -.2, 'z': 1.04},
+              'additional_condition': {'resource_id': 'ur5e-4', 'part_name': 'gear_small'}}
+    evidence = {'run_id': 'observed-run', 'injection_status': 'completed', 'checkpoint': config['checkpoint'],
+                'detach': {'success': True, 'release_mode': 'detached'},
+                'observed_drop_pose': {'x': 0., 'y': -.2, 'z': 1.015},
+                'resource_values_before': {'ur5e-3': {'held_part': 'KET4_Square_4mm'},
+                                           'ur5e-4': {'held_part': 'gear_small'}}}
+    sample = {'run_id': 'observed-run', 'diagnostic_cca_bypass': False,
+              'unavailable_resources': ['ur5e-3'], 'values': {'ur5e-4': {'held_part': 'gear_small'}},
+              'fault': {'status': 'triggered', 'run_id': 'observed-run', 'scenario': config['scenario'],
+                        'visual': {'status': 'completed'}, 'evidence': evidence}}
+    assert failure_videos.validate_failure(sample, config)['validated']
+    if change == 'pickup':
+        evidence['resource_values_before']['ur5e-3']['held_part'] = None
+    elif change == 'other_pickup':
+        evidence['resource_values_before']['ur5e-4']['held_part'] = None
+    elif change == 'region':
+        evidence['observed_drop_pose']['y'] = .2
+    else:
+        evidence['detach']['release_mode'] = 'assumed_released_if_open'
+    with pytest.raises(ValueError):
+        failure_videos.validate_failure(sample, config)
+
+
+def test_failure_video_cannot_publish_unvalidated_capture(tmp_path):
+    attempt = recording.RecordingAttempt(tmp_path)
+    source = attempt.directory / 'capture.partial.mp4'
+    source.write_bytes(b'owned original')
+    output = tmp_path / 'failure-20x.mp4'
+    with pytest.raises(ValueError, match='Observed run validation'):
+        failure_videos.export_20x(attempt, output, 'Conveyor breakdown',
+                                 {'validated': False, 'run_id': 'blocked'}, [])
+    assert source.read_bytes() == b'owned original'
+    assert not output.exists()
+
+
+def test_verified_20x_export_decodes_and_removes_only_its_original(tmp_path):
+    script = '''
+import json, sys
+from pathlib import Path
+import numpy as np
+from cais_spade_llm.recovery_framework.gazebo_recording import RecordingAttempt, _H264Writer, _write_json
+from cais_spade_llm.recovery_framework.failure_videos import export_20x
+root=Path(sys.argv[1])
+attempt=RecordingAttempt(root)
+writer=_H264Writer(attempt.directory/'capture.partial.mp4', 15., (640,360))
+for index in range(60):
+    writer.write(np.full((360,640,3), 80+index, dtype=np.uint8))
+writer.release()
+_write_json(attempt.directory/'capture.json', {'status':'captured','frames':60,'fps':15.})
+(attempt.directory/'frames.jsonl').write_text(json.dumps({'frame':59,'elapsed_sec':59/15})+'\\n')
+previous=root/'previous.mp4'
+previous.write_bytes(b'preserve')
+output=root/'videos'/'Conveyor breakdown-20x.mp4'
+result=export_20x(attempt,output,'Conveyor breakdown', {'validated':True,'run_id':'encoding-fixture'},[])
+assert abs(result['duration_sec']-result['source_duration_sec']/20) <= 2/15
+assert result['frames_decoded'] >= 2 and output.exists()
+assert not (attempt.directory/'capture.partial.mp4').exists()
+assert previous.read_bytes() == b'preserve'
+assert list(output.parent.iterdir()) == [output]
+'''
+    subprocess.run(['/usr/bin/python3', '-c', script, str(tmp_path)],
+                   cwd=Path(__file__).resolve().parents[1], check=True, timeout=30)
+
+
+def test_mutex_video_requires_cca_hold_and_subsequent_access():
+    def sample(timestamp, first, second):
+        return {'run_id': 'mutex-run', 'observed_at_unix': timestamp,
+                'diagnostic_cca_bypass': False,
+                'values': {'ur5e-3': {'resource_location': first},
+                           'ur5e-4': {'resource_location': second}}}
+    samples = [sample(10, 'home', 'assembly_board-v1'),
+               sample(10.5, 'home', 'home'), sample(11, 'assembly_board-v1', 'home')]
+    negotiations = [
+        {'kind': 'CCA', 'timestamp': 10, 'task_ids': ['entry-3']},
+        {'kind': 'candidate_held', 'task_id': 'entry-3',
+         'decision': {'status': 'held', 'included_specifications': ['workspace_mutex'],
+                      'counterexample': [{'action': 'entry'}],
+                      'task_bindings': {'entry': {'resource_id': 'ur5e-3', 'event_name': 'place_approach',
+                                                 'parameters': {'destination_location': 'assembly_board-v1'}}}}},
+        {'kind': 'CCA', 'timestamp': 10.6, 'decision': {'decisions': {'allowed-entry-3': {'status': 'allowed'}}}},
+        {'kind': 'task_sent', 'task_id': 'allowed-entry-3', 'timestamp': 10.7,
+         'resource_id': 'ur5e-3', 'event_name': 'place_approach'},
+    ]
+    result = failure_videos.validate_mutex(samples, negotiations)
+    assert result['waiting_robot'] == 'ur5e-3' and result['first_robot'] == 'ur5e-4'
+    with pytest.raises(ValueError, match='No observed CCA mutex hold'):
+        failure_videos.validate_mutex(samples, [])
+    samples.append(sample(12, 'assembly_board-v1', 'assembly_board-v1'))
+    with pytest.raises(ValueError, match='overlapping occupancy'):
+        failure_videos.validate_mutex(samples, negotiations)
+
+
+def test_mutex_recording_binds_entry_and_persistent_occupancy_to_exact_resources():
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    checker = OnlineSafetyMonitor({}, [failure_videos.mutex_rule()])
+    assert checker._map_task_to_aps('ur5e-3@localhost', 'place_approach',
+                                    {'destination_location': 'assembly_board-v1'}) == ['ap5']
+    assert checker._map_task_to_aps('ur5e-3@localhost', 'place_approach',
+                                    {'destination_location': 'Conveyor'}) == []
+    assert checker._map_state_to_aps('ur5e-4@localhost', 'placed',
+                                     {'resource_location': 'assembly_board-v1'}) == ['ap4']
+    assert checker._map_state_to_aps('ur5e-4@localhost', 'home',
+                                     {'resource_location': 'home'}) == []
+    checker.resource_bindings = {'recovery-resource-3@localhost': 'ur5e-3',
+                                 'recovery-resource-4@localhost': 'ur5e-4'}
+    assert checker._map_task_to_aps('recovery-resource-3@localhost', 'place_approach',
+                                    {'destination_location': 'assembly_board-v1'}) == ['ap5']
+    assert checker._map_state_to_aps('recovery-resource-4@localhost', 'placed',
+                                     {'resource_location': 'assembly_board-v1'}) == ['ap4']
+    assert checker._map_task_to_aps('unregistered@localhost', 'place_approach',
+                                    {'resource_id': 'ur5e-3', 'destination_location': 'assembly_board-v1'}) == []
 
 
 def test_cancel_terminates_owned_recorder_and_preserves_logs(tmp_path):

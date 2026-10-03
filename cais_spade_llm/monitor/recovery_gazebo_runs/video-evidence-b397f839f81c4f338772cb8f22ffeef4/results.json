@@ -1,0 +1,10 @@
+{
+  "videos": [],
+  "blocked": [
+    {
+      "scenario": "mutex rule applied into ur5e 3 and ur5e4",
+      "reason": "Run ended without the requested CCA mutex demonstration"
+    }
+  ],
+  "output_directory": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/videos-20x"
+}

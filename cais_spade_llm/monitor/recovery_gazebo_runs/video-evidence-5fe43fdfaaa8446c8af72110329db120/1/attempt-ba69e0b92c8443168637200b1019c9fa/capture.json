@@ -1,0 +1,16 @@
+{
+  "status": "captured",
+  "started_at_unix": 1790973452.1053505,
+  "ended_at_unix": 1790973784.8373158,
+  "encoder_finalize_time_sec": 0.16444458400019357,
+  "fps": 15.0,
+  "frames": 4703,
+  "captures": 4634,
+  "repeated_frames": 69,
+  "encoder": "h264_nvenc",
+  "preset": "p1",
+  "capture_cpu_time_sec": 217.77215900000002,
+  "encoder_cpu_time_sec": 50.273185,
+  "max_capture_gap_sec": 0.1859543639993717,
+  "wall_duration_sec": 313.5105722349999
+}
