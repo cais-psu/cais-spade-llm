@@ -373,6 +373,12 @@ class ProductAgent(LlmAgent):
         )
         if isinstance(recovery_safety_result, dict) and recovery_safety_result:
             payload["recovery_safety_result"] = deepcopy(recovery_safety_result)
+        if not skip_recovery_safety_validation:
+            registration_builder = getattr(self, "_build_recovery_composition_request", None)
+            if callable(registration_builder):
+                registration = registration_builder()
+                if registration is not None:
+                    payload["recovery_composition_request"] = registration
         return payload
 
     def _safety_event_history_cache_key(self) -> tuple[tuple[Any, ...], bool]:
@@ -1716,6 +1722,13 @@ class ProductAgent(LlmAgent):
                     existing_task_node = node
                     break
 
+            if (existing_task_node or {}).get("function_name") == "execute_recovery_macro" and (
+                str(msg.sender).split("/", 1)[0]
+                != str(existing_task_node.get("resource_jid")).split("/", 1)[0]
+            ):
+                agent.logger.warning("[Product] Ignoring recovery ACK from an unexpected resource")
+                return
+
             if agent._should_ignore_stale_recovery_macro_ack(
                 task_node=existing_task_node,
                 incoming_status=str(status),
@@ -1736,6 +1749,25 @@ class ProductAgent(LlmAgent):
                     str(status or "").strip() or "<unknown>",
                 )
                 return
+
+            if (existing_task_node or {}).get("function_name") == "execute_recovery_macro":
+                sequence = agent._active_recovery_sequence() or {}
+                registration = sequence.get("recovery_composition") or {}
+                reference = (registration.get("task_refs") or {}).get(task_id)
+                if isinstance(reference, dict) and (
+                    status in {"completed", "finished"} or str(status).startswith("failed")
+                ):
+                    acknowledgement = Message(to=agent.cca_jid)
+                    acknowledgement.set_metadata("type", "resource_event")
+                    acknowledgement.body = json.dumps({
+                        "status": "recovery_acknowledgement",
+                        "task_id": task_id,
+                        "resource_jid": existing_task_node.get("resource_jid"),
+                        "product_jid": str(agent.jid),
+                        "params": {"recovery_composition_ref": deepcopy(reference)},
+                        "observations": {"status": status, "observations": deepcopy(observations)},
+                    })
+                    await send_agent_message(self, acknowledgement, transport_label="recovery_acknowledgement")
 
             # 1) Keep existing state map for UI/debug
             agent.task_states[task_id] = status
@@ -1904,6 +1936,8 @@ class ProductAgent(LlmAgent):
             msg = await self.receive(timeout=0.5)
             if not msg:
                 return
+            if str(msg.sender).split("/", 1)[0] != str(agent.cca_jid).split("/", 1)[0]:
+                return
 
             try:
                 payload = json.loads(msg.body or "{}")
@@ -1928,6 +1962,7 @@ class ProductAgent(LlmAgent):
                 ok=ok,
                 violations=violations,
                 request_id=request_id,
+                recovery_composition=payload.get("recovery_composition"),
             ):
                 return
 

@@ -1,0 +1,20 @@
+[
+  {
+    "candidate_id": "GAZEBO_MOTION_SAFE",
+    "status": "NEEDS_CONTEXT",
+    "artifact_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/a4d0f3aa377843ec9c8b0da08959599f/result.json",
+    "dispatch_authorized": false
+  },
+  {
+    "candidate_id": "GAZEBO_MOTION_CONFLICT",
+    "status": "NEEDS_CONTEXT",
+    "artifact_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/f06d5e665394476696090be0f876d47f/result.json",
+    "dispatch_authorized": false
+  },
+  {
+    "candidate_id": "missing_resource_evidence",
+    "status": "NEEDS_CONTEXT",
+    "artifact_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/1c6735023e8549678523d913399936df/result.json",
+    "dispatch_authorized": false
+  }
+]

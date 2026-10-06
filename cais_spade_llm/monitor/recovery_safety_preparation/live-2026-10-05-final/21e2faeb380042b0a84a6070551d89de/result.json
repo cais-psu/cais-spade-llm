@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "candidate_id": "GAZEBO_MOTION_CONFLICT",
+  "origin": "mock",
+  "dispatch_authorized": false,
+  "status": "NEEDS_CONTEXT",
+  "analysis": null,
+  "prepared_programs": [],
+  "unresolved": [
+    {
+      "reason": "Gazebo read-only service timed out: /GETRECOVERYSTATE"
+    }
+  ]
+}

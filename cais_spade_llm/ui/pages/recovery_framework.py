@@ -82,7 +82,7 @@ def render(bridge: SystemBridge) -> None:
                     recovery_run.render(bridge, is_active=lambda: tabs.value == "run")
                 elif name == "recovery":
                     from cais_spade_llm.ui.pages import recovery
-                    recovery.render(root=_ROOT, is_active=lambda: tabs.value == "recovery")
+                    recovery.render(root=_ROOT, is_active=lambda: tabs.value == "recovery", bridge=bridge)
                 else:
                     ui.label(
                         "Saved results retain their recorded inputs; the current setup is not applied to historical runs."

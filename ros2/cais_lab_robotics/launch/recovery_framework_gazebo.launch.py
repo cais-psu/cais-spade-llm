@@ -82,7 +82,8 @@ def _load_launch_module(filename: str) -> Any:
     return module
 
 
-def _controller_config(robots: list[dict[str, Any]], update_rate: int = 1000) -> dict[str, Any]:
+def _controller_config(robots: list[dict[str, Any]], update_rate: int = 1000,
+                       recovery_observations: bool = False) -> dict[str, Any]:
     if update_rate not in (250, 500, 1000):
         raise ValueError('UR controller rate must be 250, 500, or 1000 Hz')
     manager = {
@@ -101,6 +102,8 @@ def _controller_config(robots: list[dict[str, Any]], update_rate: int = 1000) ->
             (f'{prefix}rg2_gripper_traj_controller', [f'{prefix}rg2_finger_width']),
         ):
             manager[controller] = {'type': 'joint_trajectory_controller/JointTrajectoryController'}
+            if recovery_observations:
+                manager[controller]['type'] = 'cais_lab_robotics/RecoveryJointTrajectoryController'
             config[controller] = {'ros__parameters': {
                 'joints': joints, 'command_interfaces': ['position'],
                 'state_interfaces': ['position', 'velocity'] if len(joints) == 6 else ['position'],
@@ -561,7 +564,8 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     controller_rate = int(LaunchConfiguration('ur_controller_rate_hz').perform(context))
     gui_rate = int(LaunchConfiguration('gazebo_gui_rate_hz', default='30').perform(context))
     ode_island_threads = int(LaunchConfiguration('ode_island_threads', default='0').perform(context))
-    controllers = _controller_config(robots, controller_rate)
+    recovery_observations = LaunchConfiguration('recovery_observations', default='false').perform(context) == 'true'
+    controllers = _controller_config(robots, controller_rate, recovery_observations)
     performance = {
         'speed': speed, 'ur_controller_rate_hz': controller_rate,
         'enable_camera_streams': enabled('enable_camera_streams'),
@@ -577,7 +581,16 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     temporary_paths.append(Path(controllers_path))
     ur_description = _build_description(robots, controllers_path)
     kmr_controllers_path = share / 'config' / 'recovery_framework_kmr_controllers.yaml'
-    _kmr_controller_config(kmr_controllers_path)
+    kmr_controllers = _kmr_controller_config(kmr_controllers_path)
+    if recovery_observations:
+        for parameters in kmr_controllers.values():
+            for value in parameters.get('ros__parameters', {}).values():
+                if isinstance(value, dict) and value.get('type') == 'joint_trajectory_controller/JointTrajectoryController':
+                    value['type'] = 'cais_lab_robotics/RecoveryJointTrajectoryController'
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='cais_recovery_KMR_controllers_', delete=False) as file:
+            yaml.safe_dump(kmr_controllers, file, sort_keys=False)
+            kmr_controllers_path = Path(file.name)
+        temporary_paths.append(kmr_controllers_path)
     kmr_description = _build_kmr_description(share, kmr_controllers_path, initial_arm)
     planning_description = _build_planning_description(ur_description, kmr_description)
     ur_urdf_path = _write_temporary_urdf(ur_description, 'cais_recovery_ur5e_')
@@ -797,6 +810,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 name='KMR_base_controller', output='screen',
                 parameters=[{'config_file': str(scene_path), 'use_sim_time': True,
                              'launch_id': launch_id, 'simulation_speed': float(speed),
+                             'navigation_enabled': LaunchConfiguration('launch_nav2', default='true').perform(context) == 'true',
                              'initial_arm_configuration': initial_arm,
                              'performance_settings': json.dumps(performance, sort_keys=True)}],
             ),
@@ -938,6 +952,7 @@ def generate_launch_description() -> Any:
         'launch_moveit': 'true', 'launch_rviz': 'false',
         'rviz_software_rendering': 'true' if os.environ.get('WSL_DISTRO_NAME') else 'false',
         'launch_nav2': 'true',
+        'recovery_observations': 'false',
     }
     return LaunchDescription([
         *[DeclareLaunchArgument(name, default_value=value) for name, value in defaults.items()],

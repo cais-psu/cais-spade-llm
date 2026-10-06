@@ -1,0 +1,95 @@
+{
+  "synthetic": true,
+  "description": "Four new multi-primitive recovery events. Expected endpoints are authored assumptions. The affected part changes between events; both parts remain tracked in primitive_programs.json step_expectations.",
+  "initial_context_file": "initial_context.json",
+  "outline_events": [
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+      "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET8_Square_8mm",
+      "predecessors": [],
+      "expected_start_state": {
+        "resource_state": "carrying",
+        "resource_location": "Storage",
+        "held_part": "KET8_Square_8mm",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": "Storage",
+        "held_part": null,
+        "part_state": "ready",
+        "part_location": "Storage"
+      },
+      "rationale": "Return KET8_Square_8mm to its vacated Storage slot while preserving the interrupted Storage-to-M1 delivery."
+    },
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+      "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": ["KMR_STORAGE_INTERRUPTION_SEQ1"],
+      "expected_start_state": {
+        "resource_state": "idle",
+        "resource_location": "Storage",
+        "held_part": null,
+        "part_state": "misplaced",
+        "part_location": null
+      },
+      "expected_end_state": {
+        "resource_state": "carrying",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "rationale": "Travel empty to the synthetic recovery pose and acquire the displaced KET4_Square_4mm whose trim result is already square."
+    },
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+      "event_name": "KMR_place_KET4_Square_4mm_at_assembly_board-v1",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": ["KMR_STORAGE_INTERRUPTION_SEQ2"],
+      "expected_start_state": {
+        "resource_state": "carrying",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_state": "ready",
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Place and release KET4_Square_4mm at the synthetic assembly_board-v1 pose, then retreat without claiming assembly completion."
+    },
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+      "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET8_Square_8mm",
+      "predecessors": ["KMR_STORAGE_INTERRUPTION_SEQ3"],
+      "expected_start_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_state": "ready",
+        "part_location": "Storage"
+      },
+      "expected_end_state": {
+        "resource_state": "carrying",
+        "resource_location": "Storage",
+        "held_part": "KET8_Square_8mm",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "rationale": "Return empty to Storage, reacquire KET8_Square_8mm, and restore the carrying checkpoint for the same pending Storage-to-M1 tasks."
+    }
+  ]
+}

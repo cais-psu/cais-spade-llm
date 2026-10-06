@@ -1,0 +1,2 @@
+[Safety Requirements]
+- Placement of KET4_Square_4mm at assembly_board-v1 may begin only after assembly of gear_small is completed.

@@ -1,0 +1,107 @@
+Generated with the built-in image_gen tool.
+
+INITIAL PROMPT
+
+Redraw the attached academic engineering figure to match its implemented system. The attachment is the edit target and style reference, but replace its obsolete contents completely with the three panels specified below. This is a publication figure draft, not a screenshot. Keep the purple-and-white palette, white background, restrained purple rounded panel outlines, purple numbered circles, black readable sans-serif typography and purple directional arrows. Omit logos and decorative robot icons. High-resolution portrait composition approximately 2000 by 2600 pixels, extremely crisp text, generous whitespace, precise alignment. All provided identifiers are fixed symbols: render exact spelling, case, underscores and hyphens, without renaming.
+
+Title: "Central Controller Agent"
+Below title, three stacked numbered panels, with panel 3 largest. The outer purple CCA boundary encloses the three panels. A small "RA execution" box is OUTSIDE that boundary at bottom right.
+
+PANEL 1 heading: "Construct monitors from predefined safety specifications"
+Three horizontally connected boxes.
+Left box:
+"Predefined safety specifications"
+"Fixed AP meanings and bindings"
+Small illustrative rule card:
+"Mutex example"
+"SAFE_shared_area_mutex"
+"assembly_board-v1"
+"G !(ap001 & ap002)"
+Middle box:
+"LTLf-to-DFA compilation"
+"LTLfParser / MONA"
+Right box:
+"DFA monitors"
+Show a neat small two-state schematic for the example formula: an initial arrow to an accepting double circle q0, safe self-loop labeled "!(ap001 & ap002)", arrow from q0 to red rejecting circle qd labeled "ap001 & ap002", and qd self-loop labeled "true". Do not add any other AP symbols. This can be small and simple. Text below: "Separate rule-local APs".
+Main arrows from specifications to compiler to monitors.
+A thin purple route from this DFA box goes down the right side with label "DFA monitors" into joint validation in panel 3, bypassing panel 2.
+
+PANEL 2 heading: "Evaluate APs during primitive execution"
+Left input area has two small stacked cards:
+"PA: recovery outline"
+"RA: primitive compositions and evidence"
+Below these a wider small card:
+"Configured geometry and current conditions"
+"Trajectories, durations, custody and stationary evidence"
+These inputs converge to a middle box:
+"Projected observations"
+"Primitive boundaries and region crossings"
+then an arrow to a right box:
+"Rule-local AP valuations"
+"ap001: first bound resource occupancy"
+"ap002: second bound resource occupancy"
+Below those lines a very small illustrative truth table clearly captioned "Mutex example":
+"ap001  ap002"
+"1      0"
+"1      1"  [light red row to show violation]
+"0      1"
+Footnote within this panel:
+"Occupancy includes configured robot/tool geometry and carried parts."
+Fixed AP bindings from panel 1 also feed this panel, via a short connector labeled "Fixed bindings".
+A downward arrow labeled "Projected behavior and AP valuations" goes from panel 2 into panel 3. Projected observations must NOT feed actual monitor history.
+
+PANEL 3 heading: "Validate joint behavior and authorize task starts"
+A slim input strip along the top contains these two input boxes:
+"Permitted nominal behavior and running work"
+"Retained monitor history"
+Both feed the joint composition below.
+Three clear horizontally arranged boxes connected by purple arrows:
+1. "Joint composition"
+small supporting line "All configured resources"
+small branching graph using unlabeled nodes and two outgoing branches, one red, one green, to suggest alternative starts.
+2. "Nonblocking region"
+small supporting text "One common accepting continuation"
+"All included monitors"
+3. "Exact requested start check"
+small supporting text "Current state, history and program"
+Under the main row add a clear short line:
+"Starts: controllable | Progress and completions: uncontrollable"
+Below exact requested start check display a compact outcome mapping, preserving exact code status names:
+green "allowed → allow"
+amber "held → block"
+gray "inconclusive → block"
+Draw a green arrow labeled "allow" from the allowed outcome to the external "RA execution" box. Both blocked cases end inside the CCA frame at a small "Start remains blocked" box.
+Draw a dashed blue feedback path from external RA execution, around the left margin, back specifically to "Retained monitor history" in panel 3. Label it "Validated observations and acknowledgements". No arrow from permission alone updates history; feedback originates at RA execution.
+
+Design constraints: no LLM box, no selected-rule/not-involved cards, no ap_rec_region/ap_nom_region, no ap_C/ap_D. Do not claim new formulas are synthesized from recovery events. Do not show independent DFA checks as sufficient. No claim of experimental success or physical safety certification. Keep figure readable, avoid excessive bullet text, use visual flow and aligned boxes. Purple structure, blue input/feedback accents, green allowance, red violating example, amber hold. Correct spelling and arrow direction are the priorities.
+
+FIRST CORRECTION
+
+Edit this diagram ONLY to correct connector routing and the CCA boundary, preserving all existing wording, typography, boxes, colors, three-panel layout, and exact identifiers.
+
+1. Remove the current purple "Fixed bindings" connector entirely: it incorrectly begins at the DFA monitors box and points to "PA: recovery outline". Replace it with a clean purple connector FROM the "Predefined safety specifications" box TO the "Rule-local AP valuations" box, labeled "Fixed bindings". It must not point to PA or come from DFA monitors. Route through whitespace; adjust spacing modestly if needed.
+2. The purple right-side "DFA monitors" connector must terminate WITH A VISIBLE ARROWHEAD at the "Joint composition" box in panel 3. Currently it ends at the panel frame. Make its causal destination clear.
+3. "Permitted nominal behavior and running work" must have a visible arrow into "Joint composition". The "Projected behavior and AP valuations" arrow must also point into "Joint composition", not merely into the panel frame.
+4. Correct the dashed blue feedback: REMOVE the entire long dashed blue bottom/perimeter line and its arrow entering RA execution from below. That line is misleading. Keep exactly ONE dashed blue arrow FROM the TOP of "RA execution" up and left INTO the RIGHT edge of "Retained monitor history". Label that single return arrow "Validated observations and acknowledgements" using two or three short lines in the whitespace above RA execution. The feedback source is RA execution, destination is Retained monitor history. No dashed blue arrow may enter RA execution. Projected observations never feed Retained monitor history.
+5. The "Retained monitor history" box supplies current history to validation; keep its existing solid input connector into Joint composition / start checking.
+6. The green "allow" arrow into RA execution and the held/inconclusive arrows into Start remains blocked remain unchanged.
+7. The outer Central Controller Agent boundary must exclude RA execution. Shape the right boundary to run down to the LEFT of RA execution, while still enclosing the three numbered panels and Start remains blocked. An indentation of the outer border beside RA is acceptable.
+
+Do not modify any AP label, formula, title, rule identifier, table value, outcome status or other content. Fix wiring clearly and avoid overlapping text.
+
+FINAL CORRECTION
+
+Make one focused wiring repair to the attached figure, preserving every other element and all exact identifiers.
+
+The unlabeled purple line leaving the RIGHT side of the "DFA monitors" box is currently dangling outside the diagram near the blue feedback label. DELETE that entire long dangling purple line. Keep the CCA outer frame intact.
+
+Instead, explicitly show the monitor input locally in panel 3:
+Rearrange its top input strip into THREE adjacent boxes, with these exact texts:
+LEFT: "Permitted nominal behavior and running work"
+MIDDLE: "DFA monitors"
+RIGHT: "Retained monitor history"
+Keep all three above the main Joint composition / Nonblocking region / Exact requested start check row. Connect the first two input boxes with clear solid purple arrows INTO "Joint composition". The existing solid input from Retained monitor history to validation stays, and the blue dashed feedback must still end only at Retained monitor history. Use legible 2-3 line text within the three boxes if needed. The small panel-3 "DFA monitors" input means the monitors constructed in panel 1; no long cross-panel wire is needed.
+
+In the Nonblocking region miniature graph, remove the red branch so only the retained green continuation remains. Keep both branches in the Joint composition miniature graph.
+
+Do not change the formula, AP symbols, wording, colors, outcomes, or any other arrow. Ensure there are no loose dangling connectors or arrowheads ending in empty space. This is a precise cleanup, not a redesign.

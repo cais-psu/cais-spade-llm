@@ -131,6 +131,7 @@ class ProductRecoveryController:
         "_runtime_safety_ap_sets_for_task",
         "_runtime_safety_task_ap_empty",
         "_dispatch_params_for_task_node",
+        "_build_recovery_composition_request",
         "_runtime_recovery_blocks_execution",
         "get_runtime_recovery",
         "_runtime_recovery_data_root",
@@ -1286,7 +1287,9 @@ class ProductRecoveryController:
             return None
         return not ap_sets.get("candidate_aps") and not ap_sets.get("predicted_state_aps")
 
-    def _dispatch_params_for_task_node(self, task_node: dict[str, Any]) -> dict[str, Any]:
+    def _dispatch_params_for_task_node(
+        self, task_node: dict[str, Any], *, registration_only: bool = False
+    ) -> dict[str, Any]:
         """Build task params for dispatch without overriding recovery primitive intent."""
         params = dict(task_node.get("params", {}))
         task_id = str(task_node.get("id") or "").strip()
@@ -1391,6 +1394,19 @@ class ProductRecoveryController:
             if recovery_safety_scope_id:
                 params["recovery_safety_scope_id"] = recovery_safety_scope_id
                 params["start_safety_mode"] = "cca_check"
+                if function_name == "execute_recovery_macro":
+                    params["task_id"] = task_id
+                    params["product_jid"] = str(self.jid)
+                    params.pop("recovery_composition_ref", None)
+                    if not registration_only:
+                        registration = (active_recovery_sequence or {}).get("recovery_composition") or {}
+                        reference = (registration.get("task_refs") or {}).get(task_id)
+                        if not isinstance(reference, dict) or reference.get("task_id") != task_id:
+                            raise RuntimeError(
+                                "Recovery Safety Check dispatch blocked: validated recovery task "
+                                f"{task_id} has no CCA recovery composition reference."
+                            )
+                        params["recovery_composition_ref"] = deepcopy(reference)
             else:
                 message = (
                     "Recovery Safety Check dispatch blocked: validated recovery task "
@@ -1411,6 +1427,9 @@ class ProductRecoveryController:
                     history_message=message,
                 )
                 raise RuntimeError(message)
+        elif active_validation_policy == "no_validation" and function_name == "execute_recovery_macro":
+            params["validation_policy"] = "no_validation"
+            params["start_safety_mode"] = "fast_path"
         elif assembly_board_task and bool(getattr(self, "safety_text_has_requirements", False)):
             params["start_safety_mode"] = "cca_check"
         elif not recovery_safety_task:
@@ -1422,6 +1441,48 @@ class ProductRecoveryController:
             ):
                 params.setdefault("start_safety_mode", "fast_path")
         return params
+
+    def _build_recovery_composition_request(self) -> dict[str, Any] | None:
+        """Register all approved generated tasks without supplying safety authority."""
+        sequence = self._active_recovery_sequence()
+        if not isinstance(sequence, dict):
+            return None
+        policy = (sequence.get("execution_policy") or {}).get("validation_policy") or sequence.get(
+            "validation_policy", self.runtime_recovery.get("validation_policy", "validated")
+        )
+        if policy != "validated":
+            return None
+        task_ids = list(sequence.get("recovery_task_ids") or [])
+        nodes = {node["id"]: node for node in self.process_planner.nodes if isinstance(node, dict)}
+        if not task_ids or not any(
+            nodes.get(task_id, {}).get("function_name") == "execute_recovery_macro"
+            for task_id in task_ids
+        ):
+            return None
+        tasks = []
+        for task_id in task_ids:
+            node = nodes.get(task_id)
+            if node is None or node.get("function_name") != "execute_recovery_macro":
+                raise RuntimeError("Complete generated recovery sequence is unavailable for CCA registration")
+            params = self._dispatch_params_for_task_node(node, registration_only=True)
+            row = {
+                "task_id": task_id,
+                "outline_id": node.get("recovery_outline_id") or params.get("outline_id"),
+                "resource_jid": node.get("resource_jid"),
+                "function_name": node["function_name"],
+                "params": deepcopy(params),
+            }
+            if node.get("resource_id"):
+                row["resource_id"] = node["resource_id"]
+            tasks.append(row)
+        return {
+            "recovery_id": sequence.get("recovery_sequence_id"),
+            "recovery_safety_scope_id": sequence.get("recovery_safety_scope_id")
+            or self.runtime_recovery.get("recovery_safety_scope_id"),
+            "tasks": tasks,
+            "pending_nominal_task_ids": deepcopy(sequence.get("pending_nominal_task_ids") or []),
+            "continuation_requirements": deepcopy(sequence.get("continuation_requirements") or {}),
+        }
 
     def _runtime_recovery_blocks_execution(self) -> bool:
         status = str(self.runtime_recovery.get("status", "idle") or "idle").strip().lower()
@@ -6222,6 +6283,7 @@ class ProductRecoveryController:
         ok: bool,
         violations: list[dict[str, Any]],
         request_id: str = "",
+        recovery_composition: dict[str, Any] | None = None,
     ) -> bool:
         incoming_request_id = str(request_id or "").strip()
         expected_request_id = ""
@@ -6271,6 +6333,28 @@ class ProductRecoveryController:
         active_recovery_sequence = self._active_recovery_sequence()
         if not active_recovery_sequence:
             active_recovery_sequence = self._reconstruct_active_recovery_sequence_for_validation()
+
+        if ok and validation_policy == "validated" and active_recovery_sequence:
+            sequence_task_ids = set(active_recovery_sequence.get("recovery_task_ids") or [])
+            generated_task_ids = {
+                node.get("id") for node in self.process_planner.nodes
+                if node.get("id") in sequence_task_ids
+                and node.get("function_name") == "execute_recovery_macro"
+            }
+            if generated_task_ids:
+                registration = recovery_composition or {}
+                references = registration.get("task_refs") or {}
+                if (registration.get("status") != "allowed"
+                        or registration.get("recovery_id") != active_recovery_sequence.get("recovery_sequence_id")
+                        or set(references) != generated_task_ids):
+                    ok = False
+                    violations = [*violations, {
+                        "reason": "Complete CCA recovery composition registration is unavailable",
+                        "recovery_composition": deepcopy(registration),
+                    }]
+                else:
+                    active_recovery_sequence = deepcopy(active_recovery_sequence)
+                    active_recovery_sequence["recovery_composition"] = deepcopy(registration)
 
         if ok:
             verification_only = self._recovery_is_verification_only(active_recovery_sequence)

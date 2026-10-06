@@ -1,0 +1,1815 @@
+{
+  "synthetic": true,
+  "description": "Explicitly authored offline model evidence for the unchanged 22-step storage_interruption fixture. Geometry, timing, trajectories, parked poses, helper outputs, process ledger completeness and excluded-resource envelopes are synthetic assumptions, not measured execution or physical feasibility.",
+  "source_files": [
+    {
+      "path": "initial_context.json",
+      "sha256": "cc97e6cfe0bf467a1eadfa5a2061df0d6656f90457424cfd35c6eaf5a8b31a15"
+    },
+    {
+      "path": "event_sequence.json",
+      "sha256": "7dc77a99d0dab607905b7d07f7fed764a6275581314c1577a8052265ec9e8444"
+    },
+    {
+      "path": "primitive_programs.json",
+      "sha256": "774de3103048dda056c77796aedee457b400e925e1f5c5737d25082a7430a80d"
+    }
+  ],
+  "source_scene": {
+    "path": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
+    "sha256": "c09db918fd87e42d2f6a4f331d6eba682d4984eca353b68fd4b55e0e82f31414",
+    "robot_resource_ids": ["ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4", "KMR"],
+    "resource_ids": ["ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4", "M1", "M2", "Storage", "KMR", "Conveyor", "Buffer For Machined parts", "3D Printing Station", "Exit"],
+    "declaration": "Resource identities come from the referenced scene. resource_type values in applicability are reviewed manifest classifications for this offline fixture."
+  },
+  "modeling_assumptions": ["Every KMR primitive occupies one second on the shared horizon [0, 22]. Motion evidence is piecewise linear through the supplied endpoints and bound waypoints, with fixed orientation and base yaw.", "geometry.resources footprints are synthetic world-axis-aligned envelopes; KMR has separate modeled arm/tool and base envelopes. These envelopes do not establish CAD or forward-kinematics enclosure.", "ur5e-1, ur5e-2, ur5e-3 and ur5e-4 are explicitly stationary outside assembly_board-v1 in this baseline. Their synthetic current_pose coordinates reuse scene base_xyz values, not observed TCP poses. Tests may supply concurrent trajectories.", "Both parts have immutable, explicitly complete synthetic processCompleted ledgers for this horizon. The trim result for KET4_Square_4mm predates the initial checkpoint; none of these 22 primitives creates a process completion.", "KET4_Square_4mm starts outside the bound region. This fresh offline trace does not certify events before the checkpoint.", "The released KET8_Square_8mm remains stationary in Storage from t=3 through reacquisition at t=20. KET4_Square_4mm is stationary through its first grasp at t=9 and after release at t=13 through t=22.", "The seven excluded nonrobot resources have explicitly synthetic, stationary outside bounds centred on their scene world_pose coordinates; these bounds are reviewed fixture assumptions, not physical dimensions."],
+  "exclusions": [
+    {
+      "resource_id": "M1",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [-4.05, 1.9, 0, 0, 0, -1.5707963267948966],
+      "bounds": [
+        [-4.1, -4],
+        [1.85, 1.95],
+        [-0.05, 0.05]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    },
+    {
+      "resource_id": "M2",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [-2.05, 1.9, 0, 0, 0, -1.5707963267948966],
+      "bounds": [
+        [-2.1, -2],
+        [1.85, 1.95],
+        [-0.05, 0.05]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    },
+    {
+      "resource_id": "Storage",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [-6.45, 2.3, 0, 0, 0, 1.57079632679],
+      "bounds": [
+        [-6.5, -6.4],
+        [2.25, 2.35],
+        [-0.05, 0.05]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    },
+    {
+      "resource_id": "Conveyor",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [-2.85, 0.5, 0, 0, 0, 0],
+      "bounds": [
+        [-2.9, -2.8],
+        [0.45, 0.55],
+        [-0.05, 0.05]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    },
+    {
+      "resource_id": "Buffer For Machined parts",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [-0.5, 0.5, 1.015, 0, 0, 0],
+      "bounds": [
+        [-0.55, -0.45],
+        [0.45, 0.55],
+        [0.965, 1.065]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    },
+    {
+      "resource_id": "3D Printing Station",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [0.5, -0.5, 1.04, 0, 0, -1.57079632679],
+      "bounds": [
+        [0.45, 0.55],
+        [-0.55, -0.45],
+        [0.99, 1.09]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    },
+    {
+      "resource_id": "Exit",
+      "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds.",
+      "frame": "world",
+      "source_world_pose": [0.5, 0.58, 1.04, 0, 0, 0],
+      "bounds": [
+        [0.45, 0.55],
+        [0.53, 0.63],
+        [0.99, 1.09]
+      ],
+      "stationary": [
+        [0, 22]
+      ],
+      "evidence_kind": "synthetic"
+    }
+  ],
+  "inputs": {
+    "programs": [
+      {
+        "resource_id": "KMR",
+        "resource_jid": "recovery-resource-8@localhost",
+        "primitive_steps": [
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "release_part",
+            "params": {
+              "transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_to_named_pose",
+            "params": {
+              "pose_name": "transport"
+            }
+          },
+          {
+            "primitive": "move_base",
+            "params": {
+              "target_pose": [-0.5, -0.5, 1.5707963267948966],
+              "waypoints": []
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "grasp_part",
+            "params": {
+              "part_name": "KET4_Square_4mm",
+              "initial": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [0, 0, 1.2, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [0, 0, 1.065, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "release_part",
+            "params": {
+              "transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [0, 0, 1.2, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "move_to_named_pose",
+            "params": {
+              "pose_name": "transport"
+            }
+          },
+          {
+            "primitive": "move_base",
+            "params": {
+              "target_pose": [-5.54, 2.41, 1.5707963267948966],
+              "waypoints": []
+            }
+          },
+          {
+            "primitive": "compute_pick_targets",
+            "params": {
+              "initial": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+              "seed": [-3.86e-8, 0.9684402263, 7.98e-8, -1.0292177427, -7.22e-8, 1.1439346844, 3.65e-8]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+            }
+          },
+          {
+            "primitive": "grasp_part",
+            "params": {
+              "part_name": "KET8_Square_8mm",
+              "initial": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787]
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "target": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+              "waypoints": [
+                [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+              ]
+            }
+          },
+          {
+            "primitive": "move_to_named_pose",
+            "params": {
+              "pose_name": "transport"
+            }
+          }
+        ],
+        "step_results": [
+          {
+            "step_index": 0,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+            },
+            "start_time": 0,
+            "end_time": 1,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 0
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 0,
+                  "pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+                },
+                {
+                  "time": 1,
+                  "pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 1,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+            },
+            "start_time": 1,
+            "end_time": 2,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 1
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 1,
+                  "pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+                },
+                {
+                  "time": 2,
+                  "pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 2,
+            "primitive": "release_part",
+            "resolved_params": {
+              "transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "start_time": 2,
+            "end_time": 3,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 2
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "attached": false,
+                "held_part": null,
+                "gripper_state": "open"
+              },
+              "released_part": {
+                "part_name": "KET8_Square_8mm",
+                "frame": "world",
+                "pose": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787],
+                "contained_by": "Storage",
+                "stationary_until": 20
+              }
+            }
+          },
+          {
+            "step_index": 3,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+            },
+            "start_time": 3,
+            "end_time": 4,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 3
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 3,
+                  "pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+                },
+                {
+                  "time": 4,
+                  "pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 4,
+            "primitive": "move_to_named_pose",
+            "resolved_params": {
+              "pose_name": "transport"
+            },
+            "start_time": 4,
+            "end_time": 5,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+              "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 4
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+                "pose_name": "transport"
+              },
+              "trajectory": [
+                {
+                  "time": 4,
+                  "pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+                },
+                {
+                  "time": 5,
+                  "pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 5,
+            "primitive": "move_base",
+            "resolved_params": {
+              "target_pose": [-0.5, -0.5, 1.5707963267948966],
+              "waypoints": []
+            },
+            "start_time": 5,
+            "end_time": 6,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 0
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "base_pose": [-0.5, -0.5, 1.5707963267948966],
+                "resource_location": null,
+                "attached": false
+              },
+              "trajectory": [
+                {
+                  "time": 5,
+                  "pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+                },
+                {
+                  "time": 6,
+                  "pose": [-1, -0.5, 1.15, 1, 0, 0, 0]
+                }
+              ],
+              "base_trajectory": [
+                {
+                  "time": 5,
+                  "pose": [-5.54, 2.41, 1.5707963267948966]
+                },
+                {
+                  "time": 6,
+                  "pose": [-0.5, -0.5, 1.5707963267948966]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 6,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+            },
+            "start_time": 6,
+            "end_time": 7,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 1
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 6,
+                  "pose": [-1, -0.5, 1.15, 1, 0, 0, 0]
+                },
+                {
+                  "time": 7,
+                  "pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 7,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+            },
+            "start_time": 7,
+            "end_time": 8,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 2
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 7,
+                  "pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+                },
+                {
+                  "time": 8,
+                  "pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 8,
+            "primitive": "grasp_part",
+            "resolved_params": {
+              "part_name": "KET4_Square_4mm",
+              "initial": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787]
+            },
+            "start_time": 8,
+            "end_time": 9,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 3
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0],
+                "attached": true,
+                "held_part": "KET4_Square_4mm",
+                "gripper_state": "closed"
+              },
+              "grasped_part": {
+                "part_name": "KET4_Square_4mm",
+                "frame": "world",
+                "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+                "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+              }
+            }
+          },
+          {
+            "step_index": 9,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+            },
+            "start_time": 9,
+            "end_time": 10,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+              "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 4
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 9,
+                  "pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+                },
+                {
+                  "time": 10,
+                  "pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 10,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [0, 0, 1.2, 1, 0, 0, 0]
+            },
+            "start_time": 10,
+            "end_time": 11,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "event_name": "KMR_place_KET4_Square_4mm_at_assembly_board-v1",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 0
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [0, 0, 1.2, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 10,
+                  "pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+                },
+                {
+                  "time": 11,
+                  "pose": [0, 0, 1.2, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 11,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [0, 0, 1.065, 1, 0, 0, 0]
+            },
+            "start_time": 11,
+            "end_time": 12,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "event_name": "KMR_place_KET4_Square_4mm_at_assembly_board-v1",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 1
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [0, 0, 1.065, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 11,
+                  "pose": [0, 0, 1.2, 1, 0, 0, 0]
+                },
+                {
+                  "time": 12,
+                  "pose": [0, 0, 1.065, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 12,
+            "primitive": "release_part",
+            "resolved_params": {
+              "transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "start_time": 12,
+            "end_time": 13,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "event_name": "KMR_place_KET4_Square_4mm_at_assembly_board-v1",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 2
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": "KET4_Square_4mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "attached": false,
+                "held_part": null,
+                "gripper_state": "open"
+              },
+              "released_part": {
+                "part_name": "KET4_Square_4mm",
+                "frame": "world",
+                "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+                "contained_by": "assembly_board-v1",
+                "stationary_until": 22
+              }
+            }
+          },
+          {
+            "step_index": 13,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [0, 0, 1.2, 1, 0, 0, 0]
+            },
+            "start_time": 13,
+            "end_time": 14,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+              "event_name": "KMR_place_KET4_Square_4mm_at_assembly_board-v1",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 3
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.065, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [0, 0, 1.2, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 13,
+                  "pose": [0, 0, 1.065, 1, 0, 0, 0]
+                },
+                {
+                  "time": 14,
+                  "pose": [0, 0, 1.2, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 14,
+            "primitive": "move_to_named_pose",
+            "resolved_params": {
+              "pose_name": "transport"
+            },
+            "start_time": 14,
+            "end_time": 15,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 0
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+                "pose_name": "transport"
+              },
+              "trajectory": [
+                {
+                  "time": 14,
+                  "pose": [0, 0, 1.2, 1, 0, 0, 0]
+                },
+                {
+                  "time": 15,
+                  "pose": [-1, -0.5, 1.15, 1, 0, 0, 0]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 15,
+            "primitive": "move_base",
+            "resolved_params": {
+              "target_pose": [-5.54, 2.41, 1.5707963267948966],
+              "waypoints": []
+            },
+            "start_time": 15,
+            "end_time": 16,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 1
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+              "base_pose": [-0.5, -0.5, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "base_pose": [-5.54, 2.41, 1.5707963267948966],
+                "resource_location": "Storage",
+                "attached": false
+              },
+              "trajectory": [
+                {
+                  "time": 15,
+                  "pose": [-1, -0.5, 1.15, 1, 0, 0, 0]
+                },
+                {
+                  "time": 16,
+                  "pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+                }
+              ],
+              "base_trajectory": [
+                {
+                  "time": 15,
+                  "pose": [-0.5, -0.5, 1.5707963267948966]
+                },
+                {
+                  "time": 16,
+                  "pose": [-5.54, 2.41, 1.5707963267948966]
+                }
+              ]
+            }
+          },
+          {
+            "step_index": 16,
+            "primitive": "compute_pick_targets",
+            "resolved_params": {
+              "initial": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787]
+            },
+            "start_time": 16,
+            "end_time": 17,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 2
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+                "approach": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+                "lift": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+                "lift_waypoints": [
+                  [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+                ],
+                "retreat": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+                "seed": [-3.86e-8, 0.9684402263, 7.98e-8, -1.0292177427, -7.22e-8, 1.1439346844, 3.65e-8],
+                "carrying": [0.00328154, -0.76073215, -0.00070832, -1.94313693, -0.00334093, 0.91199349, 0.00300654]
+              }
+            }
+          },
+          {
+            "step_index": 17,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+              "seed": [-3.86e-8, 0.9684402263, 7.98e-8, -1.0292177427, -7.22e-8, 1.1439346844, 3.65e-8]
+            },
+            "start_time": 17,
+            "end_time": 18,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 3
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 17,
+                  "pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+                },
+                {
+                  "time": 18,
+                  "pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+                }
+              ],
+              "param_sources": {
+                "target": {
+                  "step_index": 16,
+                  "output": "approach"
+                },
+                "seed": {
+                  "step_index": 16,
+                  "output": "seed"
+                }
+              }
+            }
+          },
+          {
+            "step_index": 18,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+            },
+            "start_time": 18,
+            "end_time": 19,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 4
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 18,
+                  "pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+                },
+                {
+                  "time": 19,
+                  "pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+                }
+              ],
+              "param_sources": {
+                "target": {
+                  "step_index": 16,
+                  "output": "target"
+                }
+              }
+            }
+          },
+          {
+            "step_index": 19,
+            "primitive": "grasp_part",
+            "resolved_params": {
+              "part_name": "KET8_Square_8mm",
+              "initial": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787]
+            },
+            "start_time": 19,
+            "end_time": 20,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 5
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": null,
+              "gripper_state": "open",
+              "grasp_transform": null
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0],
+                "attached": true,
+                "held_part": "KET8_Square_8mm",
+                "gripper_state": "closed"
+              },
+              "grasped_part": {
+                "part_name": "KET8_Square_8mm",
+                "frame": "world",
+                "pose": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787],
+                "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+              }
+            }
+          },
+          {
+            "step_index": 20,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+              "waypoints": [
+                [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+              ]
+            },
+            "start_time": 20,
+            "end_time": 21,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 6
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+              },
+              "trajectory": [
+                {
+                  "time": 20,
+                  "pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+                },
+                {
+                  "time": 20.5,
+                  "pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+                },
+                {
+                  "time": 21,
+                  "pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+                }
+              ],
+              "param_sources": {
+                "target": {
+                  "step_index": 16,
+                  "output": "lift"
+                },
+                "waypoints": {
+                  "step_index": 16,
+                  "output": "lift_waypoints"
+                }
+              }
+            }
+          },
+          {
+            "step_index": 21,
+            "primitive": "move_to_named_pose",
+            "resolved_params": {
+              "pose_name": "transport"
+            },
+            "start_time": 21,
+            "end_time": 22,
+            "source": {
+              "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+              "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+              "resource_jid": "recovery-resource-8@localhost",
+              "step_index": 7
+            },
+            "start_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "projected_snapshot": {
+              "frame": "world",
+              "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+              "base_pose": [-5.54, 2.41, 1.5707963267948966],
+              "held_part": "KET8_Square_8mm",
+              "gripper_state": "closed",
+              "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+            },
+            "model_evidence": {
+              "frame": "world",
+              "outputs": {
+                "tcp_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+                "pose_name": "transport"
+              },
+              "trajectory": [
+                {
+                  "time": 21,
+                  "pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+                },
+                {
+                  "time": 22,
+                  "pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "snapshot": {
+      "nominal_tasks": [
+        {
+          "task_id": "KMR_STORAGE_KET8_PICK_APPROACH",
+          "resource_id": "KMR",
+          "resource_jid": "recovery-resource-8@localhost",
+          "event_name": "pick_approach",
+          "part_name": "KET8_Square_8mm",
+          "parameters": {
+            "resource_id": "KMR",
+            "part_name": "KET8_Square_8mm",
+            "origin_resource_location": "Storage"
+          },
+          "predecessors": [],
+          "status": "completed"
+        },
+        {
+          "task_id": "KMR_STORAGE_KET8_PICK_PART",
+          "resource_id": "KMR",
+          "resource_jid": "recovery-resource-8@localhost",
+          "event_name": "pick_part",
+          "part_name": "KET8_Square_8mm",
+          "parameters": {
+            "resource_id": "KMR",
+            "part_name": "KET8_Square_8mm",
+            "origin_resource_location": "Storage",
+            "handoff_acknowledged": true
+          },
+          "predecessors": ["KMR_STORAGE_KET8_PICK_APPROACH"],
+          "status": "completed"
+        },
+        {
+          "task_id": "KMR_STORAGE_KET8_MOVE_TO_M1",
+          "resource_id": "KMR",
+          "resource_jid": "recovery-resource-8@localhost",
+          "event_name": "move_to_resource",
+          "part_name": "KET8_Square_8mm",
+          "parameters": {
+            "resource_id": "KMR",
+            "target_resource": "M1",
+            "source_resource": "Storage",
+            "arrival_acknowledged": true,
+            "arm_parked": true
+          },
+          "predecessors": ["KMR_STORAGE_KET8_PICK_PART"],
+          "status": "pending"
+        },
+        {
+          "task_id": "KMR_STORAGE_KET8_PLACE_APPROACH",
+          "resource_id": "KMR",
+          "resource_jid": "recovery-resource-8@localhost",
+          "event_name": "place_approach",
+          "part_name": "KET8_Square_8mm",
+          "parameters": {
+            "resource_id": "KMR",
+            "part_name": "KET8_Square_8mm",
+            "destination_location": "M1"
+          },
+          "predecessors": ["KMR_STORAGE_KET8_MOVE_TO_M1"],
+          "status": "pending"
+        },
+        {
+          "task_id": "KMR_STORAGE_KET8_PLACE_RELEASE",
+          "resource_id": "KMR",
+          "resource_jid": "recovery-resource-8@localhost",
+          "event_name": "place_release",
+          "part_name": "KET8_Square_8mm",
+          "parameters": {
+            "resource_id": "KMR",
+            "part_name": "KET8_Square_8mm",
+            "destination_location": "M1",
+            "handoff_acknowledged": true,
+            "robot_clear": true
+          },
+          "predecessors": ["KMR_STORAGE_KET8_PLACE_APPROACH"],
+          "status": "pending"
+        }
+      ],
+      "task_statuses": {
+        "KMR_STORAGE_KET8_PICK_APPROACH": "completed",
+        "KMR_STORAGE_KET8_PICK_PART": "completed",
+        "KMR_STORAGE_KET8_MOVE_TO_M1": "pending",
+        "KMR_STORAGE_KET8_PLACE_APPROACH": "pending",
+        "KMR_STORAGE_KET8_PLACE_RELEASE": "pending"
+      },
+      "resume_entry_task_ids_by_resource": {
+        "recovery-resource-8@localhost": "KMR_STORAGE_KET8_MOVE_TO_M1"
+      },
+      "resumable_task_ids_by_resource": {
+        "recovery-resource-8@localhost": ["KMR_STORAGE_KET8_MOVE_TO_M1", "KMR_STORAGE_KET8_PLACE_APPROACH", "KMR_STORAGE_KET8_PLACE_RELEASE"]
+      },
+      "resources": {
+        "KMR": {
+          "resource_id": "KMR",
+          "resource_jid": "recovery-resource-8@localhost",
+          "resource_type": "kmr",
+          "current_state": "carrying",
+          "resource_location": "Storage",
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed",
+          "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966],
+          "frame": "world",
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "ur5e-1": {
+          "frame": "world",
+          "current_pose": [-4.05, 1.1, 0.8, 0, 0, 0, 1],
+          "held_part": null,
+          "gripper_state": "open",
+          "current_state": "idle"
+        },
+        "ur5e-2": {
+          "frame": "world",
+          "current_pose": [-2.05, 1.1, 0.8, 0, 0, 0, 1],
+          "held_part": null,
+          "gripper_state": "open",
+          "current_state": "idle"
+        },
+        "ur5e-3": {
+          "frame": "world",
+          "current_pose": [0, 0.5, 1.021, 0, 0, 0, 1],
+          "held_part": null,
+          "gripper_state": "open",
+          "current_state": "idle"
+        },
+        "ur5e-4": {
+          "frame": "world",
+          "current_pose": [0, -0.5, 1.021, 0, 0, 0, 1],
+          "held_part": null,
+          "gripper_state": "open",
+          "current_state": "idle"
+        },
+        "Storage": {
+          "contained_parts": []
+        },
+        "assembly_board-v1": {
+          "contained_parts": []
+        }
+      },
+      "parts": {
+        "KET8_Square_8mm": {
+          "frame": "world",
+          "current_pose": [-6.04, 2.41, 1.125, 0, 0, 0.7071067811848163, 0.7071067811882787],
+          "contained_by": null,
+          "processCompleted": [],
+          "processCompleted_complete": true,
+          "processCompleted_evidence": {
+            "complete": true,
+            "source_kind": "synthetic",
+            "checkpoint": "after_pick_part_before_move_to_resource"
+          }
+        },
+        "KET4_Square_4mm": {
+          "frame": "world",
+          "current_pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+          "contained_by": null,
+          "processCompleted": [
+            {
+              "process": "trim",
+              "result": "square"
+            }
+          ],
+          "processCompleted_complete": true,
+          "processCompleted_evidence": {
+            "complete": true,
+            "source_kind": "synthetic",
+            "checkpoint": "after_pick_part_before_move_to_resource"
+          },
+          "stationary_until": 9
+        }
+      }
+    },
+    "geometry": {
+      "dimension": 3,
+      "frame": "world",
+      "regions": {
+        "assembly_board-v1": {
+          "frame": "world",
+          "bounds": [
+            [-0.1, 0.1],
+            [-0.1, 0.1],
+            [0.95, 1.1]
+          ]
+        }
+      },
+      "resources": {
+        "KMR": {
+          "frame": "world",
+          "footprint": [
+            [-0.04, 0.04],
+            [-0.04, 0.04],
+            [-0.02, 0.02]
+          ],
+          "base_footprint": [
+            [-0.2, 0.2],
+            [-0.2, 0.2],
+            [0, 0.6]
+          ]
+        },
+        "ur5e-1": {
+          "frame": "world",
+          "footprint": [
+            [-0.1, 0.1],
+            [-0.1, 0.1],
+            [-0.1, 0.1]
+          ]
+        },
+        "ur5e-2": {
+          "frame": "world",
+          "footprint": [
+            [-0.1, 0.1],
+            [-0.1, 0.1],
+            [-0.1, 0.1]
+          ]
+        },
+        "ur5e-3": {
+          "frame": "world",
+          "footprint": [
+            [-0.1, 0.1],
+            [-0.1, 0.1],
+            [-0.1, 0.1]
+          ]
+        },
+        "ur5e-4": {
+          "frame": "world",
+          "footprint": [
+            [-0.1, 0.1],
+            [-0.1, 0.1],
+            [-0.1, 0.1]
+          ]
+        }
+      },
+      "parts": {
+        "KET8_Square_8mm": {
+          "frame": "world",
+          "footprint": [
+            [-0.03, 0.03],
+            [-0.03, 0.03],
+            [-0.03, 0.03]
+          ]
+        },
+        "KET4_Square_4mm": {
+          "frame": "world",
+          "footprint": [
+            [-0.02, 0.02],
+            [-0.02, 0.02],
+            [-0.02, 0.02]
+          ]
+        }
+      }
+    },
+    "horizon": [0, 22],
+    "stationary": {
+      "ur5e-1": [
+        [0, 22]
+      ],
+      "ur5e-2": [
+        [0, 22]
+      ],
+      "ur5e-3": [
+        [0, 22]
+      ],
+      "ur5e-4": [
+        [0, 22]
+      ],
+      "Storage": [
+        [0, 22]
+      ],
+      "assembly_board-v1": [
+        [0, 22]
+      ]
+    },
+    "catalog": {
+      "version": 1,
+      "specifications": [
+        {
+          "id": "shared_area_mutex",
+          "requirement": "Resources declared mutually exclusive must never occupy the same configured shared area simultaneously.",
+          "formula": "G !(ap001 & ap002)",
+          "aps": [
+            {
+              "label": "ap001",
+              "full": "ap_state/physical_observation/shared_area_first_resource",
+              "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+            },
+            {
+              "label": "ap002",
+              "full": "ap_state/physical_observation/shared_area_second_resource",
+              "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+            }
+          ]
+        },
+        {
+          "id": "KET4_Square_4mm_trim_precedence",
+          "requirement": "KET4_Square_4mm may enter assembly_board-v1 only after its trim with result: square is completed.",
+          "formula": "G(ap001 -> ap002)",
+          "aps": [
+            {
+              "label": "ap001",
+              "full": "ap_event/physical_observation/part_region_entry",
+              "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+            },
+            {
+              "label": "ap002",
+              "full": "ap_state/processCompleted/process_result_completed",
+              "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and result record."
+            }
+          ]
+        }
+      ]
+    },
+    "applicability": {
+      "version": 1,
+      "scene_resources": [
+        {
+          "resource_id": "ur5e-1",
+          "resource_type": "ur5e"
+        },
+        {
+          "resource_id": "ur5e-2",
+          "resource_type": "ur5e"
+        },
+        {
+          "resource_id": "ur5e-3",
+          "resource_type": "ur5e"
+        },
+        {
+          "resource_id": "ur5e-4",
+          "resource_type": "ur5e"
+        },
+        {
+          "resource_id": "M1",
+          "resource_type": "machine"
+        },
+        {
+          "resource_id": "M2",
+          "resource_type": "machine"
+        },
+        {
+          "resource_id": "Storage",
+          "resource_type": "storage"
+        },
+        {
+          "resource_id": "KMR",
+          "resource_type": "kmr"
+        },
+        {
+          "resource_id": "Conveyor",
+          "resource_type": "conveyor"
+        },
+        {
+          "resource_id": "Buffer For Machined parts",
+          "resource_type": "buffer"
+        },
+        {
+          "resource_id": "3D Printing Station",
+          "resource_type": "printing_station"
+        },
+        {
+          "resource_id": "Exit",
+          "resource_type": "exit"
+        }
+      ],
+      "participant_resource_types": ["ur5e", "kmr"],
+      "regions": {
+        "assembly_board-v1": {
+          "resources": ["ur5e-1", "ur5e-2", "ur5e-3", "ur5e-4", "KMR"],
+          "excluded_resources": [
+            {
+              "resource_id": "M1",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            },
+            {
+              "resource_id": "M2",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            },
+            {
+              "resource_id": "Storage",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            },
+            {
+              "resource_id": "Conveyor",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            },
+            {
+              "resource_id": "Buffer For Machined parts",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            },
+            {
+              "resource_id": "3D Printing Station",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            },
+            {
+              "resource_id": "Exit",
+              "reason": "Reviewed assumption: this fixed resource remains outside assembly_board-v1 throughout the horizon and is excluded from the declared robot participant types; the checker does not verify physical outside bounds."
+            }
+          ]
+        }
+      },
+      "rules": [
+        {
+          "specification": "shared_area_mutex",
+          "region": "assembly_board-v1",
+          "bindings": "all_pairs"
+        },
+        {
+          "specification": "KET4_Square_4mm_trim_precedence",
+          "region": "assembly_board-v1",
+          "part": "KET4_Square_4mm",
+          "process": "trim",
+          "result": "square"
+        }
+      ]
+    }
+  }
+}

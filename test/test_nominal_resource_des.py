@@ -380,6 +380,80 @@ def test_assembly_robot_domains_follow_their_configured_roles(models):
     ]
 
 
+def test_additional_robot_preserves_existing_behavior_without_invented_handling_role(models, scene):
+    changed = deepcopy(scene)
+    robot = deepcopy(changed["robots"][0])
+    robot["resource_id"] = "ur5e-5"
+    robot["cartesian_motion"]["resource_id"] = "ur5e-5"
+    changed["robots"].append(robot)
+    before = deepcopy(changed)
+
+    expanded = build_nominal_resource_des_models(changed)
+
+    assert changed == before
+    assert set(expanded) == set(models) | {"ur5e-5"}
+    for resource, model in models.items():
+        for field in ("state_variables", "current_valuation", "assignments", "local_event_alphabet"):
+            assert expanded[resource][field] == model[field]
+    reference = load(models, initial_nominal_valuation(models), "M1", SQUARE)
+    projected = load(expanded, initial_nominal_valuation(expanded), "M1", SQUARE)
+    assert {resource: projected[resource] for resource in models} == reference
+    additional = expanded["ur5e-5"]
+    assert additional["assignments"] == robot
+    assert additional["local_event_alphabet"] == ["move_home"]
+    fields = additional["state_variables"]
+    for field in ("held_part", "task_ctx.part_name", "task_ctx.origin_resource_location",
+                  "task_ctx.destination_location"):
+        assert fields[field]["domain"] == [None]
+    assert fields["resource_location"]["domain"] == [None, "home"]
+    assert "assembled" not in fields["part_state"]["domain"]
+    assert not any(field.startswith("assembled.") for field in fields)
+    state = initial_nominal_valuation(expanded)
+    after = home(expanded, state, "ur5e-5")
+    assert after["ur5e-5"]["resource_location"] == "home"
+    assert {resource: after[resource] for resource in models} == {
+        resource: state[resource] for resource in models
+    }
+
+
+@pytest.mark.parametrize("change,error", [
+    ("duplicate_robot", ValueError),
+    ("duplicate_machine", ValueError),
+    ("robot_machine_collision", ValueError),
+    ("fixed_resource_collision", ValueError),
+    ("too_few_robots", ValueError),
+    ("unknown_handler", ValueError),
+    ("missing_handler", KeyError),
+    ("repeated_handler", ValueError),
+    ("different_exit_handler", ValueError),
+])
+def test_configured_resource_identities_and_handling_roles_remain_required(scene, change, error):
+    changed = deepcopy(scene)
+    if change == "duplicate_robot":
+        changed["robots"].append(deepcopy(changed["robots"][0]))
+    elif change == "duplicate_machine":
+        changed["machines"][1]["resource_id"] = changed["machines"][0]["resource_id"]
+    elif change == "robot_machine_collision":
+        changed["robots"][0]["resource_id"] = changed["machines"][0]["resource_id"]
+    elif change == "fixed_resource_collision":
+        changed["robots"][0]["resource_id"] = "KMR"
+    elif change == "too_few_robots":
+        changed["robots"].pop()
+    elif change == "unknown_handler":
+        changed["machines"][0]["handling_robot"] = "ur5e-5"
+    elif change == "missing_handler":
+        del changed["machines"][0]["handling_robot"]
+    elif change == "repeated_handler":
+        changed["machines"][0]["handling_robot"] = changed["machines"][1]["handling_robot"]
+    else:
+        changed["Exit"]["handling_robot"] = changed["3D Printing Station"]["handling_robot"]
+    before = deepcopy(changed)
+
+    with pytest.raises(error):
+        build_nominal_resource_des_models(changed)
+    assert changed == before
+
+
 def test_inventory_growth_does_not_duplicate_capability_events(models, scene):
     from cais_spade_llm.resources.environment_models import build_environment_models
 

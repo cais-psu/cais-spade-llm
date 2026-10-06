@@ -1,0 +1,55 @@
+Generated using the built-in image_gen tool.
+
+Use case: infographic-diagram. Edit the attached CCA v8 figure into v9 with three focused improvements requested by the user. Preserve the original portrait template, purple frames, three numbered panels, all correct graph topology and arrow directions, white background, and exact mathematical symbols. Do not redraw the unrelated large product-state grid.
+
+1. IDENTIFY THE EXAMPLE while keeping the method general.
+Keep the main title "Central Controller Agent".
+Add one small, clearly readable subtitle immediately beneath it:
+"Mutual-exclusion example (SAFE_2)"
+Keep the "From RA: PC_k" tab below this subtitle and its input arrow. Allow a little extra vertical space at the top if needed.
+This label applies to the illustrated occupancy APs and the two-state DFA; it does not restrict the general CCA method to mutual exclusion. Keep panel 1's generic title "Evaluate APs for recovery behavior", its inputs, robot/AP illustration, exact ap001/ap002 values, and branches unchanged. Keep the footer "Evaluate intermediate conditions throughout PC_k."
+
+2. MAKE THE PARALLEL COMPOSITION VISIBLE IN PANEL 2.
+Change the panel-2 heading to exactly:
+"Parallel composition and safety monitoring"
+In its upper-left "Supplied behavior" card, replace the single short chain with TWO compact horizontal behavior lanes:
+top lane labeled r_1: a gray node, an orange task-event arrow labeled e_k^R, then an orange node;
+bottom lane labeled r_2: a gray node, a black task-event arrow, then a gray node.
+These nodes are unlabeled local states. Do not label a local node x_k^R because x_k^R denotes the joint projected successor. Instead put the existing x_k^R label, small, beside the first upper successor node in the RIGHT "Joint reachable states" graph, reached by the orange recovery edge.
+Retain the caption "Recovery, nominal and running tasks" below both lanes. This is an illustrative two-resource input. Do not add a local-scope selection step, dependency reduction claim, or new equation.
+Keep a rightward arrow from this supplied-behavior card to "Joint reachable states".
+In the lower-left DFA card change its main title to:
+"All applicable safety monitors"
+Add a small upper-left tag "Given Φ → DFAs" and a small upper-right tag "Shown: SAFE_2". Arrange these tags in a slim line above the automaton, giving the card a little more height if needed.
+Keep the illustrative DFA EXACTLY correct: initial arrow into accepting double-circle q0, q0 self-loop "!(ap001 & ap002)", q0→qd labeled "ap001 & ap002", rejecting single-circle qd self-loop "true", NO qd→q0 return transition.
+Keep "Current states from accepted history" and the blue feedback arrow endpoint at this line.
+Keep the independent rightward arrow from safety monitors to Joint reachable states. Keep the AP traces arrow from above entering Joint reachable states. Task events drive resource behavior; AP valuations advance the DFAs. Do not draw G1 || G2 || DFA as a same-alphabet synchronization equation.
+Keep the output from Joint reachable states feeding the panel-3 calculation, not the admission result directly.
+
+3. REMOVE THE OVERSIZED SINGLE-EVENT BOX IN PANEL 3.
+Keep panel 3's heading and both pruning/retained-region graph views unchanged. Do not change their uncontrollable dashed edges, marked states, excluded nodes or their placement.
+Completely remove the lower-left "Requested recovery start" card containing only the oversized e_k^R, and remove the arrow that connected it to the middle checking card.
+Replace the old left-plus-middle cards with ONE WIDE, SHALLOW admission-check strip spanning that same combined width.
+Its title is:
+"Check the start of e_k^R"
+Use normal readable math size for e_k^R, embedded in that title, NOT a giant isolated symbol.
+Inside the strip use two concise lines:
+"Enabled event; successor in retained region"
+"Current conditions and exact program match"
+Keep the small footer:
+"Incomplete evidence or analysis → block"
+Use the reclaimed width efficiently without a large blank section. This strip should be compact, substantially shorter than an isolated symbol card.
+The purple connector from the retained nonblocking region must now enter the TOP CENTER of this widened checking strip, with a downward arrowhead. Reroute its endpoint carefully.
+A single rightward purple arrow connects this strip to the existing "CCA decision" card on the right.
+Keep green "allow" and red "block"; ONLY allow connects to RA execution.
+Preserve the blue dashed feedback line originating at the RIGHT edge of RA execution, routing upward in the outer margin, and terminating at "Current states from accepted history" in panel 2. Keep its exact caption "Validated observations and acknowledgements".
+
+Invariants:
+- Exactly three numbered method panels, original purple portrait style.
+- Panel 2 constructs joint behavior with monitor states. Panel 3 computes the nonblocking region and authorizes a specific event START.
+- Mutex is explicitly an example; actual validation includes all applicable monitors.
+- Do not add claims of automatic dependency-local recovery extraction, physical safety certification or experiment results.
+- Keep PC_k, e_k^R, x_k^R, ap001, ap002, Φ, q0, qd and SAFE_2 exact with correct subscripts/superscripts.
+- No extra primitive composition, LLM generation or feasibility panels.
+- No arrows through text, detached feedback, unsafe node inside green region, or uncontrollable edge leaving retained region.
+- Preserve all content and correctness not explicitly changed above.

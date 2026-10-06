@@ -1,0 +1,67 @@
+{
+  "mode": "predefined",
+  "version": 1,
+  "product_geometry": {
+    "path": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+    "environment": "gazebo"
+  },
+  "catalog": {
+    "version": 1,
+    "specifications": [
+      {
+        "id": "SAFE_shared_area_mutex",
+        "requirement": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+        "formula": "G !(ap001 & ap002)",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "ap_state/physical_observation/shared_area_first_resource",
+            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+          },
+          {
+            "label": "ap002",
+            "full": "ap_state/physical_observation/shared_area_second_resource",
+            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+          }
+        ]
+      },
+      {
+        "id": "SAFE_gear_small_before_KET4_Square_4mm",
+        "requirement": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
+        "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "ap_event/physical_observation/part_region_entry",
+            "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+          },
+          {
+            "label": "ap002",
+            "full": "ap_state/processCompleted/process_target_completed",
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+          }
+        ]
+      }
+    ]
+  },
+  "requirement_scopes": [
+    {
+      "specification": "SAFE_shared_area_mutex",
+      "region": "assembly_board-v1"
+    },
+    {
+      "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "KET4_Square_4mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "gear_small",
+          "process": "assembly",
+          "target": "Gear_Plate/Gear_Shaft_1"
+        }
+      }
+    }
+  ]
+}

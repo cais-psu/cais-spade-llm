@@ -1,0 +1,192 @@
+Generated using the built-in image_gen tool.
+
+FINAL FEEDBACK DIRECTION
+
+In this otherwise finished diagram, change ONLY the small blue arrowhead at the bottom of the outer-right blue feedback line, immediately to the right of the RA execution box (near pixel x=1000,y=1470). It currently points DOWN. Reverse this arrowhead so it points UP along the vertical blue dashed line toward panel 2. Keep its connection to RA execution and the existing left-pointing arrowhead at monitor history. Both direction indicators must show the same feedback flow: RA execution → UP the right margin → LEFT into monitor history. Do not change any other image content or text.
+
+FINAL LOCAL ARROW REPAIR
+
+Edit this 1024 × 1536 image with ONLY three pixel-local corrections. Do not alter text, graph nodes, graph edges, layout, colors, or dimensions elsewhere.
+
+1. Draw a thick PURPLE RIGHT-POINTING ARROW across the empty gap from pixel (503, 750) to pixel (566, 750). The left end touches the RIGHT border of the "All applicable safety monitors" card. The arrowhead touches the LEFT border of the "Joint reachable states" card. This arrow is missing and is REQUIRED to show the monitors feed the joint analysis. It must be clearly visible, like the existing purple arrow above it from Supplied behavior. It is a horizontal arrow only, not a frame line.
+
+2. Complete the BLUE DASHED feedback line that currently stops at pixel (999, 872). Add a vertical blue dashed line from (999, 872) DOWN to (999, 1466), then a short horizontal blue dashed line LEFT to (983, 1466), touching the RIGHT border of the "RA execution" box. These new segments have NO arrowheads. They connect the RA execution source to the EXISTING leftward blue arrow that enters monitor history at approximately (390, 872). Keep that existing leftward arrowhead. Do not draw any other blue line. The completed route visibly runs from RA execution's right edge up the right margin to monitor history.
+
+3. Remove the tiny stray green/cyan arrow-shaped artifact around pixel (114, 972), which overlaps the first letter of "Analyze the joint graph from panel 2". Restore a clean white background and the existing black title lettering there, with no icon.
+
+Do not remove the newly requested purple arrow or vertical blue line as clutter: they are necessary data-flow connections. Make precisely these three changes and preserve everything else.
+
+FINAL CONNECTOR SIMPLIFICATION
+
+Make a precise cleanup of PURPLE WORKFLOW CONNECTORS in this figure. The scientific node graphs, their labels and their edges are correct; do not change them. The BLUE feedback path is also now correct and must remain unchanged.
+
+REMOVE these unnecessary long purple workflow connectors entirely:
+- Every purple connector or downward arrow that crosses the boundary BETWEEN panels 2 and 3, including the old dangling downward arrow under the DFA card and the bent line coming from the joint graph. The numbered panel sequence already indicates this step.
+- The entire thin purple connector that leaves the green retained-region contour, runs down the right side of panel 3, runs around/under the legend, and enters the start-check strip. Remove all its branches and arrowheads, including the leftward arrow entering the right edge of the start-check strip and the downward arrow above its title.
+These are workflow lines only. Keep all purple PANEL FRAMES and CARD BORDERS. Keep every orange/black/green/red graph edge.
+
+RESTORE / KEEP exactly these local purple workflow arrows:
+1. The short RIGHTWARD arrow from "Supplied behavior" to "Joint reachable states".
+2. The short RIGHTWARD arrow from "All applicable safety monitors" to "Joint reachable states". It is currently missing: add it across the clear narrow gap between these two cards, at approximately the vertical center of the DFA card. Its source touches the monitor card's RIGHT edge and its arrowhead touches the joint graph card's LEFT edge. It must point right, not down.
+3. The AP traces arrow from panel 1 into the top of Joint reachable states.
+4. The short RIGHTWARD arrow between the two graph views in panel 3.
+5. ONE short RIGHTWARD arrow from "Check the start of e_k^R" to "CCA decision". There must be no opposing leftward arrow from CCA decision into that strip.
+Keep panel 1's short input→AP evaluation→AP trace arrows.
+
+To make the relation between panels explicit WITHOUT a long connector, change the title above panel 3's LEFT graph from "Exclude states that cannot be retained" to:
+"Analyze the joint graph from panel 2"
+The graph's crossed-out states and explanation beneath it already show the exclusions. Do not add another box or label.
+
+Keep the start-check strip's text "Enabled event; successor in retained region"; this explicitly identifies which result it uses, without requiring a long looping arrow.
+
+Preserve exactly:
+- the SIX matching nodes and SIX edges in panel 2 and panel 3 left;
+- the three retained nodes and two edges in panel 3 right, plus excluded ghosts outside the green contour;
+- labels "Current checkpoint (0,1)", "Recovery running", "Alternative running", "Marked completion", "Violation (1,1)", "No path to marked completion";
+- the correct DFA guards and accepting/rejecting states;
+- green allow→RA execution;
+- the one BLUE DASHED line FROM the right edge of RA execution UP the outer margin and LEFT into "Current states from accepted history", with only its destination arrowhead;
+- the joint-graph legend and every other text element.
+
+This edit removes confusing connector clutter. No cross-panel purple output connector from panel 2 to 3 should remain, and no purple loop from the retained-region graph to the authorization strip should remain. All processing sequence is conveyed by the numbered panels and exact matching graphs; all necessary input and decision arrows remain short and local.
+
+FINAL WIRING CORRECTION
+
+Apply ONLY wiring corrections to the attached CCA figure. The six-node graphs, all labels, formulas, colors and exclusions are now correct. Preserve them exactly. Do not alter any graph topology or add/remove any state. Keep the same purple portrait design.
+
+1. BLUE FEEDBACK: There must be ONE continuous blue dashed feedback connector.
+Its SOURCE touches the RIGHT EDGE of the "RA execution" box near the bottom of the figure. There is NO arrowhead pointing into RA execution.
+From that source, go a short distance right, then UP the existing outer-right blue dashed route, then LEFT into "Current states from accepted history" in panel 2.
+The ONLY arrowhead on this blue connector is at the monitor-history destination.
+DELETE the entire extra dashed blue horizontal line along the bottom of the figure, including the upward blue arrow that currently points into the admission-check strip. Execution feedback must not enter that strip.
+Keep the footer text "Validated observations and acknowledgements", without a separate dangling line beside it.
+
+2. PANEL 2 OUTPUT: Remove the current purple downward arrow emerging from underneath the DFA/history card, since it incorrectly makes that card alone appear to feed panel 3.
+Instead draw ONE purple output connector FROM the LEFT EDGE of the "Joint reachable states" card near its lower-left corner. Run it a short distance left into the clear vertical gap BETWEEN the input cards and the joint graph. Run it downward in that gap, avoiding the joint-graph caption and DFA text. In the thin horizontal gap BETWEEN panels 2 and 3, bend left and finish with a downward arrowhead at the TOP boundary of panel 3, above the left exclusion graph. Do not cross the panel-3 title. This connector conveys the completed joint graph into the nonblocking analysis.
+If it crosses the blue monitor-feedback line, show a small line gap or bridge so there is no junction.
+
+3. RETAINED REGION TO START CHECK: Add the missing thin purple input connector from the green retained-region contour to the wide "Check the start of e_k^R" strip.
+Start at the RIGHT EDGE of the GREEN CONTOUR in panel 3, go right into the margin just INSIDE the blue feedback route, then down past the right end of the joint-graph legend. Turn left in a CLEAR GUTTER between the legend and the start-check strip, then end with a DOWNWARD arrowhead at the TOP CENTER of the start-check strip.
+Increase that horizontal gutter slightly, or increase the portrait height slightly, to keep this connector continuous and fully visible. Do not hide it behind the legend, route it through the legend text, or route it through the CCA decision card.
+This is an INPUT to the start check, not a direct arrow to allow or block.
+
+Preserve the existing purple arrow from the start-check strip to CCA decision, and the green arrow from allow to RA execution. The block branch has no execution arrow.
+Do not change the correctly matched six-node graphs or their captions, especially "No path to marked completion", "Recovery running" and "Alternative running".
+The figure must end with exactly one blue feedback path from execution to monitor history, one joint-graph output to panel 3, and one retained-region input to the start check.
+
+INITIAL GENERATION PROMPT
+
+Use case: scientific-educational.
+Edit the attached CCA v10 figure into a corrected, coherent v11. Preserve the familiar purple portrait template, white background, title "Central Controller Agent", subtitle "Mutual-exclusion example (SAFE_2)", and THREE numbered panels. Increase the portrait height as needed for readable labels rather than shrinking text. This is a carefully specified explanatory method diagram, not an exported runtime graph. Every box and graph must carry useful meaning.
+
+PRIMARY CORRECTIONS:
+- The joint graphs in panel 2 and BOTH views of panel 3 must use THE SAME SIX STATES and THE SAME STARTING TOPOLOGY. Panel 3 must visibly prune the graph built in panel 2, not swap in an unrelated graph.
+- Use labeled ROUNDED RECTANGLES for joint states, distinguishing them from circular resource states and circular DFA states.
+- A start does not imply that the recovery has completed. REMOVE x_k^R from the joint graphs altogether. The immediate successor of the orange start is labeled "Recovery running".
+- Replace every vague "no completion" label with "No path to marked completion".
+- Remove duplicate program input and redundant red X symbols.
+
+HEADER:
+Keep the main title and mutex-example subtitle. REMOVE the separate "From RA: PC_k" tab under the subtitle and its downward arrow. The RA input is already supplied inside panel 1.
+Do not introduce any new formal state identifiers.
+
+PANEL 1:
+Heading unchanged: "Evaluate APs for recovery behavior".
+Preserve the three cards and connections.
+Inputs, exactly:
+"From RA: PC_k"
+"Resource and product observations"
+"Prepared motion"
+"Configured geometry"
+Keep "Fixed AP meanings and bindings" feeding the AP mapping and evaluation card.
+Keep the robot/assembly-region visual and exact labels:
+"ap001: first resource occupancy"
+"ap002: second resource occupancy".
+Keep Projected AP traces: current pair (0,1); upper branch (1,1) caption "overlap"; lower branch (0,0) → (1,0) caption "exit before entry".
+The red (1,1) box already identifies the conflict: REMOVE the extra red X and its little line from this AP trace.
+Keep "Example supplied alternatives" and "Evaluate intermediate conditions throughout PC_k."
+
+PANEL 2:
+Heading unchanged: "Parallel composition and safety monitoring".
+Left side has the two stacked input cards; right side has the joint-state graph, large enough for the SIX nodes below.
+Upper left "Supplied behavior": retain the two resource lanes r_1 and r_2 with small local-state CIRCLES. r_1 has the orange e_k^R task-event arrow; r_2 has a black task-event arrow. No x_k^R label on any local node.
+Caption: "Recovery, nominal and running tasks".
+Lower left "All applicable safety monitors":
+keep small tags "Given Φ → DFAs" and "Shown: SAFE_2".
+Preserve correct DFA exactly: initial accepting double-circle q0, loop "!(ap001 & ap002)", q0→qd labeled "ap001 & ap002", rejecting single-circle qd with self-loop "true", NO return transition.
+Add small meanings below these circles: "No violation" under q0 and "Violation" under qd.
+Keep "Current states from accepted history" at the bottom.
+Keep each left card's independent rightward purple arrow into the right graph, and the AP traces arrow into that graph from above.
+Right card title: "Joint reachable states".
+Small caption below the graph: "Joint conditions, running tasks and monitor states".
+
+THE EXACT COMMON SIX-NODE GRAPH:
+The following letters are INSTRUCTIONS ONLY: never print them or invent formal state names.
+Use rounded rectangle nodes, short readable labels, with the SAME relative placement in all three graph views:
+R at left-middle, label "Current checkpoint" and smaller "(0,1)".
+A at upper-middle, label "Recovery running".
+M at upper-right, label "Marked completion", green DOUBLE rectangle outline.
+B at lower-middle, label "Alternative running".
+V at lower-right, label "Violation" and smaller "(1,1)", pale red fill/red outline.
+D at bottom-left, label on two or three lines "No path to marked completion", neutral light gray.
+Do not put extra AP values on A, B, D or M. A recovery can be running before it enters the region; starting is not the same as achieving the desired successor.
+
+Edges, exactly:
+R→A: SOLID ORANGE, label "start e_k^R" with proper subscript k and superscript R.
+A→M: DASHED BLACK, arrowhead into M.
+R→B: SOLID BLACK, arrowhead into B.
+B→M: DASHED BLACK, curved upward into M. This edge is ESSENTIAL: B has a possible completion but is still unsafe because of its other uncontrollable outcome.
+B→V: DASHED RED, arrowhead into V.
+R→D: SOLID BLACK, arrowhead into D.
+NO other edges. D has no outgoing edge in this illustrative graph. No red X after V.
+Separate B→M from A→M so both are visible and their sources unambiguous.
+Keep all nodes/labels clear of arrows. In panel 2 none of the nodes is crossed out yet.
+
+PANEL 3:
+Heading: "Compute the nonblocking region and authorize the start".
+Preserve a before/after pair of graph views, but use the EXACT SAME SIX-NODE GRAPH above, with the same relative positions. These are repeats of panel 2's graph at successive analysis stages.
+LEFT title: "Exclude states that cannot be retained".
+Show the same graph, now cross out B ("Alternative running") with a thin red slash and D ("No path to marked completion") with a thin gray slash. Preserve legibility of the labels by placing slashes near the boxes' corners rather than through all words. Keep B→M and B→V both visible and dashed.
+Under it, two short explanations:
+"No path to marked completion"
+"Uncontrollable transition to an excluded state"
+Add a small repeat-loop icon with "Repeat until unchanged".
+RIGHT title: "Retained nonblocking region".
+Use the same six positions and same node labels:
+R, A and M are retained inside a pale-green enclosing contour, with R→A orange solid labeled "start e_k^R", and A→M dashed green.
+B, V and D remain as faint excluded boxes OUTSIDE the green contour, visibly crossed out. REMOVE all edges incident to the excluded boxes in this retained view: do not draw any dashed outgoing arrow from R into an excluded box.
+Make the enclosing green shape follow only R,A,M, without accidentally including B, V or D. It represents a SET OF JOINT STATES, not the physical assembly region.
+Under retained graph:
+"Marked: completion conditions met"
+"and all applicable monitors accepting".
+A small shared note under graph explanations:
+"Completion reachability is checked within the supplied behavior."
+
+Keep the compact joint-graph legend:
+ORANGE arrow: "Generated recovery event e_k^R"
+BLACK solid arrow: "Controllable start"
+BLACK dashed arrow: "Uncontrollable progress / completion".
+These meanings apply to the JOINT GRAPHS, not DFA transitions, AP-trace arrows or purple workflow arrows.
+
+AUTHORIZATION:
+Keep the wide shallow strip "Check the start of e_k^R".
+Inside:
+"Enabled event; successor in retained region"
+"Current conditions and exact program match"
+Footer: "Incomplete evidence or analysis → block".
+The thin purple connector from the retained green region feeds the top of this strip. It must remain continuous and visible around the legend, not disappear behind it.
+A purple rightward arrow then feeds "CCA decision", with green allow and red block.
+ONLY allow connects down to RA execution.
+The blue dashed feedback MUST originate at the right edge of RA execution, route along the outside margin, then terminate with a leftward arrowhead at "Current states from accepted history" in panel 2.
+Caption: "Validated observations and acknowledgements".
+Keep the output of the panel-2 joint graph feeding panel 3's exclusion calculation.
+
+CRITICAL:
+Exactly six nodes and six edges in panel 2 and panel 3 left, with identical labels and topology.
+Exactly three retained nodes and two retained edges in panel 3 right; three excluded ghost boxes remain outside its green contour.
+Do not replace this with an unrelated generic good/bad branching graph.
+Do not invent task names, robot poses, actual experiment results, scope-reduction claims, or new formal state names.
+No x_k^R on the immediate post-start node.
+Keep all exact formal symbols PC_k, e_k^R, ap001, ap002, Φ, q0, qd, SAFE_2.
+No disconnected arrowheads, arrows through labels, cramped illegible text, extra blank cards or decorative graph branches.
+Preserve the original user-preferred purple portrait composition and emphasis on CCA safety and recovery completion.

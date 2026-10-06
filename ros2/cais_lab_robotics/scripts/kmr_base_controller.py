@@ -576,6 +576,7 @@ def main() -> None:
                 json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
             ).hexdigest())
             self.declare_parameter("launch_id", uuid.uuid4().hex)
+            self.declare_parameter("navigation_enabled", True)
             self.declare_parameter('performance_settings', '{}')
             self.declare_parameter('simulation_speed', 1.0)
             self.declare_parameter('initial_arm_configuration', [0.] * 7)
@@ -793,6 +794,24 @@ def main() -> None:
                 self._cancel_base_motion,
                 callback_group=callback_group,
             )
+            self.create_service(Trigger, "/KMR/recovery_state", self._recovery_state,
+                                callback_group=callback_group)
+
+        def _recovery_state(self, request: Any, response: Any) -> Any:
+            """Read owned base activity without commanding or cancelling motion."""
+            with self._lock:
+                response.success = True
+                response.message = json.dumps({
+                    "version": 1, "instance_id": self.get_parameter("launch_id").value,
+                    "simulation_time": self.get_clock().now().nanoseconds / 1e9,
+                    "navigation_enabled": self.get_parameter("navigation_enabled").value,
+                    "has_active_goal": bool(self._active_goal or self._follow_path_active
+                                            or self._nav_goal_handle is not None),
+                    "has_pending_goal": bool(self._arm_parking_in_progress),
+                    "holding": bool(self._initial_arm_parked and not self._active_goal
+                                    and not self._follow_path_active and self._nav_goal_handle is None),
+                }, allow_nan=False)
+            return response
 
         @staticmethod
         def _yaw_from_quaternion(quaternion: Any) -> float:

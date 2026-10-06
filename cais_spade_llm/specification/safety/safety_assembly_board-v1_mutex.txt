@@ -1,0 +1,2 @@
+[Safety Requirements]
+- At most one resource may occupy the assembly_board-v1 destination area at any time.

@@ -1,0 +1,31 @@
+Use case: precise-object-edit.
+Asset type: scientific publication diagram.
+Edit target: the attached portrait Central Controller Agent figure, 900 by 1090 pixels.
+Primary request: add concise, legible captions to the purple information-flow arrows INSIDE PANEL 1. Make a minimal edit to the supplied latest image; preserve the overall layout, fonts, all formal tokens, all formulas, all diagrams, robot illustration, empty space in the orange box, and all of panel 2 exactly. Do not import content from earlier versions. Do not add recovery nodes or change graph semantics.
+
+Panel 1 arrow labels:
+1. Formula SAFE_2 -> DFA: retain existing purple right arrow and exact label "Compile".
+2. Existing DOWNWARD purple arrow from the top light-blue monitor/specification area to the Predefined AP evaluation block: add label "Required APs" just to the LEFT of this arrow in the white gap between blocks. This arrow points down and describes which APs the specification requires; do NOT label the downward arrow "AP values".
+3. Existing purple downward arrow inside AP evaluation, from the fixed definition box into the funnel: change caption "binding" to "AP bindings". Preserve arrow direction and fixed definitions.
+4. Existing horizontal purple arrow from "Motion + state + geometry" into the funnel: add label "Modeled observations" centered just above the arrow. It may be split into two short lines to fit the space without overlapping robot illustration, labels, borders, or the funnel.
+
+One minimal necessary flow addition:
+5. Add a separate short UPWARD purple arrow from the top-right of the AP evaluation block into the light-blue monitor panel, labeled "AP values". Keep it clearly separate from the downward Required APs arrow. Place it in the existing right-hand whitespace between the blocks, near original x=850, with label near x=780,y=319. The upward arrow may end just inside the light-blue panel at its lower-right empty area; it feeds the monitor as a whole, not specifically the rejecting q_d state. The two direction labels must be unambiguous and must not overlap. The original downward arrow is around x=740; put "Required APs" to its left around x=635-730,y=318. Both captions need appropriate readable text size; if necessary make a tiny local spacing adjustment to the panel 1 blocks only, maintaining the same overall structure.
+
+Preserve exact text and values elsewhere, including:
+"Central Controller Agent"
+"Safety Monitor Construction"
+"Safety monitor (Mutual Exclusion Example)"
+SAFE_2 and G !(ap001 & ap002)
+q_0, q_d, !(ap001 & ap002), ap001 & ap002, true
+"No violation", "Violation", "Monitor state retained from accepted history."
+"Generated recovery event/state", "RA program PC_k"
+"Predefined AP evaluation"
+"ap001: r1 occupancy", "ap002: r2 occupancy", "region: assembly station"
+"Motion + state + geometry", "Match to APs", "ap001 = 1", "ap002 = 0".
+Keep all panel 2 headings, nodes, AP-change edge labels, timelines, captions and colors exactly as in the edit target.
+
+Style: crisp scientific infographic, same purple borders/arrows and blue text, clean mathematical subscripts and superscripts, no new decorative elements, no overflow or clipping, high-resolution portrait output. Do not change any numbered-panel count, formula, robot, graph arrow, timeline interval, or other wording beyond the specified captions.
+
+Refinement prompt:
+Use case: precise-object-edit. Edit the supplied figure with ONE tiny typography adjustment only. In panel 1, the two-line caption 'Modeled observations' currently straddles the vertical borders between the orange recovery box and the purple AP evaluation box. Move this caption LEFT so it does not overlap any border or illustration. Put 'Modeled observations' as one compact readable line immediately above the blue 'Motion + state + geometry' source box, within the orange box: approximately x=515 to 740, baseline y=599 in this 1140x1380 image. Use a slightly smaller font if needed. The caption should be associated with the horizontal purple arrow, and must not cross the orange right border at x=752 or the AP evaluation left border at x=766. Preserve ALL other content exactly, including the Required APs downward arrow, AP values upward arrow, AP bindings arrow, Compile, formula, robot illustration, blank orange area, both panels, all graphs and timelines. Do not move or resize any box or arrow. Do not alter mathematical tokens or text other than repositioning this existing caption.

@@ -1,0 +1,99 @@
+Generated using the built-in image_gen tool.
+
+FINAL LABEL CORRECTION
+
+Change ONLY the text labels inside the two blue input boxes near the TOP OF PANEL 3. Swap their contents:
+- LEFT blue input box, currently "Existing DFA monitors and retained history", must instead read "Permitted nominal behavior and running work".
+- RIGHT blue input box, currently "Permitted nominal behavior and running work", must instead read "Existing DFA monitors and retained history".
+
+Keep every connector, every box, every other label and the entire rest of the figure exactly unchanged. This swap makes the existing dashed blue "Validated observations and acknowledgements" arrow correctly point into retained monitor history. Do not reroute anything. Do not change any mathematical symbols or any other text. ONLY swap these two labels.
+
+FINAL CONNECTOR CORRECTION
+
+Correct ONLY arrow routing in this figure. Preserve all boxes, symbols, text and colors, including the recovery-centered layout.
+
+There are two serious misconnected arrows in panel 3.
+1. The dashed blue feedback FROM "RA execution" currently points to "Permitted nominal behavior and running work". Move its endpoint to the LEFT input box "Existing DFA monitors and retained history". Route it through clear whitespace, with exactly one arrowhead pointing into retained history. Label remains "Validated observations and acknowledgements". No feedback arrow may terminate at nominal behavior.
+2. The label "Projected recovery behavior and AP valuations" currently appears under an arrow coming from the nominal-behavior input. Remove that incorrect arrow. Create a real continuous solid purple arrow FROM the bottom of the "AP valuations" box in panel 2, down through whitespace to the "Joint composition" box in panel 3. Label this connection "Projected recovery behavior and AP valuations". It must be clear that the data comes from panel 2.
+3. Keep separate short purple arrows from BOTH "Existing DFA monitors and retained history" AND "Permitted nominal behavior and running work" into "Joint composition". These must not be conflated with the projected AP input.
+4. Connect the RA "Primitive composition PC_k" box in panel 1 to the LEFT "Primitive composition and evidence" box in panel 2 with a continuous purple arrow, rerouting the existing down arrow and the detached PC_k arrow so they form one understandable link. Do not point the RA program directly into the AP valuations box.
+5. Keep the Joint composition → Common accepting continuation → Requested recovery start → allow/block arrows unchanged. Only RA execution produces the dashed blue validated-history feedback. Avoid dangling arrows and lines through text.
+
+Spacing may be adjusted to make these specific connections legible. No new wording, changed mathematical notation or unrelated redesign.
+
+INITIAL PROMPT
+
+Redraw the attached engineering diagram to correct its emphasis. The user is writing about SAFETY MONITORING OF NEW RECOVERY TASKS ADDED BY AN LLM, with newly proposed event and state identifiers absent from the nominal plant. The figure must center this mechanism, not ordinary LTLf compilation. Use the attachment ONLY as a visual style reference and as the old figure to be replaced. Preserve its white background, restrained purple rounded frames, purple numbered circles, blue input accents, green permissions and red blocked behavior. Clear publication-style vector-like diagram with highly legible black sans-serif text. Portrait layout approximately 1800x2300. Use less text and more clear arrows than the attachment. Three panels. All formal identifiers below must remain unchanged; typeset subscripts/superscripts properly when possible.
+
+Main title: "Safety Monitor Construction and Validation"
+Subtitle: "New recovery tasks proposed by the LLM"
+
+PANEL 1 heading: "New recovery behavior"
+This panel is explicitly PA and RA, providing INPUTS to CCA.
+LEFT box headed "PA / LLM"
+Contains "Recovery outline" and a clearly drawn candidate transition with three elements:
+state circle labeled x_{k-1}^R, dashed arrow labeled e_k^R, state circle labeled x_k^R.
+The two state labels are proposed recovery states; do not substitute semantic state names.
+Below the transition: "Not predefined in G"
+Below that: "Assigned resource and proposed conditions"
+RIGHT box headed "RA"
+Contains "Primitive composition PC_k", typeset PC with subscript k.
+Under it, a sequence of three small connected blocks labeled rho_1(theta_1), rho_2(theta_2), and rho_h(theta_h), using Greek mathematical typography, with an ellipsis before the last.
+Under this sequence: "Bound parameters and resource evidence"
+Horizontal arrow from Recovery outline to RA box, labeled "e_k^R".
+Thin linked provenance line or small caption: "Exact recovery event and primitive-step association"
+Downward arrow from RA composition to panel 2.
+Do not include a standalone LLM making safety rules.
+
+PANEL 2 heading: "Evaluate the new recovery behavior"
+Small authority label "CCA" in panel header.
+Three left-to-right boxes:
+LEFT: "Primitive composition and evidence"
+"Trajectory, duration, custody and effects"
+This receives PC_k from panel1.
+A small supporting input card under it:
+"Current conditions and configured geometry"
+MIDDLE: "Projected intermediate conditions"
+Include a minimal little motion path crossing a purple rectangle labeled "assembly_board-v1"; no robot art required.
+RIGHT: "AP valuations"
+"Derived from execution conditions"
+Show an illustrative mutex card:
+"SAFE_shared_area_mutex"
+"ap001: first bound resource occupancy"
+"ap002: second bound resource occupancy"
+"G !(ap001 & ap002)"
+A small green-to-red sequence of Boolean pairs labeled explicitly "Illustrative valuations": "(1,0) → (1,1)".
+The (1,1) pair is red and captioned "conflict".
+Arrow LEFT to MIDDLE to RIGHT.
+Below these boxes in one sentence: "New event and state names do not determine AP truth."
+Below that a concise red-outlined box: "Missing or unsupported evidence → block"
+Keep these as explanatory figure labels, not claims of experimental results.
+
+PANEL 3 heading: "Include recovery behavior in the safety check"
+Small authority label "CCA".
+At top is a supporting input strip, visually secondary to recovery flow:
+"Existing DFA monitors and retained history"
+"Permitted nominal behavior and running work"
+Both point to the main validation box below.
+A downward arrow from panel 2 is labeled "Projected recovery behavior and AP valuations".
+Main left box: "Joint composition"
+Inside a small state graph: gray nominal path and purple dashed recovery path, joining a later gray state. Label the purple edge e_k^R and label its recovery state x_k^R. The graph is illustrative; no invented task identifiers.
+Below: "All configured resources"
+Main middle box: "Common accepting continuation"
+Below: "Nonblocking region"
+Draw one green retained path and one red crossed-out start edge.
+Main right box: "Requested recovery start"
+Below: "Recheck current state, program and evidence"
+Arrows connect Joint composition → Common accepting continuation → Requested recovery start.
+Below the row: "Recovery starts: controllable"
+"Primitive progress and completions: uncontrollable"
+From Requested recovery start:
+green arrow labeled "allow" goes to an "RA execution" box outside the CCA panel, in a bottom strip.
+red/amber arrow labeled "block" goes to "Hold start / return feedback".
+Do not show any code status enum other than allow/block to keep the diagram simple.
+Exactly one dashed blue return arrow FROM RA execution back into "Existing DFA monitors and retained history". Label it "Validated observations and acknowledgements". Projected observations must never update retained history.
+
+In a small supporting note, not a headline: "Fixed safety specifications; newly included recovery behavior."
+This communicates that the new event may be absent from G while its primitive realization and safety evidence still must be evaluable.
+
+Important visual constraints: the FIRST thing the reader sees is newly proposed recovery transition, followed by its primitive realization and AP grounding. DFA compilation must NOT occupy a main panel, and no algorithm/compiler box is needed. Keep fixed rules a small input/example rather than the main storyline. Preserve the specific symbols and names e_k^R, x_{k-1}^R, x_k^R, PC_k, rho, theta, G, SAFE_shared_area_mutex, ap001, ap002, assembly_board-v1, PA, RA, CCA. No ap_rec_region/ap_nom_region, no generically renamed identifiers. Ensure arrows clearly connect boxes, no dangling wires, no connector through text. All execution feedback originates at RA. This is an explanatory method figure, not a claim that unknown physical effects can be safely inferred or that live execution has been validated.

@@ -1,0 +1,29 @@
+Use case: precise-object-edit.
+Asset: scientific CCA figure.
+Edit target: the supplied latest two-panel Central Controller Agent figure with the RESTORED two-node orange recovery graph, Joint states caption, Region occupancy arrow label, and all purple arrow labels.
+Primary request: clarify the meaning of the binary AP values in panel 2 and consistently mark the recovery-related parts orange. Make a minimal edit. Preserve all panel 1 content exactly, especially the orange graph x_{k-1}^{R} --e_k^{R}--> x_k^{R}, its "Joint states" caption, the dashed "realized by" link to RA program PC_k, robot illustration, Region occupancy, and all purple arrow labels. Do NOT erase or simplify the orange box.
+
+Panel 2 changes only:
+1. Replace each opaque numeric tuple inside the four nodes with TWO centered lines. The first line explicitly gives the Boolean AP values, and the second line is the monitor state rendered as proper mathematics:
+UPPER LEFT:
+"ap001 = 0, ap002 = 1"
+q_0
+UPPER RIGHT:
+"ap001 = 0, ap002 = 0"
+q_0
+LOWER LEFT:
+"ap001 = 1, ap002 = 1"
+q_d
+LOWER RIGHT:
+"ap001 = 1, ap002 = 0"
+q_0
+Fit each pair of lines comfortably inside its existing rounded box. Use a clear moderately sized first line and a larger italic math q with subscript. Do not display the old nested tuples as additional text. The AP names and numbers must be exact.
+2. Keep the UPPER two nodes neutral with their existing dark outlines. Keep the top horizontal arrow BLACK, with its existing blue annotation "ap002: 1 -> 0".
+3. Color the TWO downward graph arrows ORANGE, showing the recovery-related change ap001: 0 -> 1. Preserve both blue "ap001: 0 -> 1" annotations.
+4. Give both LOWER successor nodes ORANGE outlines, keeping the left node PALE RED inside and its q_d red, and the right node PALE GREEN inside and its q_0 green. Orange indicates the recovery-related branch, while red/green still convey the mutex result. Do not color every node orange, and do not color the top horizontal nominal transition orange.
+5. Replace the long caption "Local view: ((ap001, ap002), monitor state)" beneath the four-node graph with two short centered caption lines:
+"AP/monitor projection"
+"Orange: recovery-related AP changes"
+First line blue, second line orange in slightly smaller type. This figure shows a projection, not full plant-state tuples; these arrows are AP changes, not new task-event labels. Put the two caption lines in the existing center whitespace between the big purple downward arrows, above the timeline cards. No collisions.
+6. Preserve the rest of panel 2 exactly: heading "Parallel Composition for Safety Validation", the big purple arrows to the timeline examples, red left and green right timeline cards, "Entry before exit", "Exit before entry", both r_1/r_2 bars and overlap/disjoint patterns, "Model time", "Mutex violation", "No mutex conflict".
+Do not change the number of panels, original formulas, AP bindings, or any other text in panel 1. Preserve all diagrams without clipping or overlap. Output a crisp high-resolution portrait.

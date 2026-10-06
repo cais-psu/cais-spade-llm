@@ -1,0 +1,43 @@
+Use case: precise-object-edit / scientific-educational
+Edit target: the supplied CCA figure v12. Produce the next portrait academic figure, keeping the purple outer frame, Central Controller Agent heading with robot and shield, white background, numbered three-panel structure, and explicit subtitle "Mutual-exclusion example (SAFE_2)". Preserve exact symbols ap001, ap002, r1, r2, PC_k, e_k^R, q_0, q_d with proper mathematical sub/superscripts. No code-specific names. The user's goal is to move the occupancy timelines into panel 3 and show a small composed-state graph in panel 2. Match the reference's graphic style but reduce redundant boxes and vacant space. Fill the portrait canvas.
+
+PANEL 1, at top:
+Keep its title "Evaluate APs for recovery behavior", inputs and robot/assembly-station picture as in the reference. Inputs: "From RA: PC_k", "Resource and product observations", "Prepared motion", "Configured geometry".
+Fixed AP meanings and bindings: "ap001: first resource occupancy"; "ap002: second resource occupancy".
+To avoid repeating the graph from panel 2, replace the existing right-hand branching graph with a compact visually clear "AP valuations" card, rows "(0,1)  r2 occupies station", "(0,0)  station unoccupied", "(1,0)  r1 occupies station", "(1,1)  overlap". Color the overlap row pale red. Show "(ap001, ap002)" above these rows. This is a legend of physical occupancy, not a safety decision.
+Bottom single-line strip: "Evaluate intermediate conditions throughout PC_k."
+
+PANEL 2, middle:
+Title "Parallel composition with safety monitors".
+Left third has the two actual inputs to composition:
+- A compact upper card headed "Supplied tasks", containing an orange e_k^R with the text "Recovery, nominal and running tasks". No empty circles or unexplained graph nodes in this card. Orange identifies the recovery event, and is NOT controllability.
+- Below it the small illustrated monitor under "All applicable safety monitors", with tiny badges "Given Φ → DFAs" and "Shown: SAFE_2". Draw exactly q_0 green double-circle with initial arrow and self-loop guarded "!(ap001 & ap002)"; q_0 → q_d guard "ap001 & ap002"; q_d red single-circle with self-loop "true". Under q_0 say "No violation"; under q_d say "Violation".
+Two clear purple composition arrows from the supplied tasks and monitor cards point into ONE larger graph on the right. Label this right graph "Local view of composed states".
+This graph is an illustrative projection, not the complete checker state. Show four rounded rectangles in a two-by-two arrangement:
+upper-left: "((0,1), q_0)"
+upper-right, pale red: "((1,1), q_d)"
+lower-left: "((0,0), q_0)"
+lower-right, pale green: "((1,0), q_0)"
+Exactly three edges: upper-left to upper-right labelled "ap001: 0 → 1"; upper-left down to lower-left labelled "ap002: 1 → 0"; lower-left to lower-right labelled "ap001: 0 → 1". Space labels clearly without touching nodes. All edges are ordinary dark arrows; do not use orange edge colors. No dashed-control legend. These are occupancy transitions, NOT recovery start commands. Do not put e_k^R on these three edges.
+Caption under graph: "Nodes: ((ap001, ap002), monitor state)".
+Below that smaller text: "Other resource conditions and running-task state omitted."
+No double circle on any composed-state rectangle. No indication the lower-right node is operation completion. No extra graph edges or loops in this four-node fragment.
+
+PANEL 3, bottom, large enough to be legible:
+Title "Validate timed behavior and authorize execution".
+Subtitle clearly visible: "Projected execution — before authorization".
+Place the TWO time-based occupancy graphs from the reference here, side by side, in a single broad frame with a light dividing line. Both show r1 and r2 lanes and arrowed horizontal axes labelled "Model time →". Use blue bars for r1 occupancy and gray bars for r2 occupancy, same as reference. These bars are occupancy durations, not event-arrow colors.
+Left graph: heading "Entry before exit", r2 occupancy begins earlier; r1 occupancy starts while r2 is still inside. Vertically aligned red translucent overlap interval. Red outcome "Mutex violation → block".
+Right graph: heading "Exit before entry", r2 occupancy ends before r1 occupancy begins, clearly disjoint. Green outcome "No mutex conflict".
+Under both timelines one small caption: "Illustrative supplied timings".
+These are predictions, not measured results. The green case alone does NOT grant execution; all required checks below must pass.
+Below timelines, use a compact lower-left check list headed "Required checks":
+"No safety-rule violation"
+"Running tasks cannot force a violation or prevent completion"
+"Required work can still reach completion"
+Below it, small definition "Completion: required work finished and all monitors accepting."
+Also include "Start e_k^R: current conditions and exact program must match."
+At lower-right, "CCA decision" with green "allow" and red "block". Only allow has a downward green arrow into "RA execution".
+Across the bottom of panel 3, a narrow strip "Incomplete evidence or analysis → block".
+Small footer inside the overall frame: "Validated RA observations and acknowledgements update monitor history."
+Do not add a looping feedback arrow. Do not label the timeline actual or observed execution; no measured timestamps, no invented experimental evidence. Do not imply CCA executes the red conflict or automatically synthesizes waiting. No 'Alternative running', 'No path to marked completion', or requested recovery start box. Carefully typeset legible text and arrows. Preserve safety meaning above and the pleasant visual style of the reference.

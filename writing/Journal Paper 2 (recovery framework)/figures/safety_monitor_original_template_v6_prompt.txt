@@ -1,0 +1,113 @@
+Generated using the built-in image_gen tool.
+
+FINAL CORRECTIONS
+
+Preserve this restored original-template figure exactly, except for TWO precise corrections:
+
+1. In panel 1, under "Projected resource conditions", replace the newly introduced labels s_start and s_end with the existing paper notation:
+LEFT circle: v_i
+RIGHT circle: v_i'
+Use subscript i and a prime on the right. Do not use s_start or s_end.
+
+2. Replace ONLY the tiny automaton inside the "Existing DFA monitors" card in panel 3 with the correct mutex DFA. This is essential:
+- LEFT node labeled q0: pale green, DOUBLE CIRCLE (accepting), with an incoming initial arrow from the left.
+- RIGHT node labeled qd: pale red, SINGLE CIRCLE (rejecting).
+- A SELF-LOOP at q0 labeled "!(ap001 & ap002)".
+- A one-way transition from q0 to qd labeled "ap001 & ap002".
+- A SELF-LOOP at qd labeled "true".
+- There is NO arrow from qd back to q0. Rejection is absorbing.
+Do not use q1. Do not put a double circle around the red node. Fit labels clearly within the existing card; small tidy typesetting is fine.
+Keep the card title and "States from accepted history" footer unchanged.
+
+Every other part of the figure, its original template, text, boxes, arrows, source labels, AP mappings, joint graph, and execution-feedback path stays unchanged.
+
+INITIAL PROMPT
+
+Use the attached ORIGINAL FIGURE as the edit target and restore its template closely. The user liked this original template and rejected both a box-heavy source-table redesign and a sparse landscape infographic. Produce a portrait figure with the SAME overall visual organization as the original: purple rounded outer border, "Central Controller Agent" title at top, THREE STACKED numbered purple-bordered panels, purple headings, white background, black text, compact nested cards connected by broad purple arrows. Keep an academic diagram style. Maintain comparable panel proportions and density to the original, but shorten prose. Do not create a landscape infographic or an input-source table.
+
+Update the contents to the implemented recovery method below. The figure is focused on newly generated recovery events and states. No case-specific plant, part, region or resource names. In particular, do not include any assembly-board name or SAFE_* code identifier. Mathematical symbols must be preserved exactly. Use short labels, state graphs, primitive chips, and a small generic workspace sketch to explain the flow.
+
+TITLE exactly: "Central Controller Agent"
+No long subtitle.
+
+PANEL 1 (largest), numbered 1:
+Heading: "Associate recovery events with primitive compositions"
+One short introductory line: "Recovery outline from PA; primitive compositions from RA."
+
+Use the same left-card → slim middle block → wide right-card arrangement as original panel 1.
+LEFT card title: "Recovery outline from PA"
+Upper small badge: "PA / LLM"
+Draw a proposed recovery state transition: x_{k-1}^R -- e_k^R --> x_k^R.
+Use purple state circles and a dashed purple arrow. Correct subscripts/superscripts.
+Below, two short labels:
+"Assigned resource r_i"
+"Proposed start and end conditions"
+MIDDLE slim block: a simple link icon and label "Bind event to primitives". This is deterministic association; do not show an LLM selecting safety rules.
+RIGHT card title: "Primitive composition from RA"
+A purple header chip "e_k^R"
+Below, label "PC_k" and a horizontal sequence of 3 small primitive chips:
+rho_1(theta_1) → rho_2(theta_2) → ... → rho_h(theta_h)
+Use correct mathematical typography, h not n in the final subscript.
+Below the chips, a small two-node arrow sketch captioned "Projected resource conditions".
+Bottom short line: "Ordered primitives and bound parameters".
+Use the broad purple arrows left→middle→right, like the original.
+This is provided candidate behavior, not a claim of actual execution.
+
+PANEL 2, numbered 2:
+Heading: "Map recovery behavior to safety APs"
+Restore the original three-column structure: INPUT → AP MAPPINGS → GIVEN FORMULA.
+LEFT card title "Input".
+Upper area: "Recovery task e_k^R" and "PC_k".
+Lower area: small label "Current execution".
+Then three compact SOURCE captions, not a table and not separate boxes:
+"Pose: resource observations"
+"Trajectory: motion preparation"
+"Geometry: system configuration"
+These labels make the input sources explicit without a large evidence panel.
+MIDDLE card title "AP mappings".
+Two horizontal rows separated by a fine purple line:
+Top row bold "ap001"
+Text "First bound resource occupies the shared region"
+Bottom row bold "ap002"
+Text "Second bound resource occupies the shared region"
+Below or between these rows, include a tiny generic workspace sketch: two simple tool/robot outlines beside one shaded shared area, with a dashed projected path for the recovery task. Keep the sketch visually clear and small. No resource names or location names, and no photorealism.
+RIGHT card title "Given safety requirement".
+Small text "Mutual exclusion"
+Large formula in pale purple rounded box:
+"G !(ap001 & ap002)"
+Below formula a very short label: "Fixed AP meanings"
+Arrows from input into AP mappings, then toward the formula labeled only "Evaluate". This must NOT imply the formula is generated by AP mapping: it is explicitly GIVEN.
+One short panel footer: "Evaluate intermediate conditions throughout PC_k."
+Do not include a sources table, a truth table, or long paragraphs.
+
+PANEL 3, numbered 3:
+Heading: "Validate the recovery behavior and requested start"
+Again use three columns, but give the center enough room for a graph.
+LEFT card title "Existing DFA monitors".
+Small, clean two-state automaton sketch, plus short caption "States from accepted history". The monitor is a supplied persistent input, not reset per recovery.
+MIDDLE card title "Joint safety validation".
+Draw a joint-state graph: gray nominal/running behavior, purple dashed newly included recovery edge e_k^R and recovery state x_k^R, green continuation to a double-ring accepting node, red crossed-out conflicting branch. Keep it legible.
+Below graph: "Common accepting continuation"
+A small source label above graph: "Recovery + running and remaining tasks"
+LEFT monitors feed into this joint graph. AP valuations from panel 2 also feed the center of panel 3 with one clear downward arrow.
+RIGHT card title "Requested start".
+Two large compact outcome badges:
+green "allow"
+red "block"
+Under them: "Recheck current conditions"
+and "and the exact program"
+Arrow center→right.
+In a slim footer OUTSIDE panel 3, place a small RA icon labeled "RA execution". Connect allow to RA with a green arrow.
+ONE dashed blue feedback arrow returns FROM RA execution TO the left Existing DFA monitors card; label "Validated observations and acknowledgements".
+No feedback from predicted states directly into actual history.
+No additional rules lists, implementation details, limits or paragraphs.
+
+Stylistic constraints:
+- Retain the ORIGINAL portrait three-panel template, numbered purple badges, thin purple boundaries, nested card organization and broad purple arrows.
+- Moderate detail: more structured and informative than a sparse infographic, less prose than the original.
+- Use graphics to replace long explanation: recovery-state graph, primitive chips, tiny shared-region sketch, DFA thumbnail and joint-state graph.
+- Exact labels ap001 and ap002, formula G !(ap001 & ap002), event/state symbols, PC_k, PA, RA, CCA remain unchanged.
+- No new project-specific identifiers, no assembly-board text, no SAFE_* names, no arbitrary new event names.
+- The LLM appears only as the source of the PA recovery outline. The AP meanings and safety requirement are fixed inputs.
+- All arrows must end at their intended boxes. Source captions must remain readable. Keep text inside boundaries and leave whitespace.
+- This is a research-method figure draft, not a live-experiment result.

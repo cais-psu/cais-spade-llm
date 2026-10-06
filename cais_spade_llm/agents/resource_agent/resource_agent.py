@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import time
+import uuid
 from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
@@ -100,6 +101,11 @@ class ResourceAgent(LlmAgent):
         self.tool_timeout_s = int(tool_timeout_s)
 
         self._safety_decisions: dict[str, str] = {}
+        self._recovery_composition_grants: dict[str, dict[str, Any]] = {}
+        self._consumed_recovery_composition_refs: dict[str, dict[str, Any]] = {}
+        self._pending_recovery_composition_refs: dict[str, dict[str, Any]] = {}
+        self._pending_recovery_composition_request_ids: dict[str, str] = {}
+        self._recovery_composition_observation_senders: dict[str, Any] = {}
         self._recovery_execution_primitive_catalog_cache: list[dict[str, Any]] | None = None
         self._recovery_synthesis_primitive_catalog_cache: list[dict[str, Any]] | None = None
 
@@ -167,6 +173,104 @@ class ResourceAgent(LlmAgent):
 
         return get_resource_recovery_snapshot(self)
 
+    def get_recovery_physical_snapshot(self) -> dict[str, Any]:
+        """Export existing resource evidence without asserting physical completeness."""
+        return {
+            "resource_jid": str(self.jid),
+            "resource_id": self.agent_name,
+            "snapshot": deepcopy(self._snapshot_state()),
+            "evidence": {"source": "ResourceAgent._snapshot_state"},
+        }
+
+    def capture_recovery_safety_state(self, *, max_age: float = 2.) -> dict:
+        """Report missing observation support without inventing physical facts."""
+        observer = getattr(self, 'recovery_safety_observer', None)
+        if observer is not None:
+            return observer.capture(max_age=max_age)
+        return {"status": "NEEDS_CONTEXT", "resource_id": self.agent_name,
+                "reason": "Resource-owned safety observation support unavailable"}
+
+    def prepare_recovery_safety_program(self, program: dict, checkpoint: dict) -> dict:
+        """Retain an unprepared request when this owner has no preparation hook."""
+        from cais_spade_llm.recovery_framework import fingerprint
+
+        return {"status": "NEEDS_CONTEXT", "resource_id": self.agent_name,
+                "resource_jid": str(self.jid), "program": deepcopy(program),
+                "program_fingerprint": fingerprint(program), "checkpoint_id": checkpoint["checkpoint_id"],
+                "steps": [], "reason": "Resource-owned non-dispatching preparation unavailable"}
+
+    def recovery_safety_configuration(self) -> dict:
+        """Expose owner configuration without assuming a robot controller."""
+        observer = getattr(self, 'recovery_safety_observer', None)
+        if observer is not None:
+            return {"static_capabilities": deepcopy(self.static_capabilities),
+                    "observation_configuration": deepcopy(observer.configuration)}
+        return {"static_capabilities": deepcopy(self.static_capabilities)}
+
+    def get_recovery_safety_primitive_model(self):
+        """Return no physical model until the owner explicitly supplies one."""
+        return None
+
+    def get_recovery_entity_reader(self):
+        """Return no scene reader until an initialized owner provides one."""
+        observer = getattr(self, 'recovery_safety_observer', None)
+        if observer is not None:
+            return observer.reader
+        return None
+
+    def validate_recovery_safety_step(self, planned: dict, step: dict) -> None:
+        """Reject preparation references without owner-specific validation."""
+        raise ValueError("Resource-owned prepared-step validation unavailable")
+
+    async def prepare_recovery_composition_evidence(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Ask an owner-configured provider to prepare, without executing primitives.
+
+        Request payloads cannot install a provider or enable mock execution. The
+        CCA independently decides whether the provider's execution mode is usable.
+
+        Args:
+            request: Exact CCA task, primitive program, and schedule bindings.
+
+        Returns:
+            Owner-provided preparation evidence, or an explicit NEEDS_CONTEXT
+            record when preparation or matching execution evidence is absent.
+        """
+        physical_snapshot = self.get_recovery_physical_snapshot()
+        unavailable = {
+            "status": "NEEDS_CONTEXT",
+            "resource_jid": str(self.jid),
+            "reason": "Resource-owned nonexecuting physical preparation is unavailable",
+            "physical_snapshot": physical_snapshot,
+        }
+        if not isinstance(request, dict) or request.get("resource_jid") != str(self.jid):
+            return {**unavailable, "reason": "Preparation resource_jid does not match this resource"}
+        provider = getattr(self, "recovery_composition_evidence_provider", None)
+        prepare = getattr(provider, "prepare", None)
+        if not callable(prepare):
+            return unavailable
+        result = prepare(
+            resource_agent=self,
+            request=deepcopy(request),
+            physical_snapshot=deepcopy(physical_snapshot),
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, dict):
+            return {**unavailable, "reason": "Preparation provider returned no evidence record"}
+        result = deepcopy(result)
+        if result.get("status") == "prepared" and (
+            result.get("resource_jid") != str(self.jid)
+            or result.get("program_hash") != request.get("program_hash")
+            or result.get("execution_mode") not in {"live", "mock"}
+            or not isinstance(result.get("preparation_id"), str)
+            or not result["preparation_id"]
+        ):
+            return {**unavailable, "reason": "Preparation identity or execution evidence is incomplete"}
+        result["request_fingerprint"] = recovery_validation_fingerprint(request)
+        return result
+
     def recovery_execution_primitive_catalog(self) -> list[dict[str, Any]]:
         """Return the resource-owned execution primitive catalog."""
         if self._recovery_execution_primitive_catalog_cache is None:
@@ -176,6 +280,21 @@ class ResourceAgent(LlmAgent):
 
             self._recovery_execution_primitive_catalog_cache = build_execution_primitive_catalog(self)
         return deepcopy(self._recovery_execution_primitive_catalog_cache)
+
+    def supports_recovery_composition_execution(self) -> bool:
+        """Require an executor that implements grant consumption and feedback."""
+        return getattr(self.execute_recovery_macro, "__func__", None) is ResourceAgent.execute_recovery_macro
+
+    async def execute_recovery_composition_step(
+        self, *, primitive: str, params: dict, task_id: str, step_index: int,
+        grant: dict, owner: Any,
+    ) -> Any:
+        """Execute an already validated step on the configured primitive owner."""
+        fn = getattr(owner, primitive, None) or getattr(self, primitive, None)
+        if not callable(fn):
+            raise ValueError("Registered primitive executor is unavailable")
+        result = fn(**params)
+        return await result if inspect.isawaitable(result) else result
 
     def recovery_synthesis_primitive_catalog(self) -> list[dict[str, Any]]:
         """Return the resource-owned LLM-facing primitive catalog."""
@@ -1145,6 +1264,22 @@ class ResourceAgent(LlmAgent):
         )
 
         steps = list(primitive_steps or [])
+        reference = kwargs.get("recovery_composition_ref")
+        grant = None
+        if reference is not None:
+            if str(task_id) in self._consumed_recovery_composition_refs:
+                return {"status": "failed:recovery_composition_grant_consumed",
+                        "content": "Registered recovery task was already attempted; retry requires a new task ID"}
+            grant = self._recovery_composition_grants.pop(str(task_id), None)
+            if (not isinstance(grant, dict)
+                    or grant.get("recovery_composition_ref") != reference
+                    or grant.get("primitive_steps") != steps
+                    or not isinstance(grant.get("resolved_primitive_steps"), list)
+                    or len(grant["resolved_primitive_steps"]) != len(steps)
+                    or str(task_id) not in self._recovery_composition_observation_senders):
+                return {"status": "failed:recovery_composition_grant",
+                        "content": "Registered recovery requires a matching CCA execution grant"}
+            self._consumed_recovery_composition_refs[str(task_id)] = deepcopy(reference)
         runtime_snapshot = get_resource_recovery_snapshot(self)
         actual_state = str(
             runtime_snapshot.get("current_state") or getattr(self, "_current_state", "") or ""
@@ -1205,6 +1340,9 @@ class ResourceAgent(LlmAgent):
                     "step_index": -1,
                 },
             }
+        if grant is not None and steps != grant["primitive_steps"]:
+            return {"status": "failed:recovery_composition_grant",
+                    "content": "Expanded primitive program differs from the CCA grant"}
         primitive_meta_by_name = {
             str(entry.get("name", "")).strip(): entry
             for entry in primitive_catalog
@@ -1294,12 +1432,34 @@ class ResourceAgent(LlmAgent):
                     },
                 }
 
+            if grant is not None and grant["resolved_primitive_steps"][step_idx] != {
+                "primitive": primitive, "params": params
+            }:
+                return {
+                    "status": "failed:recovery_composition_bindings",
+                    "content": "Resolved primitive parameters differ from the CCA grant",
+                    "observations": {"step_index": step_idx, "primitive": primitive,
+                                     "params": deepcopy(params), "completed_steps": len(results)},
+                }
+
+            started_at = time.monotonic()
             try:
-                maybe_result = fn(**params)
-                step_result = (
-                    await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
-                )
+                if grant is not None:
+                    step_result = await self.execute_recovery_composition_step(
+                        primitive=primitive, params=params, task_id=str(task_id),
+                        step_index=step_idx, grant=grant, owner=owner,
+                    )
+                else:
+                    maybe_result = fn(**params)
+                    step_result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
             except Exception as exc:
+                if grant is not None:
+                    await self._recovery_composition_observation_senders[str(task_id)]({
+                        "step_index": step_idx, "primitive": primitive, "params": deepcopy(params),
+                        "result": {"success": False, "error": f"{type(exc).__name__}: {exc}"},
+                        "physical_snapshot": self.get_recovery_physical_snapshot(),
+                        "started_at_monotonic": started_at, "finished_at_monotonic": time.monotonic(),
+                    })
                 return {
                     "status": "failed",
                     "content": (
@@ -1315,9 +1475,17 @@ class ResourceAgent(LlmAgent):
                     },
                 }
 
+            if grant is not None:
+                await self._recovery_composition_observation_senders[str(task_id)]({
+                    "step_index": step_idx, "primitive": primitive, "params": deepcopy(params),
+                    "result": deepcopy(step_result),
+                    "physical_snapshot": self.get_recovery_physical_snapshot(),
+                    "started_at_monotonic": started_at, "finished_at_monotonic": time.monotonic(),
+                })
+
             if isinstance(step_result, dict):
                 normalized_result = dict(step_result)
-                normalized_result.setdefault("success", True)
+                normalized_result.setdefault("success", grant is None)
             elif isinstance(step_result, bool):
                 normalized_result = {
                     "success": step_result,
@@ -1325,19 +1493,23 @@ class ResourceAgent(LlmAgent):
                 }
             elif isinstance(step_result, list):
                 normalized_result = {
-                    "success": True,
+                    "success": grant is None,
                     "message": f"{primitive} returned {len(step_result)} items",
                     "data": step_result,
                 }
             else:
                 normalized_result = {
-                    "success": True,
+                    "success": grant is None,
                     "message": f"{primitive} completed",
                     "data": step_result,
                 }
 
             results.append({"primitive": primitive, "result": normalized_result})
-            if not normalized_result.get("success", False):
+            step_succeeded = (
+                normalized_result.get("success") is True
+                if grant is not None else bool(normalized_result.get("success", False))
+            )
+            if not step_succeeded:
                 return {
                     "status": "failed",
                     "content": (
@@ -1355,7 +1527,7 @@ class ResourceAgent(LlmAgent):
                 }
 
             primitive_meta = primitive_meta_by_name.get(primitive)
-            if primitive_meta is not None:
+            if primitive_meta is not None and grant is None:
                 runtime_snapshot = apply_effects_to_snapshot(
                     {**dict(step), "params": params},
                     primitive_meta,
@@ -1417,7 +1589,7 @@ class ResourceAgent(LlmAgent):
                 if tokens:
                     target[tokens[-1]] = deepcopy(step_output)
 
-        if out_state:
+        if out_state and grant is None:
             runtime_snapshot = resource_snapshot_set_field(
                 runtime_snapshot,
                 "current_state",
@@ -1578,13 +1750,32 @@ class ResourceAgent(LlmAgent):
                 return
 
             start_safety_mode = str(fn_args.get("start_safety_mode") or "").strip().lower()
-            # Recovery macros keep the legacy default fast path unless
-            # they explicitly request cca_check. Any task can now opt into the
-            # same bypass with start_safety_mode=fast_path.
             is_recovery_macro = fn_name == "execute_recovery_macro"
-            use_fast_path = bool(
-                start_safety_mode == "fast_path"
-                or (is_recovery_macro and start_safety_mode != "cca_check")
+            reference = fn_args.get("recovery_composition_ref")
+            if task_id in agent._consumed_recovery_composition_refs:
+                await self._ack(msg, task_id=task_id, status="blocked",
+                                content="Registered recovery task was already attempted")
+                return
+            diagnostic_macro = bool(
+                is_recovery_macro and fn_args.get("validation_policy") == "no_validation"
+                and reference is None and not fn_args.get("recovery_safety_scope_id")
+            )
+            if is_recovery_macro and not diagnostic_macro:
+                required = ("recovery_id", "task_id", "outline_id", "program_hash", "problem_id")
+                if (not isinstance(reference, dict)
+                        or any(not isinstance(reference.get(key), str) or not reference[key] for key in required)
+                        or reference["task_id"] != task_id):
+                    await self._ack(msg, task_id=task_id, status="blocked",
+                                    content="Validated recovery requires a CCA composition reference")
+                    return
+                fn_args["start_safety_mode"] = "cca_check"
+                start_safety_mode = "cca_check"
+            start_guard = getattr(agent, "recovery_composition_start_guard", None)
+            if callable(start_guard) and start_guard():
+                fn_args["start_safety_mode"] = "cca_check"
+                start_safety_mode = "cca_check"
+            use_fast_path = start_safety_mode == "fast_path" and (
+                not is_recovery_macro or diagnostic_macro
             )
 
             # ----- plumb routing/context ----- #
@@ -1604,6 +1795,21 @@ class ResourceAgent(LlmAgent):
                     status=f"failed:unknown_tool:{fn_name}",
                 )
                 return
+
+            if reference is not None and (
+                getattr(func, "__func__", None) is not getattr(agent.execute_recovery_macro, "__func__", None)
+                or not agent.supports_recovery_composition_execution()
+            ):
+                await self._ack(msg, task_id=task_id, status="blocked",
+                                content="Resource executor cannot report registered primitive evidence")
+                return
+            agent._safety_decisions.pop(task_id, None)
+            agent._recovery_composition_grants.pop(task_id, None)
+            recovery_composition_request_id = None
+            if reference is not None:
+                agent._pending_recovery_composition_refs[task_id] = deepcopy(reference)
+                recovery_composition_request_id = uuid.uuid4().hex
+                agent._pending_recovery_composition_request_ids[task_id] = recovery_composition_request_id
 
             if use_fast_path:
                 # Fast path: self-allow, log, and proceed directly to execution.
@@ -1654,6 +1860,8 @@ class ResourceAgent(LlmAgent):
                             "function_name": fn_name,
                             "params": fn_args,
                             "status": "safety_check",  # <-- REQUEST permission
+                            **({"recovery_composition_request_id": recovery_composition_request_id}
+                               if recovery_composition_request_id is not None else {}),
                         }
                     )
                     await send_agent_message(
@@ -1663,15 +1871,43 @@ class ResourceAgent(LlmAgent):
                     )
                 except Exception:
                     agent.logger.exception(
-                        "[Resource] Failed to send resource_event to CCA (ignored)."
+                        "[Resource] Failed to send resource_event to CCA."
                     )
+                    agent._pending_recovery_composition_refs.pop(task_id, None)
+                    agent._pending_recovery_composition_request_ids.pop(task_id, None)
+                    await self._ack(msg, task_id=task_id, status="blocked")
+                    return
 
             # 2) Wait for CCA decision (instant for recovery macros, blocks for normal tasks)
             decision = await agent._wait_for_safety_decision(task_id)
 
-            if decision == "block":
+            agent._pending_recovery_composition_refs.pop(task_id, None)
+            agent._pending_recovery_composition_request_ids.pop(task_id, None)
+            grant = agent._recovery_composition_grants.get(task_id)
+            if decision != "allow" or (reference is not None and (
+                not isinstance(grant, dict)
+                or grant.get("recovery_composition_ref") != reference
+                or grant.get("primitive_steps") != fn_args.get("primitive_steps")
+            )):
+                agent._recovery_composition_grants.pop(task_id, None)
                 await self._ack(msg, task_id=task_id, status="blocked")
                 return
+
+            primitive_observations = []
+
+            async def report_primitive_observation(observation: dict[str, Any]) -> None:
+                primitive_observations.append(deepcopy(observation))
+                observed_msg = Message(to=agent.cca_jid)
+                observed_msg.set_metadata("type", "resource_event")
+                observed_msg.body = json.dumps({
+                    "task_id": task_id, "resource_jid": str(agent.jid),
+                    "function_name": fn_name, "params": fn_args,
+                    "status": "recovery_primitive_observed", "observations": observation,
+                })
+                await send_agent_message(self, observed_msg, transport_label="recovery_primitive_observed")
+
+            if reference is not None:
+                agent._recovery_composition_observation_senders[task_id] = report_primitive_observation
 
             if not use_fast_path:
                 # ---------------------------
@@ -1720,6 +1956,8 @@ class ResourceAgent(LlmAgent):
                     func(**filtered_args),
                     timeout=agent.tool_timeout_s,
                 )
+                if reference is not None and isinstance(result, dict):
+                    result.setdefault("observations", {})["primitive_observations"] = deepcopy(primitive_observations)
                 state_after = agent._snapshot_state()
                 final_status = (result or {}).get("status") or "completed"
 
@@ -1746,6 +1984,7 @@ class ResourceAgent(LlmAgent):
                                 "status": final_status,  # e.g. "completed", "blocked", etc.
                                 "failure_context": failure_context,
                                 "current_state": state_after.get("current_state", "idle"),
+                                "observations": deepcopy((result or {}).get("observations")),
                             }
                         )
                         # fire-and-forget so we don't block on CCA
@@ -1767,6 +2006,9 @@ class ResourceAgent(LlmAgent):
             except Exception as e:
                 agent.logger.exception("[Resource] Tool execution failed")
                 final_status = f"failed:tool:{type(e).__name__}"
+            finally:
+                agent._recovery_composition_observation_senders.pop(task_id, None)
+                agent._recovery_composition_grants.pop(task_id, None)
 
             # Notify CCA of failure so it can clean up running_aps / FSA state.
             if isinstance(final_status, str) and final_status.startswith("failed"):
@@ -1791,6 +2033,8 @@ class ResourceAgent(LlmAgent):
                             "status": final_status,
                             "failure_context": failure_context,
                             "current_state": state_after.get("current_state", "idle"),
+                            "observations": {"primitive_observations": deepcopy(primitive_observations),
+                                             "result": deepcopy(result)},
                         }
                     )
                     await send_agent_message(
@@ -1921,7 +2165,7 @@ class ResourceAgent(LlmAgent):
             if not msg:
                 return
 
-            if getattr(agent, "environment_context", None) is not None and (
+            if (
                 str(msg.sender).split("/", 1)[0] != str(agent.cca_jid).split("/", 1)[0]
             ):
                 return
@@ -1939,6 +2183,19 @@ class ResourceAgent(LlmAgent):
                 agent.logger.warning("[Resource] Invalid safety_decision message: %s", data)
                 return
 
+            reference = agent._pending_recovery_composition_refs.get(task_id)
+            if reference is not None:
+                request_id = agent._pending_recovery_composition_request_ids.get(task_id)
+                if not request_id or data.get("recovery_composition_request_id") != request_id:
+                    return
+            elif data.get("recovery_composition_request_id") or data.get("recovery_composition_grant") is not None:
+                return
+            if reference is not None and decision == "allow":
+                grant = data.get("recovery_composition_grant")
+                if not isinstance(grant, dict) or grant.get("recovery_composition_ref") != reference:
+                    decision = "block"
+                else:
+                    agent._recovery_composition_grants[task_id] = deepcopy(grant)
             agent._safety_decisions[task_id] = decision
             agent.logger.info(
                 "[Resource] Stored safety_decision=%s for task=%s",

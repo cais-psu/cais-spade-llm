@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "case_id": "PART_SLIPPAGE_MUTEX",
+      "phase": "live_preflight",
+      "status": "NEEDS_CONTEXT",
+      "acceptance_complete": false,
+      "report": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/part-slippage-20261006T021725Z/preflight/mutex.json"
+    },
+    {
+      "case_id": "PART_SLIPPAGE_PRECEDENCE",
+      "phase": "live_preflight",
+      "status": "NEEDS_CONTEXT",
+      "acceptance_complete": false,
+      "report": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/part-slippage-20261006T021725Z/preflight/precedence.json"
+    },
+    {
+      "case_id": "PART_SLIPPAGE_SAFE",
+      "phase": "live_preflight",
+      "status": "NEEDS_CONTEXT",
+      "acceptance_complete": false,
+      "report": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/part-slippage-20261006T021725Z/preflight/safe.json"
+    }
+  ],
+  "acceptance_complete": false,
+  "dispatch_authorized": false,
+  "published_videos": []
+}

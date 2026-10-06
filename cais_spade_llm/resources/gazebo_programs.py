@@ -11,10 +11,21 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from cais_spade_llm.recovery_framework.kmr_tasks import (
-    KMR_LOCATION_TASK, KMR_LOCATION_VARIANTS, KMR_MOVE_VARIANTS, KMR_TASKS, PRIMITIVE_CONTRACTS,
+    KMR_LOCATION_TASK,
+    KMR_LOCATION_VARIANTS,
+    KMR_MOVE_VARIANTS,
+    KMR_TASKS,
+    PRIMITIVE_CONTRACTS,
+)
+from cais_spade_llm.resources.resource_safety_preparation import (
+    resource_model_declarations,
+    resource_provider,
 )
 from cais_spade_llm.resources.robot.robot_task_model import (
-    RobotTaskEffect, RobotTaskGuard, RobotTaskProgram, RobotTaskStep,
+    RobotTaskEffect,
+    RobotTaskGuard,
+    RobotTaskProgram,
+    RobotTaskStep,
 )
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
 from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
@@ -204,12 +215,27 @@ def validate_resource_programs(scene: dict) -> None:
     if not isinstance(root, dict) or type(root.get("revision")) is not int or root["revision"] < 1:
         raise ValueError("Gazebo scene lacks a valid resource program revision")
     resources = root.get("resources")
+    declarations = resource_model_declarations(scene)
     ids = {*(row["resource_id"] for row in scene["robots"]),
            *(row["resource_id"] for row in scene["machines"]),
            "KMR", "Conveyor", "Buffer For Machined parts", "3D Printing Station", "Storage", "Exit"}
+    ids.update(declarations)
     if not isinstance(resources, dict) or set(resources) != ids:
         raise ValueError("Gazebo resource program catalog does not match the scene")
     for resource_id, bundle in resources.items():
+        if resource_id in declarations:
+            entry = declarations[resource_id]
+            if not isinstance(bundle, dict) or set(bundle) != {"functions", "primitives"}:
+                raise ValueError("Invalid additional resource program bundle: " + resource_id)
+            provider = resource_provider(entry["owner_provider"])
+            provider.validate_programs(resource_id=resource_id, model=deepcopy(entry["model"]),
+                                       bundle=deepcopy(bundle))
+            for name, primitive in bundle["primitives"].items():
+                if (not isinstance(name, str) or not name or primitive.get("status") not in {"executable", "planned"}
+                        or type(primitive.get("recovery_selectable")) is not bool
+                        or primitive["status"] == "planned" and primitive["recovery_selectable"]):
+                    raise ValueError("Invalid additional resource primitive availability")
+            continue
         expected = _expected_functions(resource_id, scene)
         if not isinstance(bundle, dict) or set(bundle) != {"functions", "primitives"}:
             raise ValueError(f"Invalid program bundle for {resource_id}")

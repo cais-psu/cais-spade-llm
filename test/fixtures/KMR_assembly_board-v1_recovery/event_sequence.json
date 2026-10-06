@@ -1,0 +1,87 @@
+{
+  "synthetic": true,
+  "description": "Manually authored recovery outline. Expected states are fixture assumptions, not accepted recovery transitions.",
+  "initial_context_file": "initial_context.json",
+  "outline_events": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "event_name": "KMR_recovery_approach_assembly_board-v1",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": [],
+      "expected_start_state": {
+        "resource_state": "carrying",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "rationale": "Approach the synthetic assembly_board-v1 placement pose while retaining KET4_Square_4mm."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "event_name": "KMR_recovery_placement_assembly_board-v1",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": ["RECOVERY_SEQ1"],
+      "expected_start_state": {
+        "resource_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "rationale": "Move the held KET4_Square_4mm to the synthetic placement pose without releasing it."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "event_name": "KMR_recovery_release_KET4_Square_4mm",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": ["RECOVERY_SEQ2"],
+      "expected_start_state": {
+        "resource_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Release KET4_Square_4mm using the synthetic initial grasp_transform; assume the released part remains at the placement pose."
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "event_name": "KMR_recovery_retreat_assembly_board-v1",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": ["RECOVERY_SEQ3"],
+      "expected_start_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_location": "assembly_board-v1"
+      },
+      "expected_end_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_location": "assembly_board-v1"
+      },
+      "rationale": "Return the empty KMR TCP to its synthetic initial pose while KET4_Square_4mm remains at the placement pose."
+    }
+  ]
+}

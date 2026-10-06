@@ -1,0 +1,162 @@
+{
+  "date": "2026-10-05",
+  "live_acceptance": "incomplete",
+  "candidate_origin": "mock",
+  "evidence_origin": "actual Gazebo observations; no recovery motion dispatched",
+  "predefined_specifications": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
+  "records": [
+    {
+      "batch": "live-2026-10-05",
+      "candidate_id": "GAZEBO_MOTION_SAFE",
+      "status": "NEEDS_CONTEXT",
+      "dispatch_authorized": false,
+      "artifact_path": "cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/9233bb7e989d487eb30a6a3029bd7f38/result.json",
+      "sha256": "1e5f9f023c3b66a4610d4fdad849bc335d9bbf8a697a3ea9f9c0cc489461d64c",
+      "checkpoint_id": "472186fdc4f64394186c6d9d0bc6bc923a45176208e2f7ee1bf35f8c4456db81",
+      "resources_observed": 12,
+      "resource_geometry": 12,
+      "prepared_programs": 0,
+      "unresolved": [
+        {
+          "identity": "ur5e-1",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "ur5e-2",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "ur5e-3",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "ur5e-4",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "assembly_board-v1",
+          "reason": "Configured resource collision geometry is missing"
+        },
+        {
+          "identity": null,
+          "reason": "Complete controller goal observations unavailable: /ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        },
+        {
+          "identity": null,
+          "reason": "Complete controller goal observations unavailable: /ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        }
+      ]
+    },
+    {
+      "batch": "live-2026-10-05",
+      "candidate_id": "GAZEBO_MOTION_CONFLICT",
+      "status": "NEEDS_CONTEXT",
+      "dispatch_authorized": false,
+      "artifact_path": "cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/c24aa486e5314886be96591d0d2a62c1/result.json",
+      "sha256": "bd268f92899a295459e721cfc31cd1b1123b6665f282c8543eed79514084e69c",
+      "checkpoint_id": "f3e2489d48b7cd3a7f0b869e2e177b38859400d01ec5f2dc6004f8650fad3da7",
+      "resources_observed": 12,
+      "resource_geometry": 12,
+      "prepared_programs": 0,
+      "unresolved": [
+        {
+          "identity": "ur5e-1",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "ur5e-2",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "ur5e-3",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "ur5e-4",
+          "reason": "Observed link motion prevents an idle checkpoint"
+        },
+        {
+          "identity": "assembly_board-v1",
+          "reason": "Configured resource collision geometry is missing"
+        },
+        {
+          "identity": null,
+          "reason": "Complete controller goal observations unavailable: /ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        },
+        {
+          "identity": null,
+          "reason": "Complete controller goal observations unavailable: /ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        }
+      ]
+    },
+    {
+      "batch": "live-2026-10-05",
+      "candidate_id": "missing_resource_evidence",
+      "status": "NEEDS_CONTEXT",
+      "dispatch_authorized": false,
+      "artifact_path": "cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/1c6735023e8549678523d913399936df/result.json",
+      "sha256": "db6374eef45fed774858a8241034e56f02954276fc697daafee6253d6af38640",
+      "checkpoint_id": null,
+      "resources_observed": 0,
+      "resource_geometry": 0,
+      "prepared_programs": 0,
+      "unresolved": [
+        {
+          "identity": null,
+          "reason": "Live preparation configuration must cover every configured resource"
+        }
+      ]
+    },
+    {
+      "batch": "live-2026-10-05-final",
+      "candidate_id": "GAZEBO_MOTION_SAFE",
+      "status": "NEEDS_CONTEXT",
+      "dispatch_authorized": false,
+      "artifact_path": "cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05-final/80bc13b89cc8426fba577ab4234d8a0f/result.json",
+      "sha256": "7dd45a43a972693c6175321b685b66151ad4eae249e107200abaa63aa5c82b49",
+      "checkpoint_id": null,
+      "resources_observed": 0,
+      "resource_geometry": 0,
+      "prepared_programs": 0,
+      "unresolved": [
+        {
+          "identity": null,
+          "reason": "Gazebo read-only service timed out: /GETRECOVERYSTATE"
+        }
+      ]
+    },
+    {
+      "batch": "live-2026-10-05-final",
+      "candidate_id": "GAZEBO_MOTION_CONFLICT",
+      "status": "NEEDS_CONTEXT",
+      "dispatch_authorized": false,
+      "artifact_path": "cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05-final/21e2faeb380042b0a84a6070551d89de/result.json",
+      "sha256": "93e373295c10b2a35d54209f33c370cbc09446f080cd2e51eb4a7dff447f5bcd",
+      "checkpoint_id": null,
+      "resources_observed": 0,
+      "resource_geometry": 0,
+      "prepared_programs": 0,
+      "unresolved": [
+        {
+          "identity": null,
+          "reason": "Gazebo read-only service timed out: /GETRECOVERYSTATE"
+        }
+      ]
+    }
+  ],
+  "acceptance": {
+    "safe_moving_candidate": "not_established",
+    "definite_live_mutex_counterexample": "not_established",
+    "missing_resource_evidence": "NEEDS_CONTEXT",
+    "precedence": "no live trace checked; no non-vacuous live claim"
+  },
+  "software_regressions": {
+    "passed": 620,
+    "seconds": 174.27
+  },
+  "final_focused_regressions": {
+    "passed": 125,
+    "seconds": 16.53,
+    "overlaps_software_regressions": true
+  }
+}

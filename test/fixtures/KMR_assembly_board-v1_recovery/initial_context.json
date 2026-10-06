@@ -1,0 +1,59 @@
+{
+  "fixture_kind": "synthetic_checkpoint",
+  "synthetic": true,
+  "description": "Manually authored KMR checkpoint and expected outcomes for a four-event recovery sequence. These values are not runtime observations or executable configuration.",
+  "scene_file": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
+  "product_geometry": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+  "resource_agent": "cais_spade_llm/recovery_framework/kmr_agent.py:KMRResourceAgent",
+  "resource_profile": "cais_spade_llm/recovery_framework/kmr_primitives.py:KMR_RESOURCE_PROFILE",
+  "event_sequence_file": "event_sequence.json",
+  "primitive_programs_file": "primitive_programs.json",
+  "coordinate_frame": "world",
+  "resource_snapshots": [
+    {
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "resource_type": "kmr",
+      "current_state": "carrying",
+      "resource_location": null,
+      "held_part": "KET4_Square_4mm",
+      "gripper_state": "closed",
+      "current_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+      "base_pose": [0.0, 0.0, 0.0]
+    }
+  ],
+  "part_tracker": {
+    "KET4_Square_4mm": {
+      "state": "in_gripper",
+      "location": "recovery-resource-8@localhost",
+      "last_known_location": "recovery-resource-8@localhost"
+    }
+  },
+  "custody": {
+    "resource_jid": "recovery-resource-8@localhost",
+    "part_name": "KET4_Square_4mm",
+    "attached": true,
+    "grasp_transform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  },
+  "initial_part_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+  "expected_part_poses_after": {
+    "RECOVERY_SEQ1": [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    "RECOVERY_SEQ2": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    "RECOVERY_SEQ3": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    "RECOVERY_SEQ4": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  },
+  "expected_final_conditions": {
+    "resource_id": "KMR",
+    "resource_jid": "recovery-resource-8@localhost",
+    "current_state": "idle",
+    "resource_location": null,
+    "held_part": null,
+    "gripper_state": "open",
+    "current_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    "base_pose": [0.0, 0.0, 0.0],
+    "part_name": "KET4_Square_4mm",
+    "part_location": "assembly_board-v1",
+    "part_pose": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    "attached": false
+  }
+}

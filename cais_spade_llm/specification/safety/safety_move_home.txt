@@ -1,3 +1,0 @@
-[Safety Requirements]
-- xarm move_home must be done after its place_insert.
-- ur5e move_home must be done after its place_insert.

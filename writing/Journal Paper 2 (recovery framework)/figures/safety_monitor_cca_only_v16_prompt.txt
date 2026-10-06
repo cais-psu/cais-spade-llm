@@ -1,0 +1,85 @@
+Use case: precise-object-edit / scientific-educational.
+Edit target: the supplied CCA v15 figure.
+Keep the original purple academic portrait template, Central Controller Agent title, robot/shield header and "Mutual-exclusion example (SAFE_2)" subtitle. Preserve panels 2 and 3 with their formal diagrams and timelines. Completely redesign ONLY panel 1 to show the MECHANISM of how new recovery events/states become evaluable by existing APs. Remove the Enter/Release/Retreat storyboard, all three robot snapshots, and their three primitive-name labels. No table. No row-column grid. Make the flow predominantly visual, with short labels and meaningful connectors.
+
+Important semantics:
+New event e_k^R is bound to RA program PC_k. Its projected successor x_k^R is an identifier of the proposed new state. Primitive models evaluate the program's effects using the supplied parameters, prepared motion, configured geometry, current state and custody. Observations include modeled pose, held part and region occupancy, including other resources' behavior. The occupancy model determines overlap; the fixed AP evaluator selects the correct Boolean occupancy value using the predefined resource and region binding. Primitive models DO NOT invent AP meanings and no arrow should map a raw event/state NAME straight to an AP. ap002 requires the second resource's supplied behavior too.
+
+PANEL 1 TITLE:
+"Map new recovery events and states to predefined APs"
+
+Panel 1 layout:
+Use about the same height as the current panel 1, perhaps a little taller if needed. Make a clean two-tier arrangement followed by a slim output strip. Three main columns, minimal heavy boxes.
+
+TOP LEFT: a compact orange-accented source card:
+Heading "New recovery"
+"Event: e_k^R"
+"Proposed successor: x_k^R"
+"Bound program from RA: PC_k"
+A single tiny program strip "... → move_cartesian → ..."
+Use mathematically typeset sub/superscripts, and preserve underscores in primitive names.
+From the PROGRAM in this card a clear arrow goes DOWN to the primitive-model illustration in the left main column. The arrow is labelled "Evaluate effects". There must be no arrow directly from e_k^R or x_k^R to AP values.
+
+TOP RIGHT: a wide purple-accented card above the evaluator, showing the separate fixed source:
+Heading "Predefined SAFE_2"
+Formula "G !(ap001 & ap002)"
+Short meanings:
+"ap001: first resource occupies region"
+"ap002: second resource occupies region"
+Then a compact binding line "resources: (r1, r2)     region: assembly station"
+A clear DOWNWARD purple arrow labelled "AP meaning + binding" feeds the AP evaluator in the right main column. Fixed AP definitions are supplied from here, not from the primitive program. Keep this side input visually distinct from model-produced observations.
+
+MAIN LEFT COLUMN: heading "Model primitive effects".
+A single meaningful small robot/motion diagram:
+r1 robot/tool on the left extends into the dashed pink configured shared region. A translucent blue configured footprint visibly overlaps the region. r2 on the right is retracted, with its configured footprint clearly outside the region. Label robots r1 and r2. A dashed purple trajectory leads r1 into the region. This illustrates one observation where r1 occupancy is 1 and r2 occupancy is 0. Use the same clean robot-arm art as the reference.
+Below the scene, very compact text "Pose + geometry → region_occupancy".
+Below that, an input caption with TWO short lines:
+"Inputs: prepared motion, geometry, current state, custody"
+"Include other resources' behavior"
+Do not draw an output arrow into these inputs.
+A strong horizontal arrow from this model illustration points RIGHT to the observations in the middle column.
+
+MAIN MIDDLE COLUMN: heading "Modeled observations".
+Draw ONE large document/sheet icon, containing unboxed short field labels:
+"current_pose"
+"held_part"
+"region_occupancy"
+Under region_occupancy show two indented, color-matched values on separate lines:
+"r1: 1" in blue
+"r2: 0" in dark gray
+Small label at the foot of the document "Example intermediate state".
+No table cells or grid lines. These are state attributes whose meanings are understood, not invented state names.
+Two thin, clear connections leave the corresponding r1 and r2 values and go RIGHT into the AP evaluator. Label the connection area "Bound occupancy values" once, legibly. These demonstrate selection of the correct source values.
+
+MAIN RIGHT COLUMN: heading "Evaluate predefined APs".
+This evaluator receives the arrow from the predefined AP meaning + binding source above AND the observations from the left.
+Inside it, show a small matching/filter visual with labels "Match resource + region". Then two distinct output badges:
+"ap001 = 1" in blue, connected to the observed r1 value.
+"ap002 = 0" in dark gray, connected to the observed r2 value.
+Small caption: "Read the bound observation".
+The evaluator is not a robot, an LLM, or a classifier. Use a clear connector/filter icon to visually express matching the binding and reading the relevant value.
+Keep the diagram uncluttered; use alignment, whitespace, and connector lines instead of nesting many boxes.
+
+BOTTOM STRIP OF PANEL 1:
+Heading "AP valuation trace"
+Show "(0,1) → (0,0) → (1,0)" and the small label "(ap001, ap002)".
+This is an illustrative supplied sequence ending at the intermediate observation drawn above. Do not call it a final completed execution.
+Caption "Evaluate throughout PC_k, including intermediate states."
+A separate small bottom note, if space allows:
+"Event/state identifiers preserve identity; modeled conditions determine AP values."
+A clear DOWNWARD arrow from the AP valuation trace feeds panel 2, labelled "AP valuations".
+
+PANEL 2:
+Preserve the existing title "Parallel composition with safety monitors".
+Preserve the top strip "Recovery, nominal and running tasks + predefined safety monitors".
+Preserve correct SAFE_2 DFA: q_0 double-circle, self-loop !(ap001 & ap002), edge to single-circle q_d guarded ap001 & ap002, q_d self-loop true. Never make q_d accepting.
+Preserve four-node AP/monitor projection: ((0,1),q_0) → ((1,1),q_d) with ap001:0→1; ((0,1),q_0) down to ((0,0),q_0) with ap002:1→0; ((0,0),q_0) → ((1,0),q_0) with ap001:0→1. Preserve the node-meaning caption and accepted-history note. Do not confuse safe monitor state with completed work.
+
+PANEL 3:
+Preserve "Validate timed behavior and authorize execution", "Projected execution — before authorization", two occupancy timelines with overlap versus no overlap, "Model time", and the original required checks, exact-program matching, allow/block, and allow→RA execution flow. Preserve unsupported model/incomplete evidence→block and the monitor-history footer. Do not suggest the red conflict is executed or that the green mutex result alone authorizes execution.
+
+Overall:
+Full portrait figure, white background, crisp purple headings and outlines, orange only for new-recovery identity accents. Preserve formal symbols exactly. Avoid giant empty start boxes, vague evidence boxes, tables, action storyboards, code-specific region identifiers, fabricated measurements, and extra numbered panels. The main visual message must now be the two inputs to AP evaluation: MODEL-PRODUCED STATE INFORMATION and PREDEFINED AP MEANING/BINDING.
+
+Refinement:
+Edit ONLY the formula text inside the small rounded formula rectangle in the upper-right 'Predefined SAFE_2' card in panel 1. Its complete contents must be exactly: G !(ap001 & ap002). Remove the two stray dots currently before G. Preserve the existing mathematical font style. Do not add any prefix, suffix, punctuation, label or symbol to this formula. Preserve all other pixels/content, diagram meanings, labels, arrows, layout, and illustrations as closely as possible.

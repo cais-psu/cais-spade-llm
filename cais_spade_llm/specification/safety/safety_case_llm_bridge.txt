@@ -1,3 +1,0 @@
-[Safety Requirements]
-- LG by xarm6 must place_approach first before MCP by ur5e to the assembly station.
-- ur5e and xarm6 must not both be in the assembly board destination area at the same time.

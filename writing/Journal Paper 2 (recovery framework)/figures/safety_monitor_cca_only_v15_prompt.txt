@@ -1,0 +1,32 @@
+Use case: precise-object-edit / scientific-educational.
+Edit the supplied CCA v14 figure. Change ONLY the table in the lower part of panel 1 into a visual three-frame illustrated sequence. Preserve the rest of the figure's layout, titles, text, DFA guards, graph edges, timing diagrams, safety meanings, colors and purple academic template. No tables or table grid lines in the replacement.
+
+Replacement area:
+Keep a slender header reading "Example observations during PC_k" with proper mathematical subscript.
+Below it place THREE spacious illustrated snapshots arranged left to right in a single continuous horizontal strip, with subtle gray right-pointing chevrons BETWEEN snapshots indicating progression through the program. Do not draw separate heavy card boxes.
+Each snapshot depicts the SAME small light-gray industrial robot r1, the SAME pink dashed shared-region ellipse to its right, and the SAME small teal part. Use clean black outlined vector-like robot artwork consistent with the existing two-robot illustration. Keep the region and part at corresponding locations across snapshots so that their spatial relation is easy to compare. A light translucent blue configured robot/tool footprint shows physical occupancy. The part is teal, not orange. Avoid generic clip art unrelated to the reference.
+
+SNAPSHOT 1:
+Exact primitive label above picture: "move_cartesian".
+Robot arm extends from its base outside the pink region toward the region, carrying the teal part. The relevant robot/tool footprint visibly touches or overlaps the pink region. A small curved purple motion arrow indicates entry.
+Below the picture, a thin connector from the illustrated overlap leads to a compact blue badge "ap001 = 1".
+Short optional caption, one word: "Enter".
+The value 1 is because of physical overlap, not simply because move_cartesian is the primitive name.
+
+SNAPSHOT 2:
+Exact primitive label above picture: "release_part".
+Same region, robot arm still extended with the gripper/tool and translucent footprint clearly inside the pink region. Gripper is now open and the teal part has been deposited below it within the region. This must visibly show that releasing the part does not withdraw the robot/tool.
+Below the picture, a thin connector from the overlapping footprint leads to a matching blue badge "ap001 = 1".
+Short optional caption: "Release".
+
+SNAPSHOT 3:
+Exact primitive label above picture: "move_cartesian".
+Same region with the SAME teal deposited part still inside it. Robot arm/gripper is visibly retracted away so ALL of the illustrated configured robot/tool footprint is outside the pink region, separated from it by a clear gap. A small purple curved motion arrow points away from the region.
+Below the picture, a thin connector from the clear footprint leads to a NEUTRAL gray badge "ap001 = 0".
+Short optional caption: "Retreat".
+Do not color this badge green or claim overall safety: it only reports ap001. The deposited part remains in the region, but no longer belongs to the resource's carried footprint.
+
+Make the pictures the dominant content of this replacement. No prose descriptions, no row/column headings, no table cells, no new symbols beyond those specified, and no additional numerical values. The three snapshots illustrate observations during the supplied program, not LLM primitive synthesis. Show the physical overlap clearly at this image scale; use enlarged tool/footprint detail if needed rather than tiny unreadable details.
+Below the whole strip preserve the existing sentence "Evaluate intermediate states, not only x_k^R." using correct mathematical notation.
+
+Everything above this replacement and all of panels 2 and 3 must remain unchanged. Preserve the existing definition of SAFE_2, ap001 and ap002. Preserve the AP evaluation link to primitive models and the fixed resource/region bindings. The complete output remains a full portrait CCA figure, not just the replacement strip.

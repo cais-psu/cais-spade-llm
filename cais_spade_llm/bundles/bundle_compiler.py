@@ -11,6 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from cais_spade_llm.agents.central_controller.predefined_safety import (
+    compile_predefined_safety,
+    parse_predefined_safety,
+    validate_predefined_safety_artifact,
+)
+
 from .bundle_store import BundleStore
 from .models import (
     BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK,
@@ -178,6 +184,8 @@ class BundleCompiler:
         cls,
         descriptor: dict[str, Any],
         safety_dir: Path,
+        *,
+        source_text: str | None = None,
     ) -> tuple[Path, dict[str, str]]:
         logic_src_raw = str(descriptor.get("safety_logic_json", "") or "").strip()
         if not logic_src_raw:
@@ -185,6 +193,14 @@ class BundleCompiler:
         logic_src = Path(logic_src_raw).resolve()
         if not logic_src.exists():
             raise FileNotFoundError(f"approved safety logic missing: {logic_src}")
+
+        logic_payload = cls._load_json(logic_src)
+        predefined = validate_predefined_safety_artifact(logic_payload, source_text=source_text)
+        expected_dfas = None
+        if predefined is not None:
+            if descriptor.get("safety_sha256") != logic_payload["predefined_source_sha256"]:
+                raise ValueError("Approved predefined safety source fingerprint does not match")
+            _, expected_dfas = compile_predefined_safety(predefined)
 
         safety_dir.mkdir(parents=True, exist_ok=True)
         logic_dst = (safety_dir / "cca_safety_logic.json").resolve()
@@ -216,6 +232,8 @@ class BundleCompiler:
                 "approved safety preview is missing DFA DOT artifacts for rules: "
                 + ", ".join(missing_rule_ids)
             )
+        if expected_dfas is not None and dfa_map != expected_dfas:
+            raise ValueError("Predefined DFA artifacts differ from the given compiled formulas")
 
         for raw_png in (
             descriptor.get("dfa_png_files", [])
@@ -299,6 +317,24 @@ class BundleCompiler:
             "offline_validation_skipped": True,
         }
 
+    @staticmethod
+    def _physical_validation_unavailable(rules: list[dict[str, Any]]) -> dict[str, Any] | None:
+        from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import (
+            _MEANINGS,
+        )
+
+        physical_rules = [rule["id"] for rule in rules
+                          if any(ap.get("full") in _MEANINGS for ap in rule.get("aps", []))]
+        if not physical_rules:
+            return None
+        return {
+            "ok": False, "status": "inconclusive", "violations": [], "violated_rules": [],
+            "witness_count": 0, "auto_replans_used": 0,
+            "stop_reason": "predefined_physical_grounding_required",
+            "offline_validation_skipped": True, "pending_rule_ids": physical_rules,
+            "reason": "Native task/state validation cannot certify physical APs without joint evidence.",
+        }
+
     @classmethod
     async def run_offline_repair_loop(
         cls,
@@ -309,6 +345,9 @@ class BundleCompiler:
         auto_replan_max_attempts: int,
         seed_replan_violations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        physical_validation = cls._physical_validation_unavailable(validator.safety_rules)
+        if physical_validation is not None:
+            return physical_validation
         planner = product_agent.process_planner
         if seed_replan_violations:
             await planner.replan_with_feedback_offline(seed_replan_violations)
@@ -518,6 +557,7 @@ class BundleCompiler:
                     safety_logic_path, dfa_map = self._copy_precomputed_safety_artifacts(
                         precomputed_safety_artifacts,
                         safety_dir,
+                        source_text=safety_text,
                     )
                     safety_payload = self._load_json(safety_logic_path)
                     raw_rules = safety_payload.get("rules", [])
@@ -538,12 +578,19 @@ class BundleCompiler:
                         "tools_sha256": source_hashes["tools_sha256"],
                         "prompts_sha256": source_hashes["prompts_sha256"],
                     }
+                    if safety_payload.get("mode") == "predefined":
+                        safety_source["definition_mode"] = "predefined"
+                        safety_source["predefined_semantics_sha256"] = safety_payload[
+                            "predefined_semantics_sha256"]
                     log.info(
                         "Using approved safety preview %s for bundle %s.",
                         safety_source["preview_id"] or "<unknown>",
                         bundle_id,
                     )
                 else:
+                    # Parsing before the generation branch keeps malformed given
+                    # definitions from falling through to language interpretation.
+                    predefined = parse_predefined_safety(safety_text)
                     safety_logic = getattr(cca_agent, "safety_logic", None)
                     if safety_logic is None:
                         raise RuntimeError("failed to initialize SafetyLogic")
@@ -555,6 +602,10 @@ class BundleCompiler:
                         safety_dir,
                     )
                     safety_rules = list(safety_logic.rules or [])
+                    if predefined is not None:
+                        safety_source["mode"] = "predefined"
+                        safety_source["predefined_semantics_sha256"] = safety_logic.predefined_metadata[
+                            "predefined_semantics_sha256"]
 
                 requirements_path = plan_dir / f"{product_stem}_requirements.json"
                 plan_path = plan_dir / f"{product_stem}_plan.json"
@@ -585,6 +636,11 @@ class BundleCompiler:
                         global_fsa_path,
                     )
                 except Exception as exc:
+                    if self._physical_validation_unavailable(safety_rules) is not None:
+                        raise ValueError(
+                            "predefined_physical_grounding_required: plant compilation failed; "
+                            "safety-free regeneration cannot validate physical requirements"
+                        ) from exc
                     initial_compile_error = str(exc or "").strip() or exc.__class__.__name__
                     plan_generation_mode = BUNDLE_PLAN_GENERATION_MODE_RUNTIME_ONLY_SAFETY_FALLBACK
                     log.warning(

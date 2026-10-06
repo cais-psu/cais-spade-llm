@@ -1,0 +1,25 @@
+2026-10-05 22:26:47,731 - agent:ur5e-1 - INFO - RobotAgent 'ur5e-1' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+INFO:agent:ur5e-1:RobotAgent 'ur5e-1' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-05 22:26:47,733 - agent:ur5e-2 - INFO - RobotAgent 'ur5e-2' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+INFO:agent:ur5e-2:RobotAgent 'ur5e-2' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-05 22:26:47,735 - agent:ur5e-3 - INFO - RobotAgent 'ur5e-3' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+INFO:agent:ur5e-3:RobotAgent 'ur5e-3' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-05 22:26:47,736 - agent:ur5e-4 - INFO - RobotAgent 'ur5e-4' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+INFO:agent:ur5e-4:RobotAgent 'ur5e-4' initialized. mode=simulation tools=['pick_approach', 'pick_grasp', 'place_approach', 'move_home', 'place_insert', 'execute_recovery_macro'] failure_scenarios=[]
+2026-10-05 22:26:47,874 - agent:cca - INFO - CentralControllerAgent 'cca' initialized. safety_file=/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt
+INFO:agent:cca:CentralControllerAgent 'cca' initialized. safety_file=/home/jongh/projects/cais-spade-llm/cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt
+[INFO] [1791253612.380119721] [ur5e_1_workflow_controller]: [ur5e] Controller initialized (execution_mode=simulation)
+[INFO] [1791253612.380457171] [ur5e_1_workflow_controller]: Waiting for services/actions...
+[INFO] [1791253613.890422481] [ur5e_1_workflow_controller]: All services ready.
+[INFO] [1791253613.976777576] [ur5e_2_workflow_controller]: [ur5e] Controller initialized (execution_mode=simulation)
+[INFO] [1791253613.977106455] [ur5e_2_workflow_controller]: Waiting for services/actions...
+[INFO] [1791253614.997753488] [ur5e_2_workflow_controller]: All services ready.
+[INFO] [1791253615.097834506] [ur5e_3_workflow_controller]: [ur5e] Controller initialized (execution_mode=simulation)
+[INFO] [1791253615.098141548] [ur5e_3_workflow_controller]: Waiting for services/actions...
+[INFO] [1791253615.102292760] [ur5e_3_workflow_controller]: All services ready.
+[INFO] [1791253615.226827815] [ur5e_4_workflow_controller]: [ur5e] Controller initialized (execution_mode=simulation)
+[INFO] [1791253615.227072032] [ur5e_4_workflow_controller]: Waiting for services/actions...
+[INFO] [1791253615.232749855] [ur5e_4_workflow_controller]: All services ready.
+INFO:__main__:PART_SLIPPAGE_MUTEX: live acceptance incomplete; /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/part-slippage-20261006T021725Z/preflight/mutex.json
+INFO:__main__:PART_SLIPPAGE_PRECEDENCE: live acceptance incomplete; /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/part-slippage-20261006T021725Z/preflight/precedence.json
+INFO:__main__:PART_SLIPPAGE_SAFE: live acceptance incomplete; /home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_gazebo_runs/part-slippage-20261006T021725Z/preflight/safe.json

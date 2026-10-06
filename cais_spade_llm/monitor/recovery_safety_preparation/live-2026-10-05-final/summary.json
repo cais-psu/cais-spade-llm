@@ -1,0 +1,14 @@
+[
+  {
+    "candidate_id": "GAZEBO_MOTION_SAFE",
+    "status": "NEEDS_CONTEXT",
+    "artifact_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05-final/80bc13b89cc8426fba577ab4234d8a0f/result.json",
+    "dispatch_authorized": false
+  },
+  {
+    "candidate_id": "GAZEBO_MOTION_CONFLICT",
+    "status": "NEEDS_CONTEXT",
+    "artifact_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05-final/21e2faeb380042b0a84a6070551d89de/result.json",
+    "dispatch_authorized": false
+  }
+]

@@ -1,0 +1,110 @@
+Generated using the built-in image_gen tool.
+
+FINAL WIRING CORRECTION
+
+Make only three small wiring corrections to this CCA figure. Preserve all other content, mathematics, wording, graph topology, card layout, colors, and the original portrait template.
+
+1. In panel 2, "Supplied behavior", change the orange dashed recovery arrow labeled e_k^R into a solid orange arrow, consistent with the controllable-start legend in panel 3. Keep its existing endpoints and label.
+
+2. Correct the blue feedback source. Remove the entire horizontal dashed blue line along the bottom of the figure. Instead, start the blue dashed connector exactly at the RIGHT EDGE of the "RA execution" box, at its vertical center, travel a short distance right to the existing blue outer-margin route, then travel UP that route and LEFT into "Current states from accepted history". Keep the existing left-pointing arrowhead at monitor history. The visible line must touch the RA execution box; there must be no detached line beginning beside the caption. Keep the caption "Validated observations and acknowledgements" in the footer, without a separate stray line.
+
+3. Connect the retained region to the admission check. Add a thin purple connector FROM the right edge of the green "Retained nonblocking region" contour, route it down in the narrow clear right margin INSIDE the blue feedback line, pass around the right end of the edge legend, and route it leftward in the gutter ABOVE the lower authorization cards, ending with a DOWNWARD arrowhead at the TOP CENTER of the card whose first line is "Enabled start". Increase that horizontal gutter slightly if necessary for legibility. Do not connect this line to allow or block; it is an input to the middle check. It must not cross text, the green execution arrow, or the blue feedback route.
+
+Do not change any other graph edges or symbols. In particular retain the crossed-out lower branch with both a dashed route to marked completion AND a dashed route to violation in the left graph: that demonstrates why one possible completion is insufficient. Keep the excluded nodes outside the green retained-region contour.
+
+4. Essential controllability correction in PANEL 3: in the LEFT graph, recolor the solid arrow from the root to the crossed-out "no completion" node orange, leaving it SOLID. In the RIGHT retained-region graph, DELETE both faint grey dashed arrows from the retained root toward the excluded crossed-out nodes. Do not merely recolor those dashed arrows. Those starts have been disabled and must not appear as uncontrollable transitions leaving the retained set. Keep the crossed-out node silhouettes outside the green region, and keep the dashed red edge from the excluded lower-middle node to the excluded violation node. The ONLY outgoing graph edge from the retained root must be the solid orange e_k^R arrow into the retained region.
+
+5. In panel 1 only, change the descriptive caption "release before entry" to "exit before entry". The AP example concerns resource occupancy, so this wording must mean leaving the region, not releasing a held part. Preserve all AP identifiers and values.
+
+INITIAL GENERATION PROMPT
+
+Use case: infographic-diagram.
+Edit target: the attached v7 Central Controller Agent figure. Rebuild its contents as a carefully corrected v8 research-method figure while preserving its familiar portrait template: white background, purple rounded outer frame, three stacked numbered panels, bold purple headings, compact cards, thick purple flow arrows, black sans-serif text. Header retains robot and shield icons and the exact title "Central Controller Agent". Make it high resolution and tall enough for readable content. Panel 3 should occupy about 40% of the content height. Maintain moderate original-template density; use explanatory graphs rather than paragraphs.
+
+This is ONLY the CCA safety figure. The user already has a separate Resource Agent figure explaining primitive composition and feasibility. Do not draw an LLM, primitive construction, primitive selection, or a primitive sequence. Keep the small header input "From RA: PC_k" with PC and subscript k, feeding panel 1. No application-specific resource or region names. Do not claim dependency-local scope extraction. The graphs are explanatory projections of supplied behavior, not exported experiment results.
+
+PANEL 1 exact heading: "Evaluate APs for recovery behavior".
+Keep three cards and rightward flow:
+LEFT "Inputs": four concise lines, with small simple icons if helpful:
+"PC_k from RA"
+"Resource and product observations"
+"Prepared motion"
+"Configured geometry"
+CENTER "AP mapping and evaluation": two small robot outlines around a shaded shared region, one motion path entering it. Above this card a small "Fixed AP meanings and bindings" tab points into the card. Under the drawing, exactly:
+"ap001: first resource occupancy"
+"ap002: second resource occupancy"
+RIGHT "Projected AP traces": show a tiny two-branch diagram of Boolean pairs, with small label "(ap001, ap002)" above it. A single current pair (0,1) on the left branches:
+top to red pair (1,1) with a red X and short label "overlap";
+bottom to green pair (0,0), then green pair (1,0), with short label "release before entry".
+Footer inside this card: "Example supplied alternatives".
+These are predicted alternatives supported by inputs, not measured execution results.
+Panel footer: "Evaluate intermediate conditions throughout PC_k."
+
+PANEL 2 exact heading: "Compose behavior with safety monitors".
+Arrange TWO STACKED INPUT CARDS on LEFT and ONE output card on RIGHT, as in reference. Both left cards have their own thick rightward arrow into the right card, not a shared confusing bus.
+Upper-left "Supplied behavior": draw a small gray nominal/running graph augmented by an ORANGE recovery edge labeled e_k^R leading to an ORANGE recovery node x_k^R. Use subscript k and superscript R exactly. Beneath graph: "Recovery, nominal and running tasks".
+Lower-left title "Given Φ → DFA monitors". Draw a correct illustrative mutex automaton:
+initial arrow into q0, green accepting double circle q0; self-loop labeled "!(ap001 & ap002)";
+one arrow from q0 to single-circle red qd, labeled "ap001 & ap002";
+qd self-loop labeled "true"; NO return arrow from qd.
+Bottom of this card: "Current states from accepted history".
+Right card "Joint reachable states": a clean illustrative branching graph with gray states, one ORANGE recovery start edge, a green double-circle marked completion, and a red violation state. Keep this small, no unreadable full grid. Small caption under it: "Behavior and monitor states".
+The output of panel 1 enters this right-hand card from above with a clear purple arrow labeled "AP traces". Output of this right card routes down into the left graph in PANEL 3. No output arrow back into panel 2 inputs.
+
+PANEL 3 exact heading: "Compute the nonblocking region and authorize the start".
+This must SHOW the calculation rather than merely displaying an already-safe path. Use two large side-by-side graph views across its upper portion, with a central rightward purple arrow. Avoid surrounding every caption in another box.
+
+LEFT graph view title: "Exclude states that cannot be retained".
+Draw the following exact six-node illustrative graph, with nodes UNLABELED (the letters in these instructions are placement instructions only and must NOT appear):
+- R at left-middle, A at upper-middle, B at lower-middle, D at bottom-left/center, M at upper-right, V at lower-right.
+- R to A is a SOLID ORANGE arrow (a controllable start).
+- A to M is a DASHED BLACK arrow (uncontrollable progress/completion).
+- R to B is a SOLID ORANGE arrow (another controllable start).
+- B to M is a DASHED BLACK upward-curving arrow (an uncontrollable possible completion).
+- B to V is a DASHED RED arrow (an uncontrollable possible violation).
+- R to D is a SOLID BLACK arrow; D has no outgoing edge and is NOT marked.
+- M is green, double-ring, with short nearby label "marked".
+- V is red, single-ring, with nearby label "violation".
+- B is crossed out with a red slash because its uncontrollable edge can violate even though B also has a route to M.
+- D is crossed out with gray slash, nearby short label "no completion".
+Do not draw any uncontrollable arrow from R to B or D: those would invalidate retaining R.
+Below left graph, use two concise explanatory lines:
+"No path to marked completion"
+"Uncontrollable transition to an excluded state"
+Then a small purple repeat-loop icon and label "Repeat until unchanged".
+This explains the fixed-point calculation; do not imply merely deleting red nodes is enough.
+
+RIGHT graph view title: "Retained nonblocking region".
+Show the SAME graph positions, with only R, A, M inside one pale-green rounded enclosing contour:
+R --solid ORANGE arrow labeled e_k^R--> A --dashed green arrow--> double-ring M.
+Keep B, D, V as faint crossed-out silhouettes OUTSIDE the green contour, and show R's controllable edges toward B/D as faint crossed-out edges. No excluded node may lie inside green shading. No green link to V.
+The green contour denotes the retained SET, not just the highlighted example path.
+Under graph, short two-line caption:
+"Marked: completion conditions"
+"and all monitors accepting".
+Under BOTH graph views a thin legend line with edge samples:
+solid arrow "start: controllable"
+dashed arrow "progress / completion: uncontrollable".
+
+LOWER portion of panel 3: a compact authorization strip, clearly DOWNSTREAM of the retained region, with arrows:
+Small card title "Requested recovery start", large e_k^R
+→ middle checking area (not an oversized paragraph), exact three lines:
+"Enabled start"
+"Successor in retained region"
+"Current conditions and exact program match"
+→ small "CCA decision" area with green "allow" and red "block" badges.
+A short line under the check: "Incomplete evidence or analysis → block".
+Only the green allow badge has a green outgoing arrow to a small "RA execution" box at lower right. The red block badge has NO execution arrow. Do not add any arrow from a violation or excluded graph node to allow.
+Draw a single BLUE DASHED feedback line that ORIGINATES at the RA execution box, routes up the OUTER RIGHT MARGIN, then enters the "Current states from accepted history" portion of the DFA card in panel 2. Arrowhead must terminate inside that history area. Label the blue line "Validated observations and acknowledgements" in available footer space without crossing other text.
+Keep the visual distinction between predicted AP traces and validated execution feedback.
+
+Critical invariants:
+- Exact title and three numbered panels. Original purple portrait template, not a sparse landscape redesign.
+- Keep PC_k, e_k^R, x_k^R, ap001, ap002, Φ, q0 and qd exact, with proper mathematical subscripts/superscripts.
+- qd is rejecting absorbing; never add return path or accepting ring.
+- A marked completion satisfies both completion conditions and monitor acceptance.
+- A branch with a possible uncontrollable violation is excluded even if it also has a possible successful completion.
+- A requested start is checked specifically; a graph having some safe path is not automatic authorization.
+- Feedback goes FROM execution TO monitor history, never the other direction.
+- All arrows connect to their stated source and destination. No detached feedback lines, arrows through text, clipped symbols, empty cards, meaningless grid labels, decorative prose, source-code paths, experimental claims or invented place identifiers.
+- Illustration labels explain the implemented method; no physical safety certification.

@@ -1521,6 +1521,16 @@ class RobotAgent(ResourceAgent):
         but is excluded from function_names and the shared tools catalog.
         It is only callable through recovery-approved recovery macro tasks.
         """
+        if context.get("recovery_composition_ref") is not None:
+            if not self.supports_recovery_composition_execution():
+                return {"status": "failed:recovery_composition_grant",
+                        "content": "Prepared execution and observation support is unavailable"}
+            return await ResourceAgent.execute_recovery_macro(
+                self, macro_name=macro_name, primitive_steps=primitive_steps,
+                expected_start_state=expected_start_state, expected_snapshot=expected_snapshot,
+                product_jid=product_jid, task_id=task_id, in_state=in_state,
+                out_state=out_state, **context,
+            )
         from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_primitives import (
             apply_effects_to_snapshot,
             event_fact_key_for_primitive,
@@ -2058,6 +2068,81 @@ class RobotAgent(ResourceAgent):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+    def supports_recovery_composition_execution(self) -> bool:
+        """Accept registered execution only with an initialized owner provider."""
+        provider = getattr(self, "recovery_composition_evidence_provider", None)
+        return (getattr(self.execute_recovery_macro, "__func__", None) is RobotAgent.execute_recovery_macro
+                and callable(getattr(provider, "execute_step", None))
+                and callable(getattr(self._controller, "execute_prepared_recovery_step", None)))
+
+    async def execute_recovery_composition_step(
+        self, *, primitive: str, params: dict, task_id: str, step_index: int,
+        grant: dict, owner: Any,
+    ) -> Any:
+        """Execute the exact owner preparation under the existing motion lock."""
+        if not self.supports_recovery_composition_execution():
+            raise ValueError("Prepared recovery execution is unavailable")
+        provider = self.recovery_composition_evidence_provider
+        if not self._robot_motion_lock.acquire(blocking=False):
+            raise ValueError("Resource already has an active motion")
+        try:
+            return await asyncio.to_thread(
+                provider.execute_step, resource_agent=self, task_id=task_id,
+                step_index=step_index, primitive=primitive, params=deepcopy(params),
+                grant=deepcopy(grant),
+            )
+        finally:
+            self._robot_motion_lock.release()
+
+    def capture_recovery_safety_state(self, *, max_age: float = 2.) -> dict:
+        """Delegate observation to the initialized controller's declared support."""
+        capture = getattr(self._controller, "capture_recovery_safety_state", None)
+        if not callable(capture):
+            return ResourceAgent.capture_recovery_safety_state(self, max_age=max_age)
+        return capture(max_age=max_age)
+
+    def configure_recovery_safety_observer(self, observer, record: dict) -> None:
+        """Delegate trusted observation setup to the initialized controller."""
+        configure = getattr(self._controller, 'configure_recovery_safety_observer', None)
+        if not callable(configure):
+            raise ValueError('Initialized resource controller has no live observation support')
+        configure(observer, record)
+
+    def prepare_recovery_safety_program(self, program: dict, checkpoint: dict) -> dict:
+        """Delegate preparation under the motion lock without initializing a controller."""
+        prepare = getattr(self._controller, "prepare_recovery_safety_program", None)
+        if not callable(prepare) or program.get("resource_id") != self.agent_name:
+            return ResourceAgent.prepare_recovery_safety_program(self, program, checkpoint)
+        if not self._robot_motion_lock.acquire(blocking=False):
+            return {**ResourceAgent.prepare_recovery_safety_program(self, program, checkpoint),
+                    "reason": "Resource is already executing; preparation cannot interrupt it"}
+        try:
+            return prepare(deepcopy(program), deepcopy(checkpoint), resource_jid=str(self.jid))
+        finally:
+            self._robot_motion_lock.release()
+
+    def recovery_safety_configuration(self) -> dict:
+        """Read only configuration supplied by the initialized owner."""
+        read = getattr(self._controller, "recovery_safety_configuration", None)
+        return read() if callable(read) else ResourceAgent.recovery_safety_configuration(self)
+
+    def get_recovery_safety_primitive_model(self):
+        """Resolve the initialized controller's pure observation model."""
+        read = getattr(self._controller, "get_recovery_safety_primitive_model", None)
+        return read() if callable(read) else None
+
+    def get_recovery_entity_reader(self):
+        """Expose a supported scene reader without assuming its implementation."""
+        read = getattr(self._controller, "read_recovery_entity_state", None)
+        return read if callable(read) else None
+
+    def validate_recovery_safety_step(self, planned: dict, step: dict) -> None:
+        """Ask the controller to verify its own prepared command evidence."""
+        validate = getattr(self._controller, "validate_recovery_safety_step", None)
+        if not callable(validate):
+            raise ValueError("Resource-owned prepared-step validation unavailable")
+        validate(deepcopy(planned), deepcopy(step))
+
     def get_recovery_snapshot(self) -> dict[str, Any]:
         """Return the current primitive-level recovery snapshot for this robot."""
         from cais_spade_llm.resources.resource_primitives import (

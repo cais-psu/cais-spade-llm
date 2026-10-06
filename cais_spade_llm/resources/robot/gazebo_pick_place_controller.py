@@ -20,7 +20,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
+from copy import copy, deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,14 @@ from typing import Any
 import yaml
 
 from cais_spade_llm.product.profile import ProductProfile
+from cais_spade_llm.recovery_framework import fingerprint
+from cais_spade_llm.resources.resource_safety_preparation import (
+    PrimitiveModel,
+    cartesian_coverage_fingerprint,
+    pose_values,
+    trajectory_record,
+    validate_joint_trajectory,
+)
 from cais_spade_llm.resources.robot.target_calculations import (
     controlled_link_height,
     pick_travel_height,
@@ -8762,7 +8770,134 @@ class GazeboPickPlaceController:
         part = compose([p.x, p.y, p.z, q.x, q.y, q.z, q.w], authorization['tool_to_part_pose'])
         return mating_pose_valid(authorization, part)
 
-    def _cartesian_move(
+    def capture_recovery_safety_state(self, *, max_age: float = 2.) -> dict:
+        """Read the initialized controller without commanding any resource."""
+        goal = getattr(self, '_simulation_goal', None)
+        if goal is not None and goal.status not in (4,5,6):
+            raise ValueError('An active controller goal prevents idle preparation')
+        observer = getattr(self, 'recovery_safety_observer', None)
+        if observer is None:
+            return capture_ur5e_state(self, max_age=max_age)
+        from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
+        if observer.motion_configuration is None:
+            raise ValueError(observer.support_error or 'Configured kinematic observation unavailable')
+        import hashlib
+        reader = observer.provider.reader
+        description = reader.parameter(observer.configuration['description_node'], 'robot_description')
+        interpolation = reader.parameter(observer.configuration['controller_node'], 'interpolation_method')
+        if (hashlib.sha256(description.encode()).hexdigest() != observer.motion_configuration['description_sha256']
+                or interpolation != observer.motion_configuration['interpolation']):
+            raise ValueError('Controller interpolation or configured geometry changed during preparation')
+        record = observer.provider.reader.snapshot(max_age=max_age)
+        model = record['models'][observer.configuration['model']]
+        configuration = deepcopy(observer.motion_configuration)
+        root_pose = model['links'][configuration['root']]['pose']
+        configuration.update(root_xyz=root_pose[:3], root_quaternion=root_pose[3:])
+        positions = {name: interval(row['position']) for name, row in model['joints'].items()}
+        matrices = kinematic_transforms(configuration, positions)
+        result = {'joint_names':list(self.arm_joint_names),
+                  'joint_positions':[model['joints'][name]['position'] for name in self.arm_joint_names],
+                  'current_pose':representative_pose(matrices[self.ee_link]),
+                  'tool_pose_source':'GETRECOVERYSTATE joints and configured FK',
+                  'joint_stamps':{name:record['simulation_time'] for name in self.arm_joint_names},
+                  'joint_received_monotonic':{name:record['observed_monotonic'] for name in self.arm_joint_names}}
+        return observer.capture(max_age=max_age, native=result)
+
+    def configure_recovery_safety_observer(self, observer, record: dict) -> None:
+        """Bind live kinematics to this controller's exact configured identities."""
+        from cais_spade_llm.resources.continuous_geometry import load_continuous_geometry
+
+        configuration = observer.configuration
+        reader = observer.provider.reader
+        self.recovery_safety_observer = observer
+        description = reader.parameter(configuration['description_node'],'robot_description')
+        interpolation = reader.parameter(configuration['controller_node'],'interpolation_method')
+        model = record['models'][configuration['model']]
+        observer.motion_configuration = load_continuous_geometry(
+            description,root=configuration['root_link'],reference_link=self.ee_link,
+            joint_names=list(self.arm_joint_names),observed_joints=model['joints'],
+            root_pose=model['links'][configuration['root_link']]['pose'],interpolation=interpolation)
+        self.recovery_safety_observer = observer
+
+    def recovery_safety_configuration(self) -> dict:
+        """Export the owner's revision-sensitive preparation configuration."""
+        return {"controller_configuration": deepcopy(self.controller_config),
+                "joint_names": list(self.arm_joint_names), "attachment": self._attached_model,
+                "primitive_model": self.get_recovery_safety_primitive_model().descriptor()}
+
+    def get_recovery_safety_primitive_model(self) -> PrimitiveModel:
+        """Bind the native Cartesian contract to this controller's exact joints."""
+        observer = getattr(self, 'recovery_safety_observer', None)
+        if observer is not None and observer.motion_configuration is not None:
+            return PrimitiveModel('joint_trajectory_continuous', 2,
+                {'joint_names':list(self.arm_joint_names),
+                 'controller_configuration':deepcopy(self.controller_config),
+                 'continuous_motion':deepcopy(observer.motion_configuration)}, _continuous_motion_effects)
+        return PrimitiveModel("ur5e", 1, {"joint_names": list(self.arm_joint_names),
+                              "controller_configuration": deepcopy(self.controller_config)},
+                              _ur5e_motion_effects)
+
+    def read_recovery_entity_state(self, name: str, *, max_age: float = 2.) -> dict:
+        """Read a stamped Gazebo entity using this owner's initialized client."""
+        observer = getattr(self, 'recovery_safety_observer', None)
+        if observer is not None:
+            return observer.reader(name,max_age=max_age)
+        query = self._GetEntityState.Request(name=name, reference_frame="world")
+        response = self._wait_future(self._get_state_client.call_async(query),
+                                     timeout_sec=1., label="safety checkpoint entity")
+        if response is None or not response.success:
+            raise ValueError("Gazebo entity observation unavailable: " + name)
+        sim_time = self._node.get_clock().now().nanoseconds / 1e9
+        stamp = response.header.stamp.sec + response.header.stamp.nanosec / 1e9
+        if not math.isfinite(stamp) or not 0 <= sim_time - stamp <= max_age:
+            raise ValueError("Stale Gazebo entity observation: " + name)
+        return {"name": name, "frame": "world", "pose": pose_values(response.state.pose),
+                "observed_monotonic": time.monotonic(), "simulation_time": sim_time,
+                "simulation_stamp": stamp, "source": "gazebo_msgs/GetEntityState"}
+
+    def prepare_recovery_safety_program(self, program: dict, checkpoint: dict, *, resource_jid: str) -> dict:
+        """Plan native steps from projected joints without updating actual state."""
+        rid = program["resource_id"]
+        result = {"resource_id": rid, "resource_jid": resource_jid,
+                  "program": deepcopy(program), "program_fingerprint": fingerprint(program),
+                  "checkpoint_id": checkpoint["checkpoint_id"], "steps": [], "status": "NEEDS_CONTEXT"}
+        start = deepcopy(checkpoint["observations"][rid]["physical"])
+        observed = self.capture_recovery_safety_state()
+        for field in ("joint_names", "joint_positions", "current_pose", "attachment", "launch_id", "frame"):
+            if observed[field] != start[field]:
+                return {**result, "reason": "Checkpoint changed before planning: " + field}
+        for index, step in enumerate(program["primitive_steps"]):
+            binding = {"checkpoint_id": checkpoint["checkpoint_id"], "resource_id": rid,
+                       "resource_jid": resource_jid, "program_fingerprint": result["program_fingerprint"],
+                       "step_index": index, "source": deepcopy(step.get("source", {})),
+                       "run_id": checkpoint["runtime"]["run_id"], "launch_id": start["launch_id"]}
+            record = prepare_ur5e_motion(self, primitive=step["primitive"], params=step["params"],
+                                        start=start, binding=binding)
+            result["steps"].append(record)
+            if record["status"] != "prepared":
+                return {**result, "reason": record["reason"]}
+            start["joint_positions"] = record["joint_trajectory"]["points"][-1]["positions"]
+            start["current_pose"] = record["target_pose"]
+        return {**result, "status": "prepared"}
+
+    def validate_recovery_safety_step(self, planned: dict, step: dict) -> None:
+        """Bind observation evidence to the exact prepared native trajectory."""
+        evidence = step["model_evidence"]
+        if (evidence.get("joint_trajectory") != planned["joint_trajectory"]
+                or step["primitive"] != planned["primitive"] or step["resolved_params"] != planned["params"]):
+            raise ValueError("Observation evidence differs from the prepared native program")
+        effects = self.get_recovery_safety_primitive_model().effects(
+            primitive=step["primitive"], params=step["resolved_params"], evidence=evidence,
+            start_time=step["start_time"], end_time=step["end_time"])
+        if 'continuous_motion' in effects:
+            if (effects['continuous_motion'] != planned.get('continuous_motion')
+                    or effects['continuous_motion']['joint_trajectory']['points'][0]['positions'] != planned['start']['joint_positions']):
+                raise ValueError('Continuous observation differs from the exact prepared step')
+            return
+        if effects["trajectory"][0]["pose"] != planned["start"]["current_pose"]:
+            raise ValueError("Prepared motion observation starts at another pose")
+
+    def _prepare_cartesian_motion(
         self,
         target,
         label: str = "",
@@ -8771,12 +8906,18 @@ class GazeboPickPlaceController:
         allow_partial: bool = False,
         time_scale: float | None = None,
         waypoints: list | None = None,
-    ) -> bool:
-        """Execute fresh Cartesian targets through one request, as in the two-arm runtime."""
+        start_joint_positions: list[float] | None = None,
+        consume_prepared: bool = True,
+    ):
+        """Plan, time and validate a Cartesian trajectory without dispatching it.
+
+        Explicit start joints permit sequential preparation from projected joints.
+        Callers preparing evidence disable consumption of the execution cache.
+        """
         self._last_command_evidence = {"command_sent": False, "motion_method": "Cartesian waypoints"}
         if getattr(self, '_shutdown_requested', False):
             self._last_failure_message = 'Cartesian execution cancelled before preparation'
-            return False
+            return None
         cartesian_only = GazeboPickPlaceController._cartesian_motion_only(self)
         mating_contact = (self._simulation_mating_segment(target)
                           if getattr(self, '_simulation_mating_context', None) else None)
@@ -8786,7 +8927,7 @@ class GazeboPickPlaceController:
         if cartesian_only:
             allow_partial, min_fraction = False, 1.0
             preparation_reason = "current Cartesian targets"
-        elif avoid_collisions and not allow_partial and not mating_contact and not waypoints:
+        elif consume_prepared and avoid_collisions and not allow_partial and not mating_contact and not waypoints:
             solution, preparation_reason = self._consume_prepared_cartesian(target)
         if solution is None:
             request = self._GetCartesianPath.Request()
@@ -8801,6 +8942,9 @@ class GazeboPickPlaceController:
             # checks below, including FK and depth bounds for the intended shaft.
             request.avoid_collisions = avoid_collisions and not mating_contact
             request.start_state.is_diff = True
+            if start_joint_positions is not None:
+                request.start_state.joint_state.name = list(self.arm_joint_names)
+                request.start_state.joint_state.position = list(start_joint_positions)
             if cartesian_only:
                 settings = self.controller_config['cartesian_motion']
                 request.max_step = float(settings['linear_step_m'])
@@ -8812,18 +8956,19 @@ class GazeboPickPlaceController:
                         or not math.isfinite(request.revolute_jump_threshold)
                         or request.revolute_jump_threshold <= 0):
                     self._last_failure_message = 'Invalid configured Cartesian waypoint spacing'
-                    return False
+                    return None
                 for pose in request.waypoints:
                     p, q = pose.position, pose.orientation
                     if (not all(math.isfinite(v) for v in (p.x, p.y, p.z, q.x, q.y, q.z, q.w))
                             or not math.isclose(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w, 1., abs_tol=1e-5)):
                         self._last_failure_message = 'Cartesian waypoints require finite XYZ and a unit quaternion'
-                        return False
-                positions, missing = self._get_arm_joint_positions(timeout_sec=2.)
+                        return None
+                positions, missing = ((list(start_joint_positions), []) if start_joint_positions is not None
+                                      else self._get_arm_joint_positions(timeout_sec=2.))
                 if (positions is None or len(positions) != len(self.arm_joint_names)
                         or not all(math.isfinite(v) for v in positions)):
                     self._last_failure_message = f'Cartesian start observation unavailable: {missing}'
-                    return False
+                    return None
                 request.start_state.joint_state.name = list(self.arm_joint_names)
                 request.start_state.joint_state.position = list(positions)
                 request.avoid_collisions = settings.get('avoid_collisions') is not False and not mating_contact
@@ -8834,13 +8979,13 @@ class GazeboPickPlaceController:
             if response is None:
                 self._last_failure_message = f"[{label}] planning response timed out"
                 self._log().error(f"[{label}] planning response timed out")
-                return False
+                return None
             if hasattr(response, "error_code") and response.error_code.val != 1:
                 self._last_failure_message = f"[{label}] Cartesian planning failed: {response.error_code.val}"
-                return False
+                return None
             if not math.isfinite(response.fraction):
                 self._last_failure_message = 'Cartesian response has a non-finite fraction'
-                return False
+                return None
             if response.fraction < min_fraction:
                 self._last_failure_message = (
                     f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
@@ -8848,13 +8993,13 @@ class GazeboPickPlaceController:
                 self._log().error(
                     f"[{label}] planning fraction too low: {response.fraction:.3f} < {min_fraction:.3f}"
                 )
-                return False
+                return None
             if response.fraction < 0.999 and not allow_partial:
                 self._last_failure_message = f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
                 self._log().error(
                     f"[{label}] planning fraction incomplete: {response.fraction:.3f} (partial not allowed)"
                 )
-                return False
+                return None
             solution = response.solution
         else:
             self._planning_wall_time_sec += time.monotonic() - planning_started
@@ -8868,8 +9013,7 @@ class GazeboPickPlaceController:
                                  for left, right in zip(points, points[1:])
                                  for a, b in zip(left.positions, right.positions, strict=True))):
                 self._last_failure_message = "Cartesian trajectory has an IK joint discontinuity"
-                return False
-        exec_goal = self._ExecuteTrajectory.Goal()
+                return None
         if time_scale is None:
             scale = self.trajectory_time_scale
         else:
@@ -8878,12 +9022,29 @@ class GazeboPickPlaceController:
             self._scale_trajectory_timing(solution, scale)
         except ValueError as exc:
             self._last_failure_message = f'Invalid Cartesian trajectory: {exc}'
-            return False
+            return None
         valid = (self._simulation_trajectory_is_collision_free(
             solution.joint_trajectory, mating_contact=mating_contact) if mating_contact
             else self._simulation_trajectory_is_collision_free(solution.joint_trajectory))
         if not valid:
+            return None
+        return solution, preparation_reason
+
+    def _cartesian_move(
+        self, target, label: str = "", avoid_collisions: bool = True,
+        min_fraction: float = 0.9, allow_partial: bool = False,
+        time_scale: float | None = None, waypoints: list | None = None,
+    ) -> bool:
+        """Prepare a Cartesian trajectory, then dispatch through the existing controller."""
+        prepared = GazeboPickPlaceController._prepare_cartesian_motion(
+            self, target, label, avoid_collisions, min_fraction, allow_partial,
+            time_scale, waypoints,
+        )
+        if prepared is None:
             return False
+        solution, preparation_reason = prepared
+        cartesian_only = GazeboPickPlaceController._cartesian_motion_only(self)
+        exec_goal = self._ExecuteTrajectory.Goal()
         if cartesian_only:
             # Preparation can outlast the cached feedback on a slow simulation.
             # Wait for a fresh sample before comparing against the planned start.
@@ -9469,3 +9630,235 @@ class XArm6GazeboController(GazeboPickPlaceController):
             arm_trajectory_topic=trajectory_topic,
             joint_states_topic=joint_states_topic,
         )
+
+
+def capture_ur5e_state(controller, *, max_age: float = 2.) -> dict:
+    """Read existing joint feedback, stamped tool TF and launch identity only.
+
+    The attachment field is the controller's last acknowledged attachment, not a
+    fresh Gazebo joint observation. The caller must retain that distinction.
+    """
+    if controller.execution_mode != "simulation" or not controller.arm_joint_names:
+        raise ValueError("UR5e preparation requires the registered simulation controller")
+    now = time.monotonic()
+    sim_time = controller._node.get_clock().now().nanoseconds / 1e9
+    names = list(controller.arm_joint_names)
+    with controller._joint_lock:
+        positions = [controller._joint_positions[name] for name in names]
+        received = [controller._joint_received_times[name] for name in names]
+        stamps = [controller._joint_sim_stamps[name] for name in names]
+        gripper = controller._joint_positions.get(controller.gripper_joint)
+    if (len(set(names)) != len(names) or not all(math.isfinite(v) for v in positions + received + stamps)
+            or any(not 0 <= now - stamp <= max_age for stamp in received)
+            or any(not 0 <= sim_time - stamp <= max_age for stamp in stamps)):
+        raise ValueError("Stale or incomplete UR5e joint observation")
+    try:
+        transform = controller._tf_buffer.lookup_transform(
+            controller.frame_id, controller.ee_link, controller._rclpy.time.Time())
+    except (controller._tf2_ros.LookupException, controller._tf2_ros.ConnectivityException,
+            controller._tf2_ros.ExtrapolationException) as exc:
+        raise ValueError("UR5e tool TF unavailable") from exc
+    stamp = transform.header.stamp.sec + transform.header.stamp.nanosec / 1e9
+    if not math.isfinite(stamp) or not 0 <= sim_time - stamp <= max_age:
+        raise ValueError("Stale UR5e tool TF")
+    pose = controller._Pose()
+    for axis in ("x", "y", "z"):
+        setattr(pose.position, axis, getattr(transform.transform.translation, axis))
+    pose.orientation = transform.transform.rotation
+    tool_tf_pose = pose_values(pose)
+    gazebo = controller._observed_simulation_link_poses()
+    if not gazebo or controller.ee_link not in gazebo:
+        raise ValueError("Fresh Gazebo tool observation unavailable")
+    gazebo_observation = deepcopy(controller._last_pose_observation)
+    gazebo_stamp = gazebo_observation["simulation_stamp"]
+    sim_time = controller._node.get_clock().now().nanoseconds / 1e9
+    if not math.isfinite(gazebo_stamp) or not 0 <= sim_time - gazebo_stamp <= max_age:
+        raise ValueError("Stale Gazebo tool observation")
+    gazebo_tool_pose = pose_values(gazebo[controller.ee_link])
+    if (math.dist(gazebo_tool_pose[:3], tool_tf_pose[:3]) > .001
+            or abs(sum(a * b for a, b in zip(gazebo_tool_pose[3:], tool_tf_pose[3:], strict=True))) < math.cos(.001 / 2)):
+        raise ValueError("Gazebo and joint-derived tool TF disagree")
+    # Unlike _scene_launch_identity, this query has no fallback identity.
+    from rcl_interfaces.srv import GetParameters
+
+    client = controller._node.create_client(
+        GetParameters, "/KMR_base_controller/get_parameters", callback_group=controller._cb_group)
+    try:
+        if not client.wait_for_service(timeout_sec=.2):
+            raise ValueError("Gazebo launch identity unavailable")
+        response = controller._wait_future(
+            client.call_async(GetParameters.Request(names=["launch_id"])),
+            timeout_sec=1., label="safety preparation launch identity")
+        launch_id = response.values[0].string_value if response and response.values else ""
+        if not launch_id or launch_id == "recovery_framework":
+            raise ValueError("Gazebo launch identity unavailable")
+    finally:
+        controller._node.destroy_client(client)
+    return {"source": "registered UR5e controller / joint_states / TF",
+            "observed_monotonic": now, "simulation_time": sim_time, "launch_id": launch_id,
+            "frame": controller.frame_id, "current_pose": gazebo_tool_pose,
+            "tool_tf_pose": tool_tf_pose, "gazebo_observation": gazebo_observation,
+            "tool_stamp": stamp, "joint_names": names, "joint_positions": positions,
+            "joint_stamps": stamps, "joint_received_monotonic": received,
+            "gripper_joint": controller.gripper_joint, "gripper_position": gripper,
+            "attachment": {"model_name": controller._attached_model,
+                           "source": "controller last acknowledged attachment",
+                           "observed_attachment_complete": False}}
+
+
+def validate_ur5e_observation_contract(primitive: str, params: dict, evidence: dict,
+                                     duration: float, start_time, *, joint_names: list[str] | None = None) -> list:
+    """Validate supplied Cartesian coverage separately from the original command.
+
+    This is a conditional observation contract, not an FK interpolation proof.
+    The live planner deliberately does not produce this coverage assertion.
+    """
+    if primitive != "move_cartesian" or set(params) - {"x", "y", "z", "qx", "qy", "qz", "qw", "speed"}:
+        raise ValueError("Unsupported UR5e primitive observation contract")
+    xyz = [params[key] for key in ("x", "y", "z")]
+    qkeys = {"qx", "qy", "qz", "qw"}
+    if params.keys() & qkeys and not qkeys <= params.keys():
+        raise ValueError("Partial UR5e quaternion")
+    orientation = ([params[key] for key in ("qx", "qy", "qz", "qw")]
+                   if qkeys <= params.keys() else evidence["resolved_orientation"])
+    speed = params.get("speed")
+    if speed is not None and (type(speed) not in (int, float) or not math.isfinite(speed) or speed <= 0):
+        raise ValueError("Invalid UR5e speed")
+    trajectory, coverage = evidence["joint_trajectory"], evidence["cartesian_coverage"]
+    if joint_names is None and len(trajectory["joint_names"]) != 6:
+        raise ValueError("Historical UR5e evidence requires its six joint identities")
+    validate_joint_trajectory(trajectory, trajectory["joint_names"] if joint_names is None else joint_names, duration)
+    if (coverage.get("interpolation") != "piecewise_linear_fixed_orientation"
+            or coverage.get("covers_resource_envelope") is not True or not coverage.get("source")
+            or coverage.get("joint_trajectory_fingerprint") != fingerprint(trajectory)
+            or coverage.get("trajectory_fingerprint") != cartesian_coverage_fingerprint(evidence["trajectory"], start_time)):
+        raise ValueError("UR5e joint interpolation or complete resource coverage is unresolved")
+    return [*xyz, *orientation]
+
+
+def prepare_ur5e_motion(controller, *, primitive: str, params: dict,
+                       start: dict, binding: dict) -> dict:
+    """Plan one exact UR5e primitive without executing or populating a dispatch cache.
+
+    Only explicit Cartesian motion is prepared in this slice. Custody operations,
+    helpers and named poses require separate effect contracts and remain unavailable.
+    A joint plan is saved even when continuous Cartesian evidence is unavailable.
+    """
+    # Share existing read/planning clients, while keeping per-command diagnostics
+    # detached. Restoring old diagnostics on the live owner could erase feedback
+    # arriving from another runtime path during a planning service call.
+    controller = copy(controller)
+    record = {"status": "NEEDS_CONTEXT", "primitive": primitive, "params": deepcopy(params),
+              "binding": deepcopy(binding), "command_sent": False,
+              "start": deepcopy(start), "resolved_helper_outputs": {},
+              "configuration_fingerprint": fingerprint(controller.controller_config)}
+    try:
+        if primitive != "move_cartesian":
+            raise ValueError(f"UR5e {primitive} preparation effects are not supported")
+        if (set(params) - {"x", "y", "z", "qx", "qy", "qz", "qw", "speed"}
+                or not {"x", "y", "z"} <= params.keys()):
+            raise ValueError("Parameters do not match the UR5e move_cartesian contract")
+        if (controller.execution_mode != "simulation"
+                or not GazeboPickPlaceController._cartesian_motion_only(controller)
+                or controller.controller_config["cartesian_motion"].get("avoid_collisions") is False
+                or getattr(controller, "_simulation_mating_context", None)
+                or getattr(controller, "_robot_task_step", None)):
+            raise ValueError("Preparation requires complete Cartesian planning with collision checking and no unresolved task or mating context")
+        if (start["joint_names"] != list(controller.arm_joint_names)
+                or len(start["joint_positions"]) != len(controller.arm_joint_names) or start["frame"] != controller.frame_id):
+            raise ValueError("Checkpoint joint identities or planning frame changed")
+        if start["attachment"]["model_name"] != controller._attached_model:
+            raise ValueError("Checkpoint attachment changed")
+        xyz = [params[key] for key in ("x", "y", "z")]
+        quaternion_keys = {"qx", "qy", "qz", "qw"}
+        if params.keys() & quaternion_keys and not quaternion_keys <= params.keys():
+            raise ValueError("Partial UR5e orientation is unresolved")
+        q = [params[key] for key in ("qx", "qy", "qz", "qw")] if quaternion_keys <= params.keys() else start["current_pose"][3:]
+        scale = params.get("speed", controller.trajectory_time_scale)
+        if scale is None:
+            scale = controller.trajectory_time_scale
+        if (any(type(v) not in (int, float) or not math.isfinite(v) for v in xyz + q + [scale])
+                or scale <= 0 or not math.isclose(sum(v * v for v in q), 1., abs_tol=1e-5)):
+            raise ValueError("UR5e preparation requires finite parameters and a unit quaternion")
+        if q != start["current_pose"][3:]:
+            raise ValueError("Changing orientation requires an unsupported observation model")
+        target = controller._make_pose(*xyz, controller._make_orientation(*q))
+        prepared = GazeboPickPlaceController._prepare_cartesian_motion(
+            controller, target, label="recovery safety preparation", min_fraction=1.,
+            allow_partial=False, time_scale=scale,
+            start_joint_positions=start["joint_positions"], consume_prepared=False)
+        if prepared is None:
+            raise ValueError(controller._last_failure_message or "UR5e planning unavailable")
+        if prepared[0].multi_dof_joint_trajectory.points:
+            raise ValueError("UR5e preparation cannot omit multi-DOF motion")
+        trajectory = trajectory_record(prepared[0].joint_trajectory, list(controller.arm_joint_names))
+        if trajectory["joint_names"] != start["joint_names"] or any(
+                abs(a - b) > .000001 for a, b in zip(
+                    trajectory["points"][0]["positions"], start["joint_positions"], strict=True)):
+            raise ValueError("Prepared trajectory does not start at the checkpoint joints")
+        record.update(status="prepared", joint_trajectory=trajectory,
+                      joint_trajectory_fingerprint=fingerprint(trajectory),
+                      planning_evidence=deepcopy(getattr(controller, "_last_path_validation", None)),
+                      target_pose=[*xyz, *q], observation_status="NEEDS_CONTEXT",
+                      reason="Joint interpolation does not establish piecewise-linear fixed-orientation TCP or full resource coverage")
+        observer = getattr(controller,'recovery_safety_observer',None)
+        if observer is not None and observer.motion_configuration is not None:
+            from cais_spade_llm.resources.continuous_motion import ContinuousMotion
+            configuration = deepcopy(observer.motion_configuration)
+            motion = ContinuousMotion(trajectory,configuration)
+            if math.dist(motion.reference_pose(0)[:3],start['current_pose'][:3]) > .001:
+                raise ValueError('Configured FK does not agree with the observed checkpoint')
+            if math.dist(motion.reference_pose(motion.duration)[:3],xyz) > .001:
+                raise ValueError('Prepared joint interpolation does not reach the requested target')
+            record.update(observation_status='prepared',reason='',
+                          continuous_motion={'joint_trajectory':deepcopy(trajectory),'configuration':configuration})
+        record["preparation_id"] = fingerprint(record)
+    except (ValueError, KeyError, TypeError, OverflowError, RuntimeError) as exc:
+        record["reason"] = str(exc)
+    return record
+
+
+def _continuous_motion_effects(*, primitive, params, evidence, start_time, end_time, configuration):
+    """Describe native planned motion without providing APs or safety decisions."""
+    from cais_spade_llm.resources.continuous_motion import ContinuousMotion
+
+    if (primitive != 'move_cartesian' or not {'x','y','z'} <= set(params)
+            or set(params)-{'x','y','z','speed','qx','qy','qz','qw'}):
+        raise ValueError('Unsupported native continuous primitive parameters')
+    if any(type(v) not in (int, float) or not math.isfinite(v) for v in params.values() if v is not None):
+        raise ValueError('Continuous parameters must be finite numbers')
+    quaternion_keys = {'qx', 'qy', 'qz', 'qw'}
+    if params.keys() & quaternion_keys and not quaternion_keys <= params.keys():
+        raise ValueError('Partial continuous orientation is unavailable')
+    if params.get('speed') is not None and params['speed'] <= 0:
+        raise ValueError('Continuous speed must be positive')
+    raw = evidence['continuous_motion']
+    if raw['configuration'] != configuration['continuous_motion'] or raw['joint_trajectory'] != evidence['joint_trajectory']:
+        raise ValueError('Continuous motion evidence changed its owner configuration or trajectory')
+    motion = ContinuousMotion(raw['joint_trajectory'],raw['configuration'])
+    if motion.exact_times[-1] != end_time-start_time:
+        raise ValueError('Continuous motion duration changed')
+    if quaternion_keys <= params.keys():
+        q = [params[k] for k in ('qx', 'qy', 'qz', 'qw')]
+        if (not math.isclose(sum(v*v for v in q), 1., abs_tol=1e-5) or
+                any(abs(a-b) > 1e-5 for a,b in zip(q,motion.reference_pose(motion.duration)[3:],strict=True))):
+            raise ValueError('Continuous motion orientation differs from the native command')
+    if math.dist(motion.reference_pose(motion.duration)[:3],[params[k] for k in ('x','y','z')]) > .001:
+        raise ValueError('Continuous motion endpoint differs from the native command')
+    return {'trajectory':None,'base_trajectory':None,'part_trajectories':{},
+            'transfers':[],'resource_updates':{},'continuous_motion':deepcopy(raw)}
+
+
+def _ur5e_motion_effects(*, primitive, params, evidence, start_time, end_time, configuration) -> dict:
+    target = validate_ur5e_observation_contract(
+        primitive, params, evidence, float(end_time - start_time), start_time,
+        joint_names=configuration.get('joint_names'))
+    if evidence['trajectory'][-1]['pose'] != target:
+        raise ValueError('Motion does not reach the bound move_cartesian target')
+    return {'trajectory': deepcopy(evidence['trajectory']), 'base_trajectory': None,
+            'part_trajectories': {}, 'transfers': [], 'resource_updates': {}}
+
+
+def register_preparation_contracts(registry: dict) -> None:
+    """Retain explicit historical evidence contracts for offline callers."""
+    registry['ur5e'] = lambda: PrimitiveModel('ur5e', 1, {}, _ur5e_motion_effects)

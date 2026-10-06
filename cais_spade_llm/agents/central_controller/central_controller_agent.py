@@ -27,6 +27,13 @@ from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanS
 from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
     generate_recovery_safety_bundle,
 )
+from cais_spade_llm.agents.central_controller.predefined_safety_runtime import (
+    check_predefined_nominal_start,
+    initialize_predefined_safety,
+    nominal_unavailable,
+    predefined_required,
+    predefined_scope,
+)
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
@@ -54,6 +61,8 @@ class CentralControllerAgent(LlmAgent):
         resource_agents: Iterable[Any] | None = None,
         safety_file: str | None = None,
         precomputed_bundle: dict[str, Any] | None = None,
+        recovery_composition_context_provider: Any | None = None,
+        allow_mock_recovery_execution: bool = False,
         **kw: Any,
     ) -> None:
         """Initialize controller state, safety logic, and monitoring scaffolding."""
@@ -85,6 +94,9 @@ class CentralControllerAgent(LlmAgent):
 
         self.blocked_tasks: dict[str, dict[str, Any]] = {}
         self.recovery_safety_scopes: dict[str, dict[str, Any]] = {}
+        self.recovery_composition_context_provider = recovery_composition_context_provider
+        self.allow_mock_recovery_execution = allow_mock_recovery_execution is True
+        self.recovery_composition_admissions: dict[str, Any] = {}
         # Stores the most recent task failure event so plan_block replans can
         # include the root-cause failure context, not just the blocked task's event.
         self.last_failure_event: dict[str, Any] | None = None
@@ -119,6 +131,8 @@ class CentralControllerAgent(LlmAgent):
             return True
         deadline = asyncio.get_running_loop().time() + max(float(timeout_s or 0.0), 0.0)
         while asyncio.get_running_loop().time() < deadline:
+            if getattr(self, "predefined_safety_error", "") not in ("", "predefined_safety_not_ready"):
+                return False
             await asyncio.sleep(0.05)
             if self.safety_monitor is not None:
                 return True
@@ -734,6 +748,12 @@ class CentralControllerAgent(LlmAgent):
         recovery_safety_scope_id = str(result.get("recovery_safety_scope_id") or "").strip()
         if not recovery_safety_scope_id:
             return False
+        existing = self.recovery_safety_scopes.get(recovery_safety_scope_id)
+        if existing is not None:
+            # Registering the same sequence again must not erase accepted history.
+            return bool(result.get("ok") and existing.get("status") == "ready"
+                        and existing.get("rules") == result.get("rules", [])
+                        and existing.get("rule_dfas") == result.get("rule_dfas", {}))
         if result.get("ok"):
             self.recovery_safety_scopes[recovery_safety_scope_id] = {
                 "status": "ready",
@@ -1647,6 +1667,9 @@ class CentralControllerAgent(LlmAgent):
             if not msg:
                 return
 
+            if await self._handle_recovery_composition_message(msg):
+                return
+
             # Safety guard: ensure monitor is loaded. During startup the CCA can
             # receive the first resource_event before _InitCCA finishes.
             if not agent.safety_monitor:
@@ -1678,7 +1701,9 @@ class CentralControllerAgent(LlmAgent):
                             or data.get("params") != task["parameters"]):
                         await self._send_decision(sender, task_id, "block")
                         return
-                    result = await admission.check(task, commit=True)
+                    result = (await check_predefined_nominal_start(
+                        agent, task, runtime.product_jid, commit=True)
+                        if predefined_required(agent) else await admission.check(task, commit=True))
                     await self._send_decision(sender, task_id,
                                               "allow" if result["status"] == "allowed" else "block")
                 else:
@@ -1719,6 +1744,91 @@ class CentralControllerAgent(LlmAgent):
                 recovery_safety_scope_id=recovery_safety_scope_id,
             )
 
+        async def _handle_recovery_composition_message(self, msg) -> bool:
+            """Route registered macros before nominal-only event matching."""
+            from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
+                interacting_recovery_admission,
+                observe_recovery_event,
+                recovery_admission,
+            )
+
+            agent = self.agent
+            try:
+                event = json.loads(msg.body or "{}")
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(event, dict):
+                return False
+            sender = str(msg.sender).split("/", 1)[0]
+            params = event.get("params") or {}
+            if not isinstance(params, dict):
+                return False
+            reference = params.get("recovery_composition_ref")
+            recovery = bool(reference) or (
+                event.get("function_name") == "execute_recovery_macro" and
+                (params.get("recovery_safety_scope_id")
+                 or params.get("start_safety_mode") == "cca_check"))
+            if event.get("status") == "safety_check":
+                if recovery:
+                    product_jid = params.get("product_jid")
+                    if not isinstance(product_jid, str) or not product_jid:
+                        await self._send_decision(
+                            sender, event.get("task_id"), "block",
+                            recovery_composition_request_id=event.get("recovery_composition_request_id"))
+                        return True
+                    if any(product != product_jid and admission.holds()
+                           for product, admission in
+                           getattr(agent, "recovery_composition_admissions", {}).items()):
+                        await self._send_decision(
+                            sender, event.get("task_id"), "block",
+                            recovery_composition_request_id=event.get("recovery_composition_request_id"),
+                            recovery_composition={"status": "held",
+                                                  "reason": "another_product_recovery_proof_is_active"})
+                        return True
+                    coordinator = recovery_admission(agent, product_jid)
+                    result = await coordinator.check(event, sender=sender, commit=True)
+                    await self._send_decision(
+                        sender, event.get("task_id"),
+                        "allow" if result["status"] == "allowed" else "block",
+                        recovery_composition=result,
+                        recovery_composition_grant=result.get("recovery_composition_grant"),
+                        recovery_composition_request_id=event.get("recovery_composition_request_id"),
+                    )
+                    return True
+                if predefined_required(agent):
+                    runtime = agent._environment_runtime_for_sender(sender)
+                    task = runtime.context.pending_for(event.get("task_id")) if runtime is not None else None
+                    if (task is None or event.get("run_id") != runtime.context.run_id
+                            or sender != runtime.jids[task["resource_id"]]
+                            or event.get("function_name") != task["event_name"]
+                            or params != task["parameters"]):
+                        result = nominal_unavailable(agent)
+                    else:
+                        result = await check_predefined_nominal_start(
+                            agent, task, runtime.product_jid, commit=True)
+                    await self._send_decision(sender, event.get("task_id"),
+                                              "allow" if result["status"] == "allowed" else "block",
+                                              recovery_composition=result)
+                    return True
+                if interacting_recovery_admission(agent):
+                    await self._send_decision(sender, event.get("task_id"), "block",
+                                              recovery_composition={
+                                                  "status": "held",
+                                                  "reason": "start_absent_from_active_recovery_proof",
+                                              })
+                    return True
+                return False
+            coordinators = getattr(agent, "recovery_composition_admissions", {})
+            if recovery or event.get("status") == "recovery_acknowledgement" or any(
+                    coordinator.holds() for coordinator in coordinators.values()):
+                for coordinator in coordinators.values():
+                    try:
+                        observe_recovery_event(agent, coordinator, event, sender)
+                    except (ValueError, KeyError, TypeError) as exc:
+                        coordinator.invalidate("execution_evidence_unavailable: " + str(exc))
+                return True
+            return False
+
         async def _handle_safety_check(
             self,
             *,
@@ -1729,6 +1839,10 @@ class CentralControllerAgent(LlmAgent):
             recovery_safety_scope_id: str,
         ) -> None:
             agent: CentralControllerAgent = self.agent  # type: ignore
+            if predefined_required(agent):
+                await self._send_decision(resource_jid, task_id, "block",
+                                          recovery_composition=nominal_unavailable(agent))
+                return
             monitor = (
                 agent._recovery_safety_monitor_for_scope(recovery_safety_scope_id)
                 if recovery_safety_scope_id
@@ -2067,7 +2181,7 @@ class CentralControllerAgent(LlmAgent):
             """
             agent: CentralControllerAgent = self.agent  # type: ignore
 
-            if not agent.blocked_tasks or not agent.safety_monitor:
+            if predefined_required(agent) or not agent.blocked_tasks or not agent.safety_monitor:
                 return
 
             to_clear = []
@@ -2156,10 +2270,10 @@ class CentralControllerAgent(LlmAgent):
                     ", ".join(task_ids),
                 )
 
-        async def _send_decision(self, to_jid: str, task_id: str, decision: str):
+        async def _send_decision(self, to_jid: str, task_id: str, decision: str, **evidence):
             msg = Message(to=to_jid)
             msg.set_metadata("type", "safety_decision")
-            msg.body = json.dumps({"task_id": task_id, "decision": decision})
+            msg.body = json.dumps({"task_id": task_id, "decision": decision, **evidence})
             await send_agent_message(
                 self,
                 msg,
@@ -2196,6 +2310,8 @@ class CentralControllerAgent(LlmAgent):
             )
             if getattr(agent.safety_monitor, "history_error", None) is not None:
                 validation_unavailable_reason = "CCA safety monitor history is unavailable"
+            if predefined_required(agent):
+                validation_unavailable_reason = "Predefined physical rules require grounded composition evidence"
             current_rules = [
                 deepcopy(rule)
                 for rule in agent.safety_rules
@@ -2414,7 +2530,14 @@ class CentralControllerAgent(LlmAgent):
             recovery_safety_scope_id = str(payload.get("recovery_safety_scope_id") or "").strip()
             result: dict[str, Any]
             try:
-                result = await generate_recovery_safety_bundle(agent, payload)
+                if predefined_required(agent):
+                    if str(msg.sender).split("/", 1)[0] != product_jid:
+                        return
+                    if not await agent._wait_for_safety_monitor_ready():
+                        raise ValueError("predefined_safety_not_ready")
+                    result = predefined_scope(agent, recovery_safety_scope_id)
+                else:
+                    result = await generate_recovery_safety_bundle(agent, payload)
             except Exception as exc:
                 agent.logger.exception(
                     "[CCA] Recovery safety generation failed for scope=%s.",
@@ -2432,7 +2555,7 @@ class CentralControllerAgent(LlmAgent):
                     "failure_reason": str(exc),
                 }
 
-            if recovery_safety_scope_id:
+            if recovery_safety_scope_id and not predefined_required(agent):
                 agent._register_recovery_safety_scope_result(result)
 
             if not product_jid:
@@ -2458,6 +2581,9 @@ class CentralControllerAgent(LlmAgent):
             safety_logic = agent.safety_logic
             if not safety_logic:
                 agent.logger.warning("[CCA] No SafetyPlanner configured.")
+                return
+
+            if await asyncio.to_thread(initialize_predefined_safety, agent):
                 return
 
             # Bundle fast-path: load precomputed structured safety + DFA artifacts.
@@ -2622,8 +2748,27 @@ class CentralControllerAgent(LlmAgent):
                 agent.logger.exception("[CCA] Malformed plan_safety_check.")
                 return
 
+            recovery_composition = None
+            recovery_request = data.get("recovery_composition_request")
+            if recovery_request is not None:
+                from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
+                    register_recovery_composition,
+                )
+
+                sender = str(msg.sender).split("/", 1)[0]
+                if sender != product_jid:
+                    return
+                ready = await agent._wait_for_safety_monitor_ready()
+                if ready and isinstance(recovery_request, dict):
+                    recovery_composition = await register_recovery_composition(
+                        agent, recovery_request, sender)
+                else:
+                    recovery_composition = {
+                        "status": "inconclusive", "reason": "recovery_registration_unavailable",
+                    }
+
             runtime = agent._environment_runtime_for_sender(str(msg.sender))
-            if runtime is not None:
+            if runtime is not None and recovery_request is None:
                 sender = str(msg.sender).split("/", 1)[0]
                 if sender != runtime.product_jid:
                     return
@@ -2635,7 +2780,9 @@ class CentralControllerAgent(LlmAgent):
                 for task in local.get("candidates", []):
                     if ready and valid_request:
                         admission = agent._environment_admission(runtime)
-                        decisions[task["task_id"]] = await admission.check(task, commit=False)
+                        decisions[task["task_id"]] = (
+                            await check_predefined_nominal_start(agent, task, runtime.product_jid, commit=False)
+                            if predefined_required(agent) else await admission.check(task, commit=False))
                     else:
                         decisions[task["task_id"]] = {
                             "status": "inconclusive", "reason": "local_context_unavailable",
@@ -2653,11 +2800,21 @@ class CentralControllerAgent(LlmAgent):
 
             if not fsa:
                 agent.logger.warning("[CCA] No FSA provided for plan validation.")
+                if recovery_request is not None:
+                    reply = msg.make_reply()
+                    reply.set_metadata("type", "plan_safety_result")
+                    reply.body = json.dumps({
+                        "ok": False, "request_id": request_id,
+                        "recovery_composition": {"status": "inconclusive",
+                                                 "reason": "recovery_plan_fsa_unavailable"},
+                    })
+                    await send_agent_message(self, reply, transport_label="cca_plan_result")
                 return
 
             monitor_ready = await agent._wait_for_safety_monitor_ready()
 
-            if isinstance(recovery_safety_result, dict) and recovery_safety_result:
+            if (not predefined_required(agent) and recovery_request is None and isinstance(recovery_safety_result, dict)
+                    and recovery_safety_result):
                 recovery_safety_result = agent._rebind_recovery_safety_result_to_live_fsa(
                     recovery_safety_result,
                     plan if isinstance(plan, dict) else {},
@@ -2770,8 +2927,9 @@ class CentralControllerAgent(LlmAgent):
             # still "ready" even though its DFA map is empty.
             if agent.safety_logic is not None and agent.safety_monitor is not None:
                 validator = PlanSafetyValidator(
-                    rules=agent.safety_rules,
-                    dfa_map=dict(agent.safety_logic.rule_dfas),
+                    rules=(agent.safety_monitor.safety_rules if predefined_required(agent)
+                           else agent.safety_rules),
+                    dfa_map=({} if predefined_required(agent) else dict(agent.safety_logic.rule_dfas)),
                     tools_catalog=getattr(agent, "tools_catalog", []),
                 )
                 diagnostic_only_active_window = False
@@ -2870,6 +3028,14 @@ class CentralControllerAgent(LlmAgent):
                 agent.online_supervisor = None
                 diagnostic_only_active_window = False
 
+            if predefined_required(agent) and (
+                    not monitor_ready or recovery_composition is None
+                    or recovery_composition["status"] != "allowed"):
+                ok = False
+                violations.append({"violation_text": "Predefined physical safety requires a grounded continuation"})
+            if recovery_composition is not None:
+                ok = ok and recovery_composition["status"] == "allowed"
+
             # ---- NEW: log summary + details ----
             violated_rules = sorted(
                 {v.get("violated_rule_id") for v in violations if v.get("violated_rule_id")}
@@ -2945,6 +3111,8 @@ class CentralControllerAgent(LlmAgent):
                         "violations": violations,
                         "request_id": request_id,
                         "diagnostic_only": bool(diagnostic_only_active_window),
+                        **({"recovery_composition": recovery_composition}
+                           if recovery_composition is not None else {}),
                     }
                 )
                 await send_agent_message(

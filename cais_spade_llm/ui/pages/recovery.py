@@ -402,9 +402,13 @@ def _all_files(example: dict) -> None:
     )
 
 
-def render(*, root: Path = ROOT, debug_root: Path = DEBUG_ROOT, is_active=lambda: True) -> None:
+def render(*, root: Path = ROOT, debug_root: Path = DEBUG_ROOT, is_active=lambda: True, bridge=None) -> None:
     """Browse exact stage evidence and explicitly launch saved-context tests."""
     ui.label("recovery").classes("text-2xl font-semibold")
+    if bridge is not None:
+        from cais_spade_llm.ui.components.recovery_safety_preparation import render_safety_preparation
+
+        render_safety_preparation(bridge)
     ui.label("Inspect the prompts, decisions, and validation behind recovery.").classes(
         "text-slate-600"
     )

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -288,6 +289,95 @@ def export_20x(attempt: RecordingAttempt, output: Path, title: str,
     partial.replace(output)
     source.unlink()
     attempt.cancel()
+    return result
+
+
+def export_combined_20x(trials: list[dict], output: Path, title: str) -> dict:
+    """Join validated trial captures and publish one silent, captioned 20x video.
+
+    Each trial supplies its RecordingAttempt, title, captions and observed-run
+    validation. Separate run identities and original evidence remain in the
+    combined validation record. Sources are removed only after the final copy
+    passes decoding and duration checks; a failed export preserves them.
+    """
+    if not trials or output.exists():
+        raise ValueError("Combined export needs trials and a new output path")
+    validations = [row["validation"] for row in trials]
+    if (any(row.get("validated") is not True or not row.get("run_id") for row in validations)
+            or len({row["run_id"] for row in validations}) != len(validations)):
+        raise ValueError("Each separately staged trial needs its own observed run validation")
+    attempts = [row["attempt"] for row in trials]
+    if len({row.directory.resolve() for row in attempts}) != len(attempts):
+        raise ValueError("Trial captures must have distinct owners")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    durations, sources, captions, capture_rows = [], [], [], []
+    stream_identity = None
+    fps = None
+    frames = 0
+    for trial in trials:
+        attempt = trial["attempt"]
+        source = attempt.directory / "capture.partial.mp4"
+        metadata = json.loads((attempt.directory / "capture.json").read_text())
+        probe = _probe(source)
+        videos = [row for row in probe["streams"] if row["codec_type"] == "video"]
+        if metadata.get("status") != "captured" or len(videos) != 1:
+            raise ValueError("Every trial needs a complete video capture")
+        video = videos[0]
+        identity = {key: video[key] for key in ("codec_name", "width", "height", "pix_fmt", "r_frame_rate", "time_base")}
+        if stream_identity is not None and (identity != stream_identity or metadata["fps"] != fps):
+            raise ValueError("Trial captures need matching video and frame-clock contracts")
+        stream_identity, fps = identity, metadata["fps"]
+        duration = float(probe["format"]["duration"])
+        count = int(video["nb_read_frames"])
+        observed = [json.loads(line) for line in (attempt.directory / "frames.jsonl").read_text().splitlines()]
+        if (count != metadata["frames"] or not observed
+                or abs(duration - (observed[-1]["elapsed_sec"] + 1 / fps)) > 1):
+            raise ValueError("Trial capture frame count or timing is incomplete")
+        offset = sum(durations)
+        captions.append({"text": trial["title"], "start": offset, "end": offset + duration})
+        for caption in trial["captions"]:
+            start, end = caption.get("start", 0), caption.get("end", duration)
+            if not 0 <= start <= end <= duration:
+                raise ValueError("Trial caption falls outside its observed recording")
+            # The trial title and its evidence caption share one line, keeping
+            # the visible reset between independently staged trials explicit.
+            captions.append({"text": trial["title"] + " | " + caption["text"],
+                             "start": offset + start, "end": offset + end})
+        frames += count
+        durations.append(duration)
+        sources.append(source)
+        capture_rows.append({"run_id": trial["validation"]["run_id"], "capture_directory": str(attempt.directory),
+                             "duration_sec": duration, "frames": count, "start_sec": offset,
+                             "validation": deepcopy(trial["validation"])})
+    evidence = attempts[0].directory / "combined-20x-validation.json"
+    if evidence.exists():
+        raise FileExistsError(evidence)
+    with tempfile.TemporaryDirectory(prefix="part-slippage-combined-", dir=attempts[0].directory) as temporary:
+        combined = RecordingAttempt(Path(temporary))
+        manifest = combined.directory / "concat.txt"
+        # ffconcat quoting is distinct from shell quoting; subprocess receives
+        # an argument array and never evaluates paths as shell expressions.
+        manifest.write_text("".join("file '" + str(path.resolve()).replace("'", "'\\''") + "'\n"
+                                    for path in sources), encoding="utf-8")
+        with (combined.directory / "concat.log").open("w") as log:
+            subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                            "-f", "concat", "-safe", "0", "-i", str(manifest), "-map", "0:v:0", "-c", "copy",
+                            str(combined.directory / "capture.partial.mp4")],
+                           stdout=subprocess.DEVNULL, stderr=log, check=True, timeout=300)
+        _write_json(combined.directory / "capture.json", {"status": "captured", "frames": frames, "fps": fps})
+        (combined.directory / "frames.jsonl").write_text(json.dumps({
+            "frame": frames - 1, "elapsed_sec": (frames - 1) / fps}) + "\n", encoding="utf-8")
+        result = export_20x(combined, output, title, {
+            "validated": True, "run_id": output.stem, "trials": capture_rows,
+            "separately_staged_trials": True,
+        }, captions)
+        if abs(result["source_duration_sec"] - sum(durations)) > 2 / fps:
+            output.unlink()
+            raise ValueError("Combined duration differs from the complete trial captures")
+    result["validation_file"] = str(evidence)
+    _write_json(evidence, result)
+    for attempt in attempts:
+        attempt.cancel()
     return result
 
 

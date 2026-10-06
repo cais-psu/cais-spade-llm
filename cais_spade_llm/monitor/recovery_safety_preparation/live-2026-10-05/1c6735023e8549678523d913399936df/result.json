@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "attempt_id": "1c6735023e8549678523d913399936df",
+  "status": "NEEDS_CONTEXT",
+  "dispatch_authorized": false,
+  "request": {
+    "recovery_id": "GAZEBO_MOTION_CONFLICT",
+    "programs": [
+      {
+        "resource_id": "ur5e-4",
+        "primitive_steps": [
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": -0.1,
+              "y": -0.08,
+              "z": 1.5
+            },
+            "source": {
+              "outline_id": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "des_event_id": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "event_name": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "step_index": 0
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": -0.1,
+              "y": -0.08,
+              "z": 1.26
+            },
+            "source": {
+              "outline_id": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "des_event_id": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "event_name": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "step_index": 1
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": 0.4993724571551952,
+              "y": -0.5000297722475339,
+              "z": 1.4997734147602744
+            },
+            "source": {
+              "outline_id": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "des_event_id": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "event_name": "GAZEBO_MOTION_CONFLICT/ur5e-4",
+              "step_index": 2
+            }
+          }
+        ]
+      },
+      {
+        "resource_id": "ur5e-3",
+        "primitive_steps": [
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": -0.1,
+              "y": 0.08,
+              "z": 1.5
+            },
+            "source": {
+              "outline_id": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "des_event_id": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "event_name": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "step_index": 0
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": -0.1,
+              "y": 0.08,
+              "z": 1.26
+            },
+            "source": {
+              "outline_id": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "des_event_id": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "event_name": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "step_index": 1
+            }
+          },
+          {
+            "primitive": "move_cartesian",
+            "params": {
+              "x": 0.40093654378388977,
+              "y": 0.2023043982993371,
+              "z": 1.499773522932236
+            },
+            "source": {
+              "outline_id": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "des_event_id": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "event_name": "GAZEBO_MOTION_CONFLICT/ur5e-3",
+              "step_index": 2
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "prepared_programs": [],
+  "unresolved": [
+    {
+      "reason": "Live preparation configuration must cover every configured resource"
+    }
+  ],
+  "analysis": null,
+  "predefined_safety": {
+    "mode": "predefined",
+    "predefined_safety": {
+      "mode": "predefined",
+      "version": 1,
+      "product_geometry": {
+        "path": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+        "environment": "gazebo"
+      },
+      "catalog": {
+        "version": 1,
+        "specifications": [
+          {
+            "id": "SAFE_shared_area_mutex",
+            "requirement": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+            "formula": "G !(ap001 & ap002)",
+            "aps": [
+              {
+                "label": "ap001",
+                "full": "ap_state/physical_observation/shared_area_first_resource",
+                "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+              },
+              {
+                "label": "ap002",
+                "full": "ap_state/physical_observation/shared_area_second_resource",
+                "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+              }
+            ]
+          },
+          {
+            "id": "SAFE_gear_small_before_KET4_Square_4mm",
+            "requirement": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
+            "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
+            "aps": [
+              {
+                "label": "ap001",
+                "full": "ap_event/physical_observation/part_region_entry",
+                "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+              },
+              {
+                "label": "ap002",
+                "full": "ap_state/processCompleted/process_target_completed",
+                "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+              }
+            ]
+          }
+        ]
+      },
+      "requirement_scopes": [
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "region": "assembly_board-v1"
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "physical_ap_bindings": {
+            "ap001": {
+              "part": "KET4_Square_4mm",
+              "region": "assembly_board-v1"
+            },
+            "ap002": {
+              "part": "gear_small",
+              "process": "assembly",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            }
+          }
+        }
+      ]
+    },
+    "predefined_source_sha256": "fceaae6dd7cdef403a8b11108d66b36ed484ce551794381761bcb8256c876cf8",
+    "predefined_semantics_sha256": "1533ab10844d59348bdbc03175dd1971c693f9bac3c371d7dadb3294cf1059e1",
+    "predefined_geometry_sha256": "ca9a3393f492eb85b5a40cfef96dd8b8258d79de997f01c02e99e5878f08ec9d"
+  },
+  "simulation_launch_identity": [],
+  "artifact_path": "/home/jongh/projects/cais-spade-llm/cais_spade_llm/monitor/recovery_safety_preparation/live-2026-10-05/1c6735023e8549678523d913399936df/result.json",
+  "fingerprint": "32f171eac6646b19d18df8880784444c6a1d1d6a4dcd192feab1561704772ece"
+}

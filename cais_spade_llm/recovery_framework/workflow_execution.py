@@ -16,6 +16,10 @@ from cais_spade_llm.product.profile import ProductProfile
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.gazebo_worker import GazeboExecutionError, GazeboWorker
 from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+from cais_spade_llm.resources.resource_safety_preparation import (
+    resource_model_declarations,
+    resource_provider,
+)
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
 
 _UR_JOINTS = (
@@ -134,8 +138,17 @@ def create_environment_resource_agents(
     prewarmed = prewarmed_controllers if prewarmed_controllers is not None else {}
     robot_rows = {row["resource_id"]: row for row in scene["robots"]}
     resources: list[ResourceAgent] = []
+    declarations = resource_model_declarations(scene)
     for index, rid in enumerate(models, 1):
         jid = f"recovery-resource-{index}@localhost"
+        if rid in declarations:
+            provider = resource_provider(declarations[rid]["owner_provider"])
+            owner = provider.create_owner(resource_id=rid, jid=jid, password="none",
+                                          cca_jid=cca_jid, scene=deepcopy(scene), model=deepcopy(models[rid]))
+            if owner is None or owner.agent_name != rid or str(owner.jid) != jid:
+                raise ValueError("Registered owner factory returned a different resource identity")
+            resources.append(owner)
+            continue
         if rid in robot_rows:
             controller, named_positions, static = _robot_configuration(scene, robot_rows[rid])
             names = sorted(

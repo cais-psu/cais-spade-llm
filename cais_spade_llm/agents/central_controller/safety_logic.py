@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from cais_spade_llm.agents.central_controller.predefined_safety import (
+    compile_predefined_safety,
+    parse_predefined_safety,
+    predefined_safety_metadata,
+    validate_predefined_safety_artifact,
+)
+
 try:
     from ltlf2dfa.parser.ltlf import LTLfParser
 except Exception:  # pragma: no cover - dependency may be absent in lightweight test envs
@@ -60,6 +67,7 @@ class SafetyLogic:
         self.global_safety_spec: dict[str, Any] = {}
         self.preview_interpretation_summary: str = ""
         self.safety_text_sha256: str = ""
+        self.predefined_metadata: dict[str, Any] = {}
 
         # store one DFA (DOT string) per rule
         self.rule_dfas: dict[str, str] = {}
@@ -240,7 +248,7 @@ class SafetyLogic:
         return {
             "prefix": str(prefix).strip(),
             "process": str(process).strip().lower(),
-            "product": str(product).strip().lower(),
+            "product": str(product).strip(),
             "resource": str(resource).strip().lower(),
             "event": str(event).strip(),
             "context": str(context).strip(),
@@ -455,11 +463,11 @@ class SafetyLogic:
         return bound
 
     def _normalize_atom_product(self, rule: dict[str, Any], node: dict[str, Any]) -> str:
-        explicit = str(node.get("product", "") or "").strip().lower()
+        explicit = str(node.get("product", "") or "").strip()
         if explicit:
             return explicit
         products = [
-            str(product).strip().lower()
+            str(product).strip()
             for product in (rule.get("product") or [])
             if str(product or "").strip()
         ]
@@ -1070,7 +1078,14 @@ class SafetyLogic:
         self.rules.clear()
         self.logic_raw.clear()
         self.global_safety_spec.clear()
+        self.predefined_metadata = {}
         self.safety_text_sha256 = self.compute_safety_text_sha256(safety_text)
+
+        document = parse_predefined_safety(safety_text)
+        if document is not None:
+            self.rules, self.rule_dfas = compile_predefined_safety(document)
+            self.predefined_metadata = predefined_safety_metadata(document, safety_text)
+            return f"Compiled {len(self.rules)} predefined safety specification(s)."
 
         if not self._safety_text_has_requirements(safety_text):
             msg = "[SafetyLogic] Parsed 0 structured safety rule(s): no non-empty safety requirements."
@@ -1225,6 +1240,8 @@ class SafetyLogic:
         )
         if not self.rules:
             return msg
+        if self.predefined_metadata:
+            return msg
 
         # 2) structured rules -> APs + LTLf (raw)
         try:
@@ -1272,6 +1289,17 @@ class SafetyLogic:
 
     async def build_preview_interpretations(self) -> dict[str, Any]:
         """Generate preview-only natural-language explanations for the grounded rules."""
+        if self.predefined_metadata:
+            for rule in self.rules:
+                rule["generated_interpretation"] = rule["raw_text"]
+            self.preview_interpretation_summary = (
+                "Predefined APs and LTLf compiled unchanged. Physical evidence and CCA admission "
+                "remain required before execution."
+            )
+            return {
+                "preview_summary": self.preview_interpretation_summary,
+                "rules": [{"id": rule["id"], "interpretation": rule["raw_text"]} for rule in self.rules],
+            }
         if not self.rules:
             self.preview_interpretation_summary = ""
             return {"preview_summary": "", "rules": []}
@@ -1543,7 +1571,7 @@ class SafetyLogic:
 
                 prefix, ap_process, ap_product, ap_resource, ap_event, ap_context = parts[:6]
                 raw_prefix = str(prefix).strip()
-                product_token = str(ap_product).strip().lower() or "any"
+                product_token = str(ap_product).strip() or "any"
                 context_token = rule_context_token or str(ap_context).strip() or "any"
 
                 resource_token = self._normalize_resource_token(ap_resource)
@@ -1919,6 +1947,8 @@ class SafetyLogic:
             "formula": "(φ_SAFE_1) & (φ_SAFE_2) & ..."
           }
         """
+        if self.predefined_metadata:
+            return {}
         global_ap_map: dict[str, str] = {}
         formula_list: list[str] = []
 
@@ -1955,6 +1985,8 @@ class SafetyLogic:
           - convert to DFA (DOT string)
           - save DOT and PNG under cais_spade_llm/safety/
         """
+        if self.predefined_metadata:
+            return self._build_predefined_dfas(out_dir)
         if not self.rules:
             if self.logger:
                 self.logger.warning("[SafetyLogic] No safety rules to build DFAs for.")
@@ -2050,11 +2082,28 @@ class SafetyLogic:
 
         return self.rule_dfas
 
+    def _build_predefined_dfas(self, out_dir: Path | str | None) -> dict[str, str]:
+        payload = {**self.predefined_metadata, "rules": self.rules,
+                   "safety_text_sha256": self.safety_text_sha256}
+        document = validate_predefined_safety_artifact(payload)
+        _, dfas = compile_predefined_safety(document)
+        directory = Path(out_dir) if out_dir else Path("cais_spade_llm/safety")
+        directory.mkdir(parents=True, exist_ok=True)
+        for identifier, dot in dfas.items():
+            (directory / f"{identifier}_dfa.dot").write_text(dot, encoding="utf-8")
+            if Source is not None:
+                Source(dot).render(filename=str(directory / f"{identifier}_dfa"),
+                                   format="png", cleanup=True)
+        self.rule_dfas = dfas
+        return deepcopy(dfas)
+
     def build_global_dfa(self):
         """
         Convert the combined LTLf formula into a DFA (DOT string) using ltlf2dfa.
         Then save it and render a PNG visualization.
         """
+        if self.predefined_metadata:
+            raise ValueError("Predefined specifications retain separate rule-local AP namespaces")
         formula_str = self.global_safety_spec.get("formula", "")
         if not formula_str:
             if self.logger:
@@ -2136,7 +2185,9 @@ class SafetyLogic:
             "preview_interpretation_summary": self.preview_interpretation_summary,
             "safety_text_sha256": self.safety_text_sha256,
             "rules": self.rules,
+            **self.predefined_metadata,
         }
+        validate_predefined_safety_artifact(payload)
 
         with p.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -2159,6 +2210,13 @@ class SafetyLogic:
 
         with p.open("r", encoding="utf-8") as f:
             data = json.load(f)
+        source_text = (self.safety_file.read_text(encoding="utf-8")
+                       if self.safety_file.exists() else None)
+        document = validate_predefined_safety_artifact(data, source_text=source_text)
+        self.predefined_metadata = ({key: deepcopy(data[key]) for key in (
+            "mode", "predefined_safety", "predefined_source_sha256",
+            "predefined_semantics_sha256", "predefined_geometry_sha256",
+        )} if document is not None else {})
         self.preview_interpretation_summary = str(
             data.get("preview_interpretation_summary", "") or ""
         ).strip()

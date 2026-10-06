@@ -1,0 +1,6407 @@
+{
+  "configuration": {
+    "provider": "gazebo_idle_continuous_v1",
+    "observation_service": "/GETRECOVERYSTATE",
+    "launch_parameter_node": "/KMR_base_controller",
+    "regions": {
+      "assembly_board-v1": {
+        "frame": "world",
+        "bounds": [
+          [
+            -0.25,
+            0.25
+          ],
+          [
+            -0.25,
+            0.25
+          ],
+          [
+            1.05,
+            1.4
+          ]
+        ]
+      }
+    },
+    "resources": {
+      "ur5e-1": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_1_",
+        "reference_link": "ur5e_1_tool0",
+        "root_link": "ur5e_1_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_1_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_1_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "ur5e-2": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_2_",
+        "reference_link": "ur5e_2_tool0",
+        "root_link": "ur5e_2_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_2_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_2_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "ur5e-3": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_3_",
+        "reference_link": "ur5e_3_tool0",
+        "root_link": "ur5e_3_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_3_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_3_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "ur5e-4": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_4_",
+        "reference_link": "ur5e_4_tool0",
+        "root_link": "ur5e_4_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_4_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_4_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "M1": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "M1"
+      },
+      "M2": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "M2"
+      },
+      "Conveyor": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Conveyor"
+      },
+      "Buffer For Machined parts": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Buffer For Machined parts"
+      },
+      "Storage": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Storage"
+      },
+      "Exit": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Exit"
+      },
+      "3D Printing Station": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "prusa_mk4_2"
+      },
+      "KMR": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "KMR",
+        "gripper": {
+          "joint": "KMR_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      }
+    },
+    "part_geometry": {
+      "assembly_board-v1": {
+        "models": [
+          "GMC_Laser_Plate_Virtual",
+          "Gear_Plate"
+        ],
+        "requires_static": true
+      }
+    },
+    "candidates": {
+      "GAZEBO_MOTION_SAFE": {
+        "origin": "mock",
+        "start_offsets": {
+          "ur5e-4": 0.0
+        },
+        "poses": {
+          "ur5e-4": {
+            "approach": [
+              -0.1,
+              -0.08,
+              1.5
+            ],
+            "entry": [
+              -0.1,
+              -0.08,
+              1.26
+            ]
+          }
+        }
+      },
+      "GAZEBO_MOTION_CONFLICT": {
+        "origin": "mock",
+        "start_offsets": {
+          "ur5e-4": 0.0,
+          "ur5e-3": 0.0
+        },
+        "poses": {
+          "ur5e-4": {
+            "approach": [
+              -0.1,
+              -0.08,
+              1.5
+            ],
+            "entry": [
+              -0.1,
+              -0.08,
+              1.26
+            ]
+          },
+          "ur5e-3": {
+            "approach": [
+              -0.1,
+              0.08,
+              1.5
+            ],
+            "entry": [
+              -0.1,
+              0.08,
+              1.26
+            ]
+          }
+        }
+      }
+    },
+    "controller_status_topics": [
+      "/ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_1_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_2_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_2_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_3_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_3_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_4_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_4_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/KMR/KMR_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/KMR/dock/_action/status",
+      "/KMR/move_base/_action/status",
+      "/KMR/validated_navigate_to_pose/_action/status",
+      "/navigate_to_pose/_action/status",
+      "/KMR/validated_follow_path/_action/status",
+      "/KMR/navigate_to_pose/_action/status",
+      "/KMR/follow_path/_action/status"
+    ],
+    "controller_state_services": {
+      "/ur5e_1_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_1_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_1_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_2_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_2_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_2_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_2_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_3_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_3_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_3_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_3_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_4_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_4_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_4_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_4_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/KMR/KMR_iiwa_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/KMR/KMR_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/KMR/KMR_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/KMR/recovery_state": {
+        "covers": [
+          "/KMR/dock/_action/status",
+          "/KMR/move_base/_action/status",
+          "/KMR/validated_navigate_to_pose/_action/status",
+          "/navigate_to_pose/_action/status",
+          "/KMR/validated_follow_path/_action/status",
+          "/KMR/navigate_to_pose/_action/status",
+          "/KMR/follow_path/_action/status"
+        ],
+        "required_values": {
+          "navigation_enabled": false
+        }
+      }
+    }
+  },
+  "dispatch_authorized": false,
+  "diagnostic_service_timeout_sec": 15.0,
+  "physics": {
+    "version": 1,
+    "instance_id": "278802915379884",
+    "simulation_time": 316.117,
+    "attachment_revision": 0,
+    "attachment_complete": true,
+    "attachments": [],
+    "models": {
+      "ground_plane": {
+        "static": true,
+        "pose": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "ground_plane::link::collision",
+                "bounds": null,
+                "reason": "non_finite_collision_geometry"
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "M1": {
+        "static": true,
+        "pose": [
+          -4.05,
+          1.9,
+          0,
+          0,
+          0,
+          -0.7071067811865475,
+          0.7071067811865476
+        ],
+        "links": {
+          "enclosure": {
+            "pose": [
+              -4.05,
+              1.9,
+              0,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "M1::enclosure::stand_collision",
+                "bounds": [
+                  [
+                    -4.3155,
+                    -3.7844999999999995
+                  ],
+                  [
+                    1.6484999999999999,
+                    2.1515
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "M1::enclosure::base_collision",
+                "bounds": [
+                  [
+                    -4.3155,
+                    -3.7844999999999995
+                  ],
+                  [
+                    1.6484999999999999,
+                    2.1515
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "M1::enclosure::rear_collision",
+                "bounds": [
+                  [
+                    -4.3155,
+                    -3.7845
+                  ],
+                  [
+                    2.1314999999999995,
+                    2.1515
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M1::enclosure::left_side_collision",
+                "bounds": [
+                  [
+                    -3.8045,
+                    -3.7844999999999995
+                  ],
+                  [
+                    1.6684999999999999,
+                    2.1315
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M1::enclosure::front_post_collision",
+                "bounds": [
+                  [
+                    -3.8145,
+                    -3.7945
+                  ],
+                  [
+                    1.6484999999999999,
+                    1.6684999999999999
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M1::enclosure::side_post_collision",
+                "bounds": [
+                  [
+                    -4.315499999999999,
+                    -4.2955
+                  ],
+                  [
+                    2.1215,
+                    2.1414999999999997
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M1::enclosure::spindle_collision",
+                "bounds": [
+                  [
+                    -3.96,
+                    -3.88
+                  ],
+                  [
+                    2.02,
+                    2.1
+                  ],
+                  [
+                    1.305,
+                    1.4549999999999998
+                  ]
+                ]
+              }
+            ]
+          },
+          "workholding": {
+            "pose": [
+              -4.13,
+              1.8199999999999998,
+              1.06,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "M1::workholding::workholding_collision",
+                "bounds": [
+                  [
+                    -4.18,
+                    -4.08
+                  ],
+                  [
+                    1.7699999999999998,
+                    1.8699999999999999
+                  ],
+                  [
+                    1.0300000000000002,
+                    1.06
+                  ]
+                ]
+              }
+            ]
+          },
+          "front_access": {
+            "pose": [
+              -4.13,
+              1.5,
+              1.25,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          },
+          "side_access": {
+            "pose": [
+              -4.45,
+              1.8199999999999998,
+              1.25,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "M2": {
+        "static": true,
+        "pose": [
+          -2.05,
+          1.9,
+          0,
+          0,
+          0,
+          -0.7071067811865475,
+          0.7071067811865476
+        ],
+        "links": {
+          "enclosure": {
+            "pose": [
+              -2.05,
+              1.9,
+              0,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "M2::enclosure::stand_collision",
+                "bounds": [
+                  [
+                    -2.3155,
+                    -1.7844999999999998
+                  ],
+                  [
+                    1.6484999999999999,
+                    2.1515
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "M2::enclosure::base_collision",
+                "bounds": [
+                  [
+                    -2.3155,
+                    -1.7844999999999998
+                  ],
+                  [
+                    1.6484999999999999,
+                    2.1515
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "M2::enclosure::rear_collision",
+                "bounds": [
+                  [
+                    -2.3154999999999997,
+                    -1.7844999999999998
+                  ],
+                  [
+                    2.1314999999999995,
+                    2.1515
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M2::enclosure::left_side_collision",
+                "bounds": [
+                  [
+                    -1.8044999999999998,
+                    -1.7844999999999998
+                  ],
+                  [
+                    1.6684999999999999,
+                    2.1315
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M2::enclosure::front_post_collision",
+                "bounds": [
+                  [
+                    -1.8144999999999998,
+                    -1.7944999999999998
+                  ],
+                  [
+                    1.6484999999999999,
+                    1.6684999999999999
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M2::enclosure::side_post_collision",
+                "bounds": [
+                  [
+                    -2.3154999999999997,
+                    -2.2955
+                  ],
+                  [
+                    2.1215,
+                    2.1414999999999997
+                  ],
+                  [
+                    1.03,
+                    1.4629999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "M2::enclosure::spindle_collision",
+                "bounds": [
+                  [
+                    -1.96,
+                    -1.88
+                  ],
+                  [
+                    2.02,
+                    2.1
+                  ],
+                  [
+                    1.305,
+                    1.4549999999999998
+                  ]
+                ]
+              }
+            ]
+          },
+          "workholding": {
+            "pose": [
+              -2.13,
+              1.8199999999999998,
+              1.06,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "M2::workholding::workholding_collision",
+                "bounds": [
+                  [
+                    -2.1799999999999997,
+                    -2.08
+                  ],
+                  [
+                    1.7699999999999998,
+                    1.8699999999999999
+                  ],
+                  [
+                    1.0300000000000002,
+                    1.06
+                  ]
+                ]
+              }
+            ]
+          },
+          "front_access": {
+            "pose": [
+              -2.13,
+              1.5,
+              1.25,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          },
+          "side_access": {
+            "pose": [
+              -2.4499999999999997,
+              1.8199999999999998,
+              1.25,
+              0,
+              0,
+              -0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "M1_KMR_docking_pose": {
+        "static": true,
+        "pose": [
+          -4.7,
+          2.2,
+          0.004,
+          0,
+          0,
+          0.7071067811865475,
+          0.7071067811865476
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -4.7,
+              2.2,
+              0.004,
+              0,
+              0,
+              0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "M2_KMR_docking_pose": {
+        "static": true,
+        "pose": [
+          -2.7,
+          2.2,
+          0.004,
+          0,
+          0,
+          0.7071067811865475,
+          0.7071067811865476
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -2.7,
+              2.2,
+              0.004,
+              0,
+              0,
+              0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "ur5e-1 pedestal": {
+        "static": true,
+        "pose": [
+          -4.05,
+          1.1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -4.05,
+              1.1,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "ur5e-1 pedestal::link::column",
+                "bounds": [
+                  [
+                    -4.21,
+                    -3.8899999999999997
+                  ],
+                  [
+                    0.9400000000000001,
+                    1.26
+                  ],
+                  [
+                    0,
+                    0.76
+                  ]
+                ]
+              },
+              {
+                "id": "ur5e-1 pedestal::link::mounting_plate",
+                "bounds": [
+                  [
+                    -4.25,
+                    -3.8499999999999996
+                  ],
+                  [
+                    0.9000000000000001,
+                    1.3
+                  ],
+                  [
+                    0.76,
+                    0.8
+                  ]
+                ]
+              },
+              {
+                "id": "ur5e-1 pedestal::link::foot",
+                "bounds": [
+                  [
+                    -4.27,
+                    -3.8299999999999996
+                  ],
+                  [
+                    0.8800000000000001,
+                    1.32
+                  ],
+                  [
+                    0,
+                    0.05
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "ur5e-2 pedestal": {
+        "static": true,
+        "pose": [
+          -2.05,
+          1.1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -2.05,
+              1.1,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "ur5e-2 pedestal::link::column",
+                "bounds": [
+                  [
+                    -2.21,
+                    -1.89
+                  ],
+                  [
+                    0.9400000000000001,
+                    1.26
+                  ],
+                  [
+                    0,
+                    0.76
+                  ]
+                ]
+              },
+              {
+                "id": "ur5e-2 pedestal::link::mounting_plate",
+                "bounds": [
+                  [
+                    -2.25,
+                    -1.8499999999999999
+                  ],
+                  [
+                    0.9000000000000001,
+                    1.3
+                  ],
+                  [
+                    0.76,
+                    0.8
+                  ]
+                ]
+              },
+              {
+                "id": "ur5e-2 pedestal::link::foot",
+                "bounds": [
+                  [
+                    -2.27,
+                    -1.8299999999999998
+                  ],
+                  [
+                    0.8800000000000001,
+                    1.32
+                  ],
+                  [
+                    0,
+                    0.05
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "M1 staging tray": {
+        "static": true,
+        "pose": [
+          -4.6,
+          1.1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -4.6,
+              1.1,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "M1 staging tray::link::pedestal",
+                "bounds": [
+                  [
+                    -4.6499999999999995,
+                    -4.55
+                  ],
+                  [
+                    1.05,
+                    1.1500000000000001
+                  ],
+                  [
+                    0,
+                    0.96
+                  ]
+                ]
+              },
+              {
+                "id": "M1 staging tray::link::surface",
+                "bounds": [
+                  [
+                    -4.71,
+                    -4.489999999999999
+                  ],
+                  [
+                    0.9900000000000001,
+                    1.2100000000000002
+                  ],
+                  [
+                    0.96,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "M1 staging tray::link::rear_edge",
+                "bounds": [
+                  [
+                    -4.71,
+                    -4.489999999999999
+                  ],
+                  [
+                    1.1900000000000002,
+                    1.2100000000000002
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "M1 staging tray::link::left_edge",
+                "bounds": [
+                  [
+                    -4.709999999999999,
+                    -4.6899999999999995
+                  ],
+                  [
+                    1,
+                    1.2000000000000002
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "M1 staging tray::link::right_edge",
+                "bounds": [
+                  [
+                    -4.51,
+                    -4.49
+                  ],
+                  [
+                    1,
+                    1.2000000000000002
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "M2 staging tray": {
+        "static": true,
+        "pose": [
+          -2.6,
+          1.1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -2.6,
+              1.1,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "M2 staging tray::link::pedestal",
+                "bounds": [
+                  [
+                    -2.65,
+                    -2.5500000000000003
+                  ],
+                  [
+                    1.05,
+                    1.1500000000000001
+                  ],
+                  [
+                    0,
+                    0.96
+                  ]
+                ]
+              },
+              {
+                "id": "M2 staging tray::link::surface",
+                "bounds": [
+                  [
+                    -2.71,
+                    -2.49
+                  ],
+                  [
+                    0.9900000000000001,
+                    1.2100000000000002
+                  ],
+                  [
+                    0.96,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "M2 staging tray::link::rear_edge",
+                "bounds": [
+                  [
+                    -2.71,
+                    -2.49
+                  ],
+                  [
+                    1.1900000000000002,
+                    1.2100000000000002
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "M2 staging tray::link::left_edge",
+                "bounds": [
+                  [
+                    -2.71,
+                    -2.6900000000000004
+                  ],
+                  [
+                    1,
+                    1.2000000000000002
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "M2 staging tray::link::right_edge",
+                "bounds": [
+                  [
+                    -2.51,
+                    -2.49
+                  ],
+                  [
+                    1,
+                    1.2000000000000002
+                  ],
+                  [
+                    0.9999999999999999,
+                    1.0299999999999998
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "Storage": {
+        "static": true,
+        "pose": [
+          -6.45,
+          2.3,
+          0,
+          0,
+          0,
+          0.7071067811848163,
+          0.7071067811882787
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.45,
+              2.3,
+              0,
+              0,
+              0,
+              0.7071067811848163,
+              0.7071067811882787
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Storage::link::leg_0",
+                "bounds": [
+                  [
+                    -6.010000000002963,
+                    -5.970000000002766
+                  ],
+                  [
+                    1.6949999999976495,
+                    1.7349999999978454
+                  ],
+                  [
+                    0,
+                    0.625
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::leg_1",
+                "bounds": [
+                  [
+                    -6.930000000002963,
+                    -6.890000000002766
+                  ],
+                  [
+                    1.6950000000021543,
+                    1.7350000000023502
+                  ],
+                  [
+                    0,
+                    0.625
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::leg_2",
+                "bounds": [
+                  [
+                    -6.009999999997234,
+                    -5.969999999997038
+                  ],
+                  [
+                    2.8649999999976496,
+                    2.904999999997845
+                  ],
+                  [
+                    0,
+                    0.625
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::leg_3",
+                "bounds": [
+                  [
+                    -6.929999999997234,
+                    -6.889999999997038
+                  ],
+                  [
+                    2.8650000000021545,
+                    2.90500000000235
+                  ],
+                  [
+                    0,
+                    0.625
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::shelf_0",
+                "bounds": [
+                  [
+                    -6.950000000003061,
+                    -5.9499999999969395
+                  ],
+                  [
+                    1.6749999999975516,
+                    2.925000000002448
+                  ],
+                  [
+                    0.054999999999999986,
+                    0.10499999999999998
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::shelf_1",
+                "bounds": [
+                  [
+                    -6.950000000003061,
+                    -5.9499999999969395
+                  ],
+                  [
+                    1.6749999999975516,
+                    2.925000000002448
+                  ],
+                  [
+                    0.575,
+                    0.625
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::back",
+                "bounds": [
+                  [
+                    -6.95000000000306,
+                    -6.9099999999969395
+                  ],
+                  [
+                    1.6750000000022525,
+                    2.9250000000024485
+                  ],
+                  [
+                    0,
+                    0.625
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_kitting_tray",
+                "bounds": [
+                  [
+                    -6.320000000002693,
+                    -6.179999999997307
+                  ],
+                  [
+                    1.749999999998678,
+                    2.8499999999993633
+                  ],
+                  [
+                    0.625,
+                    0.645
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_kitting_tray",
+                "bounds": [
+                  [
+                    -6.1400000000026935,
+                    -5.999999999997307
+                  ],
+                  [
+                    1.7499999999977964,
+                    2.8499999999984817
+                  ],
+                  [
+                    0.625,
+                    0.645
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_divider_0",
+                "bounds": [
+                  [
+                    -6.32000000000273,
+                    -6.180000000002656
+                  ],
+                  [
+                    1.7424999999986777,
+                    1.757499999999363
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_divider_1",
+                "bounds": [
+                  [
+                    -6.320000000001408,
+                    -6.180000000001335
+                  ],
+                  [
+                    2.0124999999986777,
+                    2.027499999999363
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_divider_2",
+                "bounds": [
+                  [
+                    -6.320000000000037,
+                    -6.179999999999963
+                  ],
+                  [
+                    2.292499999998678,
+                    2.3074999999993633
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_divider_3",
+                "bounds": [
+                  [
+                    -6.319999999998665,
+                    -6.179999999998592
+                  ],
+                  [
+                    2.5724999999986777,
+                    2.587499999999363
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_divider_4",
+                "bounds": [
+                  [
+                    -6.319999999997344,
+                    -6.17999999999727
+                  ],
+                  [
+                    2.8424999999986778,
+                    2.857499999999363
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_front_edge",
+                "bounds": [
+                  [
+                    -6.187500000002693,
+                    -6.1724999999973065
+                  ],
+                  [
+                    1.749999999998641,
+                    2.8499999999987145
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::KET_rear_edge",
+                "bounds": [
+                  [
+                    -6.3275000000026935,
+                    -6.312499999997307
+                  ],
+                  [
+                    1.7499999999993268,
+                    2.8499999999994
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_divider_0",
+                "bounds": [
+                  [
+                    -6.14000000000273,
+                    -6.0000000000026565
+                  ],
+                  [
+                    1.7424999999977964,
+                    1.7574999999984817
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_divider_1",
+                "bounds": [
+                  [
+                    -6.140000000001408,
+                    -6.000000000001335
+                  ],
+                  [
+                    2.0124999999977966,
+                    2.027499999998482
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_divider_2",
+                "bounds": [
+                  [
+                    -6.140000000000037,
+                    -5.999999999999964
+                  ],
+                  [
+                    2.2924999999977964,
+                    2.3074999999984818
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_divider_3",
+                "bounds": [
+                  [
+                    -6.139999999998666,
+                    -5.999999999998592
+                  ],
+                  [
+                    2.5724999999977967,
+                    2.587499999998482
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_divider_4",
+                "bounds": [
+                  [
+                    -6.139999999997344,
+                    -5.999999999997271
+                  ],
+                  [
+                    2.8424999999977962,
+                    2.8574999999984816
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_front_edge",
+                "bounds": [
+                  [
+                    -6.007500000002693,
+                    -5.992499999997307
+                  ],
+                  [
+                    1.7499999999977596,
+                    2.849999999997833
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              },
+              {
+                "id": "Storage::link::RGOCG_rear_edge",
+                "bounds": [
+                  [
+                    -6.147500000002694,
+                    -6.132499999997307
+                  ],
+                  [
+                    1.7499999999984452,
+                    2.8499999999985186
+                  ],
+                  [
+                    0.645,
+                    0.6699999999999999
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "Storage_KMR_docking_pose": {
+        "static": true,
+        "pose": [
+          -5.54,
+          2.13,
+          0.004,
+          0,
+          0,
+          0.7071067811865475,
+          0.7071067811865476
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -5.54,
+              2.13,
+              0.004,
+              0,
+              0,
+              0.7071067811865475,
+              0.7071067811865476
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "Conveyor": {
+        "static": true,
+        "pose": [
+          -2.85,
+          0.5,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -2.85,
+              0.5,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Conveyor::link::belt",
+                "bounds": [
+                  [
+                    -4.95,
+                    -0.75
+                  ],
+                  [
+                    0.35,
+                    0.65
+                  ],
+                  [
+                    0.945,
+                    1.015
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::frame_0",
+                "bounds": [
+                  [
+                    -4.95,
+                    -0.75
+                  ],
+                  [
+                    0.29000000000000004,
+                    0.35
+                  ],
+                  [
+                    0.895,
+                    1.025
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::frame_1",
+                "bounds": [
+                  [
+                    -4.95,
+                    -0.75
+                  ],
+                  [
+                    0.6499999999999999,
+                    0.71
+                  ],
+                  [
+                    0.895,
+                    1.025
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_0_0",
+                "bounds": [
+                  [
+                    -4.73,
+                    -4.67
+                  ],
+                  [
+                    0.29999999999999993,
+                    0.36
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_0_1",
+                "bounds": [
+                  [
+                    -4.73,
+                    -4.67
+                  ],
+                  [
+                    0.64,
+                    0.7000000000000001
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_1_0",
+                "bounds": [
+                  [
+                    -3.5,
+                    -3.4400000000000004
+                  ],
+                  [
+                    0.29999999999999993,
+                    0.36
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_1_1",
+                "bounds": [
+                  [
+                    -3.5,
+                    -3.4400000000000004
+                  ],
+                  [
+                    0.64,
+                    0.7000000000000001
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_2_0",
+                "bounds": [
+                  [
+                    -2.26,
+                    -2.2
+                  ],
+                  [
+                    0.29999999999999993,
+                    0.36
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_2_1",
+                "bounds": [
+                  [
+                    -2.26,
+                    -2.2
+                  ],
+                  [
+                    0.64,
+                    0.7000000000000001
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_3_0",
+                "bounds": [
+                  [
+                    -1.03,
+                    -0.97
+                  ],
+                  [
+                    0.29999999999999993,
+                    0.36
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              },
+              {
+                "id": "Conveyor::link::leg_3_1",
+                "bounds": [
+                  [
+                    -1.03,
+                    -0.97
+                  ],
+                  [
+                    0.64,
+                    0.7000000000000001
+                  ],
+                  [
+                    0,
+                    0.92
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "Buffer For Machined parts": {
+        "static": true,
+        "pose": [
+          -0.5,
+          0.5,
+          1.015,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -0.5,
+              0.5,
+              1.015,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Buffer For Machined parts::link::zone_1_belt",
+                "bounds": [
+                  [
+                    -0.7394999999999999,
+                    -0.6204999999999999
+                  ],
+                  [
+                    0.38,
+                    0.62
+                  ],
+                  [
+                    1.013,
+                    1.017
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_2_belt",
+                "bounds": [
+                  [
+                    -0.6195,
+                    -0.5005000000000001
+                  ],
+                  [
+                    0.38,
+                    0.62
+                  ],
+                  [
+                    1.013,
+                    1.017
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_3_belt",
+                "bounds": [
+                  [
+                    -0.4995,
+                    -0.3805
+                  ],
+                  [
+                    0.38,
+                    0.62
+                  ],
+                  [
+                    1.013,
+                    1.017
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_4_belt",
+                "bounds": [
+                  [
+                    -0.3795,
+                    -0.2605
+                  ],
+                  [
+                    0.38,
+                    0.62
+                  ],
+                  [
+                    1.013,
+                    1.017
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::guide_left",
+                "bounds": [
+                  [
+                    -0.74,
+                    -0.26
+                  ],
+                  [
+                    0.5126917175512271,
+                    0.5253082824487729
+                  ],
+                  [
+                    1.0145777514010514,
+                    1.0214222485989481
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::guide_right",
+                "bounds": [
+                  [
+                    -0.74,
+                    -0.26
+                  ],
+                  [
+                    0.4746917175512271,
+                    0.4873082824487729
+                  ],
+                  [
+                    1.0145777514010514,
+                    1.0214222485989481
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_1_stop",
+                "bounds": [
+                  [
+                    -0.635,
+                    -0.631
+                  ],
+                  [
+                    0.487,
+                    0.513
+                  ],
+                  [
+                    1.008,
+                    1.016
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_2_stop",
+                "bounds": [
+                  [
+                    -0.515,
+                    -0.511
+                  ],
+                  [
+                    0.487,
+                    0.513
+                  ],
+                  [
+                    1.008,
+                    1.016
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_3_stop",
+                "bounds": [
+                  [
+                    -0.395,
+                    -0.391
+                  ],
+                  [
+                    0.487,
+                    0.513
+                  ],
+                  [
+                    1.008,
+                    1.016
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::zone_4_stop",
+                "bounds": [
+                  [
+                    -0.275,
+                    -0.271
+                  ],
+                  [
+                    0.487,
+                    0.513
+                  ],
+                  [
+                    1.008,
+                    1.016
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::downstream_stop",
+                "bounds": [
+                  [
+                    -0.27,
+                    -0.26
+                  ],
+                  [
+                    0.4775,
+                    0.5225
+                  ],
+                  [
+                    1.017,
+                    1.0469999999999997
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::transfer_plate",
+                "bounds": [
+                  [
+                    -0.7500000000000472,
+                    -0.7396077677299527
+                  ],
+                  [
+                    0.38,
+                    0.62
+                  ],
+                  [
+                    1.0130388386483267,
+                    1.016999999999673
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::infeed_guide_left",
+                "bounds": [
+                  [
+                    -0.9214720422924082,
+                    -0.7385279577075919
+                  ],
+                  [
+                    0.5152566793012231,
+                    0.5937433206987769
+                  ],
+                  [
+                    1.017,
+                    1.033
+                  ]
+                ]
+              },
+              {
+                "id": "Buffer For Machined parts::link::infeed_guide_right",
+                "bounds": [
+                  [
+                    -0.9214720422924082,
+                    -0.7385279577075919
+                  ],
+                  [
+                    0.4062566793012231,
+                    0.4847433206987769
+                  ],
+                  [
+                    1.017,
+                    1.033
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "table_xarm6": {
+        "static": true,
+        "pose": [
+          0,
+          0.4,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0,
+              0.4,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "table_xarm6::link::surface",
+                "bounds": [
+                  [
+                    -0.75,
+                    0.75
+                  ],
+                  [
+                    0,
+                    0.8
+                  ],
+                  [
+                    0.985,
+                    1.015
+                  ]
+                ]
+              },
+              {
+                "id": "table_xarm6::link::front_left_leg",
+                "bounds": [
+                  [
+                    0.66,
+                    0.7000000000000001
+                  ],
+                  [
+                    0.76,
+                    0.8
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "table_xarm6::link::front_right_leg",
+                "bounds": [
+                  [
+                    0.66,
+                    0.7000000000000001
+                  ],
+                  [
+                    1.734723475976807e-17,
+                    0.04000000000000002
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "table_xarm6::link::back_right_leg",
+                "bounds": [
+                  [
+                    -0.7000000000000001,
+                    -0.66
+                  ],
+                  [
+                    1.734723475976807e-17,
+                    0.04000000000000002
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "table_xarm6::link::back_left_leg",
+                "bounds": [
+                  [
+                    -0.7000000000000001,
+                    -0.66
+                  ],
+                  [
+                    0.76,
+                    0.8
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "table_ur5e": {
+        "static": true,
+        "pose": [
+          0,
+          -0.4,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0,
+              -0.4,
+              0,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "table_ur5e::link::surface",
+                "bounds": [
+                  [
+                    -0.75,
+                    0.75
+                  ],
+                  [
+                    -0.8,
+                    0
+                  ],
+                  [
+                    0.985,
+                    1.015
+                  ]
+                ]
+              },
+              {
+                "id": "table_ur5e::link::front_left_leg",
+                "bounds": [
+                  [
+                    0.66,
+                    0.7000000000000001
+                  ],
+                  [
+                    -0.04000000000000002,
+                    -1.734723475976807e-17
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "table_ur5e::link::front_right_leg",
+                "bounds": [
+                  [
+                    0.66,
+                    0.7000000000000001
+                  ],
+                  [
+                    -0.8,
+                    -0.76
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "table_ur5e::link::back_right_leg",
+                "bounds": [
+                  [
+                    -0.7000000000000001,
+                    -0.66
+                  ],
+                  [
+                    -0.8,
+                    -0.76
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              },
+              {
+                "id": "table_ur5e::link::back_left_leg",
+                "bounds": [
+                  [
+                    -0.7000000000000001,
+                    -0.66
+                  ],
+                  [
+                    -0.04000000000000002,
+                    -1.734723475976807e-17
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "assembly_board_v1": {
+        "static": true,
+        "pose": [
+          0,
+          0,
+          1.0239916,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0,
+              0,
+              1.0239916,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "GMC_Laser_Plate_Virtual": {
+        "static": true,
+        "pose": [
+          0,
+          0,
+          1.0239916,
+          1,
+          0,
+          0,
+          6.123233995736766e-17
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0,
+              0,
+              1.0239916,
+              1,
+              0,
+              0,
+              6.123233995736766e-17
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "GMC_Laser_Plate_Virtual::link::collision",
+                "bounds": [
+                  [
+                    -0.192,
+                    0.1920000033378601
+                  ],
+                  [
+                    -0.1920000033378601,
+                    0.192
+                  ],
+                  [
+                    1.0149999999857306,
+                    1.0239916
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "Gear_Plate": {
+        "static": true,
+        "pose": [
+          -0.0205504,
+          0.1448242,
+          1.0239916,
+          0,
+          0,
+          -0.7071067811848163,
+          0.7071067811882787
+        ],
+        "links": {
+          "Gear_Plate": {
+            "pose": [
+              -0.0205504,
+              0.1448242,
+              1.0239916,
+              0,
+              0,
+              -0.7071067811848163,
+              0.7071067811882787
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Gear_Plate::Gear_Plate::collision",
+                "bounds": [
+                  [
+                    -0.0805503954122105,
+                    0.03944959445529368
+                  ],
+                  [
+                    0.11482419887723153,
+                    0.1748242012620049
+                  ],
+                  [
+                    1.0239915822935104,
+                    1.0289915849757194
+                  ]
+                ]
+              }
+            ]
+          },
+          "Gear_Shaft_1": {
+            "pose": [
+              0.029449600000000003,
+              0.14482420000024482,
+              1.0289916,
+              0,
+              0,
+              -0.7071067811848163,
+              0.7071067811882787
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Gear_Plate::Gear_Shaft_1::collision",
+                "bounds": [
+                  [
+                    0.02444959999997552,
+                    0.034449600000024484
+                  ],
+                  [
+                    0.13982420000022033,
+                    0.1498242000002693
+                  ],
+                  [
+                    1.0289916,
+                    1.0489916
+                  ]
+                ]
+              }
+            ]
+          },
+          "Gear_Shaft_2": {
+            "pose": [
+              -0.0005503999999999995,
+              0.1448242000000979,
+              1.0289916,
+              0,
+              0,
+              -0.7071067811848163,
+              0.7071067811882787
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Gear_Plate::Gear_Shaft_2::collision",
+                "bounds": [
+                  [
+                    -0.005550400000024483,
+                    0.004449600000024484
+                  ],
+                  [
+                    0.13982420000007342,
+                    0.1498242000001224
+                  ],
+                  [
+                    1.0289916,
+                    1.0489916
+                  ]
+                ]
+              }
+            ]
+          },
+          "Gear_Shaft_3": {
+            "pose": [
+              -0.050550399999999995,
+              0.14482419999985308,
+              1.0289916,
+              0,
+              0,
+              -0.7071067811848163,
+              0.7071067811882787
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Gear_Plate::Gear_Shaft_3::collision",
+                "bounds": [
+                  [
+                    -0.05555040000002448,
+                    -0.04555039999997551
+                  ],
+                  [
+                    0.1398241999998286,
+                    0.14982419999987756
+                  ],
+                  [
+                    1.0289916,
+                    1.0489916
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "cam_storage": {
+        "static": true,
+        "pose": [
+          -5.5,
+          0.75,
+          2.35,
+          -0.2904044925788154,
+          0.1769699950302756,
+          0.8030376687361771,
+          0.4893642346348892
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -5.5,
+              0.75,
+              2.35,
+              -0.2904044925788154,
+              0.1769699950302756,
+              0.8030376687361771,
+              0.4893642346348892
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "cam_mk4_2": {
+        "static": true,
+        "pose": [
+          0.5,
+          -0.5,
+          1.75,
+          0,
+          0.7071080798594737,
+          0,
+          0.7071054825112364
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0.5,
+              -0.5,
+              1.75,
+              0,
+              0.7071080798594737,
+              0,
+              0.7071054825112364
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "cam_assembly": {
+        "static": true,
+        "pose": [
+          0,
+          0,
+          1.55,
+          0,
+          0.7071080798594737,
+          0,
+          0.7071054825112364
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0,
+              0,
+              1.55,
+              0,
+              0.7071080798594737,
+              0,
+              0.7071054825112364
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          }
+        },
+        "joints": {}
+      },
+      "Exit": {
+        "static": true,
+        "pose": [
+          0.5,
+          0.58,
+          1.04,
+          0,
+          0,
+          0,
+          1
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0.5,
+              0.58,
+              1.04,
+              0,
+              0,
+              0,
+              1
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "Exit::link::surface",
+                "bounds": [
+                  [
+                    0.3,
+                    0.7
+                  ],
+                  [
+                    0.37999999999999995,
+                    0.78
+                  ],
+                  [
+                    1.0150000000000001,
+                    1.065
+                  ]
+                ]
+              },
+              {
+                "id": "Exit::link::rear_edge",
+                "bounds": [
+                  [
+                    0.3,
+                    0.7
+                  ],
+                  [
+                    0.76,
+                    0.78
+                  ],
+                  [
+                    1.065,
+                    1.105
+                  ]
+                ]
+              },
+              {
+                "id": "Exit::link::side_edge_1",
+                "bounds": [
+                  [
+                    0.3,
+                    0.32
+                  ],
+                  [
+                    0.38999999999999996,
+                    0.77
+                  ],
+                  [
+                    1.065,
+                    1.105
+                  ]
+                ]
+              },
+              {
+                "id": "Exit::link::side_edge_2",
+                "bounds": [
+                  [
+                    0.6799999999999999,
+                    0.7
+                  ],
+                  [
+                    0.38999999999999996,
+                    0.77
+                  ],
+                  [
+                    1.065,
+                    1.105
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "prusa_mk4_2": {
+        "static": true,
+        "pose": [
+          0.5,
+          -0.5,
+          1.04,
+          0,
+          0,
+          -0.7071067811848163,
+          0.7071067811882787
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0.5,
+              -0.5,
+              1.04,
+              0,
+              0,
+              -0.7071067811848163,
+              0.7071067811882787
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "prusa_mk4_2::link::base",
+                "bounds": [
+                  [
+                    0.29999999999902066,
+                    0.7000000000009794
+                  ],
+                  [
+                    -0.7000000000009794,
+                    -0.29999999999902066
+                  ],
+                  [
+                    1.02,
+                    1.06
+                  ]
+                ]
+              },
+              {
+                "id": "prusa_mk4_2::link::bed",
+                "bounds": [
+                  [
+                    0.3399999999993144,
+                    0.6200000000006856
+                  ],
+                  [
+                    -0.6400000000007835,
+                    -0.35999999999941235
+                  ],
+                  [
+                    1.08,
+                    1.1
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "gear_small": {
+        "static": false,
+        "pose": [
+          0.4399991465592602,
+          -0.5799986340215403,
+          1.1099994222847962,
+          -7.510214678643277e-05,
+          -4.0553499451454874e-05,
+          8.587591129208125e-06,
+          0.9999999963206674
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0.4399991465592602,
+              -0.5799986340215403,
+              1.1099994222847962,
+              -7.510214678643277e-05,
+              -4.0553499451454874e-05,
+              8.587591129208125e-06,
+              0.9999999963206674
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "gear_small::link::collision",
+                "bounds": [
+                  [
+                    0.429059339763376,
+                    0.45093895411605983
+                  ],
+                  [
+                    -0.5909391225051074,
+                    -0.569058141055765
+                  ],
+                  [
+                    1.0999968928436366,
+                    1.1200019489044581
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "gear_medium": {
+        "static": false,
+        "pose": [
+          0.44004035942707015,
+          -0.49997048572219166,
+          1.1099992111245576,
+          -0.00015624595295081798,
+          -5.2399896970034656e-05,
+          0.0008417420086867809,
+          0.9999996321558543
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0.44004035942707015,
+              -0.49997048572219166,
+              1.1099992111245576,
+              -0.00015624595295081798,
+              -5.2399896970034656e-05,
+              0.0008417420086867809,
+              0.9999996321558543
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "gear_medium::link::collision",
+                "bounds": [
+                  [
+                    0.4190060332868137,
+                    0.46107468632552423
+                  ],
+                  [
+                    -0.5210068845766913,
+                    -0.47893408516770086
+                  ],
+                  [
+                    1.0999904537444574,
+                    1.12000796568332
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "gear_large": {
+        "static": false,
+        "pose": [
+          0.44067955525205804,
+          -0.4195164737424911,
+          1.1099991884862284,
+          -0.00020370253127154704,
+          -7.082581941741032e-05,
+          -0.0035077132619848405,
+          0.9999938246992598
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              0.44067955525205804,
+              -0.4195164737424911,
+              1.1099991884862284,
+              -0.00020370253127154704,
+              -7.082581941741032e-05,
+              -0.0035077132619848405,
+              0.9999938246992598
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "gear_large::link::collision",
+                "bounds": [
+                  [
+                    0.40946425643766027,
+                    0.4718948546760977
+                  ],
+                  [
+                    -0.4507344566594995,
+                    -0.3882984981721902
+                  ],
+                  [
+                    1.099982142079221,
+                    1.1200162320754314
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "KET4_Square_4mm": {
+        "static": false,
+        "pose": [
+          -6.250000132433092,
+          1.8800001127892931,
+          0.6450002141225138,
+          4.455799527608233e-05,
+          3.9871237796224286e-05,
+          0.7071779819216865,
+          0.7070355707530142
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.250000132433092,
+              1.8800001127892931,
+              0.6450002141225138,
+              4.455799527608233e-05,
+              3.9871237796224286e-05,
+              0.7071779819216865,
+              0.7070355707530142
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KET4_Square_4mm::link::collision",
+                "bounds": [
+                  [
+                    -6.252000535177092,
+                    -6.247993759607437
+                  ],
+                  [
+                    1.8779993792268839,
+                    1.8820005155490882
+                  ],
+                  [
+                    0.6449999620417182,
+                    0.6950004658457964
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "KET8_Square_8mm": {
+        "static": false,
+        "pose": [
+          -6.2500002689709255,
+          2.160000487474877,
+          0.6449908382511544,
+          1.3071959322878415e-05,
+          8.753073875549178e-06,
+          0.7064498530019213,
+          0.7077630994521199
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.2500002689709255,
+              2.160000487474877,
+              0.6449908382511544,
+              1.3071959322878415e-05,
+              8.753073875549178e-06,
+              0.7064498530019213,
+              0.7077630994521199
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KET8_Square_8mm::link::collision",
+                "bounds": [
+                  [
+                    -6.253507691774037,
+                    -6.24649130318917
+                  ],
+                  [
+                    2.1559936873139884,
+                    2.1640069808114966
+                  ],
+                  [
+                    0.6449907058862987,
+                    0.6949909705912609
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "KET12_Square_12mm": {
+        "static": false,
+        "pose": [
+          -6.249999574542558,
+          2.440000219547462,
+          0.6449906120479525,
+          2.4227951408432736e-05,
+          -6.934815935249293e-06,
+          0.7070601536926696,
+          0.7071534051569102
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.249999574542558,
+              2.440000219547462,
+              0.6449906120479525,
+              2.4227951408432736e-05,
+              -6.934815935249293e-06,
+              0.7070601536926696,
+              0.7071534051569102
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KET12_Square_12mm::link::collision",
+                "bounds": [
+                  [
+                    -6.254000365774723,
+                    -6.24599756064636
+                  ],
+                  [
+                    2.433997488476643,
+                    2.446000746997245
+                  ],
+                  [
+                    0.644990249796409,
+                    0.6949909742359875
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "KET16_Square_16mm": {
+        "static": false,
+        "pose": [
+          -6.249999228832437,
+          2.720000047403628,
+          0.6449997688535487,
+          1.7900454756133816e-06,
+          1.2994969488219967e-05,
+          0.7082639188542118,
+          0.7059477467045284
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.249999228832437,
+              2.720000047403628,
+              0.6449997688535487,
+              1.7900454756133816e-06,
+              1.2994969488219967e-05,
+              0.7082639188542118,
+              0.7059477467045284
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KET16_Square_16mm::link::collision",
+                "bounds": [
+                  [
+                    -6.25502540647079,
+                    -6.244972007034678
+                  ],
+                  [
+                    2.7119837125343205,
+                    2.72801717629188
+                  ],
+                  [
+                    0.644999537682966,
+                    0.6950000000069241
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "RGOCG4-50_Round_4mm": {
+        "static": false,
+        "pose": [
+          -6.0699999044007,
+          1.8799997321066952,
+          0.6450032869958343,
+          0.00018133713815325604,
+          -0.000802001382062577,
+          0.706926544872845,
+          0.7072864936252968
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.0699999044007,
+              1.8799997321066952,
+              0.6450032869958343,
+              0.00018133713815325604,
+              -0.000802001382062577,
+              0.706926544872845,
+              0.7072864936252968
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "RGOCG4-50_Round_4mm::link::collision",
+                "bounds": [
+                  [
+                    -6.0720448255098045,
+                    -6.067998888562483
+                  ],
+                  [
+                    1.8779291936531854,
+                    1.8820007492227435
+                  ],
+                  [
+                    0.6449987504536769,
+                    0.6950077559290542
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "RGOCG8-50_8mm": {
+        "static": false,
+        "pose": [
+          -6.070001907464776,
+          2.159991971629554,
+          0.644999198388012,
+          -0.00044753086168263526,
+          -0.000263718087365375,
+          0.7060397327015091,
+          0.7081720313706831
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.070001907464776,
+              2.159991971629554,
+              0.644999198388012,
+              -0.00044753086168263526,
+              -0.000263718087365375,
+              0.7060397327015091,
+              0.7081720313706831
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "RGOCG8-50_8mm::link::collision",
+                "bounds": [
+                  [
+                    -6.074064223099241,
+                    -6.06598986506467
+                  ],
+                  [
+                    2.15597992838699,
+                    2.164017088211269
+                  ],
+                  [
+                    0.6449941396593428,
+                    0.695004230133571
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "RGOCG12-50_12mm": {
+        "static": false,
+        "pose": [
+          -6.069999502159341,
+          2.439999754559391,
+          0.6450000264607739,
+          -0.00038441103124630646,
+          -0.00014192383623563878,
+          0.7070652506131135,
+          0.7071481905945872
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.069999502159341,
+              2.439999754559391,
+              0.6450000264607739,
+              -0.00038441103124630646,
+              -0.00014192383623563878,
+              0.7070652506131135,
+              0.7071481905945872
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "RGOCG12-50_12mm::link::collision",
+                "bounds": [
+                  [
+                    -6.076037421477307,
+                    -6.063998799327989
+                  ],
+                  [
+                    2.433999051950223,
+                    2.446017605783795
+                  ],
+                  [
+                    0.6449935029310598,
+                    0.6950065331990665
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "RGOCG16-50_16mm": {
+        "static": false,
+        "pose": [
+          -6.070000987881158,
+          2.720003919158003,
+          0.6449966962934429,
+          -0.00017817532307829072,
+          -0.0003534568261940674,
+          0.7073870943344026,
+          0.7068262460399707
+        ],
+        "links": {
+          "link": {
+            "pose": [
+              -6.070000987881158,
+              2.720003919158003,
+              0.6449966962934429,
+              -0.00017817532307829072,
+              -0.0003534568261940674,
+              0.7073870943344026,
+              0.7068262460399707
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "RGOCG16-50_16mm::link::collision",
+                "bounds": [
+                  [
+                    -6.078044916270858,
+                    -6.0619946466400245
+                  ],
+                  [
+                    2.711985168212311,
+                    2.728010260923445
+                  ],
+                  [
+                    0.6449887000785705,
+                    0.6950046768404979
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {}
+      },
+      "dual_robot": {
+        "static": false,
+        "pose": [
+          3.2526377049535427e-06,
+          -5.615116112966945e-06,
+          2.452043038525531e-05,
+          -3.418436467399783e-06,
+          -2.073390032396086e-06,
+          -2.168863488805073e-08,
+          0.9999999999920076
+        ],
+        "links": {
+          "ur5e_1_base_link": {
+            "pose": [
+              -4.050000017020815,
+              1.100000029977129,
+              0.8000002053848178,
+              -3.883306012322097e-06,
+              9.510985872932402e-07,
+              0.7071080645176694,
+              0.7071054978417938
+            ],
+            "linear_speed": 4.5007836854663804e-05,
+            "angular_speed": 0.0050960121901464876,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_base_link::ur5e_1_base_link_inertia_collision",
+                "bounds": [
+                  [
+                    -4.12547980712253,
+                    -3.9744912751947603
+                  ],
+                  [
+                    1.024521023415603,
+                    1.175500002100861
+                  ],
+                  [
+                    0.79999928050428,
+                    0.8990997467423075
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_shoulder_link": {
+            "pose": [
+              -4.0500015543694,
+              1.1000013775938104,
+              0.9625000452017607,
+              -2.2767997560793468e-05,
+              -6.642269480179078e-06,
+              -0.324575498495928,
+              -0.9458597915196622
+            ],
+            "linear_speed": 0.00027766901111623784,
+            "angular_speed": 0.0026244753719974053,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_shoulder_link::ur5e_1_shoulder_link_collision",
+                "bounds": [
+                  [
+                    -4.1343419924199045,
+                    -3.956889524633737
+                  ],
+                  [
+                    1.0043740105065306,
+                    1.1843376612051992
+                  ],
+                  [
+                    0.8985951040787084,
+                    1.034051040875768
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_upper_arm_link": {
+            "pose": [
+              -4.050001252428143,
+              1.100001271056297,
+              0.9624998471047912,
+              -0.30261953016645154,
+              -0.6391140811245286,
+              0.3186146786812128,
+              -0.6312204827150759
+            ],
+            "linear_speed": 0.00022392952933676514,
+            "angular_speed": 0.005269424085805191,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_upper_arm_link::ur5e_1_upper_arm_link_collision",
+                "bounds": [
+                  [
+                    -4.061665459304209,
+                    -3.864047975024785
+                  ],
+                  [
+                    0.8965320152732008,
+                    1.0968475950087915
+                  ],
+                  [
+                    0.9003830368533634,
+                    1.448447398454616
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_forearm_link": {
+            "pose": [
+              -4.041516291385727,
+              1.106552692540304,
+              1.3873645964665902,
+              -0.6715814392609885,
+              -0.22141310619959975,
+              -0.23757223331492403,
+              -0.6659684983547971
+            ],
+            "linear_speed": 0.0020410003235525245,
+            "angular_speed": 0.02621785832360228,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_forearm_link::ur5e_1_forearm_link_collision",
+                "bounds": [
+                  [
+                    -4.413129199592206,
+                    -3.957249545484488
+                  ],
+                  [
+                    0.793377361799738,
+                    1.182275054361612
+                  ],
+                  [
+                    1.3189148153243566,
+                    1.4465559926306326
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_wrist_1_link": {
+            "pose": [
+              -4.269143010681373,
+              0.7605966454003447,
+              1.3778650744137182,
+              -0.3102560247650227,
+              -0.6354428018169626,
+              0.3110276549874441,
+              -0.6349924744034575
+            ],
+            "linear_speed": 0.011029198864536635,
+            "angular_speed": 0.005218941757267065,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_wrist_1_link::ur5e_1_wrist_1_link_collision",
+                "bounds": [
+                  [
+                    -4.35664125123064,
+                    -4.200956045126386
+                  ],
+                  [
+                    0.6971846826626948,
+                    0.8532432638291851
+                  ],
+                  [
+                    1.3384327444655362,
+                    1.417282605306424
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_wrist_2_link": {
+            "pose": [
+              -4.347836350876156,
+              0.6993802342247317,
+              1.377990522410277,
+              -0.311034691652152,
+              -0.6345295416721981,
+              0.6359042627808126,
+              0.3102506243528163
+            ],
+            "linear_speed": 0.011077167514987479,
+            "angular_speed": 0.0051662503810009485,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_wrist_2_link::ur5e_1_wrist_2_link_collision",
+                "bounds": [
+                  [
+                    -4.402870595221486,
+                    -4.287271967241688
+                  ],
+                  [
+                    0.6441950281658531,
+                    0.7588805670732157
+                  ],
+                  [
+                    1.324712134553518,
+                    1.43484933126616
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_wrist_3_link": {
+            "pose": [
+              -4.347822300290286,
+              0.6991577041859104,
+              1.2783907528924114,
+              -6.814309912890707e-05,
+              -0.9999993720805503,
+              0.0011162647754946,
+              -7.174938306106298e-05
+            ],
+            "linear_speed": 0.010997572568019766,
+            "angular_speed": 0.005169796071686162,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_wrist_3_link::ur5e_1_wrist_3_link_collision",
+                "bounds": [
+                  [
+                    -4.385461479824461,
+                    -4.3103380110668885
+                  ],
+                  [
+                    0.6556352106082082,
+                    0.7373018468167574
+                  ],
+                  [
+                    1.2782408444149889,
+                    1.3242480158697836
+                  ]
+                ]
+              },
+              {
+                "id": "dual_robot::ur5e_1_wrist_3_link::ur5e_1_wrist_3_link_fixed_joint_lump__ur5e_1_rg2_onrobot_base_link_collision_1",
+                "bounds": [
+                  [
+                    -4.385555914859037,
+                    -4.310524696092502
+                  ],
+                  [
+                    0.6593949275895998,
+                    0.7350438400633159
+                  ],
+                  [
+                    1.1302587472810455,
+                    1.2784839679836226
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_rg2_left_outer_knuckle": {
+            "pose": [
+              -4.3306263823384965,
+              0.69887441147038,
+              1.1525964954912922,
+              0.6960459706814268,
+              -0.6958589987289879,
+              0.1258834872145433,
+              -0.12431254253994947
+            ],
+            "linear_speed": 0.0109774002328594,
+            "angular_speed": 0.005268162308621328,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_rg2_left_outer_knuckle::ur5e_1_rg2_left_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    -4.345841167969356,
+                    -4.273850548961885
+                  ],
+                  [
+                    0.6891707553305063,
+                    0.7093296874388003
+                  ],
+                  [
+                    1.1081731087300606,
+                    1.1813072237538569
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_rg2_left_inner_finger": {
+            "pose": [
+              -4.280217638453368,
+              0.6988185935102779,
+              1.1305972726240265,
+              0.7070594493755091,
+              -0.7071532235320506,
+              0.0008466688414255222,
+              0.0007325632429563613
+            ],
+            "linear_speed": 0.011113844561795646,
+            "angular_speed": 0.005266158071919136,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_rg2_left_inner_finger::ur5e_1_rg2_left_inner_finger_collision",
+                "bounds": [
+                  [
+                    -4.2991696847191285,
+                    -4.275209891374965
+                  ],
+                  [
+                    0.6889961518944254,
+                    0.7093283574999507
+                  ],
+                  [
+                    1.0777723930446688,
+                    1.1356194312116639
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_rg2_finger_width_mock_link": {
+            "pose": [
+              -4.347806640683127,
+              0.6989120213968677,
+              1.1683919137089644,
+              0.7070594692753951,
+              -0.707153204808851,
+              0.0008400553002049558,
+              0.0007390153317517762
+            ],
+            "linear_speed": 0.010058924246512065,
+            "angular_speed": 0.005165114001662889,
+            "collisions": []
+          },
+          "ur5e_1_rg2_left_inner_knuckle": {
+            "pose": [
+              -4.340123980239153,
+              0.6988388990591162,
+              1.1360951954359362,
+              0.6960085112029444,
+              -0.6958210549703506,
+              0.12609290330785994,
+              -0.12452225314538717
+            ],
+            "linear_speed": 0.010947200607929208,
+            "angular_speed": 0.005224591146050465,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_rg2_left_inner_knuckle::ur5e_1_rg2_left_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    -4.346555847245567,
+                    -4.28358742629089
+                  ],
+                  [
+                    0.6830396298550352,
+                    0.7153746565360461
+                  ],
+                  [
+                    1.0939407965394534,
+                    1.1562648667837756
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_rg2_right_inner_knuckle": {
+            "pose": [
+              -4.355479959980353,
+              0.6988410082015808,
+              1.1360929965308706,
+              -0.6960427173550316,
+              -0.6956646944548311,
+              0.12641440125295852,
+              0.12487821131785226
+            ],
+            "linear_speed": 0.010905776539629593,
+            "angular_speed": 0.005208889969404432,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_rg2_right_inner_knuckle::ur5e_1_rg2_right_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    -4.412040880650611,
+                    -4.349045115835821
+                  ],
+                  [
+                    0.6822523662796889,
+                    0.7145954659908753
+                  ],
+                  [
+                    1.0939504527355288,
+                    1.1563031236131855
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_rg2_right_outer_knuckle": {
+            "pose": [
+              -4.364982294464732,
+              0.6988791736356517,
+              1.152591594586438,
+              -0.6960812738524396,
+              -0.69570373107415,
+              0.12619935025104304,
+              0.12466315717840114
+            ],
+            "linear_speed": 0.010885375297708423,
+            "angular_speed": 0.005193452380123111,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_rg2_right_outer_knuckle::ur5e_1_rg2_right_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    -4.421782201126399,
+                    -4.349758473196745
+                  ],
+                  [
+                    0.6883846329733398,
+                    0.7085523210189097
+                  ],
+                  [
+                    1.1081745615167,
+                    1.181339304262832
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_1_rg2_right_inner_finger": {
+            "pose": [
+              -4.415412107308774,
+              0.6988372024179935,
+              1.130640613831696,
+              -0.7071559180451154,
+              -0.7070567542690919,
+              0.000850331833659508,
+              -0.0007285272814239568
+            ],
+            "linear_speed": 0.010739153951187921,
+            "angular_speed": 0.005197865452369334,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_1_rg2_right_inner_finger::ur5e_1_rg2_right_inner_finger_collision",
+                "bounds": [
+                  [
+                    -4.420420521418448,
+                    -4.396459934788648
+                  ],
+                  [
+                    0.6882205630228392,
+                    0.7085529282809456
+                  ],
+                  [
+                    1.077817307963606,
+                    1.1356645893458708
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_base_link": {
+            "pose": [
+              -2.0500000170208144,
+              1.100000029977129,
+              0.8000002053848178,
+              -3.883306012660076e-06,
+              9.510985872382719e-07,
+              0.7071080645176714,
+              0.7071054978417918
+            ],
+            "linear_speed": 4.5007836853383544e-05,
+            "angular_speed": 0.005096012189262994,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_base_link::ur5e_2_base_link_inertia_collision",
+                "bounds": [
+                  [
+                    -2.125479807122531,
+                    -1.9744912751947599
+                  ],
+                  [
+                    1.0245210234156021,
+                    1.175500002100861
+                  ],
+                  [
+                    0.79999928050428,
+                    0.8990997467423075
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_shoulder_link": {
+            "pose": [
+              -2.0500015543693992,
+              1.1000013775938122,
+              0.9625000452017606,
+              -2.2767997560065664e-05,
+              -6.642269479989029e-06,
+              -0.3245754984959328,
+              -0.9458597915196605
+            ],
+            "linear_speed": 0.00027766901105453145,
+            "angular_speed": 0.002624475370570264,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_shoulder_link::ur5e_2_shoulder_link_collision",
+                "bounds": [
+                  [
+                    -2.134341992419904,
+                    -1.9568895246337372
+                  ],
+                  [
+                    1.0043740105065317,
+                    1.1843376612052003
+                  ],
+                  [
+                    0.8985951040787084,
+                    1.0340510408757677
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_upper_arm_link": {
+            "pose": [
+              -2.050001252428145,
+              1.1000012710562972,
+              0.9624998471047885,
+              -0.3026195301664501,
+              -0.6391140811245283,
+              0.31861467868120774,
+              -0.6312204827150795
+            ],
+            "linear_speed": 0.00022392952935698345,
+            "angular_speed": 0.005269424083712958,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_upper_arm_link::ur5e_2_upper_arm_link_collision",
+                "bounds": [
+                  [
+                    -2.0616654593042103,
+                    -1.8640479750247896
+                  ],
+                  [
+                    0.8965320152732021,
+                    1.096847595008792
+                  ],
+                  [
+                    0.900383036853364,
+                    1.4484473984546153
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_forearm_link": {
+            "pose": [
+              -2.041516291385729,
+              1.1065526925403049,
+              1.3873645964665902,
+              -0.6715814392609871,
+              -0.22141310619960208,
+              -0.23757223331492816,
+              -0.6659684983547962
+            ],
+            "linear_speed": 0.002041000322589511,
+            "angular_speed": 0.02621785832348006,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_forearm_link::ur5e_2_forearm_link_collision",
+                "bounds": [
+                  [
+                    -2.413129199592208,
+                    -1.9572495454844911
+                  ],
+                  [
+                    0.793377361799736,
+                    1.1822750543616134
+                  ],
+                  [
+                    1.3189148153243562,
+                    1.446555992630633
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_wrist_1_link": {
+            "pose": [
+              -2.269143010681375,
+              0.7605966454003432,
+              1.3778650744137173,
+              -0.31025602476502345,
+              -0.6354428018169616,
+              0.31102765498743745,
+              -0.6349924744034615
+            ],
+            "linear_speed": 0.01102919886439277,
+            "angular_speed": 0.00521894175528006,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_wrist_1_link::ur5e_2_wrist_1_link_collision",
+                "bounds": [
+                  [
+                    -2.3566412512306436,
+                    -2.2009560451263908
+                  ],
+                  [
+                    0.6971846826626947,
+                    0.8532432638291848
+                  ],
+                  [
+                    1.3384327444655382,
+                    1.4172826053064247
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_wrist_2_link": {
+            "pose": [
+              -2.3478363508761557,
+              0.6993802342247314,
+              1.3779905224102724,
+              -0.3110346916521577,
+              -0.6345295416722001,
+              0.6359042627808134,
+              0.31025062435280465
+            ],
+            "linear_speed": 0.011077167514620689,
+            "angular_speed": 0.005166250378189261,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_wrist_2_link::ur5e_2_wrist_2_link_collision",
+                "bounds": [
+                  [
+                    -2.4028705952214873,
+                    -2.2872719672416864
+                  ],
+                  [
+                    0.6441950281658508,
+                    0.7588805670732146
+                  ],
+                  [
+                    1.324712134553515,
+                    1.434849331266158
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_wrist_3_link": {
+            "pose": [
+              -2.347822300290286,
+              0.6991577041859084,
+              1.2783907528924077,
+              -6.814309912408234e-05,
+              -0.9999993720805505,
+              0.0011162647754989674,
+              -7.174938307287421e-05
+            ],
+            "linear_speed": 0.010997572567979202,
+            "angular_speed": 0.005169796068943365,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_wrist_3_link::ur5e_2_wrist_3_link_collision",
+                "bounds": [
+                  [
+                    -2.3854614798244613,
+                    -2.3103380110668876
+                  ],
+                  [
+                    0.6556352106082061,
+                    0.737301846816755
+                  ],
+                  [
+                    1.2782408444149846,
+                    1.324248015869782
+                  ]
+                ]
+              },
+              {
+                "id": "dual_robot::ur5e_2_wrist_3_link::ur5e_2_wrist_3_link_fixed_joint_lump__ur5e_2_rg2_onrobot_base_link_collision_1",
+                "bounds": [
+                  [
+                    -2.385555914859035,
+                    -2.3105246960924966
+                  ],
+                  [
+                    0.6593949275895964,
+                    0.7350438400633131
+                  ],
+                  [
+                    1.1302587472810413,
+                    1.278483967983621
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_rg2_left_outer_knuckle": {
+            "pose": [
+              -2.330626382338491,
+              0.6988744114703772,
+              1.1525964954912877,
+              0.6960459706814337,
+              -0.6958589987289865,
+              0.12588348721453085,
+              -0.1243125425399321
+            ],
+            "linear_speed": 0.010977400232699436,
+            "angular_speed": 0.005268162305891967,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_rg2_left_outer_knuckle::ur5e_2_rg2_left_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    -2.345841167969349,
+                    -2.2738505489618803
+                  ],
+                  [
+                    0.689170755330505,
+                    0.7093296874388001
+                  ],
+                  [
+                    1.108173108730057,
+                    1.181307223753852
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_rg2_left_inner_finger": {
+            "pose": [
+              -2.280217638453367,
+              0.6988185935102749,
+              1.1305972726240205,
+              0.7070594493755123,
+              -0.7071532235320469,
+              0.0008466688414305647,
+              0.0007325632429576788
+            ],
+            "linear_speed": 0.011113844561675242,
+            "angular_speed": 0.005266158069195426,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_rg2_left_inner_finger::ur5e_2_rg2_left_inner_finger_collision",
+                "bounds": [
+                  [
+                    -2.299169684719127,
+                    -2.2752098913749648
+                  ],
+                  [
+                    0.688996151894424,
+                    0.7093283574999495
+                  ],
+                  [
+                    1.0777723930446639,
+                    1.135619431211659
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_rg2_finger_width_mock_link": {
+            "pose": [
+              -2.347806640683125,
+              0.6989120213968647,
+              1.1683919137089607,
+              0.7070594692753982,
+              -0.707153204808848,
+              0.000840055300216426,
+              0.0007390153317466866
+            ],
+            "linear_speed": 0.01005892424642275,
+            "angular_speed": 0.0051651139989859676,
+            "collisions": []
+          },
+          "ur5e_2_rg2_left_inner_knuckle": {
+            "pose": [
+              -2.34012398023915,
+              0.6988388990591129,
+              1.136095195435932,
+              0.696008511202948,
+              -0.695821054970347,
+              0.1260929033078625,
+              -0.1245222531453849
+            ],
+            "linear_speed": 0.010947200607762626,
+            "angular_speed": 0.005224591143250503,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_rg2_left_inner_knuckle::ur5e_2_rg2_left_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    -2.346555847245565,
+                    -2.283587426290888
+                  ],
+                  [
+                    0.6830396298550331,
+                    0.7153746565360447
+                  ],
+                  [
+                    1.0939407965394514,
+                    1.156264866783774
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_rg2_right_inner_knuckle": {
+            "pose": [
+              -2.35547995998035,
+              0.6988410082015767,
+              1.1360929965308662,
+              -0.6960427173550165,
+              -0.6956646944548209,
+              0.1264144012530321,
+              0.12487821131791832
+            ],
+            "linear_speed": 0.010905776539656941,
+            "angular_speed": 0.005208889966755908,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_rg2_right_inner_knuckle::ur5e_2_rg2_right_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    -2.4120408806506135,
+                    -2.349045115835818
+                  ],
+                  [
+                    0.6822523662796818,
+                    0.7145954659908684
+                  ],
+                  [
+                    1.0939504527355286,
+                    1.1563031236131915
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_rg2_right_outer_knuckle": {
+            "pose": [
+              -2.3649822944647294,
+              0.6988791736356478,
+              1.152591594586434,
+              -0.69608127385244,
+              -0.6957037310741561,
+              0.12619935025102758,
+              0.12466315717837863
+            ],
+            "linear_speed": 0.010885375297836484,
+            "angular_speed": 0.00519345237731506,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_rg2_right_outer_knuckle::ur5e_2_rg2_right_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    -2.4217822011263954,
+                    -2.3497584731967422
+                  ],
+                  [
+                    0.6883846329733326,
+                    0.7085523210189028
+                  ],
+                  [
+                    1.1081745615166978,
+                    1.181339304262828
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_2_rg2_right_inner_finger": {
+            "pose": [
+              -2.415412107308773,
+              0.6988372024179893,
+              1.1306406138316891,
+              -0.7071559180451121,
+              -0.7070567542690951,
+              0.0008503318336253267,
+              -0.0007285272814637854
+            ],
+            "linear_speed": 0.010739153951647642,
+            "angular_speed": 0.005197865449459119,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_2_rg2_right_inner_finger::ur5e_2_rg2_right_inner_finger_collision",
+                "bounds": [
+                  [
+                    -2.4204205214184413,
+                    -2.396459934788647
+                  ],
+                  [
+                    0.6882205630228334,
+                    0.7085529282809401
+                  ],
+                  [
+                    1.0778173079636009,
+                    1.1356645893458635
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_base_link": {
+            "pose": [
+              -1.3785965065763928e-08,
+              0.49999999700582465,
+              1.0210000264495376,
+              8.428610485308244e-06,
+              5.9943702046894015e-06,
+              -0.9999999796802794,
+              0.00020132676662104355
+            ],
+            "linear_speed": 7.285858369274555e-14,
+            "angular_speed": 5.65566336145922e-13,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_base_link::ur5e_3_base_link_inertia_collision",
+                "bounds": [
+                  [
+                    -0.0755311022198358,
+                    0.07550910460752236
+                  ],
+                  [
+                    0.4244893096708665,
+                    0.5755388505036422
+                  ],
+                  [
+                    1.020997753211625,
+                    1.1201009161731896
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_shoulder_link": {
+            "pose": [
+              -2.6954392926190323e-06,
+              0.49999746564303854,
+              1.1834998669311556,
+              1.0155923412904142e-05,
+              1.651214970343153e-05,
+              0.8984185566788035,
+              0.4391401788032856
+            ],
+            "linear_speed": 2.5678601365830896e-13,
+            "angular_speed": 0.0001531852076154096,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_shoulder_link::ur5e_3_shoulder_link_collision",
+                "bounds": [
+                  [
+                    -0.08434266948235497,
+                    0.09562491447838928
+                  ],
+                  [
+                    0.4156533692665514,
+                    0.5931174802480388
+                  ],
+                  [
+                    1.1195954879401437,
+                    1.2550504261813074
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_upper_arm_link": {
+            "pose": [
+              -2.4891018699513268e-06,
+              0.499997616774653,
+              1.1834996704984078,
+              -0.2380664366630025,
+              0.6658571291176558,
+              0.22117603425094068,
+              0.6715949800369273
+            ],
+            "linear_speed": 3.890855905574854e-11,
+            "angular_speed": 0.00016493739771661868,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_upper_arm_link::ur5e_3_upper_arm_link_collision",
+                "bounds": [
+                  [
+                    0.003110984146216897,
+                    0.20343610030026055
+                  ],
+                  [
+                    0.4883666862424799,
+                    0.685996347303473
+                  ],
+                  [
+                    1.1213844284679055,
+                    1.6694478146292884
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_forearm_link": {
+            "pose": [
+              -0.006560480786074213,
+              0.5084786621395765,
+              1.6083643988531608,
+              0.31819304161554524,
+              0.6315018129461221,
+              0.6389609058317706,
+              0.30279961910783904
+            ],
+            "linear_speed": 2.6125848123277806e-05,
+            "angular_speed": 0.02693156383887013,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_forearm_link::ur5e_3_forearm_link_collision",
+                "bounds": [
+                  [
+                    -0.08228894507019485,
+                    0.30673240340054825
+                  ],
+                  [
+                    0.1369533720566909,
+                    0.5927499096501945
+                  ],
+                  [
+                    1.5399155727795144,
+                    1.6675553334388014
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_wrist_1_link": {
+            "pose": [
+              0.33948386213173865,
+              0.28098613362290575,
+              1.5988663865281667,
+              -0.23007031175466625,
+              0.6686627864342651,
+              0.22920846785719723,
+              0.668895513476979
+            ],
+            "linear_speed": 0.010560875392893077,
+            "angular_speed": 0.0017032905154760005,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_wrist_1_link::ur5e_3_wrist_1_link_collision",
+                "bounds": [
+                  [
+                    0.2468372736369963,
+                    0.40290328399530145
+                  ],
+                  [
+                    0.19347837011918562,
+                    0.34917128970661987
+                  ],
+                  [
+                    1.5594343964903645,
+                    1.6382832932924813
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_wrist_2_link": {
+            "pose": [
+              0.40073083834025014,
+              0.20231657173184286,
+              1.598991799431099,
+              -0.22886873862812732,
+              0.6685728230977708,
+              -0.6689855816061357,
+              0.23040783905272677
+            ],
+            "linear_speed": 0.010730060467394689,
+            "angular_speed": 0.0018155177321713878,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_wrist_2_link::ur5e_3_wrist_2_link_collision",
+                "bounds": [
+                  [
+                    0.3412249406335297,
+                    0.4559194131491213
+                  ],
+                  [
+                    0.14727887376150975,
+                    0.26288269298732503
+                  ],
+                  [
+                    1.5457126894884257,
+                    1.6558513329903997
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_wrist_3_link": {
+            "pose": [
+              0.4009548234365734,
+              0.20233189777376945,
+              1.4993920343253793,
+              0.7070136839185633,
+              0.7071989693800983,
+              0.000849598080448039,
+              0.0007393529133963692
+            ],
+            "linear_speed": 0.010734519242895044,
+            "angular_speed": 0.001808765865412146,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_wrist_3_link::ur5e_3_wrist_3_link_collision",
+                "bounds": [
+                  [
+                    0.35732505342788273,
+                    0.43900148609268425
+                  ],
+                  [
+                    0.1648342656461203,
+                    0.23996854927937028
+                  ],
+                  [
+                    1.499229126632499,
+                    1.5452377888122422
+                  ]
+                ]
+              },
+              {
+                "id": "dual_robot::ur5e_3_wrist_3_link::ur5e_3_wrist_3_link_fixed_joint_lump__ur5e_3_rg2_onrobot_base_link_collision_1",
+                "bounds": [
+                  [
+                    0.36151747519859867,
+                    0.4371785453707081
+                  ],
+                  [
+                    0.16504981151977272,
+                    0.2400929295638175
+                  ],
+                  [
+                    1.3512511602535424,
+                    1.499478373971118
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_rg2_left_outer_knuckle": {
+            "pose": [
+              0.40124210469877036,
+              0.18517343191324975,
+              1.3735926711222854,
+              6.957848042699272e-05,
+              0.9840031269874924,
+              -0.1781475937530059,
+              0.0011296360858037038
+            ],
+            "linear_speed": 0.010774043289486944,
+            "angular_speed": 0.0016591368205324218,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_rg2_left_outer_knuckle::ur5e_3_rg2_left_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    0.39158329917887236,
+                    0.41173926764862456
+                  ],
+                  [
+                    0.12833381032477534,
+                    0.2004131093463601
+                  ],
+                  [
+                    1.3291829786391263,
+                    1.40239739445211
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_rg2_left_inner_finger": {
+            "pose": [
+              0.4013046659532598,
+              0.13470977496744246,
+              1.3517197602551705,
+              -0.00013253361753914425,
+              0.9999993361954423,
+              -0.00021613554544108144,
+              0.0011239790660530849
+            ],
+            "linear_speed": 0.010855022282287524,
+            "angular_speed": 0.0016617134058633332,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_rg2_left_inner_finger::ur5e_3_rg2_left_inner_finger_collision",
+                "bounds": [
+                  [
+                    0.3915845528026384,
+                    0.4119207675649418
+                  ],
+                  [
+                    0.12968655010853902,
+                    0.15366467151279317
+                  ],
+                  [
+                    1.2988913784809462,
+                    1.356745194894491
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_rg2_finger_width_mock_link": {
+            "pose": [
+              0.40120209853157834,
+              0.20234896719987297,
+              1.3893932309502213,
+              -0.0001328289204966115,
+              0.9999993566577862,
+              7.76332547550812e-05,
+              0.001123838764892013
+            ],
+            "linear_speed": 0.009827043705989984,
+            "angular_speed": 0.001808765860696151,
+            "collisions": []
+          },
+          "ur5e_3_rg2_left_inner_knuckle": {
+            "pose": [
+              0.40127666209338764,
+              0.19467603964324762,
+              1.3570941922764757,
+              6.934852097281433e-05,
+              0.9840406506181577,
+              -0.1779402072397988,
+              0.001129499549767948
+            ],
+            "linear_speed": 0.010759344967379582,
+            "angular_speed": 0.0017023758451543672,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_rg2_left_inner_knuckle::ur5e_3_rg2_left_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    0.3855379786282799,
+                    0.41787012646266153
+                  ],
+                  [
+                    0.13810066936416762,
+                    0.20111454995748565
+                  ],
+                  [
+                    1.3149566935483545,
+                    1.3773247300931606
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_rg2_right_inner_knuckle": {
+            "pose": [
+              0.40127261849614454,
+              0.21003205823950313,
+              1.3570965751161268,
+              0.9841423052409362,
+              0.00032634807291804195,
+              0.0010830394404653463,
+              -0.17737712241876574
+            ],
+            "linear_speed": 0.010732908519337232,
+            "angular_speed": 0.0017255666693477005,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_rg2_right_inner_knuckle::ur5e_3_rg2_right_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    0.3847210009872961,
+                    0.4170684419724514
+                  ],
+                  [
+                    0.20359702738321508,
+                    0.2665788631660526
+                  ],
+                  [
+                    1.3149454139805647,
+                    1.3772798235421333
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_rg2_right_outer_knuckle": {
+            "pose": [
+              0.4012330181139625,
+              0.21952952141701695,
+              1.3735980155031993,
+              0.9840113024970788,
+              0.0003271429422819393,
+              0.001082725517836004,
+              -0.17810243468563586
+            ],
+            "linear_speed": 0.010714887803788355,
+            "angular_speed": 0.0017572825415378495,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_rg2_right_outer_knuckle::ur5e_3_rg2_right_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    0.3907627734727543,
+                    0.41093537906936545
+                  ],
+                  [
+                    0.2042907716409558,
+                    0.27636679781201284
+                  ],
+                  [
+                    1.3291860980749255,
+                    1.40239755973055
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_3_rg2_right_inner_finger": {
+            "pose": [
+              0.40126918101515907,
+              0.2699911657350961,
+              1.351720412793412,
+              0.9999992321537751,
+              0.00012962713159946754,
+              0.0011236551940080298,
+              -0.0005062486265804625
+            ],
+            "linear_speed": 0.010632917932567426,
+            "angular_speed": 0.0017373758728681057,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_3_rg2_right_inner_finger::ur5e_3_rg2_right_inner_finger_collision",
+                "bounds": [
+                  [
+                    0.39076055690131023,
+                    0.411096623047054
+                  ],
+                  [
+                    0.25103345126315324,
+                    0.2750449825051231
+                  ],
+                  [
+                    1.2988792929601611,
+                    1.356746956964532
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_base_link": {
+            "pose": [
+              -9.318734209415645e-09,
+              -0.5000000106696234,
+              1.0210000264018908,
+              9.830947685444305e-06,
+              -3.191580305199391e-06,
+              -2.6118426212520883e-11,
+              0.9999999999465832
+            ],
+            "linear_speed": 1.0762198585414363e-13,
+            "angular_speed": 5.909578369926889e-13,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_base_link::ur5e_4_base_link_inertia_collision",
+                "bounds": [
+                  [
+                    -0.07547937446689354,
+                    0.07549901119800506
+                  ],
+                  [
+                    -0.5755104269852895,
+                    -0.4245209055587153
+                  ],
+                  [
+                    1.0209979642606033,
+                    1.1201007045712448
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_shoulder_link": {
+            "pose": [
+              -6.500404581571582e-07,
+              -0.5000036341018499,
+              1.1834998671060926,
+              4.367858846567426e-06,
+              1.8695514427756825e-05,
+              0.9908569828502289,
+              0.13491641548877872
+            ],
+            "linear_speed": 2.7474361975743916e-13,
+            "angular_speed": 0.0001531687605852452,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_shoulder_link::ur5e_4_shoulder_link_collision",
+                "bounds": [
+                  [
+                    -0.0739720885011226,
+                    0.07780256252105851
+                  ],
+                  [
+                    -0.57398875275264,
+                    -0.41224372352736394
+                  ],
+                  [
+                    1.1195955231368522,
+                    1.2550503965063655
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_upper_arm_link": {
+            "pose": [
+              -5.798591244214613e-07,
+              -0.5000034061651248,
+              1.1834996709468921,
+              -0.4350541051072346,
+              0.5574666519914747,
+              0.4208188966493841,
+              0.5682167841322132
+            ],
+            "linear_speed": 3.624650490679419e-11,
+            "angular_speed": 0.00016492230233834302,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_upper_arm_link::ur5e_4_upper_arm_link_collision",
+                "bounds": [
+                  [
+                    -0.05356530367329114,
+                    0.11546897038768673
+                  ],
+                  [
+                    -0.4584727249541303,
+                    -0.2784075334524514
+                  ],
+                  [
+                    1.121384518645874,
+                    1.6694478354687112
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_forearm_link": {
+            "pose": [
+              -0.010321579289532062,
+              -0.49710317775766777,
+              1.6083644003183146,
+              0.10387181306260865,
+              0.6994653643362354,
+              0.7017154988441795,
+              0.08691495398910593
+            ],
+            "linear_speed": 2.6126039030271226e-05,
+            "angular_speed": 0.026931588307286307,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_forearm_link::ur5e_4_forearm_link_collision",
+                "bounds": [
+                  [
+                    -0.08111236273891873,
+                    0.42244331262299384
+                  ],
+                  [
+                    -0.6603509185518723,
+                    -0.42288623330063974
+                  ],
+                  [
+                    1.5399155509858908,
+                    1.6675553212426162
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_wrist_1_link": {
+            "pose": [
+              0.40312949334794296,
+              -0.4734865009002019,
+              1.5988663986824032,
+              -0.4283429298818587,
+              0.5626405604436536,
+              0.42759788570507795,
+              0.5631322955615524
+            ],
+            "linear_speed": 0.010560885029066339,
+            "angular_speed": 0.0017030932530148174,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_wrist_1_link::ur5e_4_wrist_1_link_collision",
+                "bounds": [
+                  [
+                    0.329172100911881,
+                    0.4651379608382116
+                  ],
+                  [
+                    -0.5587035149034816,
+                    -0.4212059958042676
+                  ],
+                  [
+                    1.559434424795466,
+                    1.6382832750274887
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_wrist_2_link": {
+            "pose": [
+              0.49919994124253203,
+              -0.5001427969547723,
+              1.5989918117378183,
+              -0.4271738753866307,
+              0.5629325010572683,
+              -0.5628411556004268,
+              0.4287648691333658
+            ],
+            "linear_speed": 0.010730050461805748,
+            "angular_speed": 0.0018151988823561604,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_wrist_2_link::ur5e_4_wrist_2_link_collision",
+                "bounds": [
+                  [
+                    0.44414706269774074,
+                    0.547490923229812
+                  ],
+                  [
+                    -0.5485994131857337,
+                    -0.44982084004175416
+                  ],
+                  [
+                    1.545712693331292,
+                    1.655851353776261
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_wrist_3_link": {
+            "pose": [
+              0.4993706501346611,
+              -0.4999969566998796,
+              1.499392046743423,
+              0.44927595686508126,
+              0.8933923247606015,
+              0.0010388448324407575,
+              0.00043525076433379415
+            ],
+            "linear_speed": 0.01073450875268364,
+            "angular_speed": 0.0018084472853627687,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_wrist_3_link::ur5e_4_wrist_3_link_collision",
+                "bounds": [
+                  [
+                    0.44192169417154803,
+                    0.5522539663887096
+                  ],
+                  [
+                    -0.5561000275620295,
+                    -0.44711031616733476
+                  ],
+                  [
+                    1.4992291271375966,
+                    1.545237812312282
+                  ]
+                ]
+              },
+              {
+                "id": "dual_robot::ur5e_4_wrist_3_link::ur5e_4_wrist_3_link_fixed_joint_lump__ur5e_4_rg2_onrobot_base_link_collision_1",
+                "bounds": [
+                  [
+                    0.4452224281658187,
+                    0.5506531084974513
+                  ],
+                  [
+                    -0.5534277388415247,
+                    -0.4480972058536221
+                  ],
+                  [
+                    1.3512511614650247,
+                    1.4994783971736687
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_rg2_left_outer_knuckle": {
+            "pose": [
+              0.5098293313492058,
+              -0.5136025012150907,
+              1.3735926811477677,
+              -0.3088380872673466,
+              0.9343215822281598,
+              -0.16858623288218796,
+              0.05692889352787168
+            ],
+            "linear_speed": 0.01077402393584743,
+            "angular_speed": 0.0016601213766435597,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_rg2_left_outer_knuckle::ur5e_4_rg2_left_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    0.4930194622269759,
+                    0.5521057133417504
+                  ],
+                  [
+                    -0.5649136678701869,
+                    -0.49518744698975087
+                  ],
+                  [
+                    1.32918088812825,
+                    1.4023815497156589
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_rg2_left_inner_finger": {
+            "pose": [
+              0.5399549215891901,
+              -0.5540757034431038,
+              1.3516979894678107,
+              -0.3140393605752917,
+              0.9494092987324271,
+              0.0003470762035580575,
+              0.0010691248627496082
+            ],
+            "linear_speed": 0.010855040491797955,
+            "angular_speed": 0.0016626632212374216,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_rg2_left_inner_finger::ur5e_4_rg2_left_inner_finger_collision",
+                "bounds": [
+                  [
+                    0.5208560652781944,
+                    0.5514566537712691
+                  ],
+                  [
+                    -0.5638808701731716,
+                    -0.532534357010037
+                  ],
+                  [
+                    1.2988775622104258,
+                    1.3567213266774476
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_rg2_finger_width_mock_link": {
+            "pose": [
+              0.499559021243731,
+              -0.49983582887396855,
+              1.3893932434015235,
+              -0.3140394157829257,
+              0.9494092774463573,
+              0.00042659200540636985,
+              0.0010427141341408516
+            ],
+            "linear_speed": 0.009827041202462557,
+            "angular_speed": 0.001808447280731835,
+            "collisions": []
+          },
+          "ur5e_4_rg2_left_inner_knuckle": {
+            "pose": [
+              0.50419265629504,
+              -0.5059520971427787,
+              1.357094203689801,
+              -0.3088465110679949,
+              0.9343465522032802,
+              -0.1684478510111541,
+              0.056882989343861684
+            ],
+            "linear_speed": 0.010759328934796624,
+            "angular_speed": 0.0017029820901936852,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_rg2_left_inner_knuckle::ur5e_4_rg2_left_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    0.4877448024719335,
+                    0.5512090016502089
+                  ],
+                  [
+                    -0.5606899547701368,
+                    -0.49095501586698076
+                  ],
+                  [
+                    1.3149535161677999,
+                    1.3773125661906522
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_rg2_right_inner_knuckle": {
+            "pose": [
+              0.4950358196787393,
+              -0.4936249051764343,
+              1.357096588751328,
+              0.9342728994756253,
+              0.30923890648692304,
+              -0.05468956949861706,
+              -0.16886236705742358
+            ],
+            "linear_speed": 0.010732898505005918,
+            "angular_speed": 0.0017259744839951364,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_rg2_right_inner_knuckle::ur5e_4_rg2_right_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    0.4481184068362037,
+                    0.5114720573496268
+                  ],
+                  [
+                    -0.5086283739390971,
+                    -0.4388321931957309
+                  ],
+                  [
+                    1.3149478949743418,
+                    1.3772893175485157
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_rg2_right_outer_knuckle": {
+            "pose": [
+              0.48934266742675747,
+              -0.48602284346253455,
+              1.3735980304447422,
+              0.9341559907806215,
+              0.30920103792909964,
+              -0.054903316599648415,
+              -0.16950790205356744
+            ],
+            "linear_speed": 0.010714881919033673,
+            "angular_speed": 0.0017574113498686752,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_rg2_right_outer_knuckle::ur5e_4_rg2_right_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    0.44714937890368334,
+                    0.5061215165703664
+                  ],
+                  [
+                    -0.5044665541589887,
+                    -0.43463488605468564
+                  ],
+                  [
+                    1.3291868243174048,
+                    1.4024029513372056
+                  ]
+                ]
+              }
+            ]
+          },
+          "ur5e_4_rg2_right_inner_finger": {
+            "pose": [
+              0.45929003445629146,
+              -0.44548223146696414,
+              1.3517278131364945,
+              0.9494100743734805,
+              0.3140364276940348,
+              0.0008759706217868068,
+              -0.0009302874726269389
+            ],
+            "linear_speed": 0.010632902153511814,
+            "angular_speed": 0.0017377333805539527,
+            "collisions": [
+              {
+                "id": "dual_robot::ur5e_4_rg2_right_inner_finger::ur5e_4_rg2_right_inner_finger_collision",
+                "bounds": [
+                  [
+                    0.4478785571823324,
+                    0.4784367652460211
+                  ],
+                  [
+                    -0.4669648892531812,
+                    -0.4355614497473926
+                  ],
+                  [
+                    1.2988828365401528,
+                    1.3567553776222876
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {
+          "ur5e_1_shoulder_pan_joint": {
+            "position": 2.2319211389411837,
+            "velocity": 9.364425139495547e-05
+          },
+          "ur5e_1_shoulder_lift_joint": {
+            "position": -1.5960241804405955,
+            "velocity": -0.0007002973842634642
+          },
+          "ur5e_1_elbow_joint": {
+            "position": 1.620214222315984,
+            "velocity": 0.026369602339968868
+          },
+          "ur5e_1_wrist_1_joint": {
+            "position": -1.5962486713452602,
+            "velocity": -0.02517822450954521
+          },
+          "ur5e_1_wrist_2_joint": {
+            "position": -1.5688534193032218,
+            "velocity": 4.979292768985625e-05
+          },
+          "ur5e_1_wrist_3_joint": {
+            "position": -0.9095364735390438,
+            "velocity": 8.785061067376478e-05
+          },
+          "ur5e_1_rg2_finger_joint": {
+            "position": -0.3555595993383524,
+            "velocity": 0.00011653143703175758
+          },
+          "ur5e_1_rg2_left_inner_finger_joint": {
+            "position": -0.355541724277632,
+            "velocity": 1.0221469915481021e-07
+          },
+          "ur5e_1_rg2_finger_width": {
+            "position": 0.10999911466443126,
+            "velocity": -0.0008853340414866195
+          },
+          "ur5e_1_rg2_left_inner_knuckle_joint": {
+            "position": 0.35616185028799574,
+            "velocity": -6.619807630659467e-05
+          },
+          "ur5e_1_rg2_right_inner_knuckle_joint": {
+            "position": 0.3574223662621332,
+            "velocity": 4.689198755856343e-05
+          },
+          "ur5e_1_rg2_right_outer_knuckle_joint": {
+            "position": 0.3568042864232881,
+            "velocity": 2.9468368254832386e-05
+          },
+          "ur5e_1_rg2_right_inner_finger_joint": {
+            "position": -0.35648852581447577,
+            "velocity": -1.618081727971718e-07
+          },
+          "ur5e_2_shoulder_pan_joint": {
+            "position": 2.231921138941189,
+            "velocity": 9.364425335888358e-05
+          },
+          "ur5e_2_shoulder_lift_joint": {
+            "position": -1.5960241804405884,
+            "velocity": -0.000700297384135934
+          },
+          "ur5e_2_elbow_joint": {
+            "position": 1.6202142223159788,
+            "velocity": 0.026369602340145862
+          },
+          "ur5e_2_wrist_1_joint": {
+            "position": -1.5962486713452504,
+            "velocity": -0.025178224507524292
+          },
+          "ur5e_2_wrist_2_joint": {
+            "position": -1.5688534193032022,
+            "velocity": 4.9792928513019835e-05
+          },
+          "ur5e_2_wrist_3_joint": {
+            "position": -0.9095364735390447,
+            "velocity": 8.785061149555217e-05
+          },
+          "ur5e_2_rg2_finger_joint": {
+            "position": -0.3555595993382858,
+            "velocity": 0.00011653143705254044
+          },
+          "ur5e_2_rg2_left_inner_finger_joint": {
+            "position": -0.355541724277584,
+            "velocity": 1.0221470033008537e-07
+          },
+          "ur5e_2_rg2_finger_width": {
+            "position": 0.10999911466443131,
+            "velocity": -0.0008853340415965714
+          },
+          "ur5e_2_rg2_left_inner_knuckle_joint": {
+            "position": 0.35616185028797265,
+            "velocity": -6.619807631759542e-05
+          },
+          "ur5e_2_rg2_right_inner_knuckle_joint": {
+            "position": 0.3574223662623579,
+            "velocity": 4.689198756670709e-05
+          },
+          "ur5e_2_rg2_right_outer_knuckle_joint": {
+            "position": 0.356804286423257,
+            "velocity": 2.9468368259520043e-05
+          },
+          "ur5e_2_rg2_right_inner_finger_joint": {
+            "position": -0.3564885258145273,
+            "velocity": -1.618081697366859e-07
+          },
+          "ur5e_3_shoulder_pan_joint": {
+            "position": 2.231909832385165,
+            "velocity": -0.000153185207615464
+          },
+          "ur5e_3_shoulder_lift_joint": {
+            "position": -1.5960279186150836,
+            "velocity": 6.113764426688956e-05
+          },
+          "ur5e_3_elbow_joint": {
+            "position": 1.620215342759706,
+            "velocity": 0.026869983781032867
+          },
+          "ur5e_3_wrist_1_joint": {
+            "position": -1.5962471510283964,
+            "velocity": -0.025234735809670044
+          },
+          "ur5e_3_wrist_2_joint": {
+            "position": -1.5688427224586243,
+            "velocity": 0.0006286206872840759
+          },
+          "ur5e_3_wrist_3_joint": {
+            "position": 2.2320455442763256,
+            "velocity": -0.00015416704359750012
+          },
+          "ur5e_3_rg2_finger_joint": {
+            "position": -0.3583633577258393,
+            "velocity": -0.0001576544010161436
+          },
+          "ur5e_3_rg2_left_inner_finger_joint": {
+            "position": -0.35777518009372883,
+            "velocity": -2.728075084769367e-06
+          },
+          "ur5e_3_rg2_finger_width": {
+            "position": 0.10999908263390903,
+            "velocity": -0.0009173658181777199
+          },
+          "ur5e_3_rg2_left_inner_knuckle_joint": {
+            "position": 0.35794184977763166,
+            "velocity": 0.0001119391345187808
+          },
+          "ur5e_3_rg2_right_inner_knuckle_joint": {
+            "position": 0.35648565380841823,
+            "velocity": -8.747585268346837e-05
+          },
+          "ur5e_3_rg2_right_outer_knuckle_joint": {
+            "position": 0.35795975062054985,
+            "velocity": -5.407816324909539e-05
+          },
+          "ur5e_3_rg2_right_inner_finger_joint": {
+            "position": -0.35710316722991703,
+            "velocity": -2.0954514130692775e-05
+          },
+          "ur5e_4_shoulder_pan_joint": {
+            "position": -0.2706555652400784,
+            "velocity": -0.00015316876058530442
+          },
+          "ur5e_4_shoulder_lift_joint": {
+            "position": -1.5960277005979522,
+            "velocity": 6.113813596747133e-05
+          },
+          "ur5e_4_elbow_joint": {
+            "position": 1.620215370809059,
+            "velocity": 0.026870007859002964
+          },
+          "ur5e_4_wrist_1_joint": {
+            "position": -1.5962472556523348,
+            "velocity": -0.025234956962999315
+          },
+          "ur5e_4_wrist_2_joint": {
+            "position": -1.5688429128712995,
+            "velocity": 0.0006282339473091691
+          },
+          "ur5e_4_wrist_3_joint": {
+            "position": 2.2320459445044465,
+            "velocity": -0.00015416178800815644
+          },
+          "ur5e_4_rg2_finger_joint": {
+            "position": -0.3579318432442237,
+            "velocity": -0.00015628358767954078
+          },
+          "ur5e_4_rg2_left_inner_finger_joint": {
+            "position": -0.35776363466771255,
+            "velocity": -2.6912125788564056e-06
+          },
+          "ur5e_4_rg2_finger_width": {
+            "position": 0.10999908264389237,
+            "velocity": -0.0009173558352642708
+          },
+          "ur5e_4_rg2_left_inner_knuckle_joint": {
+            "position": 0.35763552468102855,
+            "velocity": 0.00011096902218859974
+          },
+          "ur5e_4_rg2_right_inner_knuckle_joint": {
+            "position": 0.3567239240700193,
+            "velocity": -8.671494122156802e-05
+          },
+          "ur5e_4_rg2_right_outer_knuckle_joint": {
+            "position": 0.35810595871276174,
+            "velocity": -5.361038911245314e-05
+          },
+          "ur5e_4_rg2_right_inner_finger_joint": {
+            "position": -0.3570454455440333,
+            "velocity": -2.0714223130924997e-05
+          }
+        }
+      },
+      "KMR": {
+        "static": false,
+        "pose": [
+          -5.54,
+          2.13,
+          0,
+          0,
+          0,
+          0.7071080798594737,
+          0.7071054825112364
+        ],
+        "links": {
+          "KMR_base_link": {
+            "pose": [
+              -5.54,
+              2.13,
+              0,
+              0,
+              0,
+              0.7071080798594737,
+              0.7071054825112364
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__mobile_platform_collision",
+                "bounds": [
+                  [
+                    -5.855001983528631,
+                    -5.224998016471369
+                  ],
+                  [
+                    1.589998842944035,
+                    2.6700011570559647
+                  ],
+                  [
+                    0,
+                    0.7
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__front_safety_scanner_collision_1",
+                "bounds": [
+                  [
+                    -5.645002185557006,
+                    -5.43500192843271
+                  ],
+                  [
+                    2.654998949997159,
+                    2.725001049995286
+                  ],
+                  [
+                    0.11499977856251727,
+                    0.32500022143748275
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__rear_safety_scanner_collision_2",
+                "bounds": [
+                  [
+                    -5.64499807156729,
+                    -5.434997814442994
+                  ],
+                  [
+                    1.5349989500047145,
+                    1.6050010500028413
+                  ],
+                  [
+                    0.11499977856251727,
+                    0.32500022143748275
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_left_collision_3",
+                "bounds": [
+                  [
+                    -5.900002240652603,
+                    -5.876000404050376
+                  ],
+                  [
+                    2.3649986776428906,
+                    2.6149987658015
+                  ],
+                  [
+                    0.009999955922382009,
+                    0.260000044077618
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_front_right_collision_4",
+                "bounds": [
+                  [
+                    -5.2040022406572986,
+                    -5.180000404055071
+                  ],
+                  [
+                    2.365001234193643,
+                    2.6150013223522524
+                  ],
+                  [
+                    0.009999955922382009,
+                    0.260000044077618
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_left_collision_5",
+                "bounds": [
+                  [
+                    -5.899999595944929,
+                    -5.8759977593427015
+                  ],
+                  [
+                    1.6449986776477479,
+                    1.8949987658063572
+                  ],
+                  [
+                    0.009999955922382009,
+                    0.260000044077618
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__wheel_rear_right_collision_6",
+                "bounds": [
+                  [
+                    -5.203999595949624,
+                    -5.179997759347397
+                  ],
+                  [
+                    1.6450012341985003,
+                    1.8950013223571092
+                  ],
+                  [
+                    0.009999955922382009,
+                    0.260000044077618
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::KMR_base_link::KMR_base_link_fixed_joint_lump__iiwa_link_0_collision_7",
+                "bounds": [
+                  [
+                    -5.6614709752558365,
+                    -5.403998183008191
+                  ],
+                  [
+                    1.758674106508579,
+                    2.001266000705277
+                  ],
+                  [
+                    0.6999999766846325,
+                    0.8575000137090683
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_1": {
+            "pose": [
+              -5.539999081698724,
+              1.8800000000016865,
+              0.7,
+              0,
+              0,
+              0.9999999999933993,
+              -3.633376756331599e-06
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_1::iiwa_link_1_collision",
+                "bounds": [
+                  [
+                    -5.625740534496887,
+                    -5.4540572429113885
+                  ],
+                  [
+                    1.7935232819273128,
+                    1.9958492328272113
+                  ],
+                  [
+                    0.8474920660257339,
+                    1.1449220299720764
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_2": {
+            "pose": [
+              -5.539563081698736,
+              1.880000003169991,
+              1.06,
+              -0.13151295267666666,
+              -4.778361054342726e-07,
+              0.9913144522627841,
+              -3.601818889083532e-06
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_2::iiwa_link_2_collision",
+                "bounds": [
+                  [
+                    -5.675555829901768,
+                    -5.4346563153346885
+                  ],
+                  [
+                    1.7479959162249934,
+                    1.9476153432034768
+                  ],
+                  [
+                    0.9555414779160499,
+                    1.2797695046046234
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_3": {
+            "pose": [
+              -5.539563081698736,
+              1.880000003169991,
+              1.06,
+              -0.13151295267669227,
+              -4.704502593379315e-07,
+              0.9913144522625804,
+              -3.6574917016975096e-06
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_3::iiwa_link_3_collision",
+                "bounds": [
+                  [
+                    -5.732391627949297,
+                    -5.524579715767696
+                  ],
+                  [
+                    1.7653312010324504,
+                    1.9479951016880936
+                  ],
+                  [
+                    1.229972837183296,
+                    1.5485734998320932
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_4": {
+            "pose": [
+              -5.649495380029047,
+              1.8799992042701044,
+              1.4653579650976543,
+              -0.625857315364184,
+              -2.2964871785153745e-06,
+              0.7799375749324672,
+              -2.8852583304415184e-06
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_4::iiwa_link_4_collision",
+                "bounds": [
+                  [
+                    -5.844504534417349,
+                    -5.568658474700237
+                  ],
+                  [
+                    1.8119935072770126,
+                    1.9950103689806786
+                  ],
+                  [
+                    1.3835993869251522,
+                    1.571896381353731
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_5": {
+            "pose": [
+              -5.649495380029048,
+              1.8799992042701044,
+              1.4653579650939665,
+              -0.625857315364145,
+              -2.3059289719908667e-06,
+              0.7799375749325139,
+              -2.8734920550886485e-06
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_5::iiwa_link_5_collision",
+                "bounds": [
+                  [
+                    -6.105180195980212,
+                    -5.805067014816885
+                  ],
+                  [
+                    1.8119818058989863,
+                    1.9790180994178803
+                  ],
+                  [
+                    1.4367548525803486,
+                    1.6298304284940262
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_6": {
+            "pose": [
+              -6.039999089462855,
+              1.8799963267687656,
+              1.5520000617511969,
+              -0.9999999999932129,
+              -3.684326940879799e-06,
+              9.49049172582761e-11,
+              8.462660807110106e-11
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_6::iiwa_link_6_collision",
+                "bounds": [
+                  [
+                    -6.106367095088313,
+                    -5.9737637018075365
+                  ],
+                  [
+                    1.813017003147469,
+                    1.9506993825391195
+                  ],
+                  [
+                    1.471099407530549,
+                    1.6384833540573882
+                  ]
+                ]
+              }
+            ]
+          },
+          "iiwa_link_7": {
+            "pose": [
+              -6.039999089462855,
+              1.8799963267687656,
+              1.5520000617511969,
+              -0.9999999999932534,
+              -3.6733190532169675e-06,
+              9.858358573922034e-11,
+              8.462657096548788e-11
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::iiwa_link_7::iiwa_link_7_collision",
+                "bounds": [
+                  [
+                    -6.094166004413256,
+                    -5.976498616727137
+                  ],
+                  [
+                    1.8159224481748248,
+                    1.933496782515956
+                  ],
+                  [
+                    1.401100063182185,
+                    1.4820000617709315
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_adapter_collision_1",
+                "bounds": [
+                  [
+                    -6.0649992731624405,
+                    -6.014998905827941
+                  ],
+                  [
+                    1.8549961431295525,
+                    1.9049965104634934
+                  ],
+                  [
+                    1.3780000617420363,
+                    1.3980000617603572
+                  ]
+                ]
+              },
+              {
+                "id": "KMR::iiwa_link_7::iiwa_link_7_fixed_joint_lump__rg2_base_link_collision_2",
+                "bounds": [
+                  [
+                    -6.075880592091464,
+                    -6.000571394059703
+                  ],
+                  [
+                    1.8422676827809676,
+                    1.917268235324319
+                  ],
+                  [
+                    1.229953210578895,
+                    1.3779999006065096
+                  ]
+                ]
+              }
+            ]
+          },
+          "KMR_rg2_finger_width_mock_link": {
+            "pose": [
+              -6.039999089516758,
+              1.879996326816833,
+              1.268000061751197,
+              -0.9999999999932534,
+              -3.6733190532168222e-06,
+              9.858358573922035e-11,
+              8.462657075715913e-11
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": []
+          },
+          "rg2_left_outer_knuckle": {
+            "pose": [
+              -6.0399992157203055,
+              1.897174326819043,
+              1.2522030616839932,
+              -0.9841271548438243,
+              -3.6149971476689956e-06,
+              6.519782148606267e-07,
+              0.17746476575789955
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::rg2_left_outer_knuckle::rg2_left_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    -6.0503957475822085,
+                    -6.0303952188714165
+                  ],
+                  [
+                    1.8819502922711075,
+                    1.95397681387835
+                  ],
+                  [
+                    1.207808124600378,
+                    1.2809334708717834
+                  ]
+                ]
+              }
+            ]
+          },
+          "rg2_left_inner_finger": {
+            "pose": [
+              -6.039999586239416,
+              1.9476075916409812,
+              1.230260053918066,
+              -0.9999999999932534,
+              -3.673319053216225e-06,
+              9.858358573922035e-11,
+              8.462664473797378e-11
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::rg2_left_inner_finger::rg2_left_inner_finger_collision",
+                "bounds": [
+                  [
+                    -6.05049573734753,
+                    -6.030295562187693
+                  ],
+                  [
+                    1.9286575625529547,
+                    1.952605504023226
+                  ],
+                  [
+                    1.1774615443151668,
+                    1.2352597455414505
+                  ]
+                ]
+              }
+            ]
+          },
+          "rg2_left_inner_knuckle": {
+            "pose": [
+              -6.039999145930375,
+              1.8876743268220921,
+              1.2357030616512796,
+              -0.9841271548438243,
+              -3.6149971476689956e-06,
+              6.519782148606267e-07,
+              0.17746476575789955
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::rg2_left_inner_knuckle::rg2_left_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    -6.056495675799206,
+                    -6.024295213797118
+                  ],
+                  [
+                    1.881242910782073,
+                    1.94422161749903
+                  ],
+                  [
+                    1.1935907148761358,
+                    1.2558581496697003
+                  ]
+                ]
+              }
+            ]
+          },
+          "rg2_right_inner_knuckle": {
+            "pose": [
+              -6.039999033115401,
+              1.8723183268225068,
+              1.2357030616361468,
+              -4.920762493088039e-06,
+              0.9841271548685786,
+              -0.1774647655882022,
+              8.872390228620299e-07
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::rg2_right_inner_knuckle::rg2_right_inner_knuckle_collision",
+                "bounds": [
+                  [
+                    -6.055702982313067,
+                    -6.023502353204535
+                  ],
+                  [
+                    1.8157709944839007,
+                    1.878749786635118
+                  ],
+                  [
+                    1.1935907148569342,
+                    1.2558581496411387
+                  ]
+                ]
+              }
+            ]
+          },
+          "rg2_right_outer_knuckle": {
+            "pose": [
+              -6.039998963319207,
+              1.86281832681997,
+              1.2522030616618163,
+              2.309293208560548e-06,
+              -0.984127154877682,
+              0.17746476559264684,
+              -4.163288161995737e-07
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::rg2_right_outer_knuckle::rg2_right_outer_knuckle_collision",
+                "bounds": [
+                  [
+                    -6.04960291976641,
+                    -6.029602582197454
+                  ],
+                  [
+                    1.806015865253026,
+                    1.8780423337779037
+                  ],
+                  [
+                    1.2078081245763688,
+                    1.2809334708371094
+                  ]
+                ]
+              }
+            ]
+          },
+          "rg2_right_inner_finger": {
+            "pose": [
+              -6.039998726637624,
+              1.8123850620046547,
+              1.2302600538679638,
+              2.3465241564504596e-06,
+              -0.9999999999972471,
+              -8.462649126559363e-11,
+              9.490497276942736e-11
+            ],
+            "linear_speed": 0,
+            "angular_speed": 0,
+            "collisions": [
+              {
+                "id": "KMR::rg2_right_inner_finger::rg2_right_inner_finger_collision",
+                "bounds": [
+                  [
+                    -6.049702700413139,
+                    -6.029502588801023
+                  ],
+                  [
+                    1.80738717538055,
+                    1.8313350632486918
+                  ],
+                  [
+                    1.1774615442673473,
+                    1.2352597454934822
+                  ]
+                ]
+              }
+            ]
+          }
+        },
+        "joints": {
+          "joint_a1": {
+            "position": -7.965669368559247e-08,
+            "velocity": 0
+          },
+          "joint_a2": {
+            "position": 0.26379006890547974,
+            "velocity": 0
+          },
+          "joint_a3": {
+            "position": 1.1232119589976719e-07,
+            "velocity": 0
+          },
+          "joint_a4": {
+            "position": -1.0886704491781178,
+            "velocity": 0
+          },
+          "joint_a5": {
+            "position": -3.01723517281971e-08,
+            "velocity": 0
+          },
+          "joint_a6": {
+            "position": 1.7891321353164003,
+            "velocity": 0
+          },
+          "joint_a7": {
+            "position": 2.2015775869022036e-08,
+            "velocity": 0
+          },
+          "KMR_rg2_finger_width": {
+            "position": 0.1099999999999999,
+            "velocity": 0
+          },
+          "rg2_finger_joint": {
+            "position": -0.3568194499992793,
+            "velocity": 0
+          },
+          "rg2_left_inner_finger_joint": {
+            "position": -0.3568194499992791,
+            "velocity": 0
+          },
+          "rg2_left_inner_knuckle_joint": {
+            "position": 0.3568194499992794,
+            "velocity": 0
+          },
+          "rg2_right_inner_knuckle_joint": {
+            "position": 0.35681944999499215,
+            "velocity": 0
+          },
+          "rg2_right_outer_knuckle_joint": {
+            "position": 0.35681945000050863,
+            "velocity": 0
+          },
+          "rg2_right_inner_finger_joint": {
+            "position": -0.356819450000509,
+            "velocity": 0
+          }
+        }
+      }
+    },
+    "observed_monotonic": 279200.701063642
+  },
+  "controllers": {
+    "/ur5e_1_joint_trajectory_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808213388320",
+      "controller": "/ur5e_1_joint_trajectory_controller",
+      "sequence": 313488,
+      "command_revision": 1,
+      "simulation_time": 316.127,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_1_shoulder_pan_joint",
+        "ur5e_1_shoulder_lift_joint",
+        "ur5e_1_elbow_joint",
+        "ur5e_1_wrist_1_joint",
+        "ur5e_1_wrist_2_joint",
+        "ur5e_1_wrist_3_joint"
+      ],
+      "positions": [
+        2.231920608970391,
+        -1.5960225970183044,
+        1.6202154576372942,
+        -1.5962495330224884,
+        -1.5688517396408073,
+        -0.909537066463365
+      ],
+      "observed_monotonic": 279200.71026754,
+      "covers": [
+        "/ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_1_rg2_gripper_traj_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808244546915",
+      "controller": "/ur5e_1_rg2_gripper_traj_controller",
+      "sequence": 313493,
+      "command_revision": 1,
+      "simulation_time": 316.132,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_1_rg2_finger_width"
+      ],
+      "positions": [
+        0.10999911550486347
+      ],
+      "observed_monotonic": 279200.715952423,
+      "covers": [
+        "/ur5e_1_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_2_joint_trajectory_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808284101590",
+      "controller": "/ur5e_2_joint_trajectory_controller",
+      "sequence": 313579,
+      "command_revision": 1,
+      "simulation_time": 316.218,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_2_shoulder_pan_joint",
+        "ur5e_2_shoulder_lift_joint",
+        "ur5e_2_elbow_joint",
+        "ur5e_2_wrist_1_joint",
+        "ur5e_2_wrist_2_joint",
+        "ur5e_2_wrist_3_joint"
+      ],
+      "positions": [
+        2.231921203973636,
+        -1.5960244462821451,
+        1.6202140599264085,
+        -1.596248508213766,
+        -1.5688540133350002,
+        -0.9095364185388962
+      ],
+      "observed_monotonic": 279200.802647714,
+      "covers": [
+        "/ur5e_2_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_2_rg2_gripper_traj_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808318038135",
+      "controller": "/ur5e_2_rg2_gripper_traj_controller",
+      "sequence": 313584,
+      "command_revision": 1,
+      "simulation_time": 316.223,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_2_rg2_finger_width"
+      ],
+      "positions": [
+        0.1099990499571456
+      ],
+      "observed_monotonic": 279200.809087103,
+      "covers": [
+        "/ur5e_2_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_3_joint_trajectory_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808357839038",
+      "controller": "/ur5e_3_joint_trajectory_controller",
+      "sequence": 313591,
+      "command_revision": 1,
+      "simulation_time": 316.23,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_3_shoulder_pan_joint",
+        "ur5e_3_shoulder_lift_joint",
+        "ur5e_3_elbow_joint",
+        "ur5e_3_wrist_1_joint",
+        "ur5e_3_wrist_2_joint",
+        "ur5e_3_wrist_3_joint"
+      ],
+      "positions": [
+        2.2319098323842326,
+        -1.596027918615064,
+        1.6202153427586676,
+        -1.5962471510192286,
+        -1.5688427224435084,
+        2.2320455442758638
+      ],
+      "observed_monotonic": 279200.815289748,
+      "covers": [
+        "/ur5e_3_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_3_rg2_gripper_traj_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808390813047",
+      "controller": "/ur5e_3_rg2_gripper_traj_controller",
+      "sequence": 313670,
+      "command_revision": 1,
+      "simulation_time": 316.309,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_3_rg2_finger_width"
+      ],
+      "positions": [
+        0.10999908263320754
+      ],
+      "observed_monotonic": 279200.901354397,
+      "covers": [
+        "/ur5e_3_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_4_joint_trajectory_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808432857153",
+      "controller": "/ur5e_4_joint_trajectory_controller",
+      "sequence": 313676,
+      "command_revision": 1,
+      "simulation_time": 316.315,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_4_shoulder_pan_joint",
+        "ur5e_4_shoulder_lift_joint",
+        "ur5e_4_elbow_joint",
+        "ur5e_4_wrist_1_joint",
+        "ur5e_4_wrist_2_joint",
+        "ur5e_4_wrist_3_joint"
+      ],
+      "positions": [
+        -0.27065556524169754,
+        -1.5960277005979184,
+        1.620215370807255,
+        -1.5962472556363974,
+        -1.5688429128450263,
+        2.232045944503647
+      ],
+      "observed_monotonic": 279200.908203287,
+      "covers": [
+        "/ur5e_4_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/ur5e_4_rg2_gripper_traj_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278808471224094",
+      "controller": "/ur5e_4_rg2_gripper_traj_controller",
+      "sequence": 313682,
+      "command_revision": 1,
+      "simulation_time": 316.321,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "ur5e_4_rg2_finger_width"
+      ],
+      "positions": [
+        0.1099990826431531
+      ],
+      "observed_monotonic": 279200.913804252,
+      "covers": [
+        "/ur5e_4_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/KMR/KMR_iiwa_joint_trajectory_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278813899979156",
+      "controller": "/KMR/KMR_iiwa_joint_trajectory_controller",
+      "sequence": 62216,
+      "command_revision": 1,
+      "simulation_time": 316.329,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "joint_a1",
+        "joint_a2",
+        "joint_a3",
+        "joint_a4",
+        "joint_a5",
+        "joint_a6",
+        "joint_a7"
+      ],
+      "positions": [
+        -7.965669368559247e-08,
+        0.26379006890547974,
+        1.1232119589976719e-07,
+        -1.0886704491781183,
+        -3.01723517281971e-08,
+        1.7891321353164003,
+        2.2015775869022036e-08
+      ],
+      "observed_monotonic": 279200.925666629,
+      "covers": [
+        "/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/KMR/KMR_rg2_gripper_traj_controller/recovery_state": {
+      "version": 1,
+      "instance_id": "278813986707854",
+      "controller": "/KMR/KMR_rg2_gripper_traj_controller",
+      "sequence": 62217,
+      "command_revision": 1,
+      "simulation_time": 316.334,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "joint_names": [
+        "KMR_rg2_finger_width"
+      ],
+      "positions": [
+        0.10999999999999995
+      ],
+      "observed_monotonic": 279200.930532897,
+      "covers": [
+        "/KMR/KMR_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+      ]
+    },
+    "/KMR/recovery_state": {
+      "version": 1,
+      "instance_id": "bdcef0d9d7b9473594a9e4e6d327163e",
+      "simulation_time": 316.3,
+      "navigation_enabled": false,
+      "has_active_goal": false,
+      "has_pending_goal": false,
+      "holding": true,
+      "observed_monotonic": 279200.934825048,
+      "covers": [
+        "/KMR/dock/_action/status",
+        "/KMR/move_base/_action/status",
+        "/KMR/validated_navigate_to_pose/_action/status",
+        "/navigate_to_pose/_action/status",
+        "/KMR/validated_follow_path/_action/status",
+        "/KMR/navigate_to_pose/_action/status",
+        "/KMR/follow_path/_action/status"
+      ]
+    }
+  }
+}

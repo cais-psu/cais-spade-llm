@@ -21,15 +21,19 @@ from typing import Any
 
 from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
 from cais_spade_llm.resources import nominal_des as tasks
+from cais_spade_llm.resources.function_contracts import validate_function_contracts
+from cais_spade_llm.resources.gazebo_programs import resource_program_revision
 from cais_spade_llm.resources.nominal_conveyor import (
     CONVEYOR_LOCATIONS,
     conveyor_advance_parameters,
     conveyor_load_parameters,
     conveyor_parts,
 )
+from cais_spade_llm.resources.resource_safety_preparation import (
+    resource_model_declarations,
+    resource_provider,
+)
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
-from cais_spade_llm.resources.gazebo_programs import resource_program_revision
-from cais_spade_llm.resources.function_contracts import validate_function_contracts
 from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
 
 PART_REFERENCE = {"scope": "resource", "type": ["string", "null"], "reference": "part_name"}
@@ -152,6 +156,7 @@ def build_environment_models(
         model["observable_event_alphabet"] = model["local_event_alphabet"][:]
     if schema_version == 3:
         _declare_printer_state(models, scene["3D Printing Station"])
+    _append_resource_models(models, scene, registered, schema_version, program_revision)
     # Removing product-owned assembly guards also removes passive participants.
     for model in models.values():
         for event in model["events"]:
@@ -172,6 +177,54 @@ def build_environment_models(
     validate_environment_composition(models)
     validate_function_contracts(models)
     return models
+
+
+def _append_resource_models(models: dict, scene: dict, registered: list, schema_version: int, program_revision: str) -> None:
+    """Append trusted declarations without changing established owner identities."""
+    declarations = resource_model_declarations(scene)
+    for rid, entry in declarations.items():
+        model = deepcopy(entry["model"])
+        provider = resource_provider(entry["owner_provider"])
+        bundle = scene.get("resource_programs", {}).get("resources", {}).get(rid)
+        if not isinstance(bundle, dict):
+            raise ValueError("Additional resource has no declared program catalog: " + rid)
+        model.update(schema_version=schema_version, program_revision=program_revision,
+                     configuration_revision=model.get("configuration_revision", 0),
+                     current_configuration=model.get("current_configuration", {}),
+                     process_capabilities=model.get("process_capabilities", {}),
+                     primitive_catalog=deepcopy(bundle["primitives"]),
+                     owner_provider=entry["owner_provider"], owner_provider_version=provider.version)
+        expected_fields = {bound for field in model["state_variables"]
+                           for bound in ([field.replace("{part_name}", part) for part in registered]
+                                         if "{part_name}" in field else [field])}
+        if set(model["current_valuation"]) != expected_fields:
+            raise ValueError("Additional resource valuation must cover its exact registered part references")
+        for field, value in model["current_valuation"].items():
+            if not check_value(declaration_for(model, field), value, dict.fromkeys(registered)):
+                raise ValueError("Additional resource initial state violates its declaration: " + rid + "." + field)
+        for event in model["events"]:
+            actor = event["parameter_bindings"]["resource_id"]["equals"]
+            if actor not in {*models, *declarations}:
+                raise ValueError("Additional resource action has an unknown owner")
+            if (not isinstance(event["event_name"], str) or not event["event_name"]
+                    or type(event.get("controllable")) is not bool or type(event.get("observable")) is not bool):
+                raise ValueError("Additional resource event has invalid identity or flags")
+            key = event.get("program_key", event["event_name"])
+            saved = scene["resource_programs"]["resources"][actor]["functions"][key]
+            event.update(program_key=key, function_name=saved["function_name"],
+                         program_status=saved["status"], program=deepcopy(saved["program"]))
+            if saved.get("variants"):
+                event["program_variants"] = deepcopy(saved["variants"])
+        model["local_event_alphabet"] = list(dict.fromkeys(e["event_name"] for e in model["events"]))
+        model["controllable_event_alphabet"] = [e["event_name"] for e in model["events"] if e.get("controllable") is True]
+        model["observable_event_alphabet"] = [e["event_name"] for e in model["events"] if e.get("observable") is True]
+        models[rid] = model
+    # Validate additional participants before legacy bookkeeping derives lists.
+    for rid in declarations:
+        for event in models[rid]["events"]:
+            actual = [key for key, model in models.items() if any(peer["event_id"] == event["event_id"] for peer in model["events"])]
+            if set(event["participants"]) != set(actual) or len(event["participants"]) != len(actual):
+                raise ValueError("Additional resource event participants disagree")
 
 
 def _declare_printer_state(models: dict[str, dict], configuration: dict) -> None:

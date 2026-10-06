@@ -1,0 +1,263 @@
+{
+  "fixture_kind": "synthetic_checkpoint",
+  "synthetic": true,
+  "description": "Manually authored Storage interruption. KMR already holds KET8_Square_8mm; the separate, displaced KET4_Square_4mm has completed trim with result square. Every state, helper output, custody record, and completion below is a fixture assumption, not observed execution.",
+  "scene_file": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
+  "product_geometry": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+  "resource_agent": "cais_spade_llm/recovery_framework/kmr_agent.py:KMRResourceAgent",
+  "resource_profile": "cais_spade_llm/recovery_framework/kmr_primitives.py:KMR_RESOURCE_PROFILE",
+  "event_sequence_file": "event_sequence.json",
+  "primitive_programs_file": "primitive_programs.json",
+  "checkpoint": "after_pick_part_before_move_to_resource",
+  "interrupted_nominal_task_id": "KMR_STORAGE_KET8_MOVE_TO_M1",
+  "coordinate_frame": "world",
+  "configured_pose_references": {
+    "Storage.slots.KET8_Square_8mm": [-6.25, 2.16, 0.645, 0, 0, 1.57079632679],
+    "Storage.KMR_pick_docking_poses.KET8_Square_8mm": [-5.54, 2.41, 1.5707963267948966],
+    "Storage.KMR_pick_orientations_xyzw.KET8_Square_8mm": [
+      [1, 0, 0, 0],
+      [0, 1, 0, 0]
+    ],
+    "Storage.KMR_pick_arm_configurations.KET8_Square_8mm": [-3.86e-8, 0.9684402263, 7.98e-8, -1.0292177427, -7.22e-8, 1.1439346844, 3.65e-8],
+    "Storage.KMR_pick_approach_clearance_m.KET8_Square_8mm": 0.07,
+    "KMR.task_execution.grasp_height_m": 0.025,
+    "KMR.task_execution.minimum_pick_lift_m": 0.07,
+    "KMR.task_execution.carrying_arm_configuration": [0.00328154, -0.76073215, -0.00070832, -1.94313693, -0.00334093, 0.91199349, 0.00300654]
+  },
+  "pose_assumptions": {
+    "description": "Storage slot and pickup dock are copied from the scene. Other TCP, base, approach, lift, placement and named-pose values are synthetic; helper outputs are authored mock values. Base yaw stays fixed, so empty travel translates world TCP by the base XY delta. Part quaternion comes from Storage slot yaw; TCP uses the configured downward orientation. The grasp transform maps TCP pose to part pose.",
+    "Storage_slot_pose": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787],
+    "Storage_transport_tcp": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+    "recovery_base_pose": [-0.5, -0.5, 1.5707963267948966],
+    "recovery_transport_tcp": [-1, -0.5, 1.15, 1, 0, 0, 0],
+    "displaced_KET4_Square_4mm_pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+    "assembly_board-v1_KET4_Square_4mm_pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+    "grasp_transforms": {
+      "KET8_Square_8mm": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0],
+      "KET4_Square_4mm": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+    }
+  },
+  "resource_snapshots": [
+    {
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "resource_type": "kmr",
+      "current_state": "carrying",
+      "resource_location": "Storage",
+      "held_part": "KET8_Square_8mm",
+      "gripper_state": "closed",
+      "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+      "base_pose": [-5.54, 2.41, 1.5707963267948966]
+    }
+  ],
+  "custody": {
+    "resource_jid": "recovery-resource-8@localhost",
+    "part_name": "KET8_Square_8mm",
+    "attached": true,
+    "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+  },
+  "part_tracker": {
+    "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.04,2.41,1.125,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+    "KET4_Square_4mm": {
+      "state": "misplaced",
+      "location": null,
+      "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+      "processCompleted": [
+        {
+          "process": "trim",
+          "result": "square"
+        }
+      ]
+    }
+  },
+  "Storage": {
+    "inventory.KET8_Square_8mm": false,
+    "inventory.KET4_Square_4mm": false
+  },
+  "M1": {
+    "resource_state": "idle",
+    "part_name": null
+  },
+  "nominal_tasks": [
+    {
+      "task_id": "KMR_STORAGE_KET8_PICK_APPROACH",
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "event_name": "pick_approach",
+      "part_name": "KET8_Square_8mm",
+      "parameters": {
+        "resource_id": "KMR",
+        "part_name": "KET8_Square_8mm",
+        "origin_resource_location": "Storage"
+      },
+      "predecessors": [],
+      "status": "completed"
+    },
+    {
+      "task_id": "KMR_STORAGE_KET8_PICK_PART",
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "event_name": "pick_part",
+      "part_name": "KET8_Square_8mm",
+      "parameters": {
+        "resource_id": "KMR",
+        "part_name": "KET8_Square_8mm",
+        "origin_resource_location": "Storage",
+        "handoff_acknowledged": true
+      },
+      "predecessors": ["KMR_STORAGE_KET8_PICK_APPROACH"],
+      "status": "completed"
+    },
+    {
+      "task_id": "KMR_STORAGE_KET8_MOVE_TO_M1",
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "event_name": "move_to_resource",
+      "part_name": "KET8_Square_8mm",
+      "parameters": {
+        "resource_id": "KMR",
+        "target_resource": "M1",
+        "source_resource": "Storage",
+        "arrival_acknowledged": true,
+        "arm_parked": true
+      },
+      "predecessors": ["KMR_STORAGE_KET8_PICK_PART"],
+      "status": "pending"
+    },
+    {
+      "task_id": "KMR_STORAGE_KET8_PLACE_APPROACH",
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "event_name": "place_approach",
+      "part_name": "KET8_Square_8mm",
+      "parameters": {
+        "resource_id": "KMR",
+        "part_name": "KET8_Square_8mm",
+        "destination_location": "M1"
+      },
+      "predecessors": ["KMR_STORAGE_KET8_MOVE_TO_M1"],
+      "status": "pending"
+    },
+    {
+      "task_id": "KMR_STORAGE_KET8_PLACE_RELEASE",
+      "resource_id": "KMR",
+      "resource_jid": "recovery-resource-8@localhost",
+      "event_name": "place_release",
+      "part_name": "KET8_Square_8mm",
+      "parameters": {
+        "resource_id": "KMR",
+        "part_name": "KET8_Square_8mm",
+        "destination_location": "M1",
+        "handoff_acknowledged": true,
+        "robot_clear": true
+      },
+      "predecessors": ["KMR_STORAGE_KET8_PLACE_APPROACH"],
+      "status": "pending"
+    }
+  ],
+  "task_statuses": {
+    "KMR_STORAGE_KET8_PICK_APPROACH": "completed",
+    "KMR_STORAGE_KET8_PICK_PART": "completed",
+    "KMR_STORAGE_KET8_MOVE_TO_M1": "pending",
+    "KMR_STORAGE_KET8_PLACE_APPROACH": "pending",
+    "KMR_STORAGE_KET8_PLACE_RELEASE": "pending"
+  },
+  "expected_final_conditions": {
+    "projected_snapshot": {
+      "current_state": "carrying",
+      "resource_location": "Storage",
+      "held_part": "KET8_Square_8mm",
+      "gripper_state": "closed",
+      "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+      "base_pose": [-5.54, 2.41, 1.5707963267948966]
+    },
+    "custody": {
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET8_Square_8mm",
+      "attached": true,
+      "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+    },
+    "part_tracker": {
+      "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.04,2.41,1.125,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+      "KET4_Square_4mm": {
+        "state": "ready",
+        "location": "assembly_board-v1",
+        "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+        "processCompleted": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ]
+      }
+    },
+    "Storage": {
+      "inventory.KET8_Square_8mm": false,
+      "inventory.KET4_Square_4mm": false
+    },
+    "M1": {
+      "resource_state": "idle",
+      "part_name": null
+    }
+  },
+  "expected_task_statuses_after_recovery": {
+    "KMR_STORAGE_KET8_PICK_APPROACH": "completed",
+    "KMR_STORAGE_KET8_PICK_PART": "completed",
+    "KMR_STORAGE_KET8_MOVE_TO_M1": "pending",
+    "KMR_STORAGE_KET8_PLACE_APPROACH": "pending",
+    "KMR_STORAGE_KET8_PLACE_RELEASE": "pending"
+  },
+  "resume_entry_task_ids_by_resource": {
+    "recovery-resource-8@localhost": "KMR_STORAGE_KET8_MOVE_TO_M1"
+  },
+  "resumable_task_ids_by_resource": {
+    "recovery-resource-8@localhost": ["KMR_STORAGE_KET8_MOVE_TO_M1", "KMR_STORAGE_KET8_PLACE_APPROACH", "KMR_STORAGE_KET8_PLACE_RELEASE"]
+  },
+  "required_resume_state": {
+    "resource_jid": "recovery-resource-8@localhost",
+    "current_state": "carrying",
+    "resource_location": "Storage",
+    "held_part": "KET8_Square_8mm",
+    "gripper_state": "closed",
+    "base_pose": [-5.54, 2.41, 1.5707963267948966],
+    "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+    "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+  },
+  "expected_nominal_completion": {
+    "description": "Expected symbolic completion of the preserved pending nominal tasks after recovery; not performed by this fixture and not a recovery-final state.",
+    "task_statuses": {
+      "KMR_STORAGE_KET8_PICK_APPROACH": "completed",
+      "KMR_STORAGE_KET8_PICK_PART": "completed",
+      "KMR_STORAGE_KET8_MOVE_TO_M1": "completed",
+      "KMR_STORAGE_KET8_PLACE_APPROACH": "completed",
+      "KMR_STORAGE_KET8_PLACE_RELEASE": "completed"
+    },
+    "KMR": {
+      "resource_state": "idle",
+      "resource_location": "M1",
+      "held_part": null,
+      "gripper_state": "open"
+    },
+    "M1": {
+      "resource_state": "loaded",
+      "part_name": "KET8_Square_8mm"
+    },
+    "Storage": {
+      "inventory.KET8_Square_8mm": false,
+      "inventory.KET4_Square_4mm": false
+    },
+    "part_tracker": {
+      "KET8_Square_8mm": {"state":"ready","location":"M1","processCompleted":[]},
+      "KET4_Square_4mm": {
+        "state": "ready",
+        "location": "assembly_board-v1",
+        "processCompleted": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ]
+      }
+    }
+  }
+}

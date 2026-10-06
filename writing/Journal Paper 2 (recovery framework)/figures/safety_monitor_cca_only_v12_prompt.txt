@@ -1,0 +1,122 @@
+Generated using the built-in image_gen tool.
+
+FINAL FEEDBACK SIMPLIFICATION
+
+Simplify this figure with exactly this change:
+DELETE the ENTIRE BLUE DASHED feedback connector. Remove its horizontal segment entering "Current states from accepted history", its full vertical segment along the outer-right margin, its elbow beside RA execution, and ALL of its blue arrowheads. There must be NO blue dashed feedback line anywhere in the finished figure. Preserve blue text, blue occupancy bars, and the blue RA execution box.
+Replace the footer text "Validated observations and acknowledgements" with this one complete sentence:
+"Validated RA observations and acknowledgements update monitor history."
+This sentence replaces the graphic feedback route and makes its meaning explicit. Do not add another arrow, loop or box for this sentence.
+Keep everything else exactly as shown: the three numbered panels, complete mutex DFA including both self-loops and guards, both occupancy timelines, all checklist conditions, purple input/decision arrows, and the green allow-to-execution arrow. Do not reintroduce state graphs or add any new connectors.
+
+FINAL DIRECTION AND MARGIN FIX
+
+Make one direction correction in this image: the small BLUE arrow immediately to the RIGHT of the 'RA execution' box currently points LEFT into that box. Reverse it to point RIGHT, AWAY FROM the RA execution box and toward the outer-right vertical blue line. The blue route represents feedback leaving RA execution, going UP, then LEFT into monitor history. Keep the existing upward and history-destination arrowheads. Do not change any words, DFA labels, timelines, or other arrows. Also crop away only the blank white margin BELOW the outer purple frame, keeping the complete purple frame and all its contents.
+
+FINAL REFINEMENT
+
+Refine the attached simplified CCA figure. Keep the three-panel purple portrait template, panel 1, the two occupancy-timeline examples in panel 2, and all existing notation. Make these focused corrections:
+
+1. RESTORE THE COMPLETE MUTEX DFA in the "All applicable safety monitors" card. The last rendering omitted its transition labels and loops; they are essential.
+- q0 stays a GREEN ACCEPTING DOUBLE CIRCLE with its initial arrow.
+- Add a visible self-loop on q0 labeled exactly "!(ap001 & ap002)".
+- The arrow FROM q0 TO qd must be labeled exactly "ap001 & ap002".
+- qd stays a RED REJECTING SINGLE CIRCLE.
+- Add a visible self-loop on qd labeled exactly "true".
+- NO arrow from qd back to q0.
+Keep "No violation" under q0 and "Violation" under qd, both tags "Given Φ → DFAs" / "Shown: SAFE_2", and "Current states from accepted history". There is ample blank space in this card for all these required labels and loops.
+Do not alter the two RIGHTWARD purple arrows from the supplied-behavior and monitor cards into "Joint behavior and safety".
+
+2. SIMPLIFY AND COMPACT PANEL 3.
+Change its third checklist item to:
+"Required work can still reach completion"
+This avoids the unexplained phrase "every retained state" in the simplified figure.
+Keep the first two criteria:
+"No safety-rule violation"
+"Running tasks cannot force a violation or prevent completion"
+Keep the completion explanation, exact-program/current-condition check, and incomplete-evidence blocking line.
+Make this third panel SHALLOWER: reduce oversized checklist text/icons modestly, tighten vertical padding, use compact allow/block badges, and move RA execution directly below allow with a short green arrow. Remove excessive empty space inside the CCA decision card and underneath it.
+The two panel-3 cards should fit their actual contents rather than spanning a huge blank area. Aim to reduce panel 3's height by about one third and reduce the overall portrait height accordingly. Keep text readable and retain the original figure's compact portrait proportions.
+Keep e_k^R inline in the start-check line; no separate event box.
+
+3. CORRECT BLUE FEEDBACK DIRECTION.
+At RA execution, the blue feedback arrow must point RIGHT, AWAY from the box, then the connector goes UP the outer-right margin, then LEFT into "Current states from accepted history".
+Currently there is a LEFT-pointing arrow entering RA execution; reverse that source-side arrow so it leaves RA execution.
+Do not create a blue arrow pointing into Required checks or CCA decision.
+Place the caption "Validated observations and acknowledgements" as small footer text, without its current large full-width surrounding box. Keep the long blue connector clear of other text by routing its leftward segment through a clear gap below the timelines, then into monitor history.
+Only the GREEN allow arrow enters RA execution; the BLUE feedback leaves it.
+
+Preserve both timelines exactly: upper r1/r2 occupancy bars OVERLAP and show "Mutex violation"; lower r2 exits BEFORE r1 enters and shows "No mutex conflict". Blue and gray bars represent occupancy intervals. This does not bypass the checks in panel 3.
+Do not reintroduce state graphs, "Alternative running", "No path to marked completion", a nonblocking-region diagram, or a control-style legend. Keep the simplified visual explanation.
+
+Edit the attached CCA figure to SIMPLIFY the explanation without changing its three-panel purple portrait template. The current repeated abstract graphs and labels "Alternative running" and "No path to marked completion" confuse the reader. Replace them with a concrete mutex illustration and a compact safety/completion check. Preserve the strong original visual style, white background, purple rounded frames and numbered headings. Reduce the height of panel 3 to fit its simpler content; do not leave large empty spaces.
+
+KEEP:
+- Main title "Central Controller Agent".
+- Subtitle "Mutual-exclusion example (SAFE_2)".
+- ALL of panel 1 unchanged: inputs, resource observations, prepared motion, configured geometry, fixed AP meanings and bindings, robots/shared-region drawing, exact ap001/ap002 meanings, AP pairs (0,1), (1,1), (0,0), (1,0), and intermediate-condition footer.
+- Panel 2 title "Parallel composition and safety monitoring".
+- Panel 2 LEFT input cards: "Supplied behavior" with r_1 and r_2 local behavior lanes, orange e_k^R recovery-event arrow; and "All applicable safety monitors" with the correct q0/qd DFA, its exact guards, accepting double-circle q0, rejecting absorbing qd, "Given Φ → DFAs", "Shown: SAFE_2" and "Current states from accepted history".
+- Preserve the short RIGHTWARD purple arrows from BOTH left cards into the right card, and the AP traces arrow from above into the right card.
+
+CHANGE PANEL 2 RIGHT CARD:
+Remove the entire six-node abstract "Joint reachable states" graph.
+Replace that card with "Joint behavior and safety", illustrated by TWO SMALL OCCUPANCY TIMELINES.
+These timelines show how the supplied recovery and other work interact; they are illustrative supplied timings, not newly invented scheduling decisions.
+Use small label "Assembly-station occupancy" above the timelines.
+TOP example title: "Entry before exit".
+Two horizontal rows labeled r_1 and r_2, sharing the same time axis:
+r_2 has a gray occupancy bar beginning early and ending midway.
+r_1 has a BLUE occupancy bar that starts before r_2's bar ends.
+Shade their common time interval pale red across the two rows. Add red text "Mutex violation".
+BOTTOM example title: "Exit before entry".
+Again two rows labeled r_1 and r_2 sharing a time axis:
+r_2 has an early gray occupancy bar.
+r_1 has a later BLUE occupancy bar beginning only after r_2's bar ends, with a visible gap.
+Add green text "No mutex conflict".
+Add a simple "Time →" axis under each example, without numeric durations.
+Footer: "Illustrative supplied timings".
+Blue and gray bars represent the resources' OCCUPANCY INTERVALS. They are NOT event arrows. Orange remains reserved for the generated recovery event in the supplied-behavior card. Do not use orange occupancy bars.
+Do not add a direct allow arrow from "No mutex conflict"; other checks are still required.
+
+REPLACE PANEL 3 WITH A COMPACT CHECK-AND-DECISION PANEL:
+New heading: "Validate and authorize the recovery start".
+REMOVE both six-node graphs, the green region contour, "Alternative running", "No path to marked completion", the repeat-loop icon, and the old multirow Joint-graph transitions legend.
+Do not replace them with another abstract graph or isolated giant e_k^R symbol.
+
+On the LEFT, one medium-width card titled "Required checks".
+Inside show three simple neutral check-list icons, each with one concise criterion:
+"No safety-rule violation"
+"Running tasks cannot force a violation or prevent completion"
+"Completion remains reachable from every retained state"
+Use wrapping for the second line if needed, with readable font. These are conditions to be checked, not claims of a measured successful execution.
+Below the checklist, one short explanatory line:
+"Completion: required work finished and all monitors accepting."
+This retains the nonblocking/completion requirement without inventing a dead-end example.
+
+Directly beneath or integrated into the lower part of this same left card, a compact line:
+"Start e_k^R: current conditions and exact program must match."
+Then a slim pale-gray footer:
+"Incomplete evidence or analysis → block".
+Keep e_k^R at normal inline math size.
+
+On the RIGHT, the existing compact "CCA decision" card, containing green "allow" and red "block".
+A single short purple rightward arrow goes FROM Required checks TO CCA decision.
+Only the green allow result connects downward to the "RA execution" box.
+No block-to-execution arrow. No extra card for the requested event.
+
+EXECUTION FEEDBACK:
+Keep ONE blue dashed connector originating at the right edge of RA execution, going UP the outer-right margin, then LEFT into "Current states from accepted history" in panel 2.
+Any arrowheads must point UP along the outer margin and LEFT into monitor history. No downward arrowhead into RA execution and no feedback arrow into Required checks.
+Keep the caption "Validated observations and acknowledgements" in the footer.
+Preserve panel 1 flow arrows. Keep other arrows short and local; no purple looping connectors across panel boundaries.
+
+FINAL INVARIANTS:
+- Three original-template numbered panels. Generic method, explicitly labeled mutex example.
+- No six-node graphs, "Alternative running", or "No path to marked completion".
+- Safety and completion checks remain present, including uncontrollable running behavior.
+- The green timeline only means the illustrated mutex requirement has no overlap. It is NOT automatic authorization.
+- Fixed safety monitor definitions/history remain; new recovery event names do not create new safety rules.
+- Every box conveys required information for CCA safety/admission. No decorative flowchart states, blank cards, source-code names, extra control categories or resource-specific case identifiers.
+- Preserve exact notation PC_k, e_k^R, r_1, r_2, ap001, ap002, Φ, q0, qd and SAFE_2. No x_k^R label at task start.
+- Prefer clear occupancy bars and concise text. Keep the final panel notably shorter than the original panel 3 to make the whole figure easier to read.

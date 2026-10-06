@@ -11123,5 +11123,296 @@
         "primitives": {}
       }
     }
+  },
+  "safety_preparation": {
+    "provider": "gazebo_idle_continuous_v1",
+    "observation_service": "/GETRECOVERYSTATE",
+    "launch_parameter_node": "/KMR_base_controller",
+    "regions": {
+      "assembly_board-v1": {
+        "frame": "world",
+        "bounds": [
+          [
+            -0.25,
+            0.25
+          ],
+          [
+            -0.25,
+            0.25
+          ],
+          [
+            1.05,
+            1.4
+          ]
+        ]
+      }
+    },
+    "resources": {
+      "ur5e-1": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_1_",
+        "reference_link": "ur5e_1_tool0",
+        "root_link": "ur5e_1_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_1_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_1_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "ur5e-2": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_2_",
+        "reference_link": "ur5e_2_tool0",
+        "root_link": "ur5e_2_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_2_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_2_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "ur5e-3": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_3_",
+        "reference_link": "ur5e_3_tool0",
+        "root_link": "ur5e_3_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_3_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_3_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "ur5e-4": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "dual_robot",
+        "link_prefix": "ur5e_4_",
+        "reference_link": "ur5e_4_tool0",
+        "root_link": "ur5e_4_base_link",
+        "description_node": "/robot_state_publisher",
+        "controller_node": "/ur5e_4_joint_trajectory_controller",
+        "gripper": {
+          "joint": "ur5e_4_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      },
+      "M1": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "M1"
+      },
+      "M2": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "M2"
+      },
+      "Conveyor": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Conveyor"
+      },
+      "Buffer For Machined parts": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Buffer For Machined parts"
+      },
+      "Storage": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Storage"
+      },
+      "Exit": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "Exit"
+      },
+      "3D Printing Station": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "static_body_and_idle_containment",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "prusa_mk4_2"
+      },
+      "KMR": {
+        "stationary_linear_speed_max": 0.001,
+        "stationary_angular_speed_max": 0.001,
+        "stationary_contract": {
+          "kind": "idle_commanded_hold",
+          "requires_no_running_tasks": true,
+          "requires_no_active_goals": true,
+          "future_execution_tracking": "not_established"
+        },
+        "model": "KMR",
+        "gripper": {
+          "joint": "KMR_rg2_finger_width",
+          "open": 0.11,
+          "closed": 0.02,
+          "tolerance": 0.01
+        }
+      }
+    },
+    "part_geometry": {
+      "assembly_board-v1": {
+        "models": [
+          "GMC_Laser_Plate_Virtual",
+          "Gear_Plate"
+        ],
+        "requires_static": true
+      }
+    },
+    "candidates": {
+      "GAZEBO_MOTION_SAFE": {
+        "origin": "mock",
+        "start_offsets": {
+          "ur5e-4": 0.0
+        },
+        "poses": {
+          "ur5e-4": {
+            "approach": [
+              -0.1,
+              -0.08,
+              1.5
+            ],
+            "entry": [
+              -0.1,
+              -0.08,
+              1.26
+            ]
+          }
+        }
+      },
+      "GAZEBO_MOTION_CONFLICT": {
+        "origin": "mock",
+        "start_offsets": {
+          "ur5e-4": 0.0,
+          "ur5e-3": 0.0
+        },
+        "poses": {
+          "ur5e-4": {
+            "approach": [
+              -0.1,
+              -0.08,
+              1.5
+            ],
+            "entry": [
+              -0.1,
+              -0.08,
+              1.26
+            ]
+          },
+          "ur5e-3": {
+            "approach": [
+              -0.1,
+              0.08,
+              1.5
+            ],
+            "entry": [
+              -0.1,
+              0.08,
+              1.26
+            ]
+          }
+        }
+      }
+    },
+    "controller_status_topics": [
+      "/ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_1_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_2_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_2_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_3_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_3_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_4_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/ur5e_4_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory/_action/status",
+      "/KMR/KMR_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status",
+      "/KMR/dock/_action/status",
+      "/KMR/move_base/_action/status",
+      "/KMR/validated_navigate_to_pose/_action/status",
+      "/navigate_to_pose/_action/status",
+      "/KMR/validated_follow_path/_action/status",
+      "/KMR/navigate_to_pose/_action/status",
+      "/KMR/follow_path/_action/status"
+    ]
   }
 }

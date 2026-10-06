@@ -1,0 +1,158 @@
+{
+  "generation_method": "local_reference_draft",
+  "llm_generated": false,
+  "runtime_activated": false,
+  "approved": false,
+  "scene_resources": [
+    "3D Printing Station",
+    "Buffer For Machined parts",
+    "Conveyor",
+    "Exit",
+    "KMR",
+    "M1",
+    "M2",
+    "Storage",
+    "ur5e-1",
+    "ur5e-2",
+    "ur5e-3",
+    "ur5e-4"
+  ],
+  "declared_board_actors": [
+    "ur5e-3",
+    "ur5e-4"
+  ],
+  "previews": [
+    {
+      "kind": "mutex",
+      "safety_file": "safety_assembly_board-v1_mutex.txt",
+      "rule": {
+        "id": "SAFE_1",
+        "raw_text": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+        "constraint_type": "no_simultaneous_destination_occupancy",
+        "process": "assembly",
+        "product": [],
+        "resources": [
+          "ur5e-3",
+          "ur5e-4"
+        ],
+        "resource_types": [],
+        "event": null,
+        "context": {},
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "ap_event/assembly/any/ur5e-3/place_approach/destination_location=assembly_board-v1",
+            "meaning": "ur5e-3 is executing place_approach with destination_location assembly_board-v1.",
+            "binding": {
+              "resource": "ur5e-3",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "declared task interval"
+          },
+          {
+            "label": "ap002",
+            "full": "ap_state/assembly/any/ur5e-3/resource_location=assembly_board-v1/any",
+            "meaning": "ur5e-3's declared resource_location is assembly_board-v1, independent of held_part or resource_state.",
+            "binding": {
+              "resource": "ur5e-3",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "acknowledged resource_location"
+          },
+          {
+            "label": "ap003",
+            "full": "ap_event/assembly/any/ur5e-4/place_approach/destination_location=assembly_board-v1",
+            "meaning": "ur5e-4 is executing place_approach with destination_location assembly_board-v1.",
+            "binding": {
+              "resource": "ur5e-4",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "declared task interval"
+          },
+          {
+            "label": "ap004",
+            "full": "ap_state/assembly/any/ur5e-4/resource_location=assembly_board-v1/any",
+            "meaning": "ur5e-4's declared resource_location is assembly_board-v1, independent of held_part or resource_state.",
+            "binding": {
+              "resource": "ur5e-4",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "acknowledged resource_location"
+          }
+        ],
+        "ltlf": "G !((ap001 | ap002) & (ap003 | ap004))",
+        "generated_interpretation": "LOCAL REFERENCE DRAFT; no LLM generation or approval. At most one currently declared board actor may be entering or remain at assembly_board-v1. Entry uses place_approach; retained occupancy uses resource_location, so release or failure does not itself clear this AP. This is a native event/state abstraction: geometric coverage of every configured resource and newly generated recovery events is not established by this preview."
+      }
+    },
+    {
+      "kind": "precedence",
+      "safety_file": "safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt",
+      "rule": {
+        "id": "SAFE_1",
+        "raw_text": "Placement of KET4_Square_4mm at assembly_board-v1 may begin only after assembly of gear_small is completed.",
+        "constraint_type": "precedence",
+        "process": "assembly",
+        "product": [
+          "KET4_Square_4mm",
+          "gear_small"
+        ],
+        "resources": [
+          "ur5e-3",
+          "ur5e-4"
+        ],
+        "resource_types": [],
+        "event": null,
+        "context": {},
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "ap_event/assembly/KET4_Square_4mm/ur5e-3/place_approach/destination_location=assembly_board-v1",
+            "meaning": "ur5e-3 is executing place_approach for KET4_Square_4mm with destination_location assembly_board-v1; its first activation is the placement-start boundary.",
+            "binding": {
+              "resource": "ur5e-3",
+              "part": "KET4_Square_4mm",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "exact task identity, part_name, destination_location and execution interval"
+          },
+          {
+            "label": "ap002",
+            "full": "ap_event/assembly/KET4_Square_4mm/ur5e-4/place_approach/destination_location=assembly_board-v1",
+            "meaning": "ur5e-4 is executing place_approach for KET4_Square_4mm with destination_location assembly_board-v1; its first activation is the placement-start boundary.",
+            "binding": {
+              "resource": "ur5e-4",
+              "part": "KET4_Square_4mm",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "exact task identity, part_name, destination_location and execution interval"
+          },
+          {
+            "label": "ap003",
+            "full": "ap_state/assembly/gear_small/ur5e-3/part_state=assembled/destination_location=assembly_board-v1",
+            "meaning": "A prior acknowledged assembly result associates ur5e-3 with gear_small at assembly_board-v1 and part_state assembled. Starting place_insert is insufficient; the DFA retains a witnessed completion after this AP becomes false.",
+            "binding": {
+              "resource": "ur5e-3",
+              "part": "gear_small",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "acknowledged product state with exact part and destination task context; not direct processCompleted membership"
+          },
+          {
+            "label": "ap004",
+            "full": "ap_state/assembly/gear_small/ur5e-4/part_state=assembled/destination_location=assembly_board-v1",
+            "meaning": "A prior acknowledged assembly result associates ur5e-4 with gear_small at assembly_board-v1 and part_state assembled. Starting place_insert is insufficient; the DFA retains a witnessed completion after this AP becomes false.",
+            "binding": {
+              "resource": "ur5e-4",
+              "part": "gear_small",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": "acknowledged product state with exact part and destination task context; not direct processCompleted membership"
+          }
+        ],
+        "ltlf": "((!(ap001 | ap002)) U ((ap003 | ap004) & !(ap001 | ap002))) | G !(ap001 | ap002)",
+        "generated_interpretation": "LOCAL REFERENCE DRAFT; no LLM generation or approval. Placement of KET4_Square_4mm begins at place_approach start and requires an earlier acknowledged gear_small assembly witness. First simultaneous completion and placement is rejected. A trace with no placement does not require gear_small completion. The DFA remembers the witness after its native state/context disappears. This native witness is not a processCompleted predicate; generated recovery completion grounding and checkpoint history remain separate requirements."
+      }
+    }
+  ],
+  "scene_source": "cais_spade_llm/initialization/recovery_framework_gazebo.json"
+}

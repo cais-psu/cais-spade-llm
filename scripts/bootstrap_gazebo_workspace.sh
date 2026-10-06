@@ -79,6 +79,11 @@ fi
 copy_file_if_not_same \
   "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/src/gazebo_link_attacher.cpp" \
   "${ROS2_WS}/src/IFRA_LinkAttacher/ros2_LinkAttacher/src"
+for asset in CMakeLists.txt package.xml; do
+  copy_file_if_not_same \
+    "${REPO_ROOT}/ros2/third_party/IFRA_LinkAttacher/ros2_LinkAttacher/${asset}" \
+    "${ROS2_WS}/src/IFRA_LinkAttacher/ros2_LinkAttacher"
+done
 
 # ROS setup scripts are not consistently safe under `set -u`.
 set +u

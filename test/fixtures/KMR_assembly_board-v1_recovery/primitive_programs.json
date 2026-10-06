@@ -1,0 +1,131 @@
+{
+  "synthetic": true,
+  "description": "Manually authored per-event primitive program records. projected_snapshot and projected_outline_state contain expected fixture values, not validator output or measured evidence.",
+  "event_sequence_file": "event_sequence.json",
+  "primitive_program": [
+    {
+      "outline_id": "RECOVERY_SEQ1",
+      "des_event_id": "RECOVERY_SEQ1",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "event_name": "KMR_recovery_approach_assembly_board-v1",
+      "description": "Approach the synthetic assembly_board-v1 placement pose while retaining KET4_Square_4mm.",
+      "predecessors": [],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "gripper_state": "closed",
+        "current_pose": [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "base_pose": [0.0, 0.0, 0.0]
+      },
+      "projected_outline_state": {
+        "resource_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      }
+    },
+    {
+      "outline_id": "RECOVERY_SEQ2",
+      "des_event_id": "RECOVERY_SEQ2",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "event_name": "KMR_recovery_placement_assembly_board-v1",
+      "description": "Move the held KET4_Square_4mm to the synthetic placement pose without releasing it.",
+      "predecessors": ["RECOVERY_SEQ1"],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "gripper_state": "closed",
+        "current_pose": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "base_pose": [0.0, 0.0, 0.0]
+      },
+      "projected_outline_state": {
+        "resource_state": "positioned",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_location": "recovery-resource-8@localhost"
+      }
+    },
+    {
+      "outline_id": "RECOVERY_SEQ3",
+      "des_event_id": "RECOVERY_SEQ3",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "event_name": "KMR_recovery_release_KET4_Square_4mm",
+      "description": "Release KET4_Square_4mm using the synthetic initial grasp_transform; assume the released part remains at the placement pose.",
+      "predecessors": ["RECOVERY_SEQ2"],
+      "primitive_steps": [
+        {
+          "primitive": "release_part",
+          "params": {
+            "transform": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "gripper_state": "open",
+        "current_pose": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "base_pose": [0.0, 0.0, 0.0]
+      },
+      "projected_outline_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_location": "assembly_board-v1"
+      }
+    },
+    {
+      "outline_id": "RECOVERY_SEQ4",
+      "des_event_id": "RECOVERY_SEQ4",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "event_name": "KMR_recovery_retreat_assembly_board-v1",
+      "description": "Return the empty KMR TCP to its synthetic initial pose while KET4_Square_4mm remains at the placement pose.",
+      "predecessors": ["RECOVERY_SEQ3"],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "gripper_state": "open",
+        "current_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "base_pose": [0.0, 0.0, 0.0]
+      },
+      "projected_outline_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_location": "assembly_board-v1"
+      }
+    }
+  ]
+}

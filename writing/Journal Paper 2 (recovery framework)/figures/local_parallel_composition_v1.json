@@ -1,0 +1,858 @@
+{
+  "description": "Illustrative two-resource task-level product through marked completion. Reset transitions omitted. Existing local state identifiers retained. This is a resource-state projection; no safety verdict is assigned.",
+  "resource_1_states": [
+    "x_{F,r_1}",
+    "x_{0,r_1}",
+    "x_{1,r_1}",
+    "x_{2,r_1}",
+    "x_{3,r_1}",
+    "x_{m,r_1}"
+  ],
+  "resource_2_states": [
+    "x_{2,r_2}",
+    "x_{\\rho_2,r_2}",
+    "x_{\\rho_3,r_2}",
+    "x_{\\rho_4,r_2}",
+    "x_{1,r_2}",
+    "x_{3,r_2}",
+    "x_{m,r_2}"
+  ],
+  "post_fault": "r0c0",
+  "joint_marked": "r5c6",
+  "assignment": {
+    "i(1)": 1,
+    "i(2)": 2,
+    "i(3)": 2,
+    "i(4)": 2,
+    "i(5)": 2
+  },
+  "nodes": [
+    {
+      "id": "r0c0",
+      "row": 0,
+      "col": 0,
+      "label": "(x_{F,r_1}, x_{2,r_2})"
+    },
+    {
+      "id": "r0c1",
+      "row": 0,
+      "col": 1,
+      "label": "(x_{F,r_1}, x_{\\rho_2,r_2})"
+    },
+    {
+      "id": "r0c2",
+      "row": 0,
+      "col": 2,
+      "label": "(x_{F,r_1}, x_{\\rho_3,r_2})"
+    },
+    {
+      "id": "r0c3",
+      "row": 0,
+      "col": 3,
+      "label": "(x_{F,r_1}, x_{\\rho_4,r_2})"
+    },
+    {
+      "id": "r0c4",
+      "row": 0,
+      "col": 4,
+      "label": "(x_{F,r_1}, x_{1,r_2})"
+    },
+    {
+      "id": "r0c5",
+      "row": 0,
+      "col": 5,
+      "label": "(x_{F,r_1}, x_{3,r_2})"
+    },
+    {
+      "id": "r0c6",
+      "row": 0,
+      "col": 6,
+      "label": "(x_{F,r_1}, x_{m,r_2})"
+    },
+    {
+      "id": "r1c0",
+      "row": 1,
+      "col": 0,
+      "label": "(x_{0,r_1}, x_{2,r_2})"
+    },
+    {
+      "id": "r1c1",
+      "row": 1,
+      "col": 1,
+      "label": "(x_{0,r_1}, x_{\\rho_2,r_2})"
+    },
+    {
+      "id": "r1c2",
+      "row": 1,
+      "col": 2,
+      "label": "(x_{0,r_1}, x_{\\rho_3,r_2})"
+    },
+    {
+      "id": "r1c3",
+      "row": 1,
+      "col": 3,
+      "label": "(x_{0,r_1}, x_{\\rho_4,r_2})"
+    },
+    {
+      "id": "r1c4",
+      "row": 1,
+      "col": 4,
+      "label": "(x_{0,r_1}, x_{1,r_2})"
+    },
+    {
+      "id": "r1c5",
+      "row": 1,
+      "col": 5,
+      "label": "(x_{0,r_1}, x_{3,r_2})"
+    },
+    {
+      "id": "r1c6",
+      "row": 1,
+      "col": 6,
+      "label": "(x_{0,r_1}, x_{m,r_2})"
+    },
+    {
+      "id": "r2c0",
+      "row": 2,
+      "col": 0,
+      "label": "(x_{1,r_1}, x_{2,r_2})"
+    },
+    {
+      "id": "r2c1",
+      "row": 2,
+      "col": 1,
+      "label": "(x_{1,r_1}, x_{\\rho_2,r_2})"
+    },
+    {
+      "id": "r2c2",
+      "row": 2,
+      "col": 2,
+      "label": "(x_{1,r_1}, x_{\\rho_3,r_2})"
+    },
+    {
+      "id": "r2c3",
+      "row": 2,
+      "col": 3,
+      "label": "(x_{1,r_1}, x_{\\rho_4,r_2})"
+    },
+    {
+      "id": "r2c4",
+      "row": 2,
+      "col": 4,
+      "label": "(x_{1,r_1}, x_{1,r_2})"
+    },
+    {
+      "id": "r2c5",
+      "row": 2,
+      "col": 5,
+      "label": "(x_{1,r_1}, x_{3,r_2})"
+    },
+    {
+      "id": "r2c6",
+      "row": 2,
+      "col": 6,
+      "label": "(x_{1,r_1}, x_{m,r_2})"
+    },
+    {
+      "id": "r3c0",
+      "row": 3,
+      "col": 0,
+      "label": "(x_{2,r_1}, x_{2,r_2})"
+    },
+    {
+      "id": "r3c1",
+      "row": 3,
+      "col": 1,
+      "label": "(x_{2,r_1}, x_{\\rho_2,r_2})"
+    },
+    {
+      "id": "r3c2",
+      "row": 3,
+      "col": 2,
+      "label": "(x_{2,r_1}, x_{\\rho_3,r_2})"
+    },
+    {
+      "id": "r3c3",
+      "row": 3,
+      "col": 3,
+      "label": "(x_{2,r_1}, x_{\\rho_4,r_2})"
+    },
+    {
+      "id": "r3c4",
+      "row": 3,
+      "col": 4,
+      "label": "(x_{2,r_1}, x_{1,r_2})"
+    },
+    {
+      "id": "r3c5",
+      "row": 3,
+      "col": 5,
+      "label": "(x_{2,r_1}, x_{3,r_2})"
+    },
+    {
+      "id": "r3c6",
+      "row": 3,
+      "col": 6,
+      "label": "(x_{2,r_1}, x_{m,r_2})"
+    },
+    {
+      "id": "r4c0",
+      "row": 4,
+      "col": 0,
+      "label": "(x_{3,r_1}, x_{2,r_2})"
+    },
+    {
+      "id": "r4c1",
+      "row": 4,
+      "col": 1,
+      "label": "(x_{3,r_1}, x_{\\rho_2,r_2})"
+    },
+    {
+      "id": "r4c2",
+      "row": 4,
+      "col": 2,
+      "label": "(x_{3,r_1}, x_{\\rho_3,r_2})"
+    },
+    {
+      "id": "r4c3",
+      "row": 4,
+      "col": 3,
+      "label": "(x_{3,r_1}, x_{\\rho_4,r_2})"
+    },
+    {
+      "id": "r4c4",
+      "row": 4,
+      "col": 4,
+      "label": "(x_{3,r_1}, x_{1,r_2})"
+    },
+    {
+      "id": "r4c5",
+      "row": 4,
+      "col": 5,
+      "label": "(x_{3,r_1}, x_{3,r_2})"
+    },
+    {
+      "id": "r4c6",
+      "row": 4,
+      "col": 6,
+      "label": "(x_{3,r_1}, x_{m,r_2})"
+    },
+    {
+      "id": "r5c0",
+      "row": 5,
+      "col": 0,
+      "label": "(x_{m,r_1}, x_{2,r_2})"
+    },
+    {
+      "id": "r5c1",
+      "row": 5,
+      "col": 1,
+      "label": "(x_{m,r_1}, x_{\\rho_2,r_2})"
+    },
+    {
+      "id": "r5c2",
+      "row": 5,
+      "col": 2,
+      "label": "(x_{m,r_1}, x_{\\rho_3,r_2})"
+    },
+    {
+      "id": "r5c3",
+      "row": 5,
+      "col": 3,
+      "label": "(x_{m,r_1}, x_{\\rho_4,r_2})"
+    },
+    {
+      "id": "r5c4",
+      "row": 5,
+      "col": 4,
+      "label": "(x_{m,r_1}, x_{1,r_2})"
+    },
+    {
+      "id": "r5c5",
+      "row": 5,
+      "col": 5,
+      "label": "(x_{m,r_1}, x_{3,r_2})"
+    },
+    {
+      "id": "r5c6",
+      "row": 5,
+      "col": 6,
+      "label": "(x_{m,r_1}, x_{m,r_2})"
+    }
+  ],
+  "edges": [
+    {
+      "source": "r0c0",
+      "target": "r1c0",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c0",
+      "target": "r2c0",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c0",
+      "target": "r3c0",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c0",
+      "target": "r4c0",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c0",
+      "target": "r5c0",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c1",
+      "target": "r1c1",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c1",
+      "target": "r2c1",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c1",
+      "target": "r3c1",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c1",
+      "target": "r4c1",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c1",
+      "target": "r5c1",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c2",
+      "target": "r1c2",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c2",
+      "target": "r2c2",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c2",
+      "target": "r3c2",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c2",
+      "target": "r4c2",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c2",
+      "target": "r5c2",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c3",
+      "target": "r1c3",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c3",
+      "target": "r2c3",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c3",
+      "target": "r3c3",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c3",
+      "target": "r4c3",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c3",
+      "target": "r5c3",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c4",
+      "target": "r1c4",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c4",
+      "target": "r2c4",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c4",
+      "target": "r3c4",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c4",
+      "target": "r4c4",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c4",
+      "target": "r5c4",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c5",
+      "target": "r1c5",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c5",
+      "target": "r2c5",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c5",
+      "target": "r3c5",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c5",
+      "target": "r4c5",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c5",
+      "target": "r5c5",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c6",
+      "target": "r1c6",
+      "event": "e_1^R",
+      "resource": 1,
+      "recovery": true
+    },
+    {
+      "source": "r1c6",
+      "target": "r2c6",
+      "event": "e_{1,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r2c6",
+      "target": "r3c6",
+      "event": "e_{2,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r3c6",
+      "target": "r4c6",
+      "event": "e_{3,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r4c6",
+      "target": "r5c6",
+      "event": "e_{4,1}",
+      "resource": 1,
+      "recovery": false
+    },
+    {
+      "source": "r0c0",
+      "target": "r0c1",
+      "event": "e_2^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r0c1",
+      "target": "r0c2",
+      "event": "e_3^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r0c2",
+      "target": "r0c3",
+      "event": "e_4^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r0c3",
+      "target": "r0c4",
+      "event": "e_5^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r0c4",
+      "target": "r0c0",
+      "event": "e_{2,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r0c0",
+      "target": "r0c5",
+      "event": "e_{3,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r0c5",
+      "target": "r0c6",
+      "event": "e_{4,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r1c0",
+      "target": "r1c1",
+      "event": "e_2^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r1c1",
+      "target": "r1c2",
+      "event": "e_3^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r1c2",
+      "target": "r1c3",
+      "event": "e_4^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r1c3",
+      "target": "r1c4",
+      "event": "e_5^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r1c4",
+      "target": "r1c0",
+      "event": "e_{2,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r1c0",
+      "target": "r1c5",
+      "event": "e_{3,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r1c5",
+      "target": "r1c6",
+      "event": "e_{4,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r2c0",
+      "target": "r2c1",
+      "event": "e_2^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r2c1",
+      "target": "r2c2",
+      "event": "e_3^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r2c2",
+      "target": "r2c3",
+      "event": "e_4^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r2c3",
+      "target": "r2c4",
+      "event": "e_5^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r2c4",
+      "target": "r2c0",
+      "event": "e_{2,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r2c0",
+      "target": "r2c5",
+      "event": "e_{3,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r2c5",
+      "target": "r2c6",
+      "event": "e_{4,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r3c0",
+      "target": "r3c1",
+      "event": "e_2^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r3c1",
+      "target": "r3c2",
+      "event": "e_3^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r3c2",
+      "target": "r3c3",
+      "event": "e_4^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r3c3",
+      "target": "r3c4",
+      "event": "e_5^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r3c4",
+      "target": "r3c0",
+      "event": "e_{2,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r3c0",
+      "target": "r3c5",
+      "event": "e_{3,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r3c5",
+      "target": "r3c6",
+      "event": "e_{4,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r4c0",
+      "target": "r4c1",
+      "event": "e_2^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r4c1",
+      "target": "r4c2",
+      "event": "e_3^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r4c2",
+      "target": "r4c3",
+      "event": "e_4^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r4c3",
+      "target": "r4c4",
+      "event": "e_5^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r4c4",
+      "target": "r4c0",
+      "event": "e_{2,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r4c0",
+      "target": "r4c5",
+      "event": "e_{3,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r4c5",
+      "target": "r4c6",
+      "event": "e_{4,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r5c0",
+      "target": "r5c1",
+      "event": "e_2^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r5c1",
+      "target": "r5c2",
+      "event": "e_3^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r5c2",
+      "target": "r5c3",
+      "event": "e_4^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r5c3",
+      "target": "r5c4",
+      "event": "e_5^R",
+      "resource": 2,
+      "recovery": true
+    },
+    {
+      "source": "r5c4",
+      "target": "r5c0",
+      "event": "e_{2,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r5c0",
+      "target": "r5c5",
+      "event": "e_{3,2}",
+      "resource": 2,
+      "recovery": false
+    },
+    {
+      "source": "r5c5",
+      "target": "r5c6",
+      "event": "e_{4,2}",
+      "resource": 2,
+      "recovery": false
+    }
+  ],
+  "candidate_events": [
+    "e_1^R",
+    "e_2^R",
+    "e_3^R",
+    "e_4^R",
+    "e_5^R",
+    "e_{1,1}",
+    "e_{2,1}",
+    "e_{3,1}",
+    "e_{4,1}",
+    "e_{2,2}",
+    "e_{3,2}",
+    "e_{4,2}"
+  ],
+  "candidate_nodes": [
+    "r0c0",
+    "r1c0",
+    "r1c1",
+    "r1c2",
+    "r1c3",
+    "r1c4",
+    "r2c4",
+    "r3c4",
+    "r4c4",
+    "r5c4",
+    "r5c0",
+    "r5c5",
+    "r5c6"
+  ],
+  "safety_verdict": "not evaluated: SAFE_1 / SAFE_2 AP bindings required",
+  "safety_requirements": {
+    "SAFE_1": "P_1 by r_1 must be placed before P_2 by r_2.",
+    "SAFE_2": "r_1 and r_2 should not enter the assembly station at the same time."
+  }
+}

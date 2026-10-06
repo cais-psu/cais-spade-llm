@@ -1,0 +1,4114 @@
+{
+  "version": 1,
+  "experiment": "part_slippage",
+  "dispatch_authorized": false,
+  "candidate_origin": "mock",
+  "evidence_origin": "synthetic",
+  "llm_calls": 0,
+  "sources": {
+    "scene": {
+      "path": "cais_spade_llm/initialization/recovery_framework_gazebo.json",
+      "sha256": "31967785af2ad735dc679b468c4a30fce875425cb90429cf9cf4c02231cd4602"
+    },
+    "predefined_safety": {
+      "path": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
+      "sha256": "a8a79e73e18ca16a3ec28dac5a5b9a8900fe9570b7321423cdad2184aef975da"
+    }
+  },
+  "modeling_assumptions": [
+    "All poses, trajectories, durations, envelopes, checkpoints and acknowledgements are synthetic; no Gazebo capture or dispatch occurs.",
+    "Programs use the existing offline 3D primitive-observation contract, including move_cartesian.target and release_part.transform. These are model inputs, not native UR5e controller dispatch programs.",
+    "Fixed-orientation, piecewise-linear paths and axis-aligned envelopes describe the complete modeled motion. Reachability, collisions outside the reviewed region, and physical feasibility are not established.",
+    "Every configured resource has physical evidence; assembly_board-v1 is an inventory-only containment owner and the reviewed region, not an additional configured resource.",
+    "The initial ur5e-3 occupancy is observed prospectively. Earlier execution and the physical slippage are not certified by this trace.",
+    "The assembly completion record is a separately supplied synthetic acknowledgement associated with the configured ur5e-4 place_insert declaration. Motion, release and event names alone never establish completion.",
+    "The mock candidates stand in for LLM outputs. No LLM was called, and executable LLM program quality is outside this demonstration."
+  ],
+  "fixture_sha256": {
+    "initial_context.json": "dc71ea732469c3a1dc9ce9e87b7ea9bf1e84f56d40f280c20d0dcc879d3f28cf",
+    "mutex.json": "465300271566f5c78b0e996bf9ea01573ab4b1a6d74bbf4a81372d9dde4ea928",
+    "precedence.json": "3d046ccf40d99e3a2b3de973877e46e82a383c15abbe2dd9443fc24898a0e31c",
+    "safe.json": "7b62eb4157002c34ab7f1969d92980c8dadf0225b0a2b8291dfa3fe44425cc18"
+  },
+  "definitions": [
+    {
+      "id": "SAFE_shared_area_mutex",
+      "raw_text": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap_state/physical_observation/shared_area_first_resource",
+          "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+        },
+        {
+          "label": "ap002",
+          "full": "ap_state/physical_observation/shared_area_second_resource",
+          "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+        }
+      ],
+      "ltlf": "G !(ap001 & ap002)",
+      "requirement_scopes": [
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "region": "assembly_board-v1"
+        }
+      ],
+      "dfa_dot": "digraph MONA_DFA {\n rankdir = LR;\n center = true;\n size = \"7.5,10.5\";\n edge [fontname = Courier];\n node [height = .5, width = .5];\n node [shape = doublecircle]; 1;\n node [shape = circle]; 1;\n init [shape = plaintext, label = \"\"];\n init -> 1;\n 1 -> 1 [label=\"~ap001 | ~ap002\"];\n 1 -> 2 [label=\"ap001 & ap002\"];\n 2 -> 2 [label=\"true\"];\n}"
+    },
+    {
+      "id": "SAFE_gear_small_before_KET4_Square_4mm",
+      "raw_text": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
+      "aps": [
+        {
+          "label": "ap001",
+          "full": "ap_event/physical_observation/part_region_entry",
+          "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+        },
+        {
+          "label": "ap002",
+          "full": "ap_state/processCompleted/process_target_completed",
+          "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+        }
+      ],
+      "ltlf": "(!ap001 U (ap002 & !ap001)) | G !ap001",
+      "requirement_scopes": [
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "physical_ap_bindings": {
+            "ap001": {
+              "part": "KET4_Square_4mm",
+              "region": "assembly_board-v1"
+            },
+            "ap002": {
+              "part": "gear_small",
+              "process": "assembly",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            }
+          }
+        }
+      ],
+      "dfa_dot": "digraph MONA_DFA {\n rankdir = LR;\n center = true;\n size = \"7.5,10.5\";\n edge [fontname = Courier];\n node [height = .5, width = .5];\n node [shape = doublecircle]; 1; 2;\n node [shape = circle]; 1;\n init [shape = plaintext, label = \"\"];\n init -> 1;\n 1 -> 1 [label=\"~ap001 & ~ap002\"];\n 1 -> 2 [label=\"ap002 & ~ap001\"];\n 1 -> 3 [label=\"ap001\"];\n 2 -> 2 [label=\"true\"];\n 3 -> 3 [label=\"true\"];\n}"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "PART_SLIPPAGE_MUTEX",
+      "file": "mutex.json",
+      "candidate_origin": "mock",
+      "evidence_origin": "synthetic",
+      "status": "violated",
+      "reason": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+      "trace_id": "57c27d99c41a1d46f91529285bdb4ad14611ddd70a39a966faf6fd6d42e755b4",
+      "clock_version": "grounded_primitive_observations_joint_trace_v1",
+      "input_fingerprint": "5de2ab0899bd9a9f21e413ae0bcf496d61980b30ae3101e00ec23c9df90bbdd2",
+      "dispatch_authorized": false,
+      "configured_resources": [
+        "3D Printing Station",
+        "Buffer For Machined parts",
+        "Conveyor",
+        "Exit",
+        "KMR",
+        "M1",
+        "M2",
+        "Storage",
+        "ur5e-1",
+        "ur5e-2",
+        "ur5e-3",
+        "ur5e-4"
+      ],
+      "concrete_rule_count": 67,
+      "specifications": {
+        "SAFE_shared_area_mutex": {
+          "status": "violated",
+          "reason": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+          "counterexample": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "specification": "SAFE_shared_area_mutex",
+            "binding": {
+              "specification": "SAFE_shared_area_mutex",
+              "region": "assembly_board-v1",
+              "resources": [
+                "ur5e-3",
+                "ur5e-4"
+              ]
+            },
+            "observation_index": 32,
+            "time": 5.287878787878788,
+            "phase": "at",
+            "ap_values": {
+              "ap001": true,
+              "ap002": true
+            },
+            "transition": {
+              "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+              "from": "1",
+              "label": [
+                "ap001",
+                "ap002"
+              ],
+              "rule_label": [
+                "ap001",
+                "ap002"
+              ],
+              "matched_transitions": [
+                {
+                  "guard": "ap001 & ap002",
+                  "to": "2"
+                }
+              ],
+              "to": "2",
+              "accepting": false,
+              "accepting_reachable": false,
+              "status": "rejected",
+              "reason": "accepting_state_unreachable"
+            },
+            "active_steps": [
+              {
+                "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+                "event_name": "return_gear_small_to_assembly_board-v1",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 1,
+                "step_index": 5,
+                "input_origin": "mock",
+                "source": {
+                  "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+                  "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+                  "event_name": "return_gear_small_to_assembly_board-v1",
+                  "resource_id": "ur5e-4",
+                  "resource_jid": "recovery-resource-4@localhost",
+                  "primitive_index": 1,
+                  "step_index": 1,
+                  "input_origin": "mock"
+                },
+                "global_step_index": 5,
+                "primitive": "move_cartesian",
+                "resolved_params": {
+                  "target": [
+                    0,
+                    -0.12,
+                    1.22,
+                    0,
+                    0,
+                    0,
+                    1
+                  ]
+                }
+              }
+            ],
+            "time_exact": "349/66",
+            "aps": [
+              {
+                "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+                "descriptor": {
+                  "label": "ap001",
+                  "full": "ap_state/physical_observation/shared_area_first_resource",
+                  "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+                },
+                "binding": {
+                  "specification": "SAFE_shared_area_mutex",
+                  "region": "assembly_board-v1",
+                  "resources": [
+                    "ur5e-3",
+                    "ur5e-4"
+                  ]
+                },
+                "evidence_source": {
+                  "source_kind": "resource_model",
+                  "observation_index": 32,
+                  "predicate": "ap_state/physical_observation/shared_area_first_resource"
+                },
+                "observation_index": 32,
+                "time": 5.287878787878788,
+                "phase": "at",
+                "value": true
+              },
+              {
+                "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+                "descriptor": {
+                  "label": "ap002",
+                  "full": "ap_state/physical_observation/shared_area_second_resource",
+                  "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+                },
+                "binding": {
+                  "specification": "SAFE_shared_area_mutex",
+                  "region": "assembly_board-v1",
+                  "resources": [
+                    "ur5e-3",
+                    "ur5e-4"
+                  ]
+                },
+                "evidence_source": {
+                  "source_kind": "resource_model",
+                  "observation_index": 32,
+                  "predicate": "ap_state/physical_observation/shared_area_second_resource"
+                },
+                "observation_index": 32,
+                "time": 5.287878787878788,
+                "phase": "at",
+                "value": true
+              }
+            ],
+            "region_occupancy": {
+              "assembly_board-v1": {
+                "KMR": false,
+                "ur5e-1": false,
+                "ur5e-2": false,
+                "ur5e-3": true,
+                "ur5e-4": true,
+                "M1": false,
+                "M2": false,
+                "Storage": false,
+                "Conveyor": false,
+                "Buffer For Machined parts": false,
+                "3D Printing Station": false,
+                "Exit": false
+              }
+            },
+            "carried_parts": {
+              "KMR": [],
+              "ur5e-1": [],
+              "ur5e-2": [],
+              "ur5e-3": [],
+              "ur5e-4": [
+                "gear_small"
+              ],
+              "M1": [],
+              "M2": [],
+              "Storage": [],
+              "Conveyor": [],
+              "Buffer For Machined parts": [],
+              "3D Printing Station": [],
+              "Exit": []
+            }
+          },
+          "concrete_rule_count": 66
+        },
+        "SAFE_gear_small_before_KET4_Square_4mm": {
+          "status": "satisfied",
+          "reason": "",
+          "counterexample": null,
+          "concrete_rule_count": 1
+        }
+      },
+      "counterexample": {
+        "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+        "specification": "SAFE_shared_area_mutex",
+        "binding": {
+          "specification": "SAFE_shared_area_mutex",
+          "region": "assembly_board-v1",
+          "resources": [
+            "ur5e-3",
+            "ur5e-4"
+          ]
+        },
+        "observation_index": 32,
+        "time": 5.287878787878788,
+        "phase": "at",
+        "ap_values": {
+          "ap001": true,
+          "ap002": true
+        },
+        "transition": {
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "from": "1",
+          "label": [
+            "ap001",
+            "ap002"
+          ],
+          "rule_label": [
+            "ap001",
+            "ap002"
+          ],
+          "matched_transitions": [
+            {
+              "guard": "ap001 & ap002",
+              "to": "2"
+            }
+          ],
+          "to": "2",
+          "accepting": false,
+          "accepting_reachable": false,
+          "status": "rejected",
+          "reason": "accepting_state_unreachable"
+        },
+        "active_steps": [
+          {
+            "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+            "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+            "event_name": "return_gear_small_to_assembly_board-v1",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 1,
+            "step_index": 5,
+            "input_origin": "mock",
+            "source": {
+              "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+              "event_name": "return_gear_small_to_assembly_board-v1",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 1,
+              "step_index": 1,
+              "input_origin": "mock"
+            },
+            "global_step_index": 5,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [
+                0,
+                -0.12,
+                1.22,
+                0,
+                0,
+                0,
+                1
+              ]
+            }
+          }
+        ],
+        "time_exact": "349/66",
+        "aps": [
+          {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "descriptor": {
+              "label": "ap001",
+              "full": "ap_state/physical_observation/shared_area_first_resource",
+              "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+            },
+            "binding": {
+              "specification": "SAFE_shared_area_mutex",
+              "region": "assembly_board-v1",
+              "resources": [
+                "ur5e-3",
+                "ur5e-4"
+              ]
+            },
+            "evidence_source": {
+              "source_kind": "resource_model",
+              "observation_index": 32,
+              "predicate": "ap_state/physical_observation/shared_area_first_resource"
+            },
+            "observation_index": 32,
+            "time": 5.287878787878788,
+            "phase": "at",
+            "value": true
+          },
+          {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "descriptor": {
+              "label": "ap002",
+              "full": "ap_state/physical_observation/shared_area_second_resource",
+              "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+            },
+            "binding": {
+              "specification": "SAFE_shared_area_mutex",
+              "region": "assembly_board-v1",
+              "resources": [
+                "ur5e-3",
+                "ur5e-4"
+              ]
+            },
+            "evidence_source": {
+              "source_kind": "resource_model",
+              "observation_index": 32,
+              "predicate": "ap_state/physical_observation/shared_area_second_resource"
+            },
+            "observation_index": 32,
+            "time": 5.287878787878788,
+            "phase": "at",
+            "value": true
+          }
+        ],
+        "region_occupancy": {
+          "assembly_board-v1": {
+            "KMR": false,
+            "ur5e-1": false,
+            "ur5e-2": false,
+            "ur5e-3": true,
+            "ur5e-4": true,
+            "M1": false,
+            "M2": false,
+            "Storage": false,
+            "Conveyor": false,
+            "Buffer For Machined parts": false,
+            "3D Printing Station": false,
+            "Exit": false
+          }
+        },
+        "carried_parts": {
+          "KMR": [],
+          "ur5e-1": [],
+          "ur5e-2": [],
+          "ur5e-3": [],
+          "ur5e-4": [
+            "gear_small"
+          ],
+          "M1": [],
+          "M2": [],
+          "Storage": [],
+          "Conveyor": [],
+          "Buffer For Machined parts": [],
+          "3D Printing Station": [],
+          "Exit": []
+        }
+      },
+      "ap_changes": [
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 0,
+          "time": 0.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 & ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage_DES",
+              "event_name": "retrieve_gear_small_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage_DES",
+                "event_name": "retrieve_gear_small_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  -0.65,
+                  0.35,
+                  1.3,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 0,
+          "time": 0.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap001"
+            ],
+            "rule_label": [
+              "ap001"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage_DES",
+              "event_name": "retrieve_gear_small_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage_DES",
+                "event_name": "retrieve_gear_small_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  -0.65,
+                  0.35,
+                  1.3,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 32,
+          "time": 5.287878787878788,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap001",
+              "ap002"
+            ],
+            "rule_label": [
+              "ap001",
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "ap001 & ap002",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": false,
+            "accepting_reachable": false,
+            "status": "rejected",
+            "reason": "accepting_state_unreachable"
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+              "event_name": "return_gear_small_to_assembly_board-v1",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 1,
+              "step_index": 5,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+                "event_name": "return_gear_small_to_assembly_board-v1",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 5,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 44,
+          "time": 9.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "1",
+            "label": [
+              "ap002"
+            ],
+            "rule_label": [
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "ap002 & ~ap001",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage_DES",
+              "event_name": "place_gear_small_and_retreat_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 2,
+              "step_index": 8,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage_DES",
+                "event_name": "place_gear_small_and_retreat_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 2,
+                "step_index": 2,
+                "input_origin": "mock"
+              },
+              "global_step_index": 8,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 84,
+          "time": 17.28787878787879,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "2",
+            "label": [
+              "ap001",
+              "ap002"
+            ],
+            "rule_label": [
+              "ap001",
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "true",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 85,
+          "time": 17.34090909090909,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "2",
+            "label": [
+              "ap002"
+            ],
+            "rule_label": [
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "true",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_clear_assembly_board-v1_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_clear_assembly_board-v1_after_part_slippage_DES",
+          "event_name": "clear_assembly_board-v1_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": null,
+          "predecessors": [],
+          "start_time": 10,
+          "end_time": 11,
+          "primitive_step_indices": [
+            0
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage_DES",
+          "event_name": "retrieve_gear_small_after_part_slippage",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [],
+          "start_time": 0,
+          "end_time": 4,
+          "primitive_step_indices": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.65,
+              -0.4,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              -0.65,
+              0.35,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1_DES",
+          "event_name": "return_gear_small_to_assembly_board-v1",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [
+            "PART_SLIPPAGE_MUTEX_retrieve_gear_small_after_part_slippage"
+          ],
+          "start_time": 4,
+          "end_time": 6,
+          "primitive_step_indices": [
+            4,
+            5
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.65,
+              0.35,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage_DES",
+          "event_name": "place_gear_small_and_retreat_after_part_slippage",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [
+            "PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1"
+          ],
+          "start_time": 6,
+          "end_time": 9,
+          "primitive_step_indices": [
+            6,
+            7,
+            8
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "declared_task": {
+            "event_id": 65,
+            "event_name": "place_insert",
+            "parameters": {
+              "resource_id": "ur5e-4",
+              "destination_location": "assembly_board-v1",
+              "handoff_acknowledged": true,
+              "assembly_acknowledged": true,
+              "part_name": "gear_small",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            }
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_retrieve_KET4_Square_4mm_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+          "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_MUTEX_clear_assembly_board-v1_after_part_slippage",
+            "PART_SLIPPAGE_MUTEX_place_gear_small_and_retreat_after_part_slippage"
+          ],
+          "start_time": 12,
+          "end_time": 16,
+          "primitive_step_indices": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              -0.6,
+              0.7,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+          "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_MUTEX_retrieve_KET4_Square_4mm_after_part_slippage"
+          ],
+          "start_time": 16,
+          "end_time": 18,
+          "primitive_step_indices": [
+            5,
+            6
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.6,
+              0.7,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_MUTEX_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_MUTEX_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+          "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_MUTEX_return_KET4_Square_4mm_to_assembly_board-v1"
+          ],
+          "start_time": 18,
+          "end_time": 21,
+          "primitive_step_indices": [
+            7,
+            8,
+            9
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          }
+        }
+      ],
+      "expected": {
+        "combined": "violated",
+        "SAFE_shared_area_mutex": "violated",
+        "SAFE_gear_small_before_KET4_Square_4mm": "satisfied"
+      },
+      "expectations_met": true,
+      "modeled_final_state": {
+        "resources": {
+          "ur5e-3": {
+            "held_part": null,
+            "gripper_state": "open",
+            "current_pose": [
+              0.0,
+              0.12,
+              1.55,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "ur5e-4": {
+            "held_part": null,
+            "gripper_state": "open",
+            "current_pose": [
+              0.0,
+              -0.12,
+              1.55,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          }
+        },
+        "parts": {
+          "gear_small": {
+            "current_pose": [
+              0.0,
+              -0.12,
+              1.06,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "contained_by": "assembly_board-v1",
+            "processCompleted": [
+              {
+                "process": "print_part"
+              },
+              {
+                "process": "assembly",
+                "target": "Gear_Plate/Gear_Shaft_1"
+              }
+            ]
+          },
+          "KET4_Square_4mm": {
+            "current_pose": [
+              0.0,
+              0.12,
+              1.06,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "contained_by": "assembly_board-v1",
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "pending_tasks": [
+          {
+            "task_id": "PART_SLIPPAGE_PENDING_KET4_ASSEMBLY",
+            "resource_id": "ur5e-3",
+            "part_name": "KET4_Square_4mm",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "PART_SLIPPAGE_PRECEDENCE",
+      "file": "precedence.json",
+      "candidate_origin": "mock",
+      "evidence_origin": "synthetic",
+      "status": "violated",
+      "reason": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
+      "trace_id": "22539e5fde99b90f239a7830c112799c088fa6dc36e87e9db1d7bf07a6c65f31",
+      "clock_version": "grounded_primitive_observations_joint_trace_v1",
+      "input_fingerprint": "ba81de0d959fc2e3c501b405280b1c4bcc7ff76ac9feea1aaa27b5f97869ec54",
+      "dispatch_authorized": false,
+      "configured_resources": [
+        "3D Printing Station",
+        "Buffer For Machined parts",
+        "Conveyor",
+        "Exit",
+        "KMR",
+        "M1",
+        "M2",
+        "Storage",
+        "ur5e-1",
+        "ur5e-2",
+        "ur5e-3",
+        "ur5e-4"
+      ],
+      "concrete_rule_count": 67,
+      "specifications": {
+        "SAFE_shared_area_mutex": {
+          "status": "satisfied",
+          "reason": "",
+          "counterexample": null,
+          "concrete_rule_count": 66
+        },
+        "SAFE_gear_small_before_KET4_Square_4mm": {
+          "status": "violated",
+          "reason": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
+          "counterexample": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+            "binding": {
+              "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+            },
+            "observation_index": 36,
+            "time": 6.287878787878788,
+            "phase": "at",
+            "ap_values": {
+              "ap001": true,
+              "ap002": false
+            },
+            "transition": {
+              "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+              "from": "1",
+              "label": [
+                "ap001"
+              ],
+              "rule_label": [
+                "ap001"
+              ],
+              "matched_transitions": [
+                {
+                  "guard": "ap001",
+                  "to": "3"
+                }
+              ],
+              "to": "3",
+              "accepting": false,
+              "accepting_reachable": false,
+              "status": "rejected",
+              "reason": "accepting_state_unreachable"
+            },
+            "active_steps": [
+              {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 6,
+                "input_origin": "mock",
+                "source": {
+                  "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+                  "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                  "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                  "resource_id": "ur5e-3",
+                  "resource_jid": "recovery-resource-3@localhost",
+                  "primitive_index": 1,
+                  "step_index": 1,
+                  "input_origin": "mock"
+                },
+                "global_step_index": 6,
+                "primitive": "move_cartesian",
+                "resolved_params": {
+                  "target": [
+                    0,
+                    0.12,
+                    1.22,
+                    0,
+                    0,
+                    0,
+                    1
+                  ]
+                }
+              }
+            ],
+            "time_exact": "415/66",
+            "aps": [
+              {
+                "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+                "descriptor": {
+                  "label": "ap001",
+                  "full": "ap_event/physical_observation/part_region_entry",
+                  "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+                },
+                "binding": {
+                  "part": "KET4_Square_4mm",
+                  "region": "assembly_board-v1"
+                },
+                "evidence_source": {
+                  "source_kind": "resource_model",
+                  "observation_index": 36,
+                  "predicate": "ap_event/physical_observation/part_region_entry"
+                },
+                "observation_index": 36,
+                "time": 6.287878787878788,
+                "phase": "at",
+                "value": true
+              },
+              {
+                "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+                "descriptor": {
+                  "label": "ap002",
+                  "full": "ap_state/processCompleted/process_target_completed",
+                  "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+                },
+                "binding": {
+                  "part": "gear_small",
+                  "process": "assembly",
+                  "target": "Gear_Plate/Gear_Shaft_1"
+                },
+                "evidence_source": {
+                  "source_kind": "resource_model",
+                  "observation_index": 36,
+                  "predicate": "ap_state/processCompleted/process_target_completed",
+                  "checkpoint": {
+                    "complete": true,
+                    "source_kind": "synthetic",
+                    "checkpoint": "part_slippage_predefined_safety"
+                  },
+                  "product_effect_evidence": []
+                },
+                "observation_index": 36,
+                "time": 6.287878787878788,
+                "phase": "at",
+                "value": false
+              }
+            ],
+            "region_occupancy": {
+              "assembly_board-v1": {
+                "KMR": false,
+                "ur5e-1": false,
+                "ur5e-2": false,
+                "ur5e-3": true,
+                "ur5e-4": false,
+                "M1": false,
+                "M2": false,
+                "Storage": false,
+                "Conveyor": false,
+                "Buffer For Machined parts": false,
+                "3D Printing Station": false,
+                "Exit": false
+              }
+            },
+            "carried_parts": {
+              "KMR": [],
+              "ur5e-1": [],
+              "ur5e-2": [],
+              "ur5e-3": [
+                "KET4_Square_4mm"
+              ],
+              "ur5e-4": [],
+              "M1": [],
+              "M2": [],
+              "Storage": [],
+              "Conveyor": [],
+              "Buffer For Machined parts": [],
+              "3D Printing Station": [],
+              "Exit": []
+            }
+          },
+          "concrete_rule_count": 1
+        }
+      },
+      "counterexample": {
+        "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+        "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+        "binding": {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+        },
+        "observation_index": 36,
+        "time": 6.287878787878788,
+        "phase": "at",
+        "ap_values": {
+          "ap001": true,
+          "ap002": false
+        },
+        "transition": {
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "from": "1",
+          "label": [
+            "ap001"
+          ],
+          "rule_label": [
+            "ap001"
+          ],
+          "matched_transitions": [
+            {
+              "guard": "ap001",
+              "to": "3"
+            }
+          ],
+          "to": "3",
+          "accepting": false,
+          "accepting_reachable": false,
+          "status": "rejected",
+          "reason": "accepting_state_unreachable"
+        },
+        "active_steps": [
+          {
+            "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+            "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+            "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 1,
+            "step_index": 6,
+            "input_origin": "mock",
+            "source": {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 1,
+              "input_origin": "mock"
+            },
+            "global_step_index": 6,
+            "primitive": "move_cartesian",
+            "resolved_params": {
+              "target": [
+                0,
+                0.12,
+                1.22,
+                0,
+                0,
+                0,
+                1
+              ]
+            }
+          }
+        ],
+        "time_exact": "415/66",
+        "aps": [
+          {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "descriptor": {
+              "label": "ap001",
+              "full": "ap_event/physical_observation/part_region_entry",
+              "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+            },
+            "binding": {
+              "part": "KET4_Square_4mm",
+              "region": "assembly_board-v1"
+            },
+            "evidence_source": {
+              "source_kind": "resource_model",
+              "observation_index": 36,
+              "predicate": "ap_event/physical_observation/part_region_entry"
+            },
+            "observation_index": 36,
+            "time": 6.287878787878788,
+            "phase": "at",
+            "value": true
+          },
+          {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "descriptor": {
+              "label": "ap002",
+              "full": "ap_state/processCompleted/process_target_completed",
+              "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+            },
+            "binding": {
+              "part": "gear_small",
+              "process": "assembly",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            },
+            "evidence_source": {
+              "source_kind": "resource_model",
+              "observation_index": 36,
+              "predicate": "ap_state/processCompleted/process_target_completed",
+              "checkpoint": {
+                "complete": true,
+                "source_kind": "synthetic",
+                "checkpoint": "part_slippage_predefined_safety"
+              },
+              "product_effect_evidence": []
+            },
+            "observation_index": 36,
+            "time": 6.287878787878788,
+            "phase": "at",
+            "value": false
+          }
+        ],
+        "region_occupancy": {
+          "assembly_board-v1": {
+            "KMR": false,
+            "ur5e-1": false,
+            "ur5e-2": false,
+            "ur5e-3": true,
+            "ur5e-4": false,
+            "M1": false,
+            "M2": false,
+            "Storage": false,
+            "Conveyor": false,
+            "Buffer For Machined parts": false,
+            "3D Printing Station": false,
+            "Exit": false
+          }
+        },
+        "carried_parts": {
+          "KMR": [],
+          "ur5e-1": [],
+          "ur5e-2": [],
+          "ur5e-3": [
+            "KET4_Square_4mm"
+          ],
+          "ur5e-4": [],
+          "M1": [],
+          "M2": [],
+          "Storage": [],
+          "Conveyor": [],
+          "Buffer For Machined parts": [],
+          "3D Printing Station": [],
+          "Exit": []
+        }
+      },
+      "ap_changes": [
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 0,
+          "time": 0.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 & ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+              "event_name": "clear_assembly_board-v1_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+                "event_name": "clear_assembly_board-v1_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 0,
+          "time": 0.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap001"
+            ],
+            "rule_label": [
+              "ap001"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+              "event_name": "clear_assembly_board-v1_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+                "event_name": "clear_assembly_board-v1_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 3,
+          "time": 0.803030303030303,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+              "event_name": "clear_assembly_board-v1_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+                "event_name": "clear_assembly_board-v1_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 36,
+          "time": 6.287878787878788,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "1",
+            "label": [
+              "ap001"
+            ],
+            "rule_label": [
+              "ap001"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "ap001",
+                "to": "3"
+              }
+            ],
+            "to": "3",
+            "accepting": false,
+            "accepting_reachable": false,
+            "status": "rejected",
+            "reason": "accepting_state_unreachable"
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 36,
+          "time": 6.287878787878788,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap001"
+            ],
+            "rule_label": [
+              "ap001"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 47,
+          "time": 9.855555555555556,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+              "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 2,
+              "step_index": 9,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+                "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 2,
+                "step_index": 2,
+                "input_origin": "mock"
+              },
+              "global_step_index": 9,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 82,
+          "time": 17.28787878787879,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap002"
+            ],
+            "rule_label": [
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1_DES",
+              "event_name": "return_gear_small_to_assembly_board-v1",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 1,
+              "step_index": 5,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1_DES",
+                "event_name": "return_gear_small_to_assembly_board-v1",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 5,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 93,
+          "time": 20.855555555555554,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_PRECEDENCE_place_gear_small_and_retreat_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_PRECEDENCE_place_gear_small_and_retreat_after_part_slippage_DES",
+              "event_name": "place_gear_small_and_retreat_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 2,
+              "step_index": 8,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_PRECEDENCE_place_gear_small_and_retreat_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_PRECEDENCE_place_gear_small_and_retreat_after_part_slippage_DES",
+                "event_name": "place_gear_small_and_retreat_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 2,
+                "step_index": 2,
+                "input_origin": "mock"
+              },
+              "global_step_index": 8,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage_DES",
+          "event_name": "clear_assembly_board-v1_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": null,
+          "predecessors": [],
+          "start_time": 0,
+          "end_time": 1,
+          "primitive_step_indices": [
+            0
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_retrieve_gear_small_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_retrieve_gear_small_after_part_slippage_DES",
+          "event_name": "retrieve_gear_small_after_part_slippage",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [],
+          "start_time": 12,
+          "end_time": 16,
+          "primitive_step_indices": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.65,
+              -0.4,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              -0.65,
+              0.35,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1_DES",
+          "event_name": "return_gear_small_to_assembly_board-v1",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [
+            "PART_SLIPPAGE_PRECEDENCE_retrieve_gear_small_after_part_slippage"
+          ],
+          "start_time": 16,
+          "end_time": 18,
+          "primitive_step_indices": [
+            4,
+            5
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.65,
+              0.35,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_place_gear_small_and_retreat_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_place_gear_small_and_retreat_after_part_slippage_DES",
+          "event_name": "place_gear_small_and_retreat_after_part_slippage",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [
+            "PART_SLIPPAGE_PRECEDENCE_return_gear_small_to_assembly_board-v1"
+          ],
+          "start_time": 18,
+          "end_time": 21,
+          "primitive_step_indices": [
+            6,
+            7,
+            8
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "declared_task": {
+            "event_id": 65,
+            "event_name": "place_insert",
+            "parameters": {
+              "resource_id": "ur5e-4",
+              "destination_location": "assembly_board-v1",
+              "handoff_acknowledged": true,
+              "assembly_acknowledged": true,
+              "part_name": "gear_small",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            }
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_retrieve_KET4_Square_4mm_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+          "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_PRECEDENCE_clear_assembly_board-v1_after_part_slippage"
+          ],
+          "start_time": 1,
+          "end_time": 5,
+          "primitive_step_indices": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              -0.6,
+              0.7,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+          "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_PRECEDENCE_retrieve_KET4_Square_4mm_after_part_slippage"
+          ],
+          "start_time": 5,
+          "end_time": 7,
+          "primitive_step_indices": [
+            5,
+            6
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.6,
+              0.7,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_PRECEDENCE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_PRECEDENCE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+          "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1"
+          ],
+          "start_time": 7,
+          "end_time": 10,
+          "primitive_step_indices": [
+            7,
+            8,
+            9
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          }
+        }
+      ],
+      "expected": {
+        "combined": "violated",
+        "SAFE_shared_area_mutex": "satisfied",
+        "SAFE_gear_small_before_KET4_Square_4mm": "violated"
+      },
+      "expectations_met": true,
+      "modeled_final_state": {
+        "resources": {
+          "ur5e-3": {
+            "held_part": null,
+            "gripper_state": "open",
+            "current_pose": [
+              0.0,
+              0.12,
+              1.55,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "ur5e-4": {
+            "held_part": null,
+            "gripper_state": "open",
+            "current_pose": [
+              0.0,
+              -0.12,
+              1.55,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          }
+        },
+        "parts": {
+          "gear_small": {
+            "current_pose": [
+              0.0,
+              -0.12,
+              1.06,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "contained_by": "assembly_board-v1",
+            "processCompleted": [
+              {
+                "process": "print_part"
+              },
+              {
+                "process": "assembly",
+                "target": "Gear_Plate/Gear_Shaft_1"
+              }
+            ]
+          },
+          "KET4_Square_4mm": {
+            "current_pose": [
+              0.0,
+              0.12,
+              1.06,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "contained_by": "assembly_board-v1",
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "pending_tasks": [
+          {
+            "task_id": "PART_SLIPPAGE_PENDING_KET4_ASSEMBLY",
+            "resource_id": "ur5e-3",
+            "part_name": "KET4_Square_4mm",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "PART_SLIPPAGE_SAFE",
+      "file": "safe.json",
+      "candidate_origin": "mock",
+      "evidence_origin": "synthetic",
+      "status": "satisfied",
+      "reason": "",
+      "trace_id": "70cf3fb6db94aa0411f16acb6090f9c9f43304efc3e83f500f0369399325379f",
+      "clock_version": "grounded_primitive_observations_joint_trace_v1",
+      "input_fingerprint": "ca524e48a10c23483fed8a79a3e5ac09fa081e3c8487b14686cbab866c2e2a84",
+      "dispatch_authorized": false,
+      "configured_resources": [
+        "3D Printing Station",
+        "Buffer For Machined parts",
+        "Conveyor",
+        "Exit",
+        "KMR",
+        "M1",
+        "M2",
+        "Storage",
+        "ur5e-1",
+        "ur5e-2",
+        "ur5e-3",
+        "ur5e-4"
+      ],
+      "concrete_rule_count": 67,
+      "specifications": {
+        "SAFE_shared_area_mutex": {
+          "status": "satisfied",
+          "reason": "",
+          "counterexample": null,
+          "concrete_rule_count": 66
+        },
+        "SAFE_gear_small_before_KET4_Square_4mm": {
+          "status": "satisfied",
+          "reason": "",
+          "counterexample": null,
+          "concrete_rule_count": 1
+        }
+      },
+      "counterexample": null,
+      "ap_changes": [
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 0,
+          "time": 0.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 & ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+              "event_name": "clear_assembly_board-v1_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+                "event_name": "clear_assembly_board-v1_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+              "event_name": "retrieve_gear_small_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+                "event_name": "retrieve_gear_small_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  -0.65,
+                  0.35,
+                  1.3,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 0,
+          "time": 0.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap001"
+            ],
+            "rule_label": [
+              "ap001"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+              "event_name": "clear_assembly_board-v1_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+                "event_name": "clear_assembly_board-v1_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+              "event_name": "retrieve_gear_small_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+                "event_name": "retrieve_gear_small_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  -0.65,
+                  0.35,
+                  1.3,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 7,
+          "time": 0.7496969696969698,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+              "event_name": "clear_assembly_board-v1_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+                "event_name": "clear_assembly_board-v1_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            },
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+              "event_name": "retrieve_gear_small_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 0,
+              "step_index": 0,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+                "event_name": "retrieve_gear_small_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 0,
+                "step_index": 0,
+                "input_origin": "mock"
+              },
+              "global_step_index": 0,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  -0.65,
+                  0.35,
+                  1.3,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 34,
+          "time": 5.287878787878788,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap002"
+            ],
+            "rule_label": [
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1_DES",
+              "event_name": "return_gear_small_to_assembly_board-v1",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 1,
+              "step_index": 5,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1_DES",
+                "event_name": "return_gear_small_to_assembly_board-v1",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 5,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 45,
+          "time": 8.855555555555556,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+              "event_name": "place_gear_small_and_retreat_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 2,
+              "step_index": 8,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+                "event_name": "place_gear_small_and_retreat_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 2,
+                "step_index": 2,
+                "input_origin": "mock"
+              },
+              "global_step_index": 8,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 46,
+          "time": 9.0,
+          "phase": "at",
+          "ap_values": {
+            "ap001": false,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "1",
+            "label": [
+              "ap002"
+            ],
+            "rule_label": [
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "ap002 & ~ap001",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+              "event_name": "place_gear_small_and_retreat_after_part_slippage",
+              "resource_id": "ur5e-4",
+              "resource_jid": "recovery-resource-4@localhost",
+              "primitive_index": 2,
+              "step_index": 8,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+                "event_name": "place_gear_small_and_retreat_after_part_slippage",
+                "resource_id": "ur5e-4",
+                "resource_jid": "recovery-resource-4@localhost",
+                "primitive_index": 2,
+                "step_index": 2,
+                "input_origin": "mock"
+              },
+              "global_step_index": 8,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  -0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 80,
+          "time": 15.287878787878787,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "2",
+            "label": [
+              "ap001",
+              "ap002"
+            ],
+            "rule_label": [
+              "ap001",
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "true",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 80,
+          "time": 15.287878787878787,
+          "phase": "at",
+          "ap_values": {
+            "ap001": true,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [
+              "ap001"
+            ],
+            "rule_label": [
+              "ap001"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+          "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+          "binding": {
+            "specification": "SAFE_gear_small_before_KET4_Square_4mm"
+          },
+          "observation_index": 81,
+          "time": 15.340909090909092,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": true
+          },
+          "transition": {
+            "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
+            "from": "2",
+            "label": [
+              "ap002"
+            ],
+            "rule_label": [
+              "ap002"
+            ],
+            "matched_transitions": [
+              {
+                "guard": "true",
+                "to": "2"
+              }
+            ],
+            "to": "2",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+              "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+              "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 1,
+              "step_index": 6,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+                "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+                "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 1,
+                "step_index": 1,
+                "input_origin": "mock"
+              },
+              "global_step_index": 6,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.22,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "specification": "SAFE_shared_area_mutex",
+          "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+          "binding": {
+            "specification": "SAFE_shared_area_mutex",
+            "region": "assembly_board-v1",
+            "resources": [
+              "ur5e-3",
+              "ur5e-4"
+            ]
+          },
+          "observation_index": 91,
+          "time": 18.855555555555554,
+          "phase": "between",
+          "ap_values": {
+            "ap001": false,
+            "ap002": false
+          },
+          "transition": {
+            "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
+            "from": "1",
+            "label": [],
+            "rule_label": [],
+            "matched_transitions": [
+              {
+                "guard": "~ap001 | ~ap002",
+                "to": "1"
+              }
+            ],
+            "to": "1",
+            "accepting": true,
+            "accepting_reachable": true,
+            "status": "passed",
+            "reason": ""
+          },
+          "active_steps": [
+            {
+              "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+              "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+              "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+              "resource_id": "ur5e-3",
+              "resource_jid": "recovery-resource-3@localhost",
+              "primitive_index": 2,
+              "step_index": 9,
+              "input_origin": "mock",
+              "source": {
+                "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+                "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+                "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+                "resource_id": "ur5e-3",
+                "resource_jid": "recovery-resource-3@localhost",
+                "primitive_index": 2,
+                "step_index": 2,
+                "input_origin": "mock"
+              },
+              "global_step_index": 9,
+              "primitive": "move_cartesian",
+              "resolved_params": {
+                "target": [
+                  0,
+                  0.12,
+                  1.55,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+          "event_name": "clear_assembly_board-v1_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": null,
+          "predecessors": [],
+          "start_time": 0,
+          "end_time": 1,
+          "primitive_step_indices": [
+            0
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+          "event_name": "retrieve_gear_small_after_part_slippage",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [],
+          "start_time": 0,
+          "end_time": 4,
+          "primitive_step_indices": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.65,
+              -0.4,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              -0.65,
+              0.35,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1",
+          "des_event_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1_DES",
+          "event_name": "return_gear_small_to_assembly_board-v1",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [
+            "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage"
+          ],
+          "start_time": 4,
+          "end_time": 6,
+          "primitive_step_indices": [
+            4,
+            5
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.65,
+              0.35,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+          "event_name": "place_gear_small_and_retreat_after_part_slippage",
+          "resource_id": "ur5e-4",
+          "resource_jid": "recovery-resource-4@localhost",
+          "part_name": "gear_small",
+          "predecessors": [
+            "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1"
+          ],
+          "start_time": 6,
+          "end_time": 9,
+          "primitive_step_indices": [
+            6,
+            7,
+            8
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "gear_small",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              -0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "declared_task": {
+            "event_id": 65,
+            "event_name": "place_insert",
+            "parameters": {
+              "resource_id": "ur5e-4",
+              "destination_location": "assembly_board-v1",
+              "handoff_acknowledged": true,
+              "assembly_acknowledged": true,
+              "part_name": "gear_small",
+              "target": "Gear_Plate/Gear_Shaft_1"
+            }
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+          "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+            "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage"
+          ],
+          "start_time": 10,
+          "end_time": 14,
+          "primitive_step_indices": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          },
+          "expected_end_state": {
+            "current_pose": [
+              -0.6,
+              0.7,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+          "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+          "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage"
+          ],
+          "start_time": 14,
+          "end_time": 16,
+          "primitive_step_indices": [
+            5,
+            6
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              -0.6,
+              0.7,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+          "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+          "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+          "resource_id": "ur5e-3",
+          "resource_jid": "recovery-resource-3@localhost",
+          "part_name": "KET4_Square_4mm",
+          "predecessors": [
+            "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1"
+          ],
+          "start_time": 16,
+          "end_time": 19,
+          "primitive_step_indices": [
+            7,
+            8,
+            9
+          ],
+          "expected_start_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.22,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": "KET4_Square_4mm",
+            "gripper_state": "closed",
+            "grasp_transform": [
+              0,
+              0,
+              -0.04,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "expected_end_state": {
+            "current_pose": [
+              0,
+              0.12,
+              1.55,
+              0,
+              0,
+              0,
+              1
+            ],
+            "held_part": null,
+            "gripper_state": "open",
+            "grasp_transform": null
+          }
+        }
+      ],
+      "expected": {
+        "combined": "satisfied",
+        "SAFE_shared_area_mutex": "satisfied",
+        "SAFE_gear_small_before_KET4_Square_4mm": "satisfied"
+      },
+      "expectations_met": true,
+      "modeled_final_state": {
+        "resources": {
+          "ur5e-3": {
+            "held_part": null,
+            "gripper_state": "open",
+            "current_pose": [
+              0.0,
+              0.12,
+              1.55,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "ur5e-4": {
+            "held_part": null,
+            "gripper_state": "open",
+            "current_pose": [
+              0.0,
+              -0.12,
+              1.55,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          }
+        },
+        "parts": {
+          "gear_small": {
+            "current_pose": [
+              0.0,
+              -0.12,
+              1.06,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "contained_by": "assembly_board-v1",
+            "processCompleted": [
+              {
+                "process": "print_part"
+              },
+              {
+                "process": "assembly",
+                "target": "Gear_Plate/Gear_Shaft_1"
+              }
+            ]
+          },
+          "KET4_Square_4mm": {
+            "current_pose": [
+              0.0,
+              0.12,
+              1.06,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "contained_by": "assembly_board-v1",
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "pending_tasks": [
+          {
+            "task_id": "PART_SLIPPAGE_PENDING_KET4_ASSEMBLY",
+            "resource_id": "ur5e-3",
+            "part_name": "KET4_Square_4mm",
+            "status": "pending"
+          }
+        ]
+      }
+    }
+  ],
+  "expectations_met": true
+}

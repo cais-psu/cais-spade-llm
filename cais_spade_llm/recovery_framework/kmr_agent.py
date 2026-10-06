@@ -288,6 +288,34 @@ class KMRResourceAgent(ResourceAgent):
                 )
         return snapshot
 
+    def get_recovery_physical_snapshot(self) -> dict:
+        """Export retained KMR observations without filling missing poses or custody.
+
+        This is a checkpoint export, not a fresh controller query or a prepared
+        trajectory. A preparation provider must establish freshness and coverage.
+        """
+        state = deepcopy(getattr(self, '_primitive_state', {}))
+        custody = deepcopy(getattr(self, 'workflow_custody', None) or {})
+        snapshot = {
+            key: deepcopy(state[key])
+            for key in ('current_pose', 'base_pose', 'held_part', 'gripper_state',
+                        'resource_location', 'current_state')
+            if key in state
+        }
+        if 'grasp_transform' in custody:
+            snapshot['grasp_transform'] = deepcopy(custody['grasp_transform'])
+        runtime = getattr(self, 'environment_runtime', None) or getattr(self, 'delivery_runtime', None)
+        evidence = {
+            'source': 'KMRResourceAgent.record_primitive_evidence',
+            'primitive_evidence': deepcopy(getattr(self, '_primitive_evidence', {})),
+            'workflow_custody': custody,
+        }
+        if runtime is not None:
+            evidence['revision'] = getattr(runtime.context, 'revision', None)
+            evidence['part_tracker'] = deepcopy(getattr(runtime.context, 'part_tracker', {}))
+        return {'resource_id': 'KMR', 'resource_jid': str(self.jid),
+                'snapshot': snapshot, 'evidence': evidence}
+
     async def teardown(self) -> None:
         """Stop pending execution without dropping or resetting a held part."""
         runtime = getattr(self, 'delivery_runtime', None)

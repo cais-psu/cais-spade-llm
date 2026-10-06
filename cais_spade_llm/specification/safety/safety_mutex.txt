@@ -1,2 +1,0 @@
-[Safety Requirements]
-- ur5e and xarm6 must not be in the assembly board destination area at the same time.

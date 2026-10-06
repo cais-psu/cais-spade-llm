@@ -1,0 +1,48 @@
+Use case: precise-object-edit / scientific-educational.
+Edit target: supplied CCA v17 figure.
+The user likes this figure. Make ONE structural change: in numbered panel 1, put the safety monitor FIRST at the top, then introduce the new recovery and AP evaluation BELOW it. Preserve the successful simplification, text size, white space, formal symbols, colors, and the rest of the figure. Do not redesign everything or add content.
+
+Keep:
+- Central Controller Agent header and subtitle "Mutual-exclusion example (SAFE_2)".
+- Three numbered sections with their current titles and outer purple frame.
+- Panel 2 and panel 3 content, positions, sizes and diagrams as closely as possible.
+- No Required checks, no extra checklist, no added evidence paragraph, no table.
+- No text overflow, clipping, or tiny type.
+
+Inside PANEL 1 "Safety monitor construction":
+1. Move the entire current LOWER safety-monitor subsection to the TOP immediately beneath the numbered heading.
+It includes the subheading "Safety monitor (DFA for SAFE_2)", the SAFE_2 formula card, Compile arrow, DFA, and retained-history note.
+The formula is exactly "G !(ap001 & ap002)".
+Formula → RIGHT arrow labelled "Compile" → DFA.
+DFA correctness is crucial:
+q_0 is green and double-circled, with initial arrow.
+q_0 has self-loop "!(ap001 & ap002)".
+q_0 → q_d guard is "ap001 & ap002".
+q_d is red and single-circled, with self-loop "true".
+Preserve labels "No violation" and "Violation".
+Preserve the short note "Monitor state retained from accepted history."
+
+2. Beneath the safety-monitor subsection, move the three current mapping cards, in their current left-to-right order:
+"New recovery" → "Primitive models" → "Predefined AP evaluation".
+Keep their exact existing content:
+New recovery: e_k^R, x_k^R; RA program PC_k; "... move_cartesian ..."; "Event and proposed successor".
+Primitive models: same two-robot region illustration, "Motion + state + geometry", region_occupancy, r1: 1, r2: 0, "Example intermediate observation", "Other resources' behavior".
+AP evaluation: "ap001: r1 occupancy", "ap002: r2 occupancy", "region: assembly station"; binding arrow and matching/filter visual; observation arrow from model; ap001 = 1, ap002 = 0.
+These show how the existing safety monitor is applied to newly generated recovery behavior.
+
+3. Reconnect the monitor and AP evaluation with exactly ONE SHORT UPWARD purple arrow:
+Arrow begins at the TOP boundary of the lower "Predefined AP evaluation" area.
+Arrowhead points UP into the BOTTOM boundary of the upper DFA area.
+Place the label "AP values" alongside the arrow in the gap between the two subsections.
+The arrow MUST point from the AP evaluation below TO the existing monitor above. Do NOT leave the old downward AP-values arrow.
+This is a block-level connection: do not run a long connector through the inside of the AP card, or around the outer frame, or through DFA state labels. Give this short connector a clear gap so it doesn't cross the retained-history note. The history note can move slightly left within its subsection for clearance.
+Do not add an arrow suggesting the monitor generates the new recovery or AP observations.
+
+Preserve the main downward flow from panel 1 into panel 2 and from panel 2 into panel 3. Panel 2 still shows the same four-node local AP/monitor state projection. Panel 3 still shows projected occupancy timelines and the CCA decision from composition, with only allow leading to RA execution. Nothing else needs changing.
+
+The visual reading order must now be:
+predefined SAFE_2 → compiled safety monitor at the top;
+then new recovery → primitive effects/observations → fixed AP evaluation below;
+AP values feed UP into that same monitor;
+then composition and timed validation below.
+Produce the full finished portrait figure.

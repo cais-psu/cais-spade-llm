@@ -1,0 +1,114 @@
+Generated using the built-in image_gen tool.
+
+FINAL LABEL FIX
+
+Change ONLY ONE mathematical event label in this image. At the very bottom of the graph, the long GREEN return arrow curves LEFT from (x_{m,r_1}, x_{1,r_2}) to (x_{m,r_1}, x_{2,r_2}). Its label near the center at approximately x=655, y=890 currently reads e_{3,2}. Replace that label with e_{2,2}: a lowercase e with the subscript TWO comma TWO. The long GREEN forward arrow ABOVE the bottom row must retain e_{3,2}. Therefore there are two different labels: upper long arrow e_{3,2}; lower long arrow e_{2,2}. Preserve every other pixel, mathematical label, state, edge, paragraph, color, position and dimension. Do not change any other text or redraw the layout.
+
+FINAL SINGLE-ARC CORRECTION AND SUPPLIED RULES
+
+Make two tightly scoped edits to the attached mathematical composition graph. Preserve ALL other node text, mathematical notation, colors, positions, event arrows and highlighted candidate route.
+
+1. DELETE the single stray BLACK return arc across the VERY TOP of the figure, above "Generated recovery states". This is the large curve incorrectly running from the top-right state (x_{F,r_1}, x_{m,r_2}) back toward the top-left state. Delete its e_{2,2} label as well. Leave the orange "Generated recovery states" bracket untouched. After deletion there must be NO arc above that bracket. The ONLY e_{2,2} arc in the figure must be the existing GREEN return arc BELOW THE BOTTOM ROW, from bottom column 5 to bottom column 1. Keep the bottom GREEN e_{3,2} arc above the bottom row exactly as it is.
+
+2. Extend the white canvas slightly downward and add these two concise safety-requirement lines BELOW the existing legend/footer. These lines state supplied requirements, not already-evaluated node verdicts. Typeset all indices/subscripts correctly:
+"SAFE_1: P_1 by r_1 must be placed before P_2 by r_2."
+"SAFE_2: r_1 and r_2 should not enter the assembly station at the same time."
+Use purple SAFE_1 / SAFE_2 labels and black sentence text.
+Do NOT add blocked-state overlays: exact state-to-AP bindings remain unspecified. Keep the current footer "Safety filtering additionally requires AP valuations and current DFA states."
+
+Do not invent a direct column5-to-column6 edge, do not add another top-row return arc, do not change any state labels, do not relabel the green candidate as safe. This is a precision correction to one arc and a two-line footer addition.
+
+FINAL TOPOLOGY CORRECTION
+
+Correct ONLY the incorrectly routed long r₂ transitions in this product-state figure. Keep the entire six-row/seven-column grid, all node labels, event notation, existing vertical arrows, orange recovery chain, title, white background and candidate string.
+
+The current drawing contains a serious graph error: e_{3,2} is drawn from column 5 to column 6, and black e_{2,2} arcs originate at column 7. These source states are wrong. Fix as follows:
+
+1. DELETE ALL SIX short horizontal arrows labeled e_{3,2} between column 5 (second coordinate x_{1,r_2}) and column 6 (second coordinate x_{3,r_2}). Remove those labels too. There is NO direct x1→x3 event.
+2. DELETE ALL SIX black long left-pointing arcs labeled e_{2,2} that currently begin at column 7 (second coordinate x_{m,r_2}). Delete their labels. No return event begins at xm in this figure.
+3. KEEP the single existing GREEN return arc BELOW the bottom row: its source is bottom-row COLUMN 5, (x_{m,r_1}, x_{1,r_2}); its target is bottom-row COLUMN 1, (x_{m,r_1}, x_{2,r_2}); its label is e_{2,2}. This arc has the correct endpoints and must stay.
+4. ADD ONE GREEN long forward arc labeled e_{3,2} in the clear band just ABOVE the bottom row. Start EXACTLY at the TOP EDGE of bottom-row COLUMN 1, (x_{m,r_1}, x_{2,r_2}); rise slightly, travel RIGHT above the intermediate bottom-row nodes, then descend with an arrowhead into the TOP EDGE of bottom-row COLUMN 6, (x_{m,r_1}, x_{3,r_2}). It must not start at column 5 or touch intermediate state boxes. At crossings of vertical arrows, use small gaps so there are no junctions. It changes only r₂.
+5. Keep the green short arrow e_{4,2} from bottom-row COLUMN 6 to COLUMN 7. Add green outlines to bottom-row column 1 and column 6; keep the double outline of column 7, also green, to finish the candidate route.
+6. Do NOT redraw the omitted long return/forward arcs in the other five rows: their repetition makes the drawing crowded. Instead append one small footer line exactly: "Long transitions are shown only in the bottom row and apply in every row." This explicitly defines their repetition.
+7. The highlighted recovery tuples in row 2 columns 2, 3, 4 currently have only orange outlines. Add a green OUTER outline while retaining the orange fill, to match the continuous candidate path. Their x_k^R aliases refer to the entire tuple and must stay.
+
+The resulting green path must go: down from the red initial node, across recovery edges to row2/column5, down column5 to bottom row, LEFT back to bottom/column1 via e_{2,2}, RIGHT along a long arc to bottom/column6 via e_{3,2}, then RIGHT to bottom/column7 via e_{4,2}. Absolutely no shortcut from column5 to column6.
+
+No SAFE_1/SAFE_2 blocked areas yet: the supplied rules need state-to-AP bindings before specific nodes can be shaded. Do not invent safety classifications or turn the structural candidate into an approved path. Do not change any state symbols.
+
+INITIAL PROMPT
+
+Use case: scientific-educational.
+Edit target: the attached wide product-state graph supplied by the user. Create a corrected mathematical parallel-composition drawing based on THIS grid, not a Central Controller Agent workflow or three-panel infographic. Retain its visual language: rectangular rounded state boxes, orange generated recovery transitions/states, a highlighted green candidate string, red post-fault state, and black mathematical labels. Use an opaque WHITE background so labels and legend are readable. Large landscape figure, ideally about 3000 pixels wide, publication-quality mathematical typesetting. Give the grid generous horizontal and vertical spacing. Keep the graph as the main visual.
+
+Title: "Local parallel composition of r₁ and r₂"
+Subtitle: "Resource-state projection with recovery transitions"
+
+CRITICAL NOTATION:
+Task-event arrow labels are e, NOT rho and NOT sigma. Predefined task events are e_{j,i}; recovery task events are e_k^R. Use proper subscripts and superscript R.
+The EXISTING local state identifiers x_{\rho_2,r_2}, x_{\rho_3,r_2}, x_{\rho_4,r_2} are preserved exactly as opaque state names from the supplied image. Rho may appear ONLY INSIDE THOSE STATE IDENTIFIERS, NEVER as an edge/event label.
+x_k^R denotes the whole projected joint recovery state; do not put x_k^R inside a two-resource tuple as though it were a local coordinate.
+All mathematical labels must be crisp, exact, and consistently sized.
+
+GRID:
+Exactly SIX rows and SEVEN columns. Draw each joint-state tuple exactly ONCE.
+Row resource-r1 states, top to bottom:
+x_{F,r_1}, x_{0,r_1}, x_{1,r_1}, x_{2,r_1}, x_{3,r_1}, x_{m,r_1}.
+Column resource-r2 states, left to right:
+x_{2,r_2}, x_{\rho_2,r_2}, x_{\rho_3,r_2}, x_{\rho_4,r_2}, x_{1,r_2}, x_{3,r_2}, x_{m,r_2}.
+Every node contains the ordered pair (its row state, its column state). In particular top-left is (x_{F,r_1}, x_{2,r_2}) and bottom-right is (x_{m,r_1}, x_{m,r_2}).
+Do not repeat an x0 row or x2 column. Do not add the previous duplicated post-completion row. Return transitions go BACK TO existing nodes.
+The 18 boxes in columns 2, 3, 4 have pale-orange fill and orange outline to indicate generated local recovery states. Other ordinary nodes have white fill, thin gray outlines, black labels.
+A slim orange bracket above columns 2-4 says "Generated recovery states".
+The top-left node has a pale-red fill and red outline with a small label above it "Post-fault x_F". Do not label it "Deadlock", since the augmented graph now has outgoing recovery edges.
+The bottom-right node has a DOUBLE outline and a small label "Joint marked state". It is a completion condition, not a verified safety outcome.
+
+TRANSITIONS:
+All local events in this illustration are private. Vertical arrows change ONLY r1's coordinate, keeping r2 unchanged; horizontal/return arrows change ONLY r2's coordinate, keeping r1 unchanged. No diagonal edges.
+
+Repeat these VERTICAL transitions in every column:
+row1 -> row2 labeled e_1^R, orange.
+row2 -> row3 labeled e_{1,1}, dark gray.
+row3 -> row4 labeled e_{2,1}, dark gray.
+row4 -> row5 labeled e_{3,1}, dark gray.
+row5 -> row6 labeled e_{4,1}, dark gray.
+
+Repeat these HORIZONTAL/RETURN transitions in every row:
+col1 -> col2 labeled e_2^R, orange.
+col2 -> col3 labeled e_3^R, orange.
+col3 -> col4 labeled e_4^R, orange.
+col4 -> col5 labeled e_5^R, orange.
+col5 -> col1 labeled e_{2,2}, dark gray RETURN ARC.
+col1 -> col6 labeled e_{3,2}, dark gray FORWARD ARC.
+col6 -> col7 labeled e_{4,2}, dark gray.
+Route each row's long return and forward arcs within its own generous inter-row gap, with one arc above and one below the row when needed. They must bypass intervening state boxes without entering them. Arrowheads must clearly land at the correct target. The return arc is left-pointing into col1; the forward arc is right-pointing into col6. Avoid confusing crossings with vertical edges, using small line breaks at crossings without creating junctions. Adjacent nodes should have ample gaps for e labels.
+There is NO col5->col6 adjacent event: r2 must return from x1 to the EXISTING x2 node, then transition from x2 to x3. Do not invent that shortcut.
+
+HIGHLIGHTED CANDIDATE STRING:
+Use green heavier arrows and green outlines along ONLY this structurally valid example:
+r1c1 -> r2c1 -> r2c2 -> r2c3 -> r2c4 -> r2c5
+then DOWN col5 through r3c5, r4c5, r5c5, r6c5
+then the bottom row's RETURN ARC r6c5 -> r6c1
+then the bottom row's FORWARD ARC r6c1 -> r6c6
+then r6c6 -> r6c7.
+Here rNcM is a placement instruction, never printed as a label.
+Keep the original pale-orange fill for the highlighted generated states, using green outline/path to show participation in the candidate. The red initial node remains red.
+Above or below the five highlighted joint states reached after e_1^R through e_5^R, add small aliases x_1^R, x_2^R, x_3^R, x_4^R, x_5^R respectively if space allows; these are aliases of the WHOLE tuples, never inserted inside them.
+Green means "Highlighted candidate string", NOT "safe", "admissible", or "approved".
+
+SLIM FOOTER, not extra boxes:
+Legend with four samples:
+orange outline/arrow: "Generated recovery behavior"
+green arrow: "Highlighted candidate string"
+red box: "Post-fault state"
+double-outline box: "Joint marked state"
+A small notation line:
+"e_{j,i}: predefined task event    e_k^R: recovery task event    i(1)=1; i(2)=i(3)=i(4)=i(5)=2"
+Two short explanatory lines:
+"Horizontal: r₂ changes. Vertical: r₁ changes. Reset transitions omitted."
+"Safety filtering additionally requires AP valuations and current DFA states."
+
+SCOPE AND HONESTY:
+This is the two-resource structural composition underlying the user's image. The original SAFE_1 / SAFE_2 blocked regions cannot be verified because their state-to-AP bindings are not supplied. Therefore REMOVE the original purple blocked-region overlays and all safety-pass/blocked verdict labels; do not invent safety classifications. Do not shade a state as forbidden merely based on its tuple. This drawing is the corrected structural product and candidate route, not an asserted safety-filtered runtime result.
+Keep it close to the user's rich grid diagram, not a sparse flowchart, not circles-only, not a robot drawing, not a CCA panel figure.
+Do not add code identifiers, application-specific region names, legends equating dashed edges with uncontrollability, or any new formal state names.

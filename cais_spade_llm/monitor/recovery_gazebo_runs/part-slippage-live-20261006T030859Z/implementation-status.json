@@ -1,0 +1,71 @@
+{
+  "status": "NEEDS_CONTEXT",
+  "acceptance_complete": false,
+  "recording": "one_combined_20x",
+  "requested_video": "part_slippage-20x.mp4",
+  "dispatch_authorized": false,
+  "staging_performed": false,
+  "recovery_execution_started": false,
+  "recording_started": false,
+  "published_videos": [],
+  "predefined_safety": {
+    "path": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
+    "sha256": "a8a79e73e18ca16a3ec28dac5a5b9a8900fe9570b7321423cdad2184aef975da",
+    "active_together_required": true
+  },
+  "trials": {
+    "mutex": {
+      "status": "not_started",
+      "acceptance_complete": false,
+      "cca_decision": null
+    },
+    "precedence": {
+      "status": "not_started",
+      "acceptance_complete": false,
+      "cca_decision": null
+    },
+    "safe": {
+      "status": "not_started",
+      "acceptance_complete": false,
+      "cca_decision": null
+    }
+  },
+  "verified": {
+    "read_only_controller_observations": 11,
+    "covered_action_endpoints": 17,
+    "configured_resources": 12,
+    "tests_passed": 954,
+    "normal_speed_trial_recordings_created": 0
+  },
+  "remaining": [
+    "Native grasp/release preparation and validated attachment effects",
+    "Exact prepared execution with observed tracking and timing",
+    "Live recovery composition context and execution evidence providers",
+    "Compatible continuous observed-history replay at event boundaries"
+  ],
+  "changed_baseline_files": [
+    "cais_spade_llm/agents/central_controller/offline_safety_grounding.py",
+    "cais_spade_llm/agents/central_controller/recovery_admission_runtime.py",
+    "cais_spade_llm/agents/central_controller/recovery_composition_admission.py",
+    "cais_spade_llm/agents/resource_agent/resource_agent.py",
+    "cais_spade_llm/agents/resource_agent/robot_agent.py",
+    "cais_spade_llm/recovery_framework/failure_videos.py",
+    "cais_spade_llm/recovery_framework/live_safety_preparation.py",
+    "cais_spade_llm/resources/continuous_motion.py",
+    "cais_spade_llm/resources/continuous_observations.py",
+    "cais_spade_llm/resources/resource_safety_preparation.py",
+    "docs/gazebo_safety_preparation.md",
+    "ros2/cais_lab_robotics/CMakeLists.txt",
+    "ros2/cais_lab_robotics/launch/recovery_framework_gazebo.launch.py",
+    "ros2/cais_lab_robotics/package.xml",
+    "ros2/cais_lab_robotics/scripts/kmr_base_controller.py",
+    "test/test_continuous_motion.py",
+    "test/test_gazebo_recording.py",
+    "test/test_gazebo_safety_preparation.py",
+    "test/test_recovery_admission_coordinator.py",
+    "test/test_recovery_composition_admission.py",
+    "test/test_recovery_framework_gazebo.py",
+    "writing/Journal Paper 2 (recovery framework)/IMPLEMENTATION_PLAN.md"
+  ],
+  "unrelated_baseline_files_unchanged": 1550
+}

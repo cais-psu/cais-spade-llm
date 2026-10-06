@@ -1,0 +1,77 @@
+Use case: precise-object-edit / scientific-educational.
+Edit target: supplied CCA v16 figure.
+User requests: (1) simplify the overflowing figure, (2) move the DFA into numbered panel 1, (3) completely remove "Required checks". Produce a substantially cleaner full portrait research figure in the SAME purple rounded three-panel template, white background, and Central Controller Agent heading. Preserve the subtitle "Mutual-exclusion example (SAFE_2)". Use larger readable lettering, far fewer paragraphs, fewer nested boxes, and ample internal margins. Everything must fit inside the outer frame. Do NOT shrink all lettering to fit. Remove redundant text instead. Target about one third less text than the reference.
+
+Allocate roughly 45% of body height to panel 1, 25% to panel 2, 30% to panel 3. No huge blank boxes. Preserve all formal symbols exactly: e_k^R, x_k^R, PC_k, ap001, ap002, r1, r2, q_0, q_d. Use true mathematical subscripts/superscripts.
+
+PANEL 1 title: "Safety monitor construction".
+This panel now contains BOTH the AP mapping mechanism and the DFA. It has a main mapping row and a compact monitor row below it.
+
+MAIN MAPPING ROW, three areas:
+LEFT: compact orange-accented "New recovery" area, only:
+"e_k^R, x_k^R"
+"RA program PC_k"
+"... move_cartesian ..."
+Small words underneath "Event and proposed successor".
+Arrow RIGHT from the PROGRAM toward primitive models. No direct event-name-to-AP arrow.
+
+CENTER: "Primitive models".
+One small meaningful robot illustration from the reference: r1 blue/gray robot tool overlapping a pink dashed shared region; r2 retracted clear of this same region. The illustration conveys r1 occupied, r2 clear. No three-step storyboard.
+Under it: "Motion + state + geometry".
+Then a compact observation label "region_occupancy", with "r1: 1     r2: 0" beneath it.
+A tiny caption "Example intermediate observation".
+Include "Other resources' behavior" as a short input caption, not a new box. This prevents implying r2 occupancy comes from r1's program alone.
+No separate large observations-document card and no list of current_pose or held_part.
+
+RIGHT: "Predefined AP evaluation".
+Top of this area contains the fixed binding, in THREE short lines:
+"ap001: r1 occupancy"
+"ap002: r2 occupancy"
+"region: assembly station"
+A small downward arrow inside this area labeled "binding" points to a simple matching/filter icon below.
+The observed r1 and r2 values from the middle area connect horizontally into that icon, with the short shared label "observations".
+Its outputs are two small badges "ap001 = 1" and "ap002 = 0".
+This visual must still show two inputs to AP evaluation: fixed meanings/binding from above, modeled observations from the left. Labels are enough; do not add long explanations.
+
+COMPACT MONITOR ROW below the mapping row:
+Left: "SAFE_2" and EXACT formula "G !(ap001 & ap002)".
+A horizontal RIGHT arrow from the formula labelled "Compile" points to the DFA in the right half of this row.
+Draw exactly the two-state DFA:
+q_0 green double-circle with a small initial arrow;
+q_0 self-loop guard "!(ap001 & ap002)";
+q_0 → q_d guard "ap001 & ap002";
+q_d red SINGLE circle, self-loop "true".
+Short labels "No violation" under q_0 and "Violation" under q_d.
+A short connector DOWN from the AP-value outputs above enters the DFA, labelled "AP values". AP values advance the monitor, while the separate Compile arrow builds it; preserve this distinction.
+Small line at bottom of panel 1: "Monitor state retained from accepted history".
+Do not draw a separate AP-trace strip here; remove it to save space.
+The DFA belongs ONLY in panel 1, not repeated elsewhere.
+
+PANEL 2 title: "Parallel composition".
+Small input line "Recovery + nominal + running tasks + safety monitors".
+Show ONLY the four-node local view of the composed states, using most of this panel's width:
+upper-left "((0,1), q_0)"
+upper-right pale red "((1,1), q_d)"
+lower-left "((0,0), q_0)"
+lower-right pale green "((1,0), q_0)"
+Exactly three dark arrows: upper-left to upper-right, label "ap001: 0 → 1"; upper-left down to lower-left, label "ap002: 1 → 0"; lower-left to lower-right, label "ap001: 0 → 1".
+Use compact rectangles and generously spaced connectors. No double circles on these composed-state nodes. Do not add an endpoint/completion symbol.
+One short caption below: "Local view: ((ap001, ap002), monitor state)".
+This remains a projection; do not call it the complete state model. No DFA in this panel.
+A small purple transition arrow between panel 1 and panel 2 can show their flow, with no extra floating box.
+
+PANEL 3 title: "Timed safety validation".
+Subtitle "Projected execution".
+Keep the TWO occupancy graphs SIDE BY SIDE and make them generously sized:
+LEFT heading "Entry before exit": blue r1 occupancy overlaps gray r2 occupancy, with translucent red overlap highlighting; caption "Mutex violation".
+RIGHT heading "Exit before entry": gray r2 occupancy ends before blue r1 occupancy begins; caption "No mutex conflict".
+Each has r1 and r2 lane labels and an arrowed horizontal axis "Model time". These are illustrative projected timelines, not measured execution or timestamps.
+Below these timelines use ONE compact decision strip:
+Heading "CCA decision from composition".
+Green "allow" and red "block", side by side.
+ONLY the allow box has an arrow to a compact "RA execution" label/icon.
+The timelines illustrate the conflict, while the composition result supplies the decision; do not draw an arrow from the green 'No mutex conflict' caption directly to allow.
+Absolutely REMOVE the entire "Required checks" block, all checkboxes, its three sentences, the completion definition, the start-matching sentence, and the unsupported-model/incomplete-evidence strip. Do not replace them with another checklist or footnote paragraph.
+No long monitor-history footer across the whole figure; accepted history is already noted in panel 1.
+
+Overall reduce box nesting, stop repeating headings, eliminate full-sentence explanatory ribbons. Keep the technical mechanism visible through drawings and connectors. Make labels fit without overlap or cropping. Preserve the source's formal safety meaning, clean visual identity, and three numbered sections. No table, no Enter/Release/Retreat storyboard, no new abstract graph nodes, no extra panels.

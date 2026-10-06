@@ -1,0 +1,11 @@
+{
+  "json_files_checked": 44,
+  "local_links_checked": 52,
+  "protected_files_unchanged": 77,
+  "roadmap_headings": 26,
+  "companion_cases": [
+    "mutex",
+    "precedence",
+    "safe"
+  ]
+}

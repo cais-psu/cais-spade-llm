@@ -10,6 +10,10 @@ from pathlib import Path
 
 from nicegui import events, ui
 
+from cais_spade_llm.agents.central_controller.predefined_safety import (
+    parse_predefined_safety,
+    validate_predefined_safety_artifact,
+)
 from cais_spade_llm.ui.bridge import SystemBridge
 from cais_spade_llm.ui.components.agent_chat import render_chat
 
@@ -114,7 +118,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 generate_loading_row = ui.row().classes("items-center gap-2 text-primary")
                 with generate_loading_row:
                     ui.spinner(size="sm")
-                    ui.label("Generating safety rule...")
+                    generate_progress_label = ui.label("Generating safety rule...")
                 generate_loading_row.style("display:none;")
             with ui.column().classes("items-end gap-2"):
                 with ui.row().classes("gap-2 items-end"):
@@ -140,8 +144,8 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     ).props("flat color=orange")
 
         with ui.card().classes("w-full bg-slate-50 mt-3"):
-            ui.label("Generated Safety Rule Preview").classes("text-base font-semibold mb-2")
-            ui.label("Generate first, review LTLf and DFA, then verify safety.").classes(
+            ui.label("Safety Rule Preview").classes("text-base font-semibold mb-2")
+            ui.label("Compile or generate a preview, review APs, LTLf and DFA, then verify safety.").classes(
                 "text-xs text-slate-600 mb-2"
             )
 
@@ -189,7 +193,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             ui.label("DFA Graphs").classes("text-sm font-semibold mt-2")
             ui.label("Render mode: embedded PNG debug").classes("text-xs text-amber-700 mb-1")
             preview_dfa_gallery = ui.row().classes("w-full gap-4 items-start flex-wrap")
-            ui.label("Generated LTLf").classes("text-sm font-semibold mt-2")
+            ui.label("LTLf Formula").classes("text-sm font-semibold mt-2")
             preview_ltlf = ui.code("No rule selected.", language="text").classes("w-full")
             ui.label("Latest Refinement Feedback").classes("text-sm font-semibold mt-2")
             preview_refinement_feedback = ui.code(
@@ -203,6 +207,11 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             ).classes("w-full")
             ui.label("AP Mapping").classes("text-sm font-semibold mt-2")
             preview_ap_map = ui.code("{}", language="json").classes("w-full")
+            predefined_scope_label = ui.label("Predefined AP meanings and declared bindings").classes(
+                "text-sm font-semibold mt-2")
+            preview_predefined_scope = ui.code("{}", language="json").classes("w-full")
+            predefined_scope_label.set_visibility(False)
+            preview_predefined_scope.set_visibility(False)
             ui.label("DFA Status").classes("text-sm font-semibold mt-2")
             preview_dfa_status = ui.label("No DFA preview generated yet.").classes(
                 "text-sm text-slate-700"
@@ -310,6 +319,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
         def _clear_rule_detail() -> None:
             preview_ltlf.content = "No rule selected."
             preview_ap_map.content = "{}"
+            preview_predefined_scope.content = "{}"
             preview_dfa_status.text = "No DFA preview generated yet."
             preview_dfa_status.classes(replace="text-sm text-slate-700")
             preview_dfa_transitions.rows = []
@@ -416,6 +426,25 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 return
             preview_ltlf.content = str(rule.get("ltlf", "") or "(empty)")
             preview_ap_map.content = json.dumps(rule.get("aps", []), indent=2)
+            preview_predefined_scope.content = "{}"
+            document = None
+            artifact_path = preview_state.get("payload", {}).get("record", {}).get("safety_logic_json")
+            if artifact_path:
+                try:
+                    artifact = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+                    document = validate_predefined_safety_artifact(artifact)
+                except (ValueError, TypeError, OSError) as exc:
+                    preview_predefined_scope.content = json.dumps({"unavailable": str(exc)}, indent=2)
+            if document is not None:
+                definition = next((row for row in document["catalog"].get("specifications", [])
+                                   if row.get("id") == rid), {})
+                preview_predefined_scope.content = json.dumps({
+                    "aps": definition.get("aps", []),
+                    "requirement_scopes": [scope for scope in document["requirement_scopes"]
+                                           if scope.get("specification") == rid],
+                    "product_geometry": document.get("product_geometry"),
+                    "population": "All configured resources; mutex bindings are derived at grounding.",
+                }, indent=2)
             dfa_status = str(rule.get("dfa_status", "") or "").strip()
             dfa_diagnostic = str(rule.get("dfa_diagnostic", "") or "").strip()
             if dfa_status == "ok":
@@ -428,7 +457,18 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             preview_dfa_transitions.rows = transitions if isinstance(transitions, list) else []
             preview_dfa_dot.content = str(rule.get("dfa_dot", "") or "No DFA DOT generated.")
 
+        def _refresh_input_mode() -> bool:
+            predefined = str(req_editor.value or "").lstrip().startswith("{")
+            generate_btn.text = "Compile DFA" if predefined else "Generate Safety Rule"
+            generate_progress_label.text = "Compiling predefined LTLf..." if predefined else "Generating safety rule..."
+            regenerate_btn.set_visibility(not predefined)
+            refinement_feedback.set_visibility(not predefined)
+            predefined_scope_label.set_visibility(predefined)
+            preview_predefined_scope.set_visibility(predefined)
+            return predefined
+
         def _refresh_intent_status() -> None:
+            predefined = _refresh_input_mode()
             selected = str(req_select.value or "").strip()
             approve_btn = intent_buttons.get("approve")
             revoke_btn = intent_buttons.get("revoke")
@@ -524,7 +564,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             delete_btn.set_enabled(can_mutate_file)
             create_btn.set_enabled(can_create)
             generate_btn.set_enabled(can_mutate_file)
-            regenerate_btn.set_enabled(can_mutate_file)
+            regenerate_btn.set_enabled(can_mutate_file and not predefined)
             if upload_widget is not None:
                 upload_widget.set_enabled(can_mutate_file)
 
@@ -835,6 +875,14 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 return
             selected_path = Path(selected)
             try:
+                predefined = parse_predefined_safety(str(req_editor.value or "")) is not None
+            except ValueError as exc:
+                ui.notify(f"Invalid predefined safety: {exc}", type="negative")
+                return
+            if predefined and use_feedback:
+                ui.notify("Edit the given APs and LTLf, then use Compile DFA.", type="warning")
+                return
+            try:
                 selected_path.write_text(str(req_editor.value or ""), encoding="utf-8")
                 status_label.text = f"Saved {selected_path.name}"
                 status_label.classes(replace="text-sm text-green-600")
@@ -857,6 +905,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     parent_preview_id = str(current_record.get("preview_id", "")).strip()
             _set_preview_generation_busy(True)
             preview_status_label.text = (
+                "Compiling predefined APs and LTLf..." if predefined else
                 "Regenerating safety rule preview with refinement feedback..."
                 if use_feedback
                 else "Generating safety rule preview..."
@@ -864,6 +913,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             preview_status_label.classes(replace="text-xs text-blue-700 mt-1")
             try:
                 ui.notify(
+                    "Compiling predefined APs and LTLf..." if predefined else
                     "Regenerating safety rule preview with feedback..."
                     if use_feedback
                     else "Generating safety rule preview...",
@@ -876,6 +926,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                     parent_preview_id=parent_preview_id,
                 )
                 ui.notify(
+                    "Predefined APs and LTLf compiled unchanged." if predefined else
                     "Safety rule preview regenerated with feedback."
                     if use_feedback
                     else "Safety rule preview generated.",
@@ -905,6 +956,12 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
                 ui.notify("Select a safety requirement file first.", type="warning")
                 return
             try:
+                source_text = Path(selected).read_text(encoding="utf-8")
+                if parse_predefined_safety(source_text) is not None:
+                    preview = bridge.get_safety_rule_preview(selected)
+                    artifact = Path(preview.get("record", {}).get("safety_logic_json", ""))
+                    validate_predefined_safety_artifact(
+                        json.loads(artifact.read_text(encoding="utf-8")), source_text=source_text)
                 out = bridge.approve_safety_intent(selected)
                 selected_path = Path(str(out.get("safety_file", selected)))
                 ui.notify(f"Safety intent verified: {selected_path.name}", type="positive")
@@ -940,6 +997,7 @@ def _render_safety_requirements_card(bridge: SystemBridge) -> None:
             _set_preview_rule_detail(selected_preview_rule["id"])
 
         req_select.on_value_change(_load_req)
+        req_editor.on_value_change(lambda: _refresh_intent_status())
         preview_rules_table.on_select(_on_preview_rule_select)
         create_btn.on_click(_create_new)
         generate_btn.on_click(_generate_initial_preview)

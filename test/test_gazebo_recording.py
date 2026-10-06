@@ -161,6 +161,57 @@ assert list(output.parent.iterdir()) == [output]
                    cwd=Path(__file__).resolve().parents[1], check=True, timeout=30)
 
 
+def test_combined_export_requires_every_trial_validation_before_reading_video(tmp_path):
+    attempt = recording.RecordingAttempt(tmp_path)
+    source = attempt.directory / 'capture.partial.mp4'
+    source.write_bytes(b'preserve incomplete capture')
+    trial = {'attempt': attempt, 'title': 'Incomplete trial', 'captions': [],
+             'validation': {'validated': False, 'run_id': 'incomplete'}}
+    with pytest.raises(ValueError, match='observed run validation'):
+        failure_videos.export_combined_20x([trial], tmp_path / 'combined-20x.mp4', 'Part slippage')
+    assert source.read_bytes() == b'preserve incomplete capture'
+    assert not (tmp_path / 'combined-20x.mp4').exists()
+
+
+def test_combined_20x_export_keeps_one_video_and_distinct_trial_evidence(tmp_path):
+    script = '''
+import json, sys
+from pathlib import Path
+import numpy as np
+from cais_spade_llm.recovery_framework.gazebo_recording import RecordingAttempt, _H264Writer, _write_json
+from cais_spade_llm.recovery_framework.failure_videos import export_combined_20x
+root=Path(sys.argv[1])
+trials=[]
+for index, name in enumerate(('mutex', 'precedence', 'safe')):
+    attempt=RecordingAttempt(root/name)
+    writer=_H264Writer(attempt.directory/'capture.partial.mp4',15.,(640,360))
+    for frame in range(60):
+        writer.write(np.full((360,640,3),60+index*30+frame,dtype=np.uint8))
+    writer.release()
+    _write_json(attempt.directory/'capture.json',{'status':'captured','frames':60,'fps':15.})
+    (attempt.directory/'frames.jsonl').write_text(json.dumps({'frame':59,'elapsed_sec':59/15})+'\\n')
+    trials.append({'attempt':attempt,'title':name+' | synthetic encoding fixture',
+                   'captions':[{'text':'Encoding test only','start':1.,'end':3.}],
+                   'validation':{'validated':True,'run_id':'encoding-'+name}})
+previous=root/'historical.mp4'
+previous.write_bytes(b'preserve history')
+output=root/'videos'/'part_slippage-20x.mp4'
+result=export_combined_20x(trials,output,'Synthetic encoding test')
+assert result['separately_staged_trials'] is True
+assert [row['run_id'] for row in result['trials']] == ['encoding-mutex','encoding-precedence','encoding-safe']
+assert abs(result['source_duration_sec']-12.) < .01
+assert abs(result['duration_sec']-.6) <= 2/15
+assert result['frames_decoded'] > 0
+assert len(list(output.parent.glob('*.mp4'))) == 1
+assert previous.read_bytes() == b'preserve history'
+assert all(not (row['attempt'].directory/'capture.partial.mp4').exists() for row in trials)
+assert Path(result['validation_file']).exists()
+assert list(output.parent.iterdir()) == [output]
+'''
+    subprocess.run(['/usr/bin/python3', '-c', script, str(tmp_path)],
+                   cwd=Path(__file__).resolve().parents[1], check=True, timeout=60)
+
+
 def test_mutex_video_requires_cca_hold_and_subsequent_access():
     def sample(timestamp, first, second):
         return {'run_id': 'mutex-run', 'observed_at_unix': timestamp,

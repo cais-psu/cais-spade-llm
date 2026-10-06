@@ -31,6 +31,7 @@
 #include <gazebo/common/Plugin.hh>
 #include <gazebo/common/Events.hh>
 #include <gazebo/physics/Entity.hh>
+#include <gazebo/physics/Collision.hh>
 #include <gazebo/physics/Light.hh>
 #include <gazebo/physics/Link.hh>
 #include <gazebo/physics/Model.hh>
@@ -46,6 +47,9 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <iomanip>
+#include <sstream>
+#include <std_srvs/srv/trigger.hpp>
 
 #include "gazebo_ros/conversions/builtin_interfaces.hpp"
 #include "gazebo_ros/conversions/geometry_msgs.hpp"
@@ -83,6 +87,10 @@ public:
     linkattacher_msgs::srv::DetachLink::Response::SharedPtr response);
   bool RunOnPhysicsThread(std::function<void()> operation);
   void OnUpdate();
+  void Observe(std_srvs::srv::Trigger::Response::SharedPtr response);
+  std::string instance_id_;
+  unsigned long attachment_revision_ = 0;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr observation_service_;
 
   struct PendingCommand {
     // 0: pending, 1: running, 2: cancelled. A timed-out pending operation never runs.
@@ -126,6 +134,7 @@ void GazeboLinkAttacher::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr 
 
   // ROS2 NODE:
   impl_->ros_node_ = gazebo_ros::Node::Get(_sdf);
+  impl_->instance_id_ = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 
   impl_->update_connection_ = gazebo::event::Events::ConnectWorldUpdateBegin(
     std::bind(&GazeboLinkAttacherPrivate::OnUpdate, impl_.get()));
@@ -142,6 +151,103 @@ void GazeboLinkAttacher::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr 
       &GazeboLinkAttacherPrivate::QueueDetach, impl_.get(),
       std::placeholders::_1, std::placeholders::_2));
 
+  impl_->observation_service_ = impl_->ros_node_->create_service<std_srvs::srv::Trigger>(
+    "GETRECOVERYSTATE", [this](std_srvs::srv::Trigger::Request::SharedPtr,
+                               std_srvs::srv::Trigger::Response::SharedPtr response) {
+      if (!impl_->RunOnPhysicsThread([this, response]() { impl_->Observe(response); })) {
+        response->success = false;
+        response->message = "Gazebo did not acknowledge the read-only observation.";
+      }
+    });
+
+}
+
+static void JsonString(std::ostream &out, const std::string &value)
+{
+  out << '"';
+  for (unsigned char c : value) {
+    if (c == '"' || c == '\\') out << '\\' << c;
+    else if (c < 0x20) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c) << std::dec;
+    else out << c;
+  }
+  out << '"';
+}
+
+static void JsonPose(std::ostream &out, const ignition::math::Pose3d &pose)
+{
+  out << '[' << pose.Pos().X() << ',' << pose.Pos().Y() << ',' << pose.Pos().Z() << ','
+      << pose.Rot().X() << ',' << pose.Rot().Y() << ',' << pose.Rot().Z() << ',' << pose.Rot().W() << ']';
+}
+
+void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::SharedPtr response)
+{
+  // The physics-thread snapshot never calls Attach, Detach, SetWorldPose or a
+  // controller. Empty attachments are an explicit observation of this owner.
+  std::ostringstream out;
+  out << std::setprecision(17) << "{\"version\":1,\"instance_id\":";
+  JsonString(out, instance_id_);
+  out << ",\"simulation_time\":" << world_->SimTime().Double()
+      << ",\"attachment_revision\":" << attachment_revision_
+      << ",\"attachment_complete\":true,\"attachments\":[";
+  bool comma = false;
+  for (const auto &joint : GV_joints) {
+    if (comma) out << ',';
+    comma = true;
+    out << "{\"model1\":"; JsonString(out, joint.model1);
+    out << ",\"link1\":"; JsonString(out, joint.link1);
+    out << ",\"model2\":"; JsonString(out, joint.model2);
+    out << ",\"link2\":"; JsonString(out, joint.link2);
+    out << '}';
+  }
+  out << "],\"models\":{";
+  comma = false;
+  for (const auto &model : world_->Models()) {
+    if (comma) out << ',';
+    comma = true;
+    JsonString(out, model->GetName());
+    out << ":{\"static\":" << (model->IsStatic() ? "true" : "false") << ",\"pose\":";
+    JsonPose(out, model->WorldPose());
+    out << ",\"links\":{";
+    bool link_comma = false;
+    for (const auto &link : model->GetLinks()) {
+      if (link_comma) out << ',';
+      link_comma = true;
+      JsonString(out, link->GetName());
+      out << ":{\"pose\":"; JsonPose(out, link->WorldPose());
+      out << ",\"linear_speed\":" << link->WorldLinearVel().Length()
+          << ",\"angular_speed\":" << link->WorldAngularVel().Length() << ",\"collisions\":[";
+      bool box_comma = false;
+      for (const auto &collision : link->GetCollisions()) {
+        const auto box = collision->BoundingBox();
+        if (box_comma) out << ',';
+        box_comma = true;
+        out << "{\"id\":"; JsonString(out, collision->GetScopedName());
+        const bool finite = box.Min().IsFinite() && box.Max().IsFinite();
+        // Infinite ground-plane geometry is explicit missing finite evidence;
+        // do not emit invalid JSON or replace it with invented coordinates.
+        if (finite) {
+          out << ",\"bounds\":[[" << box.Min().X() << ',' << box.Max().X() << "],["
+              << box.Min().Y() << ',' << box.Max().Y() << "],[" << box.Min().Z() << ',' << box.Max().Z() << "]]}";
+        } else {
+          out << ",\"bounds\":null,\"reason\":\"non_finite_collision_geometry\"}";
+        }
+      }
+      out << "]}";
+    }
+    out << "},\"joints\":{";
+    bool joint_comma = false;
+    for (const auto &joint : model->GetJoints()) {
+      if (joint->DOF() != 1) continue;
+      if (joint_comma) out << ',';
+      joint_comma = true;
+      JsonString(out, joint->GetName());
+      out << ":{\"position\":" << joint->Position(0) << ",\"velocity\":" << joint->GetVelocity(0) << '}';
+    }
+    out << "}}";
+  }
+  out << "}}";
+  response->message = out.str();
+  response->success = true;
 }
 
 bool GazeboLinkAttacherPrivate::RunOnPhysicsThread(std::function<void()> operation)
@@ -226,6 +332,7 @@ void GazeboLinkAttacherPrivate::Attach(
   if (this->getJoint(_req->model1_name, _req->link1_name, _req->model2_name, _req->link2_name, j)){
     if (j.joint) {
       j.joint->Attach(j.l1, j.l2);
+      ++attachment_revision_;
     }
     _res->success = true;
     _res->message = "ATTACHED (existing): {MODEL , LINK} -> {" + _req->model1_name + " , " + _req->link1_name + "} -- {" + _req->model2_name + " , " + _req->link2_name + "}.";
@@ -308,6 +415,7 @@ void GazeboLinkAttacherPrivate::Attach(
   joint_entry.joint = joint;
 
   GV_joints.push_back(joint_entry);
+  ++attachment_revision_;
 
   // Set the success and message in the response:
   _res->success = true;
@@ -346,6 +454,7 @@ void GazeboLinkAttacherPrivate::Detach(
                  entry.link2 == _req->link2_name;
         }),
       GV_joints.end());
+    ++attachment_revision_;
     
     return;
   } else {

@@ -1,0 +1,59 @@
+{
+  "origin": "mock",
+  "description": "Supplied motion-only candidates. No failure or recovery completion is asserted. Targets are configured; retreat is bound from the observed checkpoint.",
+  "candidates": {
+    "GAZEBO_MOTION_SAFE": {
+      "origin": "mock",
+      "start_offsets": {
+        "ur5e-4": 0.0
+      },
+      "poses": {
+        "ur5e-4": {
+          "approach": [
+            -0.1,
+            -0.08,
+            1.5
+          ],
+          "entry": [
+            -0.1,
+            -0.08,
+            1.26
+          ]
+        }
+      }
+    },
+    "GAZEBO_MOTION_CONFLICT": {
+      "origin": "mock",
+      "start_offsets": {
+        "ur5e-4": 0.0,
+        "ur5e-3": 0.0
+      },
+      "poses": {
+        "ur5e-4": {
+          "approach": [
+            -0.1,
+            -0.08,
+            1.5
+          ],
+          "entry": [
+            -0.1,
+            -0.08,
+            1.26
+          ]
+        },
+        "ur5e-3": {
+          "approach": [
+            -0.1,
+            0.08,
+            1.5
+          ],
+          "entry": [
+            -0.1,
+            0.08,
+            1.26
+          ]
+        }
+      }
+    }
+  }
+}

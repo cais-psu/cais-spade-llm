@@ -1,0 +1,75 @@
+Generated using the built-in image_gen tool.
+
+TEXT CORRECTIONS
+
+Make ONLY these precise text corrections to the attached diagram; preserve all geometry, arrows, styling and all other content.
+1. In panel 1's RA primitive sequence, the rightmost primitive currently reads rho_n(theta_n). Restore the supplied mathematical symbols rho_h(theta_h), with subscript h in both places. Do not use n.
+2. In panel 2, the TOP-RIGHT blue input card headed "Resource motion preparation" must contain these exact two data lines:
+"Planned trajectories and timings"
+"Owner-supplied spatial and stationary coverage"
+Replace its current second data line "For the bound primitive parameters" with the new second line. This makes the missing complete-coverage input source explicit. Fit the text cleanly without abbreviating or dropping words.
+3. In panel 3's "Requested recovery start" box, replace "Recheck current state, program and evidence" with:
+"Recheck current conditions"
+"and the exact program"
+This removes the vague word evidence.
+Change NOTHING ELSE. Keep the configured geometry and resource observations separate from planned future motion. Preserve e_k^R, x_k^R, PC_k and all other notation.
+
+FINAL TYPOGRAPHY CORRECTION
+
+Correct ONLY one mathematical subscript in the attached image. In PANEL 1, within the RA box at the upper right, there are three lavender primitive boxes. The RIGHTMOST primitive box must read exactly: ρₕ(θₕ). Both subscripts are lowercase Latin h, with the tall upward stem of h, NOT n. It currently incorrectly has n under rho. Replace that glyph with h, matching the h already under theta. Preserve all other pixels, all text, all arrow positions, all symbols and every other part of the image. This is only a one-character typography correction.
+
+INITIAL PROMPT
+
+Edit the attached recovery-focused academic figure. The user explicitly requests removing the case-specific assembly region and clarifying exactly where the inputs used to evaluate a primitive composition come from. Preserve the purple/white style, title, panel 1's recovery transition and RA primitive sequence, and panel 3's safety checking and execution feedback. Replace PANEL 2 completely as specified. This is a framework-method figure, not an experiment result.
+
+REMOVE ALL occurrences of any assembly-board or assembly_board name, any resource-specific part name, the SAFE_shared_area_mutex identifier, and the case-specific motion illustration/mutex truth-value example. Do NOT replace a code identifier by another invented code identifier; remove the example entirely. Retain mathematical symbols already used, e_k^R, x_k^R, PC_k, rho and theta.
+
+Panel 1: keep layout and text, except replace "Bound parameters and resource evidence" with "Ordered primitives and bound parameters". Do not modify mathematical notation. The output PC_k feeds panel 2.
+
+NEW PANEL 2:
+Heading: "Derive AP valuations for the recovery task"
+Authority label: "CCA"
+Under the heading, a small bold label: "Required input sources"
+Show FOUR clearly separated blue input cards in a two-by-two grid occupying the upper half of this panel. Each card has a bold SOURCE header, then concrete DATA text:
+Card 1 header "Resource observations"
+Data: "Current resource and product conditions"
+Second line: "Pose, gripper state and custody"
+Card 2 header "Resource motion preparation"
+Data: "Planned trajectories and timings"
+Second line: "For the bound primitive parameters"
+Card 3 header "System configuration"
+Data: "Frames, regions and geometry"
+Second line: "Resource, tool and part dimensions"
+Card 4 header "Resource models and execution records"
+Data: "Declared primitive effects"
+Second line: "Acknowledged task and custody updates"
+
+These are REQUIRED INPUTS to the check, not a claim they are all already obtainable in live execution. A small clear text line under the cards must read:
+"Complete motion, stationary and custody coverage required"
+
+Use a shared input bus from the four cards into the lower part of the panel. Also connect the PC_k output from panel 1 into this lower processing row, using a clean route along the left margin if needed.
+The lower processing row consists of three adjacent boxes connected by purple arrows:
+1 "Check input completeness"
+   small text: "Same task, state and time"
+2 "Project primitive execution"
+   small text: "Conditions throughout the program"
+3 "Evaluate fixed AP predicates"
+   small text: "True/false values for each specification"
+The AP evaluation is based on the computed conditions and predefined AP meanings, not new event/state labels.
+From the first processing box, add a short red arrow down to a narrow red-outlined box:
+"Missing or inconsistent inputs → hold start"
+No trajectory should be presented as measured future execution. No claims that a planner result alone proves complete physical coverage.
+At bottom of panel 2 include the concise note:
+"Generated state names do not establish physical conditions."
+Ensure the processing flow is clear and text is readable; enlarge panel 2 vertically if needed and shift panel 3 down. The main diagram can become taller.
+
+Panel 3 should retain the recovery-centered structure:
+"Permitted nominal behavior and running work" and "Existing DFA monitors and retained history" are supporting inputs to joint composition.
+Keep joint composition → common accepting continuation → requested recovery start → allow/block.
+The new panel-2 output "Evaluate fixed AP predicates" must connect to Joint composition with a purple arrow labeled "Projected recovery behavior and AP valuations".
+The blue dashed arrow from RA execution must terminate at "Existing DFA monitors and retained history"; it must NOT point into nominal behavior or the input-source cards. Label "Validated observations and acknowledgements".
+Retain the note about controllable recovery starts and uncontrollable primitive progress/completions.
+
+Scientific emphasis: NEW recovery task → bound primitive composition → explicitly sourced current conditions/configuration/planned motion/declared effects → condition projection → AP evaluation → joint validation → requested-start permission. Fixed safety rules are background inputs. Avoid a vague standalone word "evidence" anywhere in the figure. Avoid all case-specific plant identifiers and proprietary planner/product labels. Keep exact existing formal identifiers, no new notation.
+
+Make a polished readable portrait diagram, crisp academic typography. Keep all connector arrowheads attached to the correct box. No decorative graphics needed. This is an edited research-method draft, not proof of live execution.

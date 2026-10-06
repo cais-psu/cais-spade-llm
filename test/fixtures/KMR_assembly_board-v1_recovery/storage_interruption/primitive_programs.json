@@ -1,0 +1,1195 @@
+{
+  "synthetic": true,
+  "description": "Per-event program records and zero-based step_expectations. All expected_result, projected_snapshot, custody, part_tracker, Storage and M1 values are authored synthetic expectations, not primitive outputs or validator evidence. Unheld parts remain stationary, processCompleted never changes, and nominal tasks remain pending.",
+  "initial_context_file": "initial_context.json",
+  "event_sequence_file": "event_sequence.json",
+  "primitive_program": [
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+      "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ1",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET8_Square_8mm",
+      "event_name": "KMR_stage_KET8_Square_8mm_at_Storage",
+      "description": "Return KET8_Square_8mm to its vacated Storage slot while preserving the interrupted Storage-to-M1 delivery.",
+      "predecessors": [],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "move_to_named_pose",
+          "params": {
+            "pose_name": "transport"
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "idle",
+        "resource_location": "Storage",
+        "held_part": null,
+        "gripper_state": "open",
+        "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+        "base_pose": [-5.54, 2.41, 1.5707963267948966]
+      },
+      "projected_outline_state": {
+        "resource_state": "idle",
+        "resource_location": "Storage",
+        "held_part": null,
+        "part_state": "ready",
+        "part_location": "Storage"
+      }
+    },
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+      "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ2",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "event_name": "KMR_acquire_displaced_KET4_Square_4mm",
+      "description": "Travel empty to the synthetic recovery pose and acquire the displaced KET4_Square_4mm whose trim result is already square.",
+      "predecessors": ["KMR_STORAGE_INTERRUPTION_SEQ1"],
+      "primitive_steps": [
+        {
+          "primitive": "move_base",
+          "params": {
+            "target_pose": [-0.5, -0.5, 1.5707963267948966],
+            "waypoints": []
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "params": {
+            "part_name": "KET4_Square_4mm",
+            "initial": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "carrying",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "gripper_state": "closed",
+        "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+        "base_pose": [-0.5, -0.5, 1.5707963267948966]
+      },
+      "projected_outline_state": {
+        "resource_state": "carrying",
+        "resource_location": null,
+        "held_part": "KET4_Square_4mm",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-8@localhost"
+      }
+    },
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+      "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ3",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET4_Square_4mm",
+      "event_name": "KMR_place_KET4_Square_4mm_at_assembly_board-v1",
+      "description": "Place and release KET4_Square_4mm at the synthetic assembly_board-v1 pose, then retreat without claiming assembly completion.",
+      "predecessors": ["KMR_STORAGE_INTERRUPTION_SEQ2"],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [0, 0, 1.2, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [0, 0, 1.065, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "release_part",
+          "params": {
+            "transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [0, 0, 1.2, 1, 0, 0, 0]
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "gripper_state": "open",
+        "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+        "base_pose": [-0.5, -0.5, 1.5707963267948966]
+      },
+      "projected_outline_state": {
+        "resource_state": "idle",
+        "resource_location": null,
+        "held_part": null,
+        "part_state": "ready",
+        "part_location": "assembly_board-v1"
+      }
+    },
+    {
+      "outline_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+      "des_event_id": "KMR_STORAGE_INTERRUPTION_SEQ4",
+      "resource_jid": "recovery-resource-8@localhost",
+      "part_name": "KET8_Square_8mm",
+      "event_name": "KMR_reacquire_KET8_Square_8mm_at_Storage",
+      "description": "Return empty to Storage, reacquire KET8_Square_8mm, and restore the carrying checkpoint for the same pending Storage-to-M1 tasks.",
+      "predecessors": ["KMR_STORAGE_INTERRUPTION_SEQ3"],
+      "primitive_steps": [
+        {
+          "primitive": "move_to_named_pose",
+          "params": {
+            "pose_name": "transport"
+          }
+        },
+        {
+          "primitive": "move_base",
+          "params": {
+            "target_pose": [-5.54, 2.41, 1.5707963267948966],
+            "waypoints": []
+          }
+        },
+        {
+          "primitive": "compute_pick_targets",
+          "params": {
+            "initial": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+            "seed": [-3.86e-8, 0.9684402263, 7.98e-8, -1.0292177427, -7.22e-8, 1.1439346844, 3.65e-8]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "params": {
+            "part_name": "KET8_Square_8mm",
+            "initial": [-6.25, 2.16, 0.645, 0, 0, 0.7071067811848163, 0.7071067811882787]
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "params": {
+            "target": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+            "waypoints": [
+              [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+            ]
+          }
+        },
+        {
+          "primitive": "move_to_named_pose",
+          "params": {
+            "pose_name": "transport"
+          }
+        }
+      ],
+      "projected_snapshot": {
+        "current_state": "carrying",
+        "resource_location": "Storage",
+        "held_part": "KET8_Square_8mm",
+        "gripper_state": "closed",
+        "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+        "base_pose": [-5.54, 2.41, 1.5707963267948966]
+      },
+      "projected_outline_state": {
+        "resource_state": "carrying",
+        "resource_location": "Storage",
+        "held_part": "KET8_Square_8mm",
+        "part_state": "in_gripper",
+        "part_location": "recovery-resource-8@localhost"
+      }
+    }
+  ],
+  "step_expectations": {
+    "KMR_STORAGE_INTERRUPTION_SEQ1": [
+      {
+        "step_index": 0,
+        "expected_result": {
+          "tcp_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": "Storage",
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed",
+          "current_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET8_Square_8mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.25,2.16,0.715,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": false,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 1,
+        "expected_result": {
+          "tcp_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": "Storage",
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed",
+          "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET8_Square_8mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": false,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 2,
+        "expected_result": {
+          "attached": false,
+          "held_part": null,
+          "gripper_state": "open"
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 3,
+        "expected_result": {
+          "tcp_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 4,
+        "expected_result": {
+          "tcp_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      }
+    ],
+    "KMR_STORAGE_INTERRUPTION_SEQ2": [
+      {
+        "step_index": 0,
+        "expected_result": {
+          "base_pose": [-0.5, -0.5, 1.5707963267948966],
+          "resource_location": null,
+          "attached": false
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": null,
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 1,
+        "expected_result": {
+          "tcp_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": null,
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 2,
+        "expected_result": {
+          "tcp_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": null,
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "misplaced",
+            "location": null,
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 3,
+        "expected_result": {
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0],
+          "attached": true,
+          "held_part": "KET4_Square_4mm",
+          "gripper_state": "closed"
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": null,
+          "held_part": "KET4_Square_4mm",
+          "gripper_state": "closed",
+          "current_pose": [-0.35, -0.2, 1.065, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET4_Square_4mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "in_gripper",
+            "location": "recovery-resource-8@localhost",
+            "pose": [-0.35, -0.2, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 4,
+        "expected_result": {
+          "tcp_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": null,
+          "held_part": "KET4_Square_4mm",
+          "gripper_state": "closed",
+          "current_pose": [-0.35, -0.2, 1.2, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET4_Square_4mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "in_gripper",
+            "location": "recovery-resource-8@localhost",
+            "pose": [-0.35, -0.2, 1.175, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      }
+    ],
+    "KMR_STORAGE_INTERRUPTION_SEQ3": [
+      {
+        "step_index": 0,
+        "expected_result": {
+          "tcp_pose": [0, 0, 1.2, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": null,
+          "held_part": "KET4_Square_4mm",
+          "gripper_state": "closed",
+          "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET4_Square_4mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "in_gripper",
+            "location": "recovery-resource-8@localhost",
+            "pose": [0, 0, 1.175, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 1,
+        "expected_result": {
+          "tcp_pose": [0, 0, 1.065, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": null,
+          "held_part": "KET4_Square_4mm",
+          "gripper_state": "closed",
+          "current_pose": [0, 0, 1.065, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET4_Square_4mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "in_gripper",
+            "location": "recovery-resource-8@localhost",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 2,
+        "expected_result": {
+          "attached": false,
+          "held_part": null,
+          "gripper_state": "open"
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": null,
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [0, 0, 1.065, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 3,
+        "expected_result": {
+          "tcp_pose": [0, 0, 1.2, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": null,
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [0, 0, 1.2, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      }
+    ],
+    "KMR_STORAGE_INTERRUPTION_SEQ4": [
+      {
+        "step_index": 0,
+        "expected_result": {
+          "tcp_pose": [-1, -0.5, 1.15, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": null,
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-1, -0.5, 1.15, 1, 0, 0, 0],
+          "base_pose": [-0.5, -0.5, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 1,
+        "expected_result": {
+          "base_pose": [-5.54, 2.41, 1.5707963267948966],
+          "resource_location": "Storage",
+          "attached": false
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 2,
+        "expected_result": {
+          "target": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+          "approach": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+          "lift": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+          "lift_waypoints": [
+            [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+          ],
+          "retreat": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+          "seed": [-3.86e-8, 0.9684402263, 7.98e-8, -1.0292177427, -7.22e-8, 1.1439346844, 3.65e-8],
+          "carrying": [0.00328154, -0.76073215, -0.00070832, -1.94313693, -0.00334093, 0.91199349, 0.00300654]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 3,
+        "expected_result": {
+          "tcp_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.25, 2.16, 0.74, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 4,
+        "expected_result": {
+          "tcp_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "idle",
+          "resource_location": "Storage",
+          "held_part": null,
+          "gripper_state": "open",
+          "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": null,
+          "attached": false
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"ready","location":"Storage","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": true,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 5,
+        "expected_result": {
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0],
+          "attached": true,
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed"
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": "Storage",
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed",
+          "current_pose": [-6.25, 2.16, 0.67, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET8_Square_8mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.25,2.16,0.645,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": false,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 6,
+        "expected_result": {
+          "tcp_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": "Storage",
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed",
+          "current_pose": [-6.25, 2.16, 0.95, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET8_Square_8mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.25,2.16,0.925,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": false,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      },
+      {
+        "step_index": 7,
+        "expected_result": {
+          "tcp_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0]
+        },
+        "projected_snapshot": {
+          "current_state": "carrying",
+          "resource_location": "Storage",
+          "held_part": "KET8_Square_8mm",
+          "gripper_state": "closed",
+          "current_pose": [-6.04, 2.41, 1.15, 1, 0, 0, 0],
+          "base_pose": [-5.54, 2.41, 1.5707963267948966]
+        },
+        "custody": {
+          "resource_jid": "recovery-resource-8@localhost",
+          "part_name": "KET8_Square_8mm",
+          "attached": true,
+          "grasp_transform": [0, 0, 0.025, -0.7071067811882787, 0.7071067811848163, 0, 0]
+        },
+        "part_tracker": {
+          "KET8_Square_8mm": {"state":"in_gripper","location":"recovery-resource-8@localhost","pose":[-6.04,2.41,1.125,0,0,0.7071067811848163,0.7071067811882787],"processCompleted":[]},
+          "KET4_Square_4mm": {
+            "state": "ready",
+            "location": "assembly_board-v1",
+            "pose": [0, 0, 1.04, 0, 0, 0.7071067811848163, 0.7071067811882787],
+            "processCompleted": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ]
+          }
+        },
+        "Storage": {
+          "inventory.KET8_Square_8mm": false,
+          "inventory.KET4_Square_4mm": false
+        },
+        "M1": {
+          "resource_state": "idle",
+          "part_name": null
+        }
+      }
+    ]
+  }
+}

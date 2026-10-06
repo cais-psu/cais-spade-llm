@@ -924,6 +924,22 @@ def test_each_controller_owns_only_its_ur5e_joints() -> None:
     assert sum(map(len, joint_sets)) == 28
 
 
+def test_read_only_controller_observations_are_opt_in_without_changing_parameters() -> None:
+    robots = scene._load_robots(ROBOTS_PATH)
+    original = scene._controller_config(robots)
+    observed = scene._controller_config(robots, recovery_observations=True)
+    manager = observed['controller_manager']['ros__parameters']
+    changed = []
+    for name, configuration in manager.items():
+        if isinstance(configuration, dict) and configuration.get('type') == 'cais_lab_robotics/RecoveryJointTrajectoryController':
+            changed.append(name)
+            assert original['controller_manager']['ros__parameters'][name]['type'] == (
+                'joint_trajectory_controller/JointTrajectoryController')
+            configuration['type'] = original['controller_manager']['ros__parameters'][name]['type']
+    assert len(changed) == 8
+    assert observed == original
+
+
 def test_kmr_routes_are_reversible_and_reject_cross_machine_motion() -> None:
     kmr, routes = kmr_base.load_kmr_config(ROBOTS_PATH)
     assert kmr['simulation_control_integrated'] is True

@@ -1,0 +1,91 @@
+Generated using the built-in image_gen tool.
+
+FINAL FLOW CORRECTION
+
+Correct the following specific flow details in this CCA safety figure. Preserve the original purple portrait three-panel template, all panel titles and all content outside these edits.
+
+1. Panel 1 AP table: change the right-column heading "After recovery (start e_k^R)" to "Projected during PC_k" (typeset subscript k). This shows intermediate predicted conditions, not a guaranteed post-execution outcome.
+
+2. Panel 2 has an incorrect plus-shaped bus that combines the OUTPUT with the INPUTS. Remove that entire bus. Rearrange only the inside of panel 2 for unambiguous composition:
+- LEFT half contains two stacked input cards: "Supplied behavior" on top, with its existing recovery/nominal graph and short caption; "Existing DFA monitors" underneath, with its existing correct green accepting q0 / red absorbing qd automaton and "States from accepted history".
+- RIGHT half contains ONE taller output card "Joint reachable states", with the existing green/red joint graph.
+- Draw separate purple arrows FROM Supplied behavior TO Joint reachable states, and FROM Existing DFA monitors TO Joint reachable states. Both arrows point rightward. There is no arrow from Joint reachable states back into the inputs and no plus bus.
+- Keep the "AP valuations" arrow from panel 1 entering Joint reachable states from above.
+- Draw the output from Joint reachable states down to the LEFT "Nonblocking region" card in panel 3. It must not terminate at the panel frame or at Requested recovery start.
+
+3. The blue feedback arrow currently terminates at Requested recovery start. Delete that wrong endpoint. Its path must originate at RA execution and terminate at the "States from accepted history" part of Existing DFA monitors in panel 2. Route through outer margins to avoid text, with one clear arrowhead entering that history area. Keep label "Validated observations and acknowledgements". The monitor history must receive the feedback.
+
+Keep panel 3's correct sequence Nonblocking region → Requested recovery start → CCA decision unchanged. Keep only the green allow branch leading to RA execution. Do not add extra figures, labels, paragraphs, task generation, primitive composition, code identifiers or region names. This is a wiring correction and a local panel-2 arrangement change only.
+
+INITIAL PROMPT
+
+Edit the attached purple Central Controller Agent figure while keeping its ORIGINAL TEMPLATE: portrait, purple rounded outer frame, three stacked numbered panels, compact cards, thick purple flow arrows, black text and white background. The user has a SEPARATE Resource Agent figure that already explains recovery context collection, LLM retrieval, primitive composition and feasibility checks. Therefore this CCA figure MUST focus only on SAFETY. Do NOT repeat primitive composition, LLM generation, primitive selection, event-to-primitive binding or RA feasibility. Treat PC_k from RA as one small input, not a main panel.
+
+Retain the original title exactly: "Central Controller Agent".
+Use the same original template density, with more diagrams than prose, no source tables and no long bullet lists. Do not make a sparse landscape infographic. No case-specific location, part or resource names. No assembly-board identifiers or SAFE_* codes.
+
+A small input tab just below the title reads "From RA: PC_k", with PC subscript k. One thin arrow feeds panel 1. No PA/LLM bubble or primitive sequence.
+
+PANEL 1 title: "Evaluate APs for recovery behavior"
+Three columns joined by purple arrows:
+LEFT card title "Inputs"
+Four concise lines:
+"PC_k from RA"
+"Pose: resource observations"
+"Motion: resource preparation"
+"Geometry: configuration"
+Above the center card, a small supporting label "Fixed AP meanings and bindings" points into it.
+CENTER card title "AP mapping and evaluation"
+Main content is visual: two small robot/tool outlines beside a pale shaded shared region, one purple dashed path entering the shared region. No location name. Under the picture:
+"ap001: first resource occupancy"
+"ap002: second resource occupancy"
+RIGHT card title "Projected AP valuations"
+Show a tiny unbordered two-column trace: labels ap001 and ap002 on two rows; first pair (0,1), then arrow, then pair (1,1). Color the first pair neutral/green and the second pair pale red. The red pair marks a predicted mutual-exclusion conflict, not observed execution.
+Panel footer, one short line:
+"Evaluate intermediate conditions throughout PC_k."
+The illustrative occupancy example is a fixed given AP meaning. No LLM maps names to truth.
+
+PANEL 2 title: "Compose behavior with safety monitors"
+Three cards, joined as TWO INPUTS converging into the third card:
+LEFT card title "Supplied behavior"
+Draw a compact state graph showing gray nominal/running behavior and a purple dashed recovery edge labeled e_k^R leading to a new purple state labeled x_k^R. These are exact mathematical labels, subscript k/superscript R.
+Short line under graph: "Recovery, nominal and running tasks"
+MIDDLE card title "Existing DFA monitors"
+A small label above the automaton: "Given Φ"
+Show a correct illustrative mutex automaton:
+left q0 is green with double circle accepting, initial arrow enters q0;
+q0 self-loop labeled "!(ap001 & ap002)";
+q0 to qd arrow labeled "ap001 & ap002";
+qd is red single-circle rejecting, with self-loop "true";
+NO return edge from qd to q0.
+Short line under it: "States from accepted history".
+RIGHT card title "Joint reachable states"
+Draw a small product-state graph with a green branch to a double-ring completion node and a red conflicting branch. No new node labels. This represents the reachable joint behavior and monitor states, not merely independent per-rule checks.
+Arrows from BOTH Supplied behavior and Existing DFA monitors feed Joint reachable states; you may use a plus/junction between them if needed. These are inputs, not a sequence generating the specifications.
+The AP valuation output from panel 1 also points into Joint reachable states with a clear short arrow labeled "AP valuations".
+No formula generation during recovery. No reset of accepted history.
+
+PANEL 3 title: "Validate and authorize the requested start"
+LEFT card title "Nonblocking region"
+Show the retained green continuation and a red start edge crossed out.
+Short line "Of the supplied behavior".
+CENTER card title "Requested recovery start"
+Large math label e_k^R.
+Short line "Recheck current conditions"
+and "and the exact program".
+RIGHT card title "CCA decision"
+Two outcome badges, green "allow" and red "block".
+Arrows: Joint reachable states in panel 2 down to Nonblocking region; then region → Requested recovery start → CCA decision.
+Small footer text inside panel 3:
+"Starts: controllable | Progress and completions: uncontrollable"
+Below this in a slim footer, a small RA execution box. A green arrow from allow goes to RA execution. The block branch does not execute.
+One dashed blue arrow FROM RA execution BACK TO the "Existing DFA monitors" card in panel 2, terminating at its accepted-history area. Label it "Validated observations and acknowledgements". Do not point feedback into projected AP values or primitive construction.
+
+Critical design goals:
+- All three panels describe CCA safety work, not RA primitive authoring.
+- Preserve the original familiar purple portrait template and visual hierarchy.
+- Moderate informative detail, concise text, small explanatory graphs. Avoid long paragraphs, multirow evidence tables and decorative clutter.
+- Preserve exact notation PC_k, e_k^R, x_k^R, ap001, ap002, Φ, q0 and qd.
+- This is a method illustration conditional on supplied complete behavior. No "all possible behavior", experimental claims or safety certification.
+- Ensure arrows reach the correct destination and do not cross text.
+- Give panel 2 sufficient space for the automaton and converging inputs; enlarge the overall portrait vertically if needed.

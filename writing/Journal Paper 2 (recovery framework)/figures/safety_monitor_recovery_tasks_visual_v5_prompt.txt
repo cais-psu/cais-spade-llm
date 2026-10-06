@@ -1,0 +1,38 @@
+Generated using the built-in image_gen tool.
+
+Redesign the attached research figure into a MUCH MORE VISUAL academic diagram. The user explicitly dislikes the many boxes and words. This must be a substantial simplification, not a smaller font version. Use the previous image only for its purple/white visual identity and the core recovery topic. Remove all nested boxes, source tables, bullet lists, long sentences, footnotes and giant outer frame.
+
+OUTPUT: wide landscape publication diagram, three generous visual stages arranged left to right on a clean white background. Purple headings and arrows, black/gray line art, green accepted continuation, red rejected continuation, blue observed-feedback arrow. Crisp vector-like drawing, restrained flat fills, no photorealism, no gradients or shadows, no brand logos. Aim for fewer than 50 visible words excluding mathematical labels. Draw actual explanatory visuals, not text boxes. Each stage has a small purple numbered disc and just ONE short heading. Plenty of white space.
+
+Main title centered: "Safety monitoring of new recovery tasks"
+
+STAGE 1, heading "New recovery task"
+Main visual: a small nominal state graph in gray, with one interrupted gray connection marked by a red cross. Overlay a new purple dashed transition between two purple state circles labeled x_{k-1}^R and x_k^R, with the arrow label e_k^R. Typeset the mathematical subscripts and superscripts correctly. These symbols must remain exactly as provided. A small "LLM" bubble with a simple spark/robot outline points toward the purple proposed transition. This shows NEW recovery behavior being proposed.
+Below the graph, connect the proposed purple event down to a short sequence of three small primitive-action glyphs/dots joined by arrows. Label this sequence only "PC_k", with subscript k. This is the primitive realization of the proposed task, not execution yet.
+A broad purple arrow from this primitive sequence points to stage 2.
+
+STAGE 2, heading "AP mapping"
+Main visual: a generic schematic workspace viewed from above, NOT a specific named industrial cell. Use a large pale-purple shaded region with a fine boundary, labeled only "Shared region". Do not use any assembly-board name or code-specific region identifier.
+Draw one small purple robot/tool silhouette outside that region. Its planned motion is a purple dashed curved path entering the region, ending at a ghosted purple tool silhouette. Draw a gray robot/tool silhouette already inside a DIFFERENT part of the same region. The tools need not physically collide: the safety concern is simultaneous occupancy of the shared region.
+Label the dashed path "Projected motion".
+A tiny geometry/grid icon and a pose marker may accompany the scene, with no text. The scene visually combines motion, current positions and region geometry.
+Beneath the drawing, show a very compact AP display with TWO labels only, "ap001" and "ap002", and two pairs of boolean indicator dots or 0/1 digits. First valuation (0,1), then an arrow to predicted valuation (1,1), with the latter highlighted pale red. This is a visual example of the new primitive motion causing both occupancy APs to be true. Do NOT add a table border, code rule ID, lengthy AP definitions or extra prose.
+The transition to stage 3 carries these valuations with a purple arrow.
+
+STAGE 3, heading "CCA safety check"
+Main visual: a small joint-state graph with a current black-outlined node, a green path toward a double-circle completion node, and a red outgoing branch toward a crossed-out red node. The red branch represents a blocked unsafe recovery start; the green path is an admissible alternative, not approval of the shown conflicting start.
+Under the graph, use the short label "Joint behavior + DFA monitors".
+Above the graph, two small unboxed supporting inputs with thin arrows: the math symbol Phi (Greek capital Φ), and a little clock/stacked-state icon labeled "Current execution".
+At the right edge of this stage, two output arrows: green labeled exactly "allow" leading toward a tiny RA robot icon, and red labeled exactly "block" ending at a stop symbol. The green RA icon can be labeled "RA". No output boxes.
+Add ONE thin blue curved feedback arrow from the RA icon back to the current-execution/history icon in stage 3. Label it only "Validated observations". It must not feed the new LLM event, the planned motion or AP example directly. Projected motion must never look like observed execution.
+
+Important content and appearance constraints:
+- NO box-heavy UI layout. The diagrams/scene are the content, not decoration around paragraphs.
+- NO long explanatory sentences anywhere.
+- NO input-source lists or implementation details; those belong in the caption.
+- NO specific resource names, assembly-board strings, plant IDs, SAFE_... identifiers or region-specific code.
+- Keep the existing notation e_k^R, x_{k-1}^R, x_k^R, PC_k, ap001, ap002 and Φ; do not invent substitute identifiers.
+- Preserve the chain: proposed recovery event → its primitive composition → projected AP valuations → joint safety checking → a checked start.
+- LLM proposes behavior only; it does not assign authoritative AP truth or change Φ.
+- This is a clear conceptual method illustration. No numerical experimental claims, no hardware guarantees.
+- Make the three visuals large, balanced and instantly understandable. Text should support the picture, not dominate it.

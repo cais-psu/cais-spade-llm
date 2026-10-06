@@ -13,11 +13,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.local_composition import (
-    Analysis, AnalysisLimit, Budget, IncompleteModel, Node, Scope, analyze, state_key,
+    Analysis,
+    AnalysisLimit,
+    Budget,
+    IncompleteModel,
+    Node,
+    Scope,
+    analyze,
+    state_key,
 )
 from cais_spade_llm.product.environment import fingerprint
 from cais_spade_llm.recovery_framework.environment_composition import (
-    EnvironmentPlant, detached_checker, state_labels,
+    EnvironmentPlant,
+    detached_checker,
+    state_labels,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +55,7 @@ class EnvironmentAdmission:
         self.components: list[CachedComposition] = []
         self.epoch = 0
         self.ack_cursor = 0
+        self.acknowledgement_history: list[dict] = []
         self.last_results: dict[str, dict] = {}
         self.invalid_reason = ""
         runtime.admission = self
@@ -69,6 +79,7 @@ class EnvironmentAdmission:
             while self.ack_cursor < len(self.context.transitions):
                 record = self.context.transitions[self.ack_cursor]
                 task = record["acknowledgement"]
+                before_states = deepcopy(self.monitor.current_states)
                 action = self.grants.pop(task["task_id"], None)
                 if action is None:
                     self.invalid_reason = "acknowledgement_without_admission"
@@ -83,8 +94,10 @@ class EnvironmentAdmission:
                                           self.contexts)
                 sigma = frozenset(self._running_labels()) | persistent | labels
                 next_states = {}
+                rule_checks = []
                 for rule, current in self.monitor.current_states.items():
                     evidence = self.monitor.transition_evidence(rule, current, sigma)
+                    rule_checks.append(deepcopy(evidence))
                     if evidence["status"] != "passed":
                         self.monitor.history_error = evidence
                         self.invalid_reason = "unexpected_completion"
@@ -102,6 +115,12 @@ class EnvironmentAdmission:
                         "params": {**self.contexts.get(rid, {}), **values},
                     }
                 self.ack_cursor += 1
+                self.acknowledgement_history.append({
+                    "cursor": self.ack_cursor, "run_id": self.context.run_id,
+                    "task_id": task["task_id"], "task": deepcopy(task),
+                    "admitted": action is not None, "before_states": before_states,
+                    "after_states": deepcopy(next_states), "rule_checks": rule_checks,
+                })
                 self.epoch += 1
             # Retire a finished operation only once its scoped release condition holds.
             keep = []

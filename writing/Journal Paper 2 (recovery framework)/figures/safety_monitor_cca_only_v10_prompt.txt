@@ -1,0 +1,30 @@
+Generated using the built-in image_gen tool.
+
+Edit this CCA v9 research figure to remove the ambiguous use of orange. Keep the entire figure's layout, three panels, content, mathematics and correct topology. Make only these small changes:
+
+MEANING:
+In the joint behavior graphs, COLOR and LINE STYLE express different attributes.
+ORANGE means the generated recovery event e_k^R.
+SOLID means a controllable start.
+DASHED means uncontrollable progress/completion.
+Consequently an orange solid arrow is BOTH a generated recovery event's start AND controllable. Nominal starts can also be controllable and do not need to be orange.
+These line-style meanings apply to the joint behavior graphs, NOT the DFA, AP-trace illustration, purple workflow connectors or blue execution feedback.
+
+1. Replace the current one-row legend in panel 3, whose orange arrow says "start: controllable", with a compact TWO-ROW legend. Use a small label "Joint-graph transitions".
+First row: ORANGE solid arrow sample, then "Generated recovery event e_k^R".
+Second row: BLACK solid arrow sample, then "Controllable start"; BLACK dashed arrow sample, then "Uncontrollable progress / completion".
+Give the strip enough height to fit these two rows legibly. Adjust vertical spacing slightly if necessary; do not make a large empty card.
+
+2. In the LEFT pruning graph of panel 3, keep ONLY the upper outgoing start arrow orange, and add its label e_k^R in orange above that arrow. This is the same selected generated recovery event shown in the RIGHT retained graph.
+Change the root-to-crossed-out-middle-node start arrow from orange to SOLID BLACK.
+Change the root-to-crossed-out-bottom "no completion" start arrow from orange to SOLID BLACK.
+Keep both as solid lines; they are controllable starts. Do not alter their endpoints.
+Leave the dashed possible-completion and dashed violation edges unchanged.
+
+3. Preserve the existing ORANGE e_k^R arrow in panel 2's r_1 supplied-behavior lane. Preserve the orange first edge in "Joint reachable states" and the orange labeled e_k^R edge in the panel-3 retained region.
+In panel 2's Joint reachable states graph, change the last GREEN edge entering the green double-circle completion node from solid to DASHED GREEN, so its style clearly indicates uncontrollable progress/completion.
+Do not change the solid q0→qd transition in the DFA: it belongs to the monitor, not the joint behavior graph.
+
+4. Keep all prior corrections: "Mutual-exclusion example (SAFE_2)" subtitle; "Parallel composition and safety monitoring" heading; compact "Check the start of e_k^R" strip; monitor history feedback; green retained region containing only retained nodes; no uncontrollable edge leaving that region; allow-only execution branch.
+
+Do not add or remove nodes, change formulas, rename APs, alter other text or add safety claims. The figure must communicate: ORANGE identifies the generated recovery event; SOLID/DASHED identifies controllability.

@@ -172,10 +172,13 @@ def _declare_states(models: dict, scene: dict) -> None:
             parts = [*pegs, product]
             sources = ["Buffer For Machined parts", product]
             destinations = [product, "Exit"]
-        else:
+        elif robot == scene["3D Printing Station"]["handling_robot"]:
             parts = gears
             sources = ["3D Printing Station"]
             destinations = [product]
+        else:
+            # An additional configured robot has no implicit handling assignment.
+            parts, sources, destinations = [], [], []
         locations = list(dict.fromkeys([*sources, *destinations, "home"]))
         _variable(
             model, "resource_state", ["idle", "at_pick", "picked", "positioned", "placed"], "idle"
@@ -193,7 +196,10 @@ def _declare_states(models: dict, scene: dict) -> None:
                 "ready",
                 "in_gripper",
                 "in_transit",
-                *(["assembled"] if robot not in machines else []),
+                *(["assembled"] if robot in {
+                    scene["Buffer For Machined parts"]["handling_robot"],
+                    scene["3D Printing Station"]["handling_robot"],
+                } else []),
             ],
             None,
             scope="part",
@@ -927,7 +933,7 @@ def _transport_and_print_events(models: dict, scene: dict) -> None:
 
 
 def build_nominal_resource_des_models(scene: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Build the twelve resource descriptors from the configured nominal scene.
+    """Build resource descriptors from the configured nominal scene.
 
     Args:
         scene: Parsed recovery_framework_gazebo.json, with exact identifiers.
@@ -950,9 +956,10 @@ def build_nominal_resource_des_models(scene: dict[str, Any]) -> dict[str, dict[s
         "Exit",
     }
     pegs = [part for row in scene["machines"] for part in row["nominal_parts"]]
-    if len(robot_ids) != 4 or len(machine_ids) != 2 or len(set([*robot_ids, *machine_ids])) != 6:
+    if (len(robot_ids) < 4 or len(machine_ids) != 2
+            or len(set([*robot_ids, *machine_ids])) != len(robot_ids) + len(machine_ids)):
         raise ValueError(
-            "The nominal scene requires four distinct robots and two distinct machines"
+            "The nominal scene requires at least four distinct robots and two distinct machines"
         )
     if fixed_resources.intersection([*robot_ids, *machine_ids]):
         raise ValueError("Resource identifiers must not collide with the named scene resources")
@@ -961,7 +968,7 @@ def build_nominal_resource_des_models(scene: dict[str, Any]) -> dict[str, dict[s
         scene[rid]["handling_robot"] for rid in ("Buffer For Machined parts", "3D Printing Station")
     )
     if (
-        set(handlers) != set(robot_ids)
+        len(set(handlers)) != 4 or not set(handlers) <= set(robot_ids)
         or scene["Exit"]["handling_robot"] != scene["Buffer For Machined parts"]["handling_robot"]
     ):
         raise ValueError("Nominal handling_robot assignments must match the four configured robots")

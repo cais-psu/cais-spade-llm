@@ -1,0 +1,427 @@
+{
+  "version": 1,
+  "case_id": "PART_SLIPPAGE_SAFE",
+  "candidate_origin": "mock",
+  "source_fixture": {
+    "path": "../predefined_safety/safe.json",
+    "sha256": "7b62eb4157002c34ab7f1969d92980c8dadf0225b0a2b8291dfa3fe44425cc18"
+  },
+  "predefined_safety": {
+    "path": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
+    "sha256": "a8a79e73e18ca16a3ec28dac5a5b9a8900fe9570b7321423cdad2184aef975da"
+  },
+  "diagnostic_cca_bypass": false,
+  "staging": {
+    "description": "Separately staged post-slippage checkpoint; the original drop is not demonstrated.",
+    "parts": {
+      "gear_small": {
+        "state": "misplaced",
+        "near_resource": "ur5e-3",
+        "assembly_completed": false
+      },
+      "KET4_Square_4mm": {
+        "location": "Buffer For Machined parts",
+        "processCompleted": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ],
+        "assembly_completed": false
+      }
+    },
+    "resources": {
+      "ur5e-3": {
+        "held_part": null,
+        "gripper_state": "open"
+      },
+      "ur5e-4": {
+        "held_part": null,
+        "gripper_state": "open"
+      }
+    },
+    "evidence_required": "Fresh attachment-owner and configured owner observations after staging."
+  },
+  "outline_events": [
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+      "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+      "event_name": "clear_assembly_board-v1_after_part_slippage",
+      "resource_id": "ur5e-3",
+      "resource_jid": "recovery-resource-3@localhost",
+      "part_name": null,
+      "predecessors": [],
+      "primitive_step_indices": [
+        0
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage_DES",
+            "event_name": "clear_assembly_board-v1_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+      "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+      "event_name": "retrieve_gear_small_after_part_slippage",
+      "resource_id": "ur5e-4",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "gear_small",
+      "predecessors": [],
+      "primitive_step_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+            "event_name": "retrieve_gear_small_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+            "event_name": "retrieve_gear_small_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 1,
+            "step_index": 1,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+            "event_name": "retrieve_gear_small_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 2,
+            "step_index": 2,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage_DES",
+            "event_name": "retrieve_gear_small_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 3,
+            "step_index": 3,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1",
+      "des_event_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1_DES",
+      "event_name": "return_gear_small_to_assembly_board-v1",
+      "resource_id": "ur5e-4",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "gear_small",
+      "predecessors": [
+        "PART_SLIPPAGE_SAFE_retrieve_gear_small_after_part_slippage"
+      ],
+      "primitive_step_indices": [
+        4,
+        5
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1",
+            "des_event_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1_DES",
+            "event_name": "return_gear_small_to_assembly_board-v1",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1",
+            "des_event_id": "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1_DES",
+            "event_name": "return_gear_small_to_assembly_board-v1",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 1,
+            "step_index": 1,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+      "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+      "event_name": "place_gear_small_and_retreat_after_part_slippage",
+      "resource_id": "ur5e-4",
+      "resource_jid": "recovery-resource-4@localhost",
+      "part_name": "gear_small",
+      "predecessors": [
+        "PART_SLIPPAGE_SAFE_return_gear_small_to_assembly_board-v1"
+      ],
+      "primitive_step_indices": [
+        6,
+        7,
+        8
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+            "event_name": "place_gear_small_and_retreat_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "release_part",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+            "event_name": "place_gear_small_and_retreat_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 1,
+            "step_index": 1,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage_DES",
+            "event_name": "place_gear_small_and_retreat_after_part_slippage",
+            "resource_id": "ur5e-4",
+            "resource_jid": "recovery-resource-4@localhost",
+            "primitive_index": 2,
+            "step_index": 2,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage",
+      "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+      "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+      "resource_id": "ur5e-3",
+      "resource_jid": "recovery-resource-3@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": [
+        "PART_SLIPPAGE_SAFE_clear_assembly_board-v1_after_part_slippage",
+        "PART_SLIPPAGE_SAFE_place_gear_small_and_retreat_after_part_slippage"
+      ],
+      "primitive_step_indices": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+            "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+            "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 1,
+            "step_index": 1,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "grasp_part",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+            "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 2,
+            "step_index": 2,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage_DES",
+            "event_name": "retrieve_KET4_Square_4mm_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 3,
+            "step_index": 3,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+      "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+      "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+      "resource_id": "ur5e-3",
+      "resource_jid": "recovery-resource-3@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": [
+        "PART_SLIPPAGE_SAFE_retrieve_KET4_Square_4mm_after_part_slippage"
+      ],
+      "primitive_step_indices": [
+        5,
+        6
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+            "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+            "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1",
+            "des_event_id": "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1_DES",
+            "event_name": "return_KET4_Square_4mm_to_assembly_board-v1",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 1,
+            "step_index": 1,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    },
+    {
+      "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+      "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+      "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+      "resource_id": "ur5e-3",
+      "resource_jid": "recovery-resource-3@localhost",
+      "part_name": "KET4_Square_4mm",
+      "predecessors": [
+        "PART_SLIPPAGE_SAFE_return_KET4_Square_4mm_to_assembly_board-v1"
+      ],
+      "primitive_step_indices": [
+        7,
+        8,
+        9
+      ],
+      "primitive_steps": [
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+            "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 0,
+            "step_index": 0,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "release_part",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+            "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 1,
+            "step_index": 1,
+            "input_origin": "mock"
+          }
+        },
+        {
+          "primitive": "move_cartesian",
+          "source": {
+            "outline_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage",
+            "des_event_id": "PART_SLIPPAGE_SAFE_place_KET4_Square_4mm_and_retreat_after_part_slippage_DES",
+            "event_name": "place_KET4_Square_4mm_and_retreat_after_part_slippage",
+            "resource_id": "ur5e-3",
+            "resource_jid": "recovery-resource-3@localhost",
+            "primitive_index": 2,
+            "step_index": 2,
+            "input_origin": "mock"
+          }
+        }
+      ]
+    }
+  ],
+  "native_preparation": {
+    "status": "NEEDS_CONTEXT",
+    "programs": [],
+    "required": "Resolve native parameters from observed checkpoint and configured geometry, preserving every source reference. Use actual prepared trajectories and durations; synthetic source parameters and timestamps are not dispatch evidence."
+  },
+  "expected": {
+    "cca_decision": "allow",
+    "violated_specification": null,
+    "observed_completion_required": true
+  },
+  "video_file": "part_slippage-safe-20x.mp4",
+  "acceptance_complete": false
+}

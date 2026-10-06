@@ -646,3 +646,282 @@ def test_pick_target_motion_cannot_witness_placement_of_the_same_part() -> None:
     motion["context_refs"] = [value["context_ref"] for value in motion["params"].values()]
     assert any(row["evidence"].get("required_trace_fact") == "motion_landed_on_target"
                for row in _staging_validation(steps))
+
+
+def test_resource_composition_preparation_requires_owner_provider() -> None:
+    from unittest.mock import AsyncMock
+
+    from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+
+    async def scenario():
+        worker = SimpleNamespace(run=AsyncMock())
+        actor = KMRResourceAgent("recovery-resource-8@localhost", "none", worker=worker)
+        actor._primitive_state = {"held_part": "KET8_Square_8mm", "current_pose": [1, 2, 3, 1, 0, 0, 0]}
+        actor.workflow_custody = {"grasp_transform": [0, 0, .02, 1, 0, 0, 0], "attached": True}
+        actor._primitive_evidence = {"source": "observed_worker_result"}
+        request = {"resource_jid": str(actor.jid), "program_hash": "program",
+                   "synthetic": True, "allowed": True}
+        unavailable = await actor.prepare_recovery_composition_evidence(request)
+        assert unavailable["status"] == "NEEDS_CONTEXT"
+        exported = unavailable["physical_snapshot"]
+        assert "base_pose" not in exported["snapshot"]
+        assert exported["snapshot"]["held_part"] == "KET8_Square_8mm"
+        assert exported["snapshot"]["grasp_transform"] == actor.workflow_custody["grasp_transform"]
+        assert exported["evidence"]["primitive_evidence"] == actor._primitive_evidence
+        exported["snapshot"]["current_pose"][0] = 99
+        assert actor._primitive_state["current_pose"][0] == 1
+        prepare = AsyncMock(return_value={
+            "status": "prepared", "resource_jid": str(actor.jid), "program_hash": "program",
+            "execution_mode": "mock", "mock_executor": True, "preparation_id": "owner-preparation",
+        })
+        actor.recovery_composition_evidence_provider = SimpleNamespace(prepare=prepare)
+        prepared = await actor.prepare_recovery_composition_evidence(request)
+        assert prepared["status"] == "prepared"
+        assert prepare.await_args.kwargs["request"] == request
+        prepare.return_value["program_hash"] = "another-program"
+        assert (await actor.prepare_recovery_composition_evidence(request))["status"] == "NEEDS_CONTEXT"
+        worker.run.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def _registered_resource_request(actor):
+    reference = {"recovery_id": "sequence", "task_id": "task", "outline_id": "outline",
+                 "program_hash": "program", "problem_id": "problem"}
+    target = [1., 2., 3., 1., 0., 0., 0.]
+    steps = [{"primitive": "move_cartesian", "params": {"target": target}}]
+    grant = {"recovery_composition_ref": reference, "preparation_id": "prepared",
+             "schedule_id": "schedule", "primitive_steps": steps,
+             "resolved_primitive_steps": deepcopy(steps)}
+    params = {"primitive_steps": steps, "recovery_composition_ref": reference,
+              "task_id": "task", "out_state": "predicted_only", "start_safety_mode": "fast_path"}
+    actor._kmr_execution_request = {}
+    return params, grant
+
+
+@pytest.mark.parametrize("grant_change", [None, "missing", "resolved_params"])
+def test_registered_macro_rejects_ungranted_calls_and_preserves_observed_state(grant_change) -> None:
+    from unittest.mock import AsyncMock
+
+    from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+
+    async def scenario():
+        target = [1., 2., 3., 1., 0., 0., 0.]
+        worker = SimpleNamespace(run=AsyncMock(return_value={
+            "status": "completed", "result": {"tcp_pose": target},
+            "primitive_results": [{"primitive": "move_cartesian", "status": "completed",
+                                   "result": {"tcp_pose": target}}],
+        }))
+        actor = KMRResourceAgent("recovery-resource-8@localhost", "none", worker=worker)
+        params, grant = _registered_resource_request(actor)
+        actor._primitive_state = {"current_state": "idle", "held_part": None}
+        observed = AsyncMock()
+        actor._recovery_composition_observation_senders["task"] = observed
+        if grant_change != "missing":
+            actor._recovery_composition_grants["task"] = deepcopy(grant)
+        if grant_change == "resolved_params":
+            actor._recovery_composition_grants["task"]["resolved_primitive_steps"][0]["params"]["target"][0] = 9
+        result = await actor.execute_recovery_macro(**params)
+        if grant_change:
+            assert result["status"].startswith("failed:recovery_composition")
+            worker.run.assert_not_awaited()
+            observed.assert_not_awaited()
+        else:
+            assert result["status"] == "completed"
+            worker.run.assert_awaited_once()
+            observation = observed.await_args.args[0]
+            assert observation["params"] == params["primitive_steps"][0]["params"]
+            assert observation["result"]["observations"]["primitive_results"][0]["status"] == "completed"
+            assert observation["physical_snapshot"]["snapshot"]["current_pose"] == target
+            assert actor._primitive_state["current_state"] == "idle"
+            assert actor.current_state == "idle"
+            actor._recovery_composition_grants["task"] = deepcopy(grant)
+            duplicate = await actor.execute_recovery_macro(**params)
+            assert duplicate["status"] == "failed:recovery_composition_grant_consumed"
+            worker.run.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_registered_macro_waits_for_authenticated_cca_grant(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from spade.message import Message
+
+    from cais_spade_llm.agents.resource_agent import resource_agent
+    from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+
+    async def scenario():
+        worker = SimpleNamespace(run=AsyncMock(return_value={"status": "completed", "result": {}}))
+        actor = KMRResourceAgent("recovery-resource-8@localhost", "none", worker=worker, cca_jid="cca@localhost")
+        params, grant = _registered_resource_request(actor)
+        task = Message(sender="product@localhost", body=json.dumps({
+            "task_id": "task", "instruction": {"function_name": "execute_recovery_macro", "params": params},
+        }))
+        sent = []
+        requested = asyncio.Event()
+
+        async def send(_inbox, msg, **_kwargs):
+            payload = json.loads(msg.body)
+            sent.append(payload)
+            if payload.get("status") == "safety_check":
+                requested.set()
+
+        monkeypatch.setattr(resource_agent, "send_agent_message", send)
+        inbox = SimpleNamespace(agent=actor, receive=AsyncMock(return_value=task), _ack=AsyncMock())
+        execution = asyncio.create_task(resource_agent.ResourceAgent._TaskInbox.run(inbox))
+        await asyncio.wait_for(requested.wait(), 2)
+        worker.run.assert_not_awaited()
+        assert sent[0]["params"]["start_safety_mode"] == "cca_check"
+        first_request_id = sent[0]["recovery_composition_request_id"]
+        assert "recovery_composition_request_id" not in sent[0]["params"]
+        reply = Message(sender="other@localhost", body=json.dumps({
+            "task_id": "task", "decision": "allow", "recovery_composition_grant": grant,
+            "recovery_composition_request_id": first_request_id,
+        }))
+        decisions = SimpleNamespace(agent=actor, receive=AsyncMock(return_value=reply))
+        await resource_agent.ResourceAgent._SafetyDecisionInbox.run(decisions)
+        assert "task" not in actor._safety_decisions
+        worker.run.assert_not_awaited()
+        reply.sender = "cca@localhost"
+        reply.body = json.dumps({"task_id": "task", "decision": "block",
+                                 "recovery_composition_request_id": first_request_id})
+        await resource_agent.ResourceAgent._SafetyDecisionInbox.run(decisions)
+        await asyncio.wait_for(execution, 2)
+        worker.run.assert_not_awaited()
+        assert inbox._ack.await_args.kwargs["status"] == "blocked"
+
+        requested.clear()
+        execution = asyncio.create_task(resource_agent.ResourceAgent._TaskInbox.run(inbox))
+        await asyncio.wait_for(requested.wait(), 2)
+        second_request = [row for row in sent if row.get("status") == "safety_check"][-1]
+        second_request_id = second_request["recovery_composition_request_id"]
+        assert second_request_id != first_request_id
+        for decision in ("allow", "block"):
+            reply.body = json.dumps({"task_id": "task", "decision": decision,
+                                     "recovery_composition_grant": grant,
+                                     "recovery_composition_request_id": first_request_id})
+            await resource_agent.ResourceAgent._SafetyDecisionInbox.run(decisions)
+            assert "task" not in actor._safety_decisions
+            assert "task" not in actor._recovery_composition_grants
+            worker.run.assert_not_awaited()
+        reply.body = json.dumps({"task_id": "task", "decision": "allow",
+                                 "recovery_composition_grant": grant,
+                                 "recovery_composition_request_id": second_request_id})
+        await resource_agent.ResourceAgent._SafetyDecisionInbox.run(decisions)
+        await asyncio.wait_for(execution, 2)
+        await asyncio.sleep(0)
+        worker.run.assert_awaited_once()
+        assert any(row["status"] == "recovery_primitive_observed" for row in sent)
+        assert not actor._recovery_composition_grants
+        assert not actor._recovery_composition_observation_senders
+        assert not actor._pending_recovery_composition_request_ids
+        await resource_agent.ResourceAgent._SafetyDecisionInbox.run(decisions)
+        assert "task" not in actor._safety_decisions
+        request_count = sum(row["status"] == "safety_check" for row in sent)
+        await resource_agent.ResourceAgent._TaskInbox.run(inbox)
+        assert inbox._ack.await_args.kwargs["status"] == "blocked"
+        assert sum(row["status"] == "safety_check" for row in sent) == request_count
+        worker.run.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_pa_registers_complete_sequence_before_requiring_dispatch_reference() -> None:
+    from cais_spade_llm.agents.intelligent_product.product_agent import ProductAgent
+    from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (
+        ProductRecoveryController,
+    )
+
+    sequence = {"recovery_sequence_id": "sequence", "recovery_task_ids": ["task1", "task2"],
+                "validation_policy": "validated", "recovery_safety_scope_id": "scope",
+                "pending_nominal_task_ids": ["KMR_STORAGE_KET8_MOVE_TO_M1"]}
+    nodes = [{"id": task_id, "function_name": "execute_recovery_macro", "resource_jid": "recovery-resource-8@localhost",
+              "recovery_outline_id": task_id + "_outline", "event_name": task_id + "_event",
+              "params": {"primitive_steps": [{"primitive": "release_part", "params": {}}]}}
+             for task_id in sequence["recovery_task_ids"]]
+    agent = SimpleNamespace(jid="product@localhost", runtime_recovery={"validation_policy": "validated", "active_recovery_sequence": sequence},
+                            _runtime_recovery_context={}, process_planner=SimpleNamespace(nodes=nodes, global_fsa={}),
+                            _active_recovery_sequence=lambda: sequence,
+                            _enrich_observed_pose_recovery_params=deepcopy,
+                            _runtime_recovery_session_validation_policy=lambda: "validated",
+                            _build_runtime_plan_context=lambda: {})
+    controller = ProductRecoveryController(agent)
+    agent._dispatch_params_for_task_node = controller._dispatch_params_for_task_node
+    agent._build_recovery_composition_request = controller._build_recovery_composition_request
+    original = deepcopy(nodes)
+    payload = ProductAgent._build_plan_validation_payload(agent)
+    request = payload["recovery_composition_request"]
+    assert [row["task_id"] for row in request["tasks"]] == ["task1", "task2"]
+    assert request["pending_nominal_task_ids"] == ["KMR_STORAGE_KET8_MOVE_TO_M1"]
+    assert "allowed" not in request and "snapshot" not in request
+    with pytest.raises(RuntimeError, match="no CCA recovery composition reference"):
+        controller._dispatch_params_for_task_node(nodes[0])
+    reference = {"task_id": "task1", "recovery_id": "sequence", "outline_id": "task1_outline",
+                 "program_hash": "program", "problem_id": "problem"}
+    sequence["recovery_composition"] = {"task_refs": {"task1": reference}}
+    dispatch = controller._dispatch_params_for_task_node(nodes[0])
+    assert dispatch.pop("recovery_composition_ref") == reference
+    assert dispatch == request["tasks"][0]["params"]
+    assert nodes == original
+
+
+def test_active_recovery_proof_prevents_nominal_fast_path(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from spade.message import Message
+
+    from cais_spade_llm.agents.resource_agent import resource_agent
+
+    async def scenario():
+        actor = resource_agent.ResourceAgent("ur5e-3@localhost", "none", name="ur5e-3", cca_jid="cca@localhost")
+        execute = AsyncMock(return_value={"status": "completed"})
+        actor.executables["move_home"] = execute
+        actor.recovery_composition_start_guard = lambda: True
+        task = Message(sender="product@localhost", body=json.dumps({
+            "task_id": "nominal", "instruction": {"function_name": "move_home",
+                                                  "params": {"start_safety_mode": "fast_path"}},
+        }))
+        sent = []
+
+        async def send(_inbox, msg, **_kwargs):
+            payload = json.loads(msg.body)
+            sent.append(payload)
+            reply = Message(sender="cca@localhost", body=json.dumps({
+                "task_id": "nominal", "decision": "block",
+            }))
+            decisions = SimpleNamespace(agent=actor, receive=AsyncMock(return_value=reply))
+            await resource_agent.ResourceAgent._SafetyDecisionInbox.run(decisions)
+
+        monkeypatch.setattr(resource_agent, "send_agent_message", send)
+        inbox = SimpleNamespace(agent=actor, receive=AsyncMock(return_value=task), _ack=AsyncMock())
+        await resource_agent.ResourceAgent._TaskInbox.run(inbox)
+        assert sent[0]["status"] == "safety_check"
+        assert sent[0]["params"]["start_safety_mode"] == "cca_check"
+        assert inbox._ack.await_args.kwargs["status"] == "blocked"
+        execute.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raw_result", [None, [], {}, {"success": 1}, {"success": "true"}])
+def test_registered_macro_requires_explicit_primitive_success(raw_result) -> None:
+    from unittest.mock import AsyncMock
+
+    from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
+
+    async def scenario():
+        actor = KMRResourceAgent("recovery-resource-8@localhost", "none", worker=SimpleNamespace(run=AsyncMock()))
+        params, grant = _registered_resource_request(actor)
+        actor.recovery_execution_primitive_catalog()
+        actor.kmr_primitives.move_cartesian = AsyncMock(return_value=raw_result)
+        observed = AsyncMock()
+        actor._recovery_composition_observation_senders["task"] = observed
+        actor._recovery_composition_grants["task"] = grant
+        result = await actor.execute_recovery_macro(**params)
+        assert result["status"] == "failed"
+        assert result["observations"]["completed_steps"] == 0
+        assert observed.await_args.args[0]["result"] == raw_result
+        assert "task" in actor._consumed_recovery_composition_refs
+
+    asyncio.run(scenario())
