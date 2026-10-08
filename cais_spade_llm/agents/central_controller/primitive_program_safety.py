@@ -11,8 +11,10 @@ from typing import Any
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
 from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import (
     validate_reviewed_primitive_program_safety as validate_reviewed_primitive_program_safety,
+    _catalog, _ground_rule_aps, _valuation as _evaluate_ap_valuation,
 )
 from cais_spade_llm.resources.primitive_observations import model_primitive_observations
+from cais_spade_llm.agents.central_controller.ppr_ap import parse_ap_record, physical_ap_kind
 
 _DEFINITIONS = (
     Path(__file__).resolve().parents[2]
@@ -31,97 +33,37 @@ _BINDING_FIELDS = {
     },
     "shared_area_mutex": {"rule_id", "specification", "region", "resources"},
 }
-_SPECIFICATION_MEANINGS = {
-    "receiving_region_entry": {
-        "requirement": "An incoming part must not begin entering an applicable resource's receiving region while that resource contains another part.",
-        "aps": {
-            "ap_event/physical_observation/receiving_region_entry": "The bound resource's incoming tool/part begins occupying the bound receiving region while carrying the bound part. Boundary contact counts as occupancy; initial occupancy does not create an entry.",
-            "ap_state/physical_observation/receiving_resource_contains_other_part": "The complete modeled inventory of the bound receiving_resource contains a part other than the bound incoming part.",
-        },
-    },
-    "shared_area_mutex": {
-        "requirement": "Resources declared mutually exclusive must never occupy the same configured shared area simultaneously.",
-        "aps": {
-            "ap_state/physical_observation/shared_area_first_resource": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
-            "ap_state/physical_observation/shared_area_second_resource": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
-        },
-    },
+
+
+_REQUIREMENTS = {
+    "receiving_region_entry": "An incoming part must not begin entering an applicable resource's receiving region while that resource contains another part.",
+    "shared_area_mutex": "Resources declared mutually exclusive must never occupy the same configured shared area simultaneously.",
 }
 
 
 def _definition_labels(specification: str, aps: list[dict[str, Any]]) -> tuple[str, str]:
-    by_full = {ap["full"]: ap["label"] for ap in aps}
-    first, second = _SPECIFICATION_MEANINGS[specification]["aps"]
-    return by_full[first], by_full[second]
+    """Locate the two invariant operands by their typed semantics."""
+    if specification == "shared_area_mutex":
+        by_role = {parse_ap_record(ap)["resource"]: ap["label"] for ap in aps
+                   if physical_ap_kind(ap) == "resource_region"}
+        return by_role["$first_resource"], by_role["$second_resource"]
+    by_kind = {physical_ap_kind(ap): ap["label"] for ap in aps}
+    return by_kind["receiving_region_entry"], by_kind["contains_other_part"]
 
 
 def _read_definitions() -> dict[str, dict[str, Any]]:
+    """Load the registered primitive requirements through the shared compiler."""
     document = json.loads(_DEFINITIONS.read_text(encoding="utf-8"))
-    if (
-        not isinstance(document, dict)
-        or set(document) != {"version", "specifications"}
-        or type(document["version"]) is not int
-        or document["version"] != 1
-        or not isinstance(document["specifications"], list)
-    ):
-        raise ValueError("Unsupported primitive observation safety definition document")
-    definitions: dict[str, dict[str, Any]] = {}
-    for row in document["specifications"]:
-        if not isinstance(row, dict) or set(row) != {"id", "requirement", "formula", "aps"}:
-            raise ValueError("Malformed primitive observation safety specification")
-        specification = row["id"]
-        if (
-            not isinstance(specification, str)
-            or specification not in _SPECIFICATION_MEANINGS
-            or specification in definitions
-        ):
-            raise ValueError("Unknown or duplicate primitive observation safety specification")
-        expected = _SPECIFICATION_MEANINGS[specification]
-        if row["requirement"] != expected["requirement"] or not isinstance(row["aps"], list):
-            raise ValueError("Unsupported primitive observation safety requirement or APs")
-        labels: set[str] = set()
-        fulls: set[str] = set()
-        for ap in row["aps"]:
-            if not isinstance(ap, dict) or set(ap) != {"label", "full", "meaning"}:
-                raise ValueError("Malformed primitive observation safety AP")
-            label, full = ap["label"], ap["full"]
-            if (
-                not isinstance(label, str)
-                or re.fullmatch(r"ap[0-9]+", label) is None
-                or label in labels
-                or not isinstance(full, str)
-                or full not in expected["aps"]
-                or full in fulls
-                or ap["meaning"] != expected["aps"][full]
-            ):
-                raise ValueError(
-                    "Unsupported or duplicated primitive observation AP meaning or label"
-                )
-            labels.add(label)
-            fulls.add(full)
-        if fulls != set(expected["aps"]):
-            raise ValueError("Primitive observation safety specification is missing AP definitions")
-        first, second = _definition_labels(specification, row["aps"])
-        if row["formula"] != f"G !({first} & {second})":
-            raise ValueError(
-                "Primitive observation safety formula does not match its fixed invariant"
-            )
-        definitions[specification] = row
-    if set(definitions) != set(_SPECIFICATION_MEANINGS):
+    definitions = _catalog(document)
+    if set(definitions) != set(_BINDING_FIELDS):
         raise ValueError("Primitive observation safety definitions are incomplete")
+    for identifier, definition in definitions.items():
+        if definition["requirement"] != _REQUIREMENTS[identifier]:
+            raise ValueError("Primitive safety requirement changed without review")
+        first, second = _definition_labels(identifier, definition["aps"])
+        if definition["formula"] != f"G !({first} & {second})":
+            raise ValueError("Primitive safety invariant changed without review")
     return definitions
-
-
-def _dfa_dot(first: str, second: str) -> str:
-    return f"""digraph DFA {{
-    init [shape=point];
-    1 [shape=doublecircle];
-    2 [shape=circle];
-    init -> 1;
-    1 -> 1 [label="!{first} | !{second}"];
-    1 -> 2 [label="{first} & {second}"];
-    2 -> 2 [label="true"];
-}}"""
 
 
 def instantiate_primitive_safety_rules(bindings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -167,54 +109,23 @@ def instantiate_primitive_safety_rules(bindings: list[dict[str, Any]]) -> list[d
             ):
                 raise ValueError("shared_area_mutex requires two distinct exact resources")
         rule = deepcopy(definitions[specification])
-        labels = _definition_labels(specification, rule["aps"])
         rule.update(
             {
                 "id": rule_id,
                 "rule_id": rule_id,
                 "binding": deepcopy(binding),
-                "dfa_dot": _dfa_dot(*labels),
             }
         )
-        rules.append(rule)
+        rules.append(_ground_rule_aps(rule))
     return sorted(rules, key=lambda rule: rule["rule_id"])
 
-
-def _occupies(observation: dict[str, Any], region: str, resource: str) -> bool:
-    value = observation["region_occupancy"][region][resource]
-    if type(value) is not bool:
-        raise ValueError("Region occupancy must be an observed Boolean")
-    return value
 
 
 def _valuation(
     rule: dict[str, Any], observation: dict[str, Any], previous: dict[str, Any] | None
 ) -> dict[str, bool]:
-    binding = rule["binding"]
-    region = binding["region"]
-    first_label, second_label = _definition_labels(binding["specification"], rule["aps"])
-    if binding["specification"] == "shared_area_mutex":
-        first, second = binding["resources"]
-        return {
-            first_label: _occupies(observation, region, first),
-            second_label: _occupies(observation, region, second),
-        }
-    resource = binding["resource"]
-    inside = _occupies(observation, region, resource)
-    previously_inside = inside if previous is None else _occupies(previous, region, resource)
-    carried_parts = observation["carried_parts"][resource]
-    inventory = observation["resources"][binding["receiving_resource"]]["contained_parts"]
-    for parts in (carried_parts, inventory):
-        if not isinstance(parts, list) or any(
-            not isinstance(part, str) or not part for part in parts
-        ):
-            raise ValueError(
-                "Carried parts and complete containment evidence must list exact part identifiers"
-            )
-    return {
-        first_label: inside and not previously_inside and binding["part"] in carried_parts,
-        second_label: any(part != binding["part"] for part in inventory),
-    }
+    """Evaluate the shared typed PPR conditions for a primitive observation."""
+    return _evaluate_ap_valuation(rule, observation, previous)
 
 
 def _result(

@@ -1,6 +1,6 @@
-"""Outline-phase helpers for the multi-turn recovery."""
-
 from __future__ import annotations
+
+"""Outline-phase helpers for the multi-turn recovery."""
 
 import asyncio
 import json
@@ -1988,6 +1988,7 @@ async def _agent_filtered_recovery_enabledness(
         cca_reply.get("live_safety_dfa_state_fingerprint") or ""
     ).strip()
     cca_admissible: set[str] = set()
+    planning_deferred: set[str] = set()
     for raw_row in cca_reply.get("results") or []:
         if not isinstance(raw_row, dict):
             continue
@@ -2002,7 +2003,11 @@ async def _agent_filtered_recovery_enabledness(
             for item in (row.get("findings") or [])
             if isinstance(item, dict)
         ]
-        evaluation["cca_status"] = "passed" if bool(row.get("is_safe")) else "rejected"
+        deferred = _planning_only_physical_deferral(row)
+        evaluation["cca_status"] = ("deferred" if deferred else
+                                    "passed" if bool(row.get("is_safe")) else "rejected")
+        evaluation["physical_safety_deferred"] = deferred
+        evaluation["execution_authorized"] = False
         evaluation["cca_mocked"] = bool(cca_reply.get("mocked"))
         evaluation["safety_dfa_states_before"] = deepcopy(
             row.get("safety_dfa_states_before") or {}
@@ -2039,8 +2044,16 @@ async def _agent_filtered_recovery_enabledness(
             )
         if bool(row.get("is_safe")):
             cca_admissible.add(event_id)
+        elif deferred:
+            planning_deferred.add(event_id)
 
     result["cca_admissible_event_ids"] = sorted(cca_admissible)
+    result["physical_safety_deferred_event_ids"] = sorted(planning_deferred)
+    result["planning_expandable_event_ids"] = sorted(
+        set(result["symbolically_enabled_event_ids"])
+        & set(result["ra_admissible_event_ids"])
+        & (cca_admissible | planning_deferred)
+    )
     result["admissible_event_ids"] = sorted(
         set(result["symbolically_enabled_event_ids"])
         & set(result["ra_admissible_event_ids"])
@@ -2051,6 +2064,17 @@ async def _agent_filtered_recovery_enabledness(
         for event_id in sorted(evaluations_by_event_id)
     ]
     return result
+
+
+def _planning_only_physical_deferral(result: dict[str, Any]) -> bool:
+    """Recognize CCA permission to expand an outline without safety admission."""
+    return (
+        result.get("validation_status") == "deferred_physical"
+        and result.get("planning_only") is True
+        and result.get("execution_authorized") is False
+        and result.get("is_safe") is False
+        and not result.get("findings")
+    )
 
 
 async def _populate_agent_filtered_enabledness(
@@ -2107,10 +2131,10 @@ async def _populate_agent_filtered_enabledness(
         after = await task
         evaluation["agent_filtered_enabledness"] = True
         evaluation["admissible_recovery_enabled_event_ids_before"] = deepcopy(
-            current.get("admissible_event_ids") or []
+            current.get("planning_expandable_event_ids", current.get("admissible_event_ids")) or []
         )
         evaluation["admissible_recovery_enabled_event_ids_after"] = deepcopy(
-            after.get("admissible_event_ids") or []
+            after.get("planning_expandable_event_ids", after.get("admissible_event_ids")) or []
         )
         evaluation["recovery_enabledness_validation_before"] = deepcopy(current)
         evaluation["recovery_enabledness_validation_after"] = deepcopy(after)
@@ -3619,12 +3643,18 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             for row in (cca_result.get("findings") or [])
             if isinstance(row, dict)
         ]
+        physical_deferred = _planning_only_physical_deferral(cca_result)
+        if physical_deferred:
+            evaluation["physical_safety_deferred"] = True
+            evaluation["planning_only"] = True
+            evaluation["execution_authorized"] = False
         validation_stages.append(
             recovery_validation_stage(
                 validation_category=SAFETY,
                 validator_role="CCA",
                 validator_jid=str(cca_reply.get("validator_jid") or cca_jid),
-                status="passed" if bool(cca_result.get("is_safe")) else "rejected",
+                status=("deferred" if physical_deferred else
+                        "passed" if bool(cca_result.get("is_safe")) else "rejected"),
                 findings=cca_findings,
                 request_id=str(cca_reply.get("request_id") or ""),
                 latency_ms=cca_reply.get("latency_ms"),
@@ -3636,7 +3666,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 evidence=cca_result,
             )
         )
-        if cca_findings or not bool(cca_result.get("is_safe")):
+        if cca_findings or not (bool(cca_result.get("is_safe")) or physical_deferred):
             evaluation["valid"] = False
             evaluation["validation_findings"] = deepcopy(cca_findings)
             evaluation["validation_stages"] = deepcopy(validation_stages)

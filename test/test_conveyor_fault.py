@@ -157,6 +157,25 @@ def test_marker_has_no_collision_and_uses_configured_conveyor_geometry():
     assert "CAIS/ConveyorBreakdown" in marker_sdf(scene)
 
 
+def test_ur5e_1_sign_is_raised_without_changing_the_outline_or_collision_geometry():
+    from cais_spade_llm.recovery_framework.fault_visual import marker_geometry
+
+    scene = settings.validate_setup(settings.default_setup())["scene"]
+    scene["_failure_marker"] = {"scenario": "ur5e-1 breakdown", "resource_id": "ur5e-1"}
+    geometry = marker_geometry(scene)
+    model = ElementTree.fromstring(marker_sdf(scene)).find("model")
+    label = model.find("./link/visual[@name='failure_label']")
+    assert geometry["label"] == "ur5e-1 breakdown"
+    assert geometry["label_height"] == 1.15
+    assert label.findtext("pose") == "0 0 1.2 0 0 0"
+    assert label.findtext("geometry/box/size") == "1.4 .025 .28"
+    assert model.findtext("pose") == " ".join(str(v) for v in geometry["pose"])
+    assert not model.findall(".//collision")
+    for visual in model.findall("./link/visual"):
+        if visual.attrib["name"] != "failure_label":
+            assert float(visual.findtext("pose").split()[2]) == pytest.approx(.09)
+
+
 @pytest.mark.parametrize("cleared", [True, False])
 def test_explicit_world_reset_clears_latch_only_after_marker_confirmation(monkeypatch, cleared):
     from cais_spade_llm.ui.bridge import SystemBridge

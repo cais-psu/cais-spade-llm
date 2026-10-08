@@ -8,7 +8,7 @@ import logging
 import re
 from functools import lru_cache
 from typing import Any
-from urllib.parse import parse_qsl
+from cais_spade_llm.agents.central_controller.ppr_ap import parse_ap_definition, parse_ap_record, physical_ap_kind
 
 
 @lru_cache(maxsize=4096)
@@ -74,7 +74,7 @@ class BaseSafetyChecker:
         tools_catalog: list[dict[str, Any]] | None = None,
     ) -> None:
         """Load safety rules and parse DFA DOT sources into transition tables."""
-        self.logger = logging.getLogger("BaseSafetyChecker")
+        self.logger = logging.getLogger(__name__)
         self.safety_rules = safety_rules or []
         self.tools_catalog = tools_catalog or []
 
@@ -100,12 +100,12 @@ class BaseSafetyChecker:
         token = str(resource_jid or "").strip()
         if "@" in token:
             token = token.split("@", 1)[0]
-        return token.lower()
+        return token
 
     @staticmethod
     def _task_product_name(params: dict[str, Any]) -> str:
         product = params.get("part_name") or params.get("part") or params.get("product") or "any"
-        return str(product).lower()
+        return str(product)
 
     @staticmethod
     def _fixed_state_fields() -> tuple[str, ...]:
@@ -119,13 +119,8 @@ class BaseSafetyChecker:
 
     @classmethod
     def _task_event_tokens(cls, function_name: str, params: dict[str, Any]) -> set[str]:
-        tokens = {
-            str(function_name or "").strip(),
-            str(params.get("event_name") or "").strip(),
-            str(params.get("function") or "").strip(),
-            str(params.get("function_name") or "").strip(),
-        }
-        return {token for token in tokens if token}
+        token = str(function_name or "").strip()
+        return {token} if token else set()
 
     @classmethod
     def _task_id_tokens(cls, params: dict[str, Any]) -> set[str]:
@@ -200,20 +195,63 @@ class BaseSafetyChecker:
         return bool(source_task_ids & cls._task_id_tokens(params))
 
     @staticmethod
-    def _parse_ap_descriptor(full: str) -> dict[str, str] | None:
-        token = str(full or "").strip()
-        parts = token.split("/")
-        if len(parts) < 6:
-            return None
-        prefix, process, product, resource, symbol, context = parts[:6]
+    def _parse_ap_descriptor(full: str) -> dict[str, Any]:
+        definition = parse_ap_definition(full)
+        condition = definition["state" if definition["kind"] == "ap_state" else "event"]
         return {
-            "prefix": str(prefix or "").strip(),
-            "process": str(process or "").strip(),
-            "product": str(product or "").strip(),
-            "resource": str(resource or "").strip(),
-            "symbol": str(symbol or "").strip(),
-            "context": str(context or "").strip(),
+            "prefix": definition["kind"],
+            "product": definition["product"],
+            "process": definition["process"],
+            "resource": definition["resource"],
+            "symbol": condition["symbol"],
+            "arguments": condition["arguments"],
         }
+
+    @staticmethod
+    def _condition_arguments_match(arguments: dict, values: dict) -> bool:
+        missing = []
+        for key, expected in arguments.items():
+            if expected == "*":
+                continue
+            if key not in values:
+                missing.append(key)
+                continue
+            actual = values[key]
+            if ((type(actual) is bool) != (type(expected) is bool)
+                    or actual != expected):
+                return False
+        if missing:
+            raise ValueError("AP condition argument evidence is unavailable: " + ", ".join(missing))
+        return True
+
+    @staticmethod
+    def _ppr_entities_match(definition: dict, resource: str, params: dict) -> bool:
+        product = params.get("part_name") or params.get("part") or params.get("product")
+        return (definition["resource"] in {"*", "any", resource}
+                and definition["product"] in {"*", "any", product})
+
+    @classmethod
+    def _ppr_scope_matches(cls, definition: dict, resource: str, params: dict) -> bool:
+        if not cls._ppr_entities_match(definition, resource, params):
+            return False
+        if definition["process"] in {"*", "any"}:
+            return True
+        if not params.get("process"):
+            raise ValueError("Concrete AP process has no registered execution evidence")
+        return definition["process"] == params["process"]
+
+    def _registered_process_params(self, resource_jid: str, function_name: str, params: dict) -> dict:
+        """Bind the process through the exact registered owner function."""
+        processes = {row["process"] for row in self._tool_rows_for_action(resource_jid, function_name)
+                     if isinstance(row.get("process"), str) and row["process"]}
+        if len(processes) > 1:
+            raise ValueError("Registered function has ambiguous process evidence")
+        if not processes:
+            return {key: value for key, value in params.items() if key != "process"}
+        process = next(iter(processes))
+        if params.get("process") not in (None, "", process):
+            raise ValueError("Task process disagrees with its registered owner function")
+        return {**params, "process": process}
 
     @staticmethod
     def _tool_signature(row: dict[str, Any]) -> str:
@@ -239,84 +277,29 @@ class BaseSafetyChecker:
     # Shared: Task -> AP Mapping (generic, no hard-coded fn names)
     # ------------------------------------------------------------------ #
     def _map_task_to_aps(self, resource_jid: str, function_name: str, params: dict) -> list[str]:
-        """
-        Maps a task execution to a list of AP labels based on loaded safety rules.
-
-        Matching logic (per AP):
-          - resource:  exact match or wildcard ("any", legacy "robot")
-          - event:     must equal function_name
-          - product:   must match params["part_name"] (or "product") unless "any"
-          - context:   if not "any", either:
-                       * composite key=value pairs joined by "&" must all match, or
-                       * legacy single-token matching falls back to raw value comparison
-        """
+        """Match registered function events with their exact PPR condition arguments."""
         labels: list[str] = []
-
-        # Registered resource names can differ from their transport JIDs.
-        res_short = getattr(self, "resource_bindings", {}).get(
+        params = self._registered_process_params(resource_jid, function_name, params)
+        resource = getattr(self, "resource_bindings", {}).get(
             str(resource_jid).split("/", 1)[0], self._resource_short_name(resource_jid)
         )
-
-        # Task-level fields
-        task_product = self._task_product_name(params)
         event_tokens = self._task_event_tokens(function_name, params)
-
-        # Normalize all param values to strings for comparison
-        param_value_strings = {
-            self._context_scalar_text(v) for v in params.values() if v is not None
-        }
-
         for rule in self.safety_rules:
-            rule_context = rule.get("context") or {}
-            # Also consider rule context values as potential matches
-            rule_ctx_value_strings = {self._context_scalar_text(v) for v in rule_context.values()}
-
             for ap in rule.get("aps", []):
-                full = ap.get("full") or ""
-                label = ap.get("label")
-                if not full or not label:
+                definition = parse_ap_record(ap)
+                if (definition["kind"] != "ap_event"
+                        or not self._ppr_entities_match(definition, resource, params)):
                     continue
-
-                parts = full.split("/")
-                # Expected: evt/<process>/<product>/<resource>/<event>/<context>
-                if len(parts) < 6:
+                if physical_ap_kind(definition):
+                    if self._ppr_scope_matches(definition, resource, params):
+                        raise ValueError("Physical AP requires grounded observations, not task events")
                     continue
-
-                ap_prefix, _, ap_product, ap_resource, ap_event, ap_context = parts[:6]
-                if ap_prefix not in {"ap", "ap_event"}:
-                    continue
-
-                # 1) Resource match (with wildcard support)
-                if ap_resource not in ("any", "robot") and ap_resource != res_short:
-                    continue
-
-                # 2) Event / function name match
-                expected_event = str(
-                    ap.get("event_name") or ap.get("function") or ap_event or ""
-                ).strip()
-                if expected_event not in event_tokens:
-                    continue
-
-                # 3) Product match (MCP vs SG, etc.)
-                if ap_product != "any" and str(ap_product).lower() != task_product:
-                    continue
-
-                if not self._ap_requires_source_task_ids(ap, params):
-                    continue
-
-                # 4) Context match (supports composite serialized context segments)
-                if not self._context_matches(
-                    ap_context=str(ap_context),
-                    params=params,
-                    param_value_strings=param_value_strings,
-                    rule_context=rule_context,
-                    rule_ctx_value_strings=rule_ctx_value_strings,
-                ):
-                    continue
-
-                # If all predicates passed, this AP applies to this task.
-                labels.append(label)
-
+                condition = definition["event"]
+                if (condition["symbol"] in event_tokens
+                        and self._condition_arguments_match(condition["arguments"], params)
+                        and self._ap_requires_source_task_ids(ap, params)
+                        and self._ppr_scope_matches(definition, resource, params)):
+                    labels.append(ap["label"])
         return labels
 
     def _map_state_to_aps(self, resource_jid: str, current_state: str, params: dict) -> list[str]:
@@ -324,81 +307,38 @@ class BaseSafetyChecker:
         Maps a resource's persistent state to matching state AP labels.
 
         Matching logic mirrors _map_task_to_aps, but:
-          - only matches ap_state/sp prefixes
-          - compares the AP event/state segment against current_state
+          - only matches structured ap_state definitions
+          - compares the registered state condition against current_state
         """
         surface = self._state_surface_from_runtime(current_state, params)
         return self._map_state_surface_to_aps(resource_jid, surface, params)
 
     def _map_state_surface_to_aps(
-        self,
-        resource_jid: str,
-        surface: dict[str, str],
-        params: dict[str, Any],
+        self, resource_jid: str, surface: dict[str, str], params: dict[str, Any],
     ) -> list[str]:
-        """Maps a structured state surface to matching state AP labels."""
+        """Match modeled state values; spatial conditions require the physical evaluator."""
         labels: list[str] = []
-        res_short = getattr(self, "resource_bindings", {}).get(
+        resource = getattr(self, "resource_bindings", {}).get(
             str(resource_jid).split("/", 1)[0], self._resource_short_name(resource_jid)
         )
-        task_product = self._task_product_name(params)
         state_tokens = self._state_surface_tokens(surface)
-        current_state = str(surface.get("resource_state") or "").strip()
-
-        param_value_strings = {
-            self._context_scalar_text(v) for v in params.values() if v is not None
-        }
-
         for rule in self.safety_rules:
-            rule_context = rule.get("context") or {}
-            rule_ctx_value_strings = {self._context_scalar_text(v) for v in rule_context.values()}
-
             for ap in rule.get("aps", []):
-                full = ap.get("full") or ""
-                label = ap.get("label")
-                if not full or not label:
+                definition = parse_ap_record(ap)
+                if (definition["kind"] != "ap_state"
+                        or not self._ppr_entities_match(definition, resource, params)):
                     continue
-
-                parts = full.split("/")
-                if len(parts) < 6:
+                condition = definition["state"]
+                symbol, arguments = condition["symbol"], condition["arguments"]
+                if physical_ap_kind(definition):
+                    if self._ppr_scope_matches(definition, resource, params):
+                        raise ValueError("Physical AP requires grounded observations, not task state")
                     continue
-
-                ap_prefix, _, ap_product, ap_resource, ap_state, ap_context = parts[:6]
-                if ap_prefix not in {"ap_state", "sp"}:
-                    continue
-
-                if ap_resource not in ("any", "robot") and ap_resource != res_short:
-                    continue
-
-                field_name = str(ap.get("field") or "").strip()
-                field_value = str(ap.get("value") or "").strip()
-                expected_state = (
-                    f"{field_name}={field_value}" if field_name and field_value else str(ap_state)
-                )
-                if "=" in expected_state:
-                    token = expected_state.strip()
-                    if token not in state_tokens:
-                        continue
-                elif ap_state != current_state:
-                    continue
-
-                if ap_product != "any" and str(ap_product).lower() != task_product:
-                    continue
-
-                if not self._ap_requires_source_task_ids(ap, params):
-                    continue
-
-                if not self._context_matches(
-                    ap_context=str(ap_context),
-                    params=params,
-                    param_value_strings=param_value_strings,
-                    rule_context=rule_context,
-                    rule_ctx_value_strings=rule_ctx_value_strings,
-                ):
-                    continue
-
-                labels.append(label)
-
+                matches = symbol in state_tokens if "=" in symbol else symbol == surface.get("resource_state")
+                if (matches and self._condition_arguments_match(arguments, {**params, **surface})
+                        and self._ap_requires_source_task_ids(ap, params)
+                        and self._ppr_scope_matches(definition, resource, params)):
+                    labels.append(ap["label"])
         return labels
 
     def _resource_state_signature_token(
@@ -426,7 +366,8 @@ class BaseSafetyChecker:
         return json.dumps(labels, separators=(",", ":"))
 
     def _tool_rows_for_action(self, resource_jid: str, function_name: str) -> list[dict[str, Any]]:
-        res_short = self._resource_short_name(resource_jid)
+        res_short = getattr(self, "resource_bindings", {}).get(
+            str(resource_jid).split("/", 1)[0], self._resource_short_name(resource_jid))
         rows: list[dict[str, Any]] = []
         for row in self.tools_catalog:
             if not isinstance(row, dict):
@@ -449,6 +390,7 @@ class BaseSafetyChecker:
         Predict which state APs would become true if the task finishes successfully.
         """
         predicted: list[str] = []
+        params = self._registered_process_params(resource_jid, function_name, params)
         for row in self._tool_rows_for_action(resource_jid, function_name):
             out_state = str(row.get("out_state", "")).strip()
             if not out_state or out_state.lower() == "any":
@@ -467,50 +409,6 @@ class BaseSafetyChecker:
             seen.add(label)
             deduped.append(label)
         return deduped
-
-    @staticmethod
-    def _context_pairs(ap_context: str) -> list[tuple[str, str]] | None:
-        token = str(ap_context or "").strip()
-        if not token or token == "any" or "=" not in token:
-            return None
-        try:
-            pairs = parse_qsl(token, keep_blank_values=True, strict_parsing=False)
-        except Exception:
-            return None
-        return [(str(k), str(v)) for k, v in pairs if str(k)]
-
-    @classmethod
-    def _context_matches(
-        cls,
-        *,
-        ap_context: str,
-        params: dict[str, Any],
-        param_value_strings: set[str],
-        rule_context: dict[str, Any],
-        rule_ctx_value_strings: set[str],
-    ) -> bool:
-        token = str(ap_context or "").strip()
-        if token == "any":
-            return True
-
-        pairs = cls._context_pairs(token)
-        if not pairs:
-            return token in rule_ctx_value_strings or token in param_value_strings
-
-        for key, value in pairs:
-            if str(value).strip().lower() == "any":
-                continue
-            if key in params:
-                if cls._context_scalar_text(params.get(key)) != value:
-                    return False
-                continue
-            if key in rule_context:
-                if cls._context_scalar_text(rule_context.get(key)) != value:
-                    return False
-                continue
-            if value not in param_value_strings and value not in rule_ctx_value_strings:
-                return False
-        return True
 
     # ------------------------------------------------------------------ #
     # Shared: DFA Transition Logic (The Math)

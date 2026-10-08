@@ -3418,3 +3418,48 @@ def test_kmr_initial_parking_observes_spawn_without_commanding_motion(feedback):
     assert node._initial_arm_parked is (feedback == 'fresh')
     node.arm_client.send_goal_async.assert_not_called()
     assert node.arm_parking_timer.cancel.called is (feedback == 'fresh')
+
+
+def test_ur3_buffer_startup_and_runtime_home_share_the_saved_joint_target(models) -> None:
+    from cais_spade_llm.recovery_framework.workflow_execution import _robot_configuration
+
+    robots, description, _, _, srdf, _ = models
+    configuration = json.loads(ROBOTS_PATH.read_text())
+    robot = next(row for row in robots if row["resource_id"] == "ur5e-3")
+    controller, named, _ = _robot_configuration(configuration, robot)
+    expected = [robot["initial_joint_positions"][joint] for joint in scene.UR5E_JOINTS]
+    assert named["home"] == expected
+    assert controller["retain_observed_clear_pose_as_home"] is False
+    assert controller["cartesian_motion"]["pick_transit_waypoints"] == []
+    assert controller["cartesian_motion"]["avoid_collisions"] is True
+    control = ET.fromstring(description)
+    semantic = ET.fromstring(srdf)
+    home = semantic.find("group_state[@name='ur5e_3_home']")
+    assert home is not None
+    for joint, value in zip(scene.UR5E_JOINTS, expected, strict=True):
+        prefixed = robot["prefix"] + joint
+        initial = control.find(f"ros2_control/joint[@name='{prefixed}']/state_interface[@name='position']/param[@name='initial_value']")
+        assert float(initial.text) == value
+        assert float(home.find(f"joint[@name='{prefixed}']").attrib["value"]) == value
+    assert robot["base_xyz"] == [0., .5, 1.021]
+    assert robot["base_rpy"] == [0., 0., 3.142]
+
+
+def test_native_external_table_collision_geometry_uses_resolved_model(tmp_path):
+    from cais_spade_llm.recovery_framework.geometry import collision_boxes
+    world = tmp_path / "world.sdf"
+    world.write_text('<sdf version="1.6"><world name="default"><include><uri>model://table</uri>'
+                     '<name>support_table</name><pose>0 .4 0 0 0 0</pose>'
+                     '</include></world></sdf>')
+    model = tmp_path / "table.sdf"
+    model.write_text('<sdf version="1.6"><model name="table"><static>true</static><link name="top">'
+                     '<collision name="surface"><pose>0 0 1 0 0 0</pose>'
+                     '<geometry><box><size>1.5 .8 .03</size></box></geometry></collision>'
+                     '</link></model></sdf>')
+    boxes = collision_boxes(world, tmp_path / "repository-models",
+                            include_model_files={"model://table": model})
+    table = next(row for row in boxes if row["id"].startswith("support_table/"))
+    assert table["pose"][:3] == [0., .4, 1.]
+    assert table["size"] == [1.5, .8, .03]
+    assert all(not row["id"].startswith("support_table/")
+               for row in collision_boxes(world, tmp_path / "repository-models"))

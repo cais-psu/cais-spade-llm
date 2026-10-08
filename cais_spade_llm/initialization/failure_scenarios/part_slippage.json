@@ -7,6 +7,7 @@
       "place_insert"
     ],
     "checkpoints": [
+      "during_place_lowering",
       "after_both_pickups_before_place"
     ],
     "execution_modes": [
@@ -19,5 +20,48 @@
   },
   "effects": [],
   "injection_owner": "recovery_framework",
-  "description": "The owning environment runtime observes both pickups and injects loss of custody before placement. This descriptor supports saved-context diagnostics."
+  "description": "The owning runtime starts with the upright square peg ready in buffer zone 4, observes both pickups, interrupts gear placement lowering at 50%, and leaves the gear upright on the flat table in ur5e-3's region.",
+  "preset": {
+    "scenario": "Part slippage",
+    "resource_id": "ur5e-4",
+    "part_name": "gear_small",
+    "checkpoint": "during_place_lowering",
+    "mode": "once",
+    "drop_pose": {
+      "x": 0,
+      "y": 0.3,
+      "z": 1.04
+    },
+    "orientation_quat": {
+      "qx": 0,
+      "qy": 0,
+      "qz": 0,
+      "qw": 1
+    },
+    "additional_condition": {
+      "resource_id": "ur5e-3",
+      "part_name": "KET4_Square_4mm"
+    },
+    "placement_progress": 0.5,
+    "initial_conditions": [
+      {
+        "resource_id": "Buffer For Machined parts",
+        "zone": 4,
+        "part_name": "KET4_Square_4mm",
+        "processCompleted": [
+          {
+            "process": "trim",
+            "result": "square"
+          }
+        ],
+        "orientation_quat": {
+          "qx": 0,
+          "qy": 0,
+          "qz": 0,
+          "qw": 1
+        }
+      }
+    ],
+    "require_upright": true
+  }
 }

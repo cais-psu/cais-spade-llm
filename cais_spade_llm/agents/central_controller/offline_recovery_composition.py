@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Bounded offline composition of explicitly evidenced recovery schedules.
 
 Only complete recovery-event starts and supplied waiting alternatives are
@@ -5,17 +7,16 @@ controllable. Every joint observation after a choice is forced. The finite
 schedules are evidence, not a timing synthesizer or an execution permission.
 """
 
-from __future__ import annotations
-
 import json
 from collections import deque
 from copy import deepcopy
 from fractions import Fraction
-from itertools import combinations, product
+from itertools import combinations
 from typing import Any
 
 from cais_spade_llm.agents.central_controller._recovery_monitor_history import (
     TaskMonitorHistories,
+    continuous_transition,
     physical_history,
     physical_trace_fingerprint,
 )
@@ -33,6 +34,10 @@ from cais_spade_llm.agents.central_controller.local_composition import (
 from cais_spade_llm.agents.central_controller.offline_safety_grounding import (
     _prepare_grounded_primitive_trace,
     _validate_composition_formulas,
+)
+from cais_spade_llm.agents.central_controller.region_admission import (
+    event_region_relevance,
+    selected_region_mutexes,
 )
 from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import (
     _digest,
@@ -308,7 +313,7 @@ def _resource_provenance(inputs: dict, choice: dict) -> None:
         for trace in program["step_results"]:
             source = trace["source"]
             if ("resource_id" in source and source["resource_id"] != resource
-                    or expected_jid is not None and source.get("resource_jid") != expected_jid):
+                    or expected_jid is not None and "resource_jid" in source and source["resource_jid"] != expected_jid):
                 raise ValueError("Primitive provenance disagrees with its resource association")
 
 
@@ -389,6 +394,10 @@ def _prepare(inputs: dict, choices: Any, events: dict, running: dict,
              "task_state": _task_state(value, time), "valuations": value["valuations"][index]}
             for index, (observation, time) in enumerate(zip(value["observations"], row["times"], strict=True))
         ]
+        row["region_relevance"] = {
+            identity: event_region_relevance(value, event["resource_id"], row["intervals"][identity])
+            for identity, event in {**events, **running}.items()
+        }
         _preserved_checkpoint(inputs, value, row["intervals"], task_history)
     _equivalent_prefixes(prepared, events, running, budget, task_history)
     problem_id = _digest({"clock_version": _CLOCK_VERSION, "grounding_inputs": inputs,
@@ -438,10 +447,6 @@ class _Composition:
         self.terminal_schedule = {}
         self.decision_nodes = set()
         monitors = tuple(physical_states[identifier] for identifier in self.rule_ids)
-        if self.continuous:
-            if physical_checkpoint is not None:
-                raise ValueError('Continuous physical history requires its own verified checkpoint; no cross-clock state transfer')
-            monitors = tuple((state,) for state in monitors)
         state = {"resources": deepcopy(inputs["snapshot"]["resources"]),
                  "parts": deepcopy(inputs["snapshot"]["parts"])}
         self.root = self._node(state, monitors, list(range(len(schedules))), decisions[0], "decision",
@@ -643,45 +648,9 @@ class _Composition:
         Closure over DFA states overapproximates unknown crossing order/count.
         No numerical refinement step is emitted as a task or physical clock tick.
         """
-        next_monitors, checks, violation, uncertainty = [], [], None, None
-        for identifier, current in zip(self.rule_ids, monitors, strict=True):
-            states = set(current)
-            possible_violation = False
-            for cell in observation.get('rule_cells') or [values]:
-                ap_values = cell[identifier]
-                labels = list(ap_values)
-                alphabets = [frozenset(label for label, value in zip(labels, bits, strict=True) if value)
-                             for bits in product(*(value if isinstance(value,list) else [value] for value in ap_values.values()))]
-                pending, reached = list(states), set()
-                while pending:
-                    self.budget.check(len(self.analysis.nodes))
-                    state = pending.pop()
-                    for alphabet in alphabets:
-                        row = self.checker.transition_evidence(identifier,state,alphabet)
-                        if row['reason'] in {'dfa_missing_transition','dfa_ambiguous_transition'}:
-                            raise ValueError('Incomplete monitor transition for continuous evidence')
-                        if row['status'] != 'passed':
-                            possible_violation = True
-                            continue
-                        if row['to'] not in reached:
-                            reached.add(row['to'])
-                            if observation['phase'] == 'between':
-                                pending.append(row['to'])
-                    if len(reached) > self.budget.max_states:
-                        raise AnalysisLimit('Continuous DFA closure exceeds state budget')
-                states = reached
-                if not states:
-                    break
-            check = {'rule_id': identifier, 'ap_values': deepcopy(values[identifier]),
-                     'from': list(current), 'to': sorted(states),
-                     'possible_violation': possible_violation}
-            checks.append(check)
-            if not states:
-                violation = violation or check
-            elif possible_violation:
-                uncertainty = uncertainty or check
-            next_monitors.append(tuple(sorted(states)))
-        return next_monitors, checks, violation, uncertainty
+        return continuous_transition(
+            self.checker, self.rule_ids, monitors, values, observation, self.budget,
+            explored_states=len(self.analysis.nodes))
 
     def paths(self, root, *, winning: bool = False) -> dict:
         paths = {root: []}
@@ -787,6 +756,17 @@ def analyze_grounded_recovery_composition(  # noqa: PLR0913
         result["physical_trace_fingerprints"] = {
             row["id"]: physical_trace_fingerprint(row["prepared"]) for row in schedules}
         result["scope"] = composition.analysis.scope.evidence()
+        result["scope"]["dependency_closure"] = {
+            "mode": "complete_frozen_scene",
+            "reason": "no_compositional_independence_certificate",
+            "includes": ["ongoing_nominal", "stationary_resources", "pending_nominal",
+                         "future_entrants", "shared_resources", "guards", "products"],
+            "unmodeled_future_starts": "held_by_runtime_admission",
+        }
+        result["region_relevance"] = {
+            row["id"]: deepcopy(row["region_relevance"]) for row in schedules
+        }
+        result["region_mutexes"] = selected_region_mutexes(composition.rules)
         composition.build()
         analysis = composition.analysis
         analysis.winning = nonblocking_region(analysis.graph, composition.marked, budget)

@@ -45,6 +45,10 @@ def project(tmp_path):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
+    relative = "cais_spade_llm/initialization/failure_scenarios/part_slippage.json"
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / relative, target)
     return tmp_path
 
 
@@ -74,6 +78,172 @@ def test_defaults_and_save_leave_all_source_definitions_unchanged(project):
     after.pop(settings.SETUP_RELATIVE)
     assert before == after
     assert "password" not in path.read_text()
+
+
+def test_slippage_preset_resolves_current_bindings_and_returns_independent_drafts(
+    project, monkeypatch
+):
+    models = settings.validate_setup(settings.default_setup(project), root=project)["models"]
+    event = next(
+        event
+        for event in settings.part_task_events(models, "ur5e-4", "gear_small")
+        if event["event_name"] == "place_insert"
+    )
+    event["event_id"] += 1000
+    event["parameter_bindings"]["part_name"] = {"equals": "gear_small"}
+    before_models = deepcopy(models)
+    path = project / "cais_spade_llm/initialization/failure_scenarios/part_slippage.json"
+    descriptor = json.loads(path.read_text())
+    before_descriptor = deepcopy(descriptor)
+    loader = Mock(return_value=descriptor)
+    monkeypatch.setattr(settings, "read_json", loader)
+
+    failure = settings.slippage_preset(models, root=project)
+    loader.assert_called_once_with(path)
+    assert failure["event_id"] == event["event_id"]
+    assert failure["event_name"] == "place_insert"
+    assert failure["parameter_bindings"] == event["parameter_bindings"]
+    failure["drop_pose"]["y"] = -0.2
+    failure["orientation_quat"]["qw"] = 0
+    failure["additional_condition"]["part_name"] = "gear_large"
+    failure["parameter_bindings"]["part_name"]["equals"] = "gear_large"
+    assert descriptor == before_descriptor
+    assert models == before_models
+    assert settings.slippage_preset(models, root=project)["drop_pose"]["y"] == 0.3
+
+
+@pytest.mark.parametrize("missing", ["resource", "place_insert"])
+def test_slippage_preset_requires_a_current_place_insert_capability(project, missing):
+    models = settings.validate_setup(settings.default_setup(project), root=project)["models"]
+    if missing == "resource":
+        del models["ur5e-4"]
+    else:
+        models["ur5e-4"]["events"] = [
+            event for event in models["ur5e-4"]["events"]
+            if event["event_name"] != "place_insert"
+        ]
+    with pytest.raises(ValueError, match="configured place_insert task"):
+        settings.slippage_preset(models, root=project)
+
+
+def test_slippage_preset_save_reload_preserves_descriptor_and_selected_inputs(project):
+    setup = settings.default_setup(project)
+    before_setup = deepcopy(setup)
+    before_sources = snapshot(project)
+    models = settings.validate_setup(setup, root=project)["models"]
+    failure = settings.slippage_preset(models, root=project)
+    assert {key: value for key, value in failure.items() if key not in {
+        "event_id", "event_name", "parameter_bindings"
+    }} == {
+        "scenario": "Part slippage",
+        "resource_id": "ur5e-4",
+        "part_name": "gear_small",
+        "checkpoint": "during_place_lowering",
+        "placement_progress": .5,
+        "initial_conditions": [{"resource_id": "Buffer For Machined parts", "zone": 4,
+                                "part_name": "KET4_Square_4mm",
+                                "orientation_quat": {"qx": 0, "qy": 0, "qz": 0, "qw": 1},
+                                "processCompleted": [{"process": "trim", "result": "square"}]}],
+        "mode": "once",
+        "drop_pose": {"x": 0, "y": 0.3, "z": 1.04},
+        "require_upright": True,
+        "orientation_quat": {"qx": 0, "qy": 0, "qz": 0, "qw": 1},
+        "additional_condition": {"resource_id": "ur5e-3", "part_name": "KET4_Square_4mm"},
+    }
+    setup["failure_scenario"] = failure
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    assert settings.load_setup(path, root=project) == setup
+    assert settings.startup_block_reason(setup, root=project) == ""
+    assert {**setup, "failure_scenario": None} == before_setup
+    after_sources = snapshot(project)
+    after_sources.pop(settings.SETUP_RELATIVE)
+    assert after_sources == before_sources
+
+
+def test_slippage_initial_conditions_copy_custody_without_task_acknowledgements(project):
+    from cais_spade_llm.product.environment import EnvironmentProductContext
+
+    setup = settings.default_setup(project)
+    before = snapshot(project)
+    models = settings.validate_setup(setup, root=project)["models"]
+    setup["failure_scenario"] = settings.slippage_preset(models, root=project)
+    inputs = settings.validate_setup(setup, root=project)
+    context = EnvironmentProductContext(inputs["scene"], inputs["product_order"], inputs["geometry"])
+    peg = "KET4_Square_4mm"
+    assert peg not in context.inputs["scene"]["Storage"]["slots"]
+    assert context.resources["Buffer For Machined parts"].valuation["zone_4_part"] == peg
+    assert context.part_tracker[peg]["location"] == "Buffer For Machined parts"
+    assert context.part_tracker[peg]["processCompleted"] == [{"process": "trim", "result": "square"}]
+    assert context.part_tracker[peg]["last_task"] is None
+    assert not context.acknowledgements and not context.transitions and not context.pending_tasks
+    assert snapshot(project) == before
+    fresh = EnvironmentProductContext(inputs["scene"], inputs["product_order"], inputs["geometry"])
+    assert fresh.run_id != context.run_id
+    assert fresh.initial_product_states == context.initial_product_states
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("zone", 1, "zone 4"),
+    ("processCompleted", [{"process": "assembly"}], "machining facts"),
+    ("resource_id", "Conveyor", "permitted buffer"),
+    ("orientation_quat", {"qx": 0, "qy": 0, "qz": 0, "qw": 0}, "unit quaternion"),
+    ("orientation_quat", {"qx": 0, "qy": float("nan"), "qz": 0, "qw": 1}, "unit quaternion"),
+    ("orientation_quat", [0, 0, 0, 1], "unit quaternion"),
+])
+def test_slippage_initial_conditions_reject_incompatible_start(project, field, value, reason):
+    setup = settings.default_setup(project)
+    models = settings.validate_setup(setup, root=project)["models"]
+    setup["failure_scenario"] = settings.slippage_preset(models, root=project)
+    setup["failure_scenario"]["initial_conditions"][0][field] = value
+    with pytest.raises(ValueError, match=reason):
+        settings.validate_setup(setup, root=project)
+
+
+def test_legacy_slippage_checkpoint_is_preserved_after_save_reload(project):
+    setup = settings.default_setup(project)
+    setup["failure_scenario"] = slippage(setup, project)
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    loaded = settings.load_setup(path, root=project)
+    assert loaded["failure_scenario"]["checkpoint"] == "after_both_pickups_before_place"
+    assert "placement_progress" not in loaded["failure_scenario"]
+    assert "initial_conditions" not in loaded["failure_scenario"]
+    assert settings.startup_block_reason(loaded, root=project) == ""
+
+
+@pytest.mark.parametrize(
+    "kind,missing,reason",
+    [
+        ("part", "gear_small", "exact selected NIST part"),
+        ("part", "KET4_Square_4mm", "another exact selected part"),
+        ("resource", "ur5e-4", "Failure resource must be permitted"),
+        ("resource", "ur5e-3", "another permitted resource"),
+    ],
+)
+def test_slippage_preset_cannot_save_without_both_parts_and_resources(
+    project, kind, missing, reason
+):
+    setup = settings.default_setup(project)
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    before_saved = path.read_bytes()
+    inputs = settings.validate_setup(setup, root=project)
+    setup["failure_scenario"] = settings.slippage_preset(inputs["models"], root=project)
+    if kind == "part":
+        order_path = project / setup["selected_product_order_file"]
+        order = json.loads(order_path.read_text())
+        order["parts"] = [part for part in inputs["selected_parts"] if part != missing]
+        order_path.write_text(json.dumps(order))
+    else:
+        setup["permitted_resources"].remove(missing)
+    before_sources = snapshot(project)
+    before_setup = deepcopy(setup)
+    with pytest.raises(ValueError, match=reason):
+        settings.save_setup(setup, path, root=project)
+    assert path.read_bytes() == before_saved
+    assert snapshot(project) == before_sources
+    assert setup == before_setup
 
 
 @pytest.mark.parametrize("mode,bypass", [("physical", True), ("simulation", "true"), ("simulation", 1)])
@@ -289,6 +459,7 @@ def _element(client, cls, label):
 
 def test_simulation_controls_poll_without_dispatch_or_settings_changes(project, monkeypatch):
     import time
+
     from cais_spade_llm.ui.components.simulation_controls import render_simulation_controls
 
     path = project / settings.SETUP_RELATIVE
@@ -411,6 +582,147 @@ def test_complete_setup_form_only_saves_explicitly_and_preserves_nist_bindings(
             assert vars(bridge) == before_bridge
             timer.assert_not_called()
             await asyncio.sleep(0)
+        client.delete()
+
+    asyncio.run(check_page())
+
+
+def test_part_slippage_selection_save_reload_and_preset_button_keep_current_inputs(
+    project, monkeypatch
+):
+    setup = settings.default_setup(project)
+    product_path = project / setup["selected_product"]
+    selected_product = product_path.with_name("selected_product.json")
+    shutil.copyfile(product_path, selected_product)
+    setup["selected_product"] = str(selected_product.relative_to(project))
+    order_path = project / setup["selected_product_order_file"]
+    selected_order = order_path.with_name("selected_order.json")
+    order = json.loads(order_path.read_text())
+    order["parts"] = ["gear_small", "KET4_Square_4mm"]
+    selected_order.write_text(json.dumps(order))
+    setup["selected_product_order_file"] = str(selected_order.relative_to(project))
+    setup["permitted_resources"].remove("KMR")
+    models = settings.validate_setup(setup, root=project)["models"]
+    expected = settings.slippage_preset(models, root=project)
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    before = snapshot(project)
+    before_saved = path.read_bytes()
+    bridge = SimpleNamespace(system_running=False, _starting=False, _stopping=False)
+    before_bridge = vars(bridge).copy()
+    buttons = _capture_buttons(monkeypatch)
+    helper = Mock(wraps=settings.slippage_preset)
+    monkeypatch.setattr(settings, "slippage_preset", helper)
+    timer = Mock(side_effect=AssertionError("setup added a polling path"))
+    monkeypatch.setattr(ui, "timer", timer)
+    client = Client(context.client.page)
+
+    async def check_page():
+        monkeypatch.setattr(core, "loop", asyncio.get_running_loop())
+        with client:
+            render_setup(bridge, root=project)
+            _element(client, ui.select, "Failure scenario").value = "Part slippage"
+            await asyncio.sleep(0)
+            assert helper.call_count == 1
+            assert helper.call_args.kwargs == {"root": project}
+            for label, value in (
+                ("Failure resource", "ur5e-4"),
+                ("NIST part", "gear_small"),
+                ("Other resource", "ur5e-3"),
+                ("Other held part", "KET4_Square_4mm"),
+                ("Trigger point", expected["checkpoint"]),
+                ("Task", expected["event_id"]),
+            ):
+                assert _element(client, ui.select, label).value == value
+            for axis, value in expected["drop_pose"].items():
+                assert _element(client, ui.number, f"drop_pose.{axis}").value == value
+            for axis, value in expected["orientation_quat"].items():
+                assert _element(client, ui.number, axis).value == value
+            assert snapshot(project) == before
+            buttons["Save setup"]()
+            saved = settings.load_setup(path, root=project)
+            assert saved == {**setup, "failure_scenario": expected}
+            assert path.read_bytes() != before_saved
+
+            _element(client, ui.number, "drop_pose.y").value = -0.2
+            buttons["Reload saved setup"]()
+            await asyncio.sleep(0)
+            assert _element(client, ui.number, "drop_pose.y").value == expected["drop_pose"]["y"]
+            assert helper.call_count == 1
+
+            _element(client, ui.number, "drop_pose.y").value = 0.35
+            buttons["Save setup"]()
+            edited = settings.load_setup(path, root=project)
+            assert edited["failure_scenario"]["drop_pose"]["y"] == 0.35
+            assert {**edited, "failure_scenario": None} == setup
+            edited_bytes = path.read_bytes()
+            buttons["Preset: ur5e-4 / gear_small"]()
+            await asyncio.sleep(0)
+            assert helper.call_count == 2
+            assert _element(client, ui.number, "drop_pose.y").value == expected["drop_pose"]["y"]
+            assert path.read_bytes() == edited_bytes
+            buttons["Save setup"]()
+            assert settings.load_setup(path, root=project) == saved
+            assert _element(client, ui.select, "Product").value == setup["selected_product"]
+            assert _element(client, ui.select, "Product Order JSON").value == setup[
+                "selected_product_order_file"
+            ]
+            resources = next(
+                element for element in client.elements.values() if isinstance(element, ui.table)
+            )
+            assert [row["resource_id"] for row in resources.selected] == setup[
+                "permitted_resources"
+            ]
+            assert vars(bridge) == before_bridge
+            timer.assert_not_called()
+        client.delete()
+
+    asyncio.run(check_page())
+    before.pop(settings.SETUP_RELATIVE)
+    after = snapshot(project)
+    after.pop(settings.SETUP_RELATIVE)
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "resource,part,y",
+    [
+        ("ur5e-3", "KET4_Square_4mm", -0.2),
+        ("ur5e-4", "gear_large", 0.2),
+    ],
+)
+def test_custom_slippage_examples_save_reload_in_both_directions(
+    project, monkeypatch, resource, part, y
+):
+    path = project / settings.SETUP_RELATIVE
+    buttons = _capture_buttons(monkeypatch)
+    bridge = SimpleNamespace(system_running=False, _starting=False, _stopping=False)
+    client = Client(context.client.page)
+
+    async def check_page():
+        monkeypatch.setattr(core, "loop", asyncio.get_running_loop())
+        with client:
+            render_setup(bridge, root=project)
+            _element(client, ui.select, "Failure scenario").value = "Part slippage"
+            await asyncio.sleep(0)
+            buttons[f"Example: {resource} / {part}"]()
+            await asyncio.sleep(0)
+            assert _element(client, ui.select, "Failure resource").value == resource
+            assert _element(client, ui.select, "NIST part").value == part
+            assert _element(client, ui.number, "drop_pose.y").value is None
+            for axis, value in {"x": 0.0, "y": y, "z": 1.04}.items():
+                _element(client, ui.number, f"drop_pose.{axis}").value = value
+            buttons["Save setup"]()
+            saved = settings.load_setup(path, root=project)
+            assert saved["failure_scenario"] == slippage(saved, project, resource, part)
+            buttons["Preset: ur5e-4 / gear_small"]()
+            await asyncio.sleep(0)
+            buttons["Reload saved setup"]()
+            await asyncio.sleep(0)
+            assert _element(client, ui.select, "Failure resource").value == resource
+            assert _element(client, ui.select, "NIST part").value == part
+            assert _element(client, ui.number, "drop_pose.y").value == y
+            assert settings.load_setup(path, root=project) == saved
         client.delete()
 
     asyncio.run(check_page())
@@ -933,3 +1245,21 @@ def test_stop_during_validation_cancels_start_and_allows_retry(project, monkeypa
 
     asyncio.run(check())
     client.delete()
+
+
+def test_slippage_orientation_override_is_scenario_only_and_optional(project):
+    setup = settings.default_setup(project)
+    ordinary = settings.validate_setup(setup, root=project)
+    buffer = "Buffer For Machined parts"
+    orientation = ordinary["scene"][buffer]["part_orientation_rpy"].copy()
+    setup["failure_scenario"] = settings.slippage_preset(ordinary["models"], root=project)
+    initialized = settings.validate_setup(setup, root=project)
+    assert initialized["scene"][buffer]["part_orientation_rpy"] == orientation
+    assert initialized["scene"]["failure_initial_conditions"][0]["orientation_quat"] == {
+        "qx": 0, "qy": 0, "qz": 0, "qw": 1}
+    del setup["failure_scenario"]["initial_conditions"][0]["orientation_quat"]
+    path = project / settings.SETUP_RELATIVE
+    settings.save_setup(setup, path, root=project)
+    loaded = settings.load_setup(path, root=project)
+    assert "orientation_quat" not in loaded["failure_scenario"]["initial_conditions"][0]
+    assert settings.validate_setup(loaded, root=project)["scene"][buffer]["part_orientation_rpy"] == orientation

@@ -94,11 +94,22 @@ def _pose(element: ET.Element) -> list[float]:
 
 
 def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None = None, *,
-                    exact_models: set[str] | None = None) -> list[dict]:
+                    exact_models: set[str] | None = None,
+                    include_model_files: dict[str, Path] | None = None) -> list[dict]:
     """Extract static SDF boxes and conservative cylinder bounds in world coordinates.
 
     Open robot-loading windows stay open because their surrounding panels are
     imported individually. Floor support is represented below world z=0.
+
+    Args:
+        world_path: Selected SDF world.
+        models_path: Repository model directory.
+        part_poses: Observed model poses overriding their starting poses.
+        exact_models: Models whose CAD or cylinder geometry must be retained.
+        include_model_files: Explicit resolved files for external include URIs.
+
+    Returns:
+        Collision geometry in world coordinates.
     """
     part_poses = part_poses or {}
     world = _read_model(world_path).find('world')
@@ -108,6 +119,8 @@ def collision_boxes(world_path: Path, models_path: Path, part_poses: dict | None
         uri = include.findtext('uri', '')
         path = models_path / uri.removeprefix('model://') / 'model.sdf'
         if not path.is_file():
+            path = (include_model_files or {}).get(uri)
+        if path is None or not path.is_file():
             continue
         model = _read_model(path).find('model')
         models.append((include.findtext('name', model.get('name')), model, _pose(include)))

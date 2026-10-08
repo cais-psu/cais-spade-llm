@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.local_composition import (
+    Action,
     Analysis,
     AnalysisLimit,
     Budget,
@@ -27,6 +28,7 @@ from cais_spade_llm.recovery_framework.environment_composition import (
     EnvironmentPlant,
     detached_checker,
     state_labels,
+    task_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ class EnvironmentAdmission:
         self.ack_cursor = 0
         self.acknowledgement_history: list[dict] = []
         self.last_results: dict[str, dict] = {}
+        self._prepared_admissions: dict[str, dict] = {}
         self.invalid_reason = ""
         runtime.admission = self
         # Context invokes this CCA-owned consumer only after committing validated
@@ -67,6 +70,7 @@ class EnvironmentAdmission:
         """Discard affected proofs after a run failure without resetting history."""
         with self.context.admission_lock:
             self.components.clear()
+            self._prepared_admissions.clear()
             self.invalid_reason = reason
             self.epoch += 1
 
@@ -122,6 +126,7 @@ class EnvironmentAdmission:
                     "after_states": deepcopy(next_states), "rule_checks": rule_checks,
                 })
                 self.epoch += 1
+                self._prepared_admissions.clear()
             # Retire a finished operation only once its scoped release condition holds.
             keep = []
             for component in self.components:
@@ -165,6 +170,87 @@ class EnvironmentAdmission:
     def _inconclusive(self, task_id: str, reason: str, revision=None) -> dict:
         return self._result(task_id, Analysis("inconclusive", reason, Scope()).evidence(revision))
 
+    def _prepare_composition_start(self, task: dict) -> dict:
+        """Retain a start after CCA has validated its winning composition edge.
+
+        This internal entry is only for the composition commit callback, under
+        its existing admission lock. The caller owns the completed graph proof;
+        this method binds the pending task to the same grant transaction as
+        ``check`` without running another search or accepting a caller's Action.
+        """
+        task = deepcopy(task)
+        with self.context.admission_lock:
+            self.synchronize()
+            task_id = task.get("task_id", "")
+            revision = self._revision()
+            if self.invalid_reason or self.monitor.history_error or self.runtime.stopped:
+                return self._inconclusive(task_id, self.invalid_reason or
+                                          "monitor_history_unavailable", revision)
+            if (fingerprint(self.context.pending_for(task_id)) != fingerprint(task)
+                    or task.get("run_id") != self.context.run_id
+                    or not self.context.relevant_revisions_match(task)):
+                return self._inconclusive(task_id, "stale_candidate", revision)
+            if task_id in self.grants:
+                return self._inconclusive(task_id, "prepared_admission_unavailable", revision)
+            part = task["parameters"].get("part_name") or task.get("part_name")
+            claims = frozenset(self.context._task_reservations(task, part))
+            labels = frozenset(self.monitor._map_task_to_aps(
+                self.runtime.jids[task["resource_id"]], task["event_name"], task["parameters"]))
+            candidate = Action(task_key(task), task, claims, labels)
+            result = Analysis("allowed", "", Scope()).evidence(revision)
+            self._prepared_admissions[task_id] = {
+                "task": deepcopy(task), "candidate": candidate, "goals": [],
+                "verdict": deepcopy(result), "fingerprint": fingerprint(result),
+            }
+            return result
+
+    def commit_prepared(self, task: dict, verdict: dict) -> dict:
+        """Commit an unchanged owner-retained preview under the admission lock.
+
+        Args:
+            task: Exact pending task used for the successful preview.
+            verdict: Unchanged result of ``check(commit=False)`` or the internal
+                winning-composition start preparation.
+
+        Returns:
+            Committed allowed evidence, or inconclusive evidence without a grant.
+            Replaying a consumed preview cannot commit a second time.
+        """
+        with self.context.admission_lock:
+            self.synchronize()
+            task_id = task.get("task_id", "")
+            revision = self._revision()
+            if self.invalid_reason or self.monitor.history_error or self.runtime.stopped:
+                return self._inconclusive(task_id, self.invalid_reason or
+                                          "monitor_history_unavailable", revision)
+            if (fingerprint(self.context.pending_for(task_id)) != fingerprint(task)
+                    or task.get("run_id") != self.context.run_id
+                    or not self.context.relevant_revisions_match(task)):
+                return self._inconclusive(task_id, "stale_candidate", revision)
+            prepared = self._prepared_admissions.get(task_id)
+            if prepared is None or task_id in self.grants:
+                return self._inconclusive(task_id, "prepared_admission_unavailable", revision)
+            if fingerprint(prepared["task"]) != fingerprint(task):
+                return self._inconclusive(task_id, "stale_candidate", revision)
+            if prepared["verdict"]["snapshot_revision"] != revision:
+                return self._inconclusive(task_id, "stale_snapshot", revision)
+            try:
+                unchanged = isinstance(verdict, dict) and fingerprint(verdict) == prepared["fingerprint"]
+            except (TypeError, ValueError):
+                unchanged = False
+            if not unchanged:
+                return self._inconclusive(task_id, "prepared_verdict_changed", revision)
+            self.grants[task_id] = prepared["candidate"]
+            for goal in prepared["goals"]:
+                if "part_name" in goal:
+                    self.goals[goal["part_name"]] = deepcopy(goal["operation"])
+            self.monitor.running_aps = self._running_labels()
+            self.epoch += 1
+            result = deepcopy(prepared["verdict"])
+            result["admitted_epoch"] = self.epoch
+            self._prepared_admissions.clear()
+            return self._result(task_id, result)
+
     async def check(self, task: dict, *, commit: bool, full: bool = False,
                     budget: Budget | None = None) -> dict:
         """Analyze outside the lock, then compare revision and atomically grant.
@@ -179,6 +265,7 @@ class EnvironmentAdmission:
         Returns:
             Structured allowed, held or inconclusive evidence.
         """
+        task = deepcopy(task)
         budget = budget or Budget(**getattr(self.runtime, "composition_budget", {}))
         task_id = task.get("task_id", "")
         with self.context.admission_lock:
@@ -187,7 +274,8 @@ class EnvironmentAdmission:
             if self.invalid_reason or self.monitor.history_error or self.runtime.stopped:
                 return self._inconclusive(task_id, self.invalid_reason or
                                           "monitor_history_unavailable", revision)
-            if (self.context.pending_for(task_id) != task or task.get("run_id") != self.context.run_id
+            if (fingerprint(self.context.pending_for(task_id)) != fingerprint(task)
+                    or task.get("run_id") != self.context.run_id
                     or not self.context.relevant_revisions_match(task)):
                 return self._inconclusive(task_id, "stale_candidate", revision)
             if task_id in self.grants:
@@ -292,7 +380,8 @@ class EnvironmentAdmission:
             if result["analysis_time_sec"] >= budget.seconds:
                 result.update(status="inconclusive", reason="time_limit")
                 return self._result(task_id, result)
-            if (self._revision() != revision or self.context.pending_for(task_id) != task
+            if (self._revision() != revision
+                    or fingerprint(self.context.pending_for(task_id)) != fingerprint(task)
                     or self.invalid_reason):
                 result.update(status="inconclusive", reason="stale_snapshot")
                 return self._result(task_id, result)
@@ -305,12 +394,11 @@ class EnvironmentAdmission:
                                            or scope.rules & component.analysis.scope.rules
                                            or scope.claims & component.analysis.scope.claims)]
                 self.components.append(CachedComposition(plant, analysis, identity))
+                self._prepared_admissions[task_id] = {
+                    "task": deepcopy(task), "candidate": deepcopy(candidate),
+                    "goals": deepcopy(scope.goals), "verdict": deepcopy(result),
+                    "fingerprint": fingerprint(result),
+                }
                 if commit:
-                    self.grants[task_id] = candidate
-                    for goal in scope.goals:
-                        if "part_name" in goal:
-                            self.goals[goal["part_name"]] = deepcopy(goal["operation"])
-                    self.monitor.running_aps = self._running_labels()
-                    self.epoch += 1
-                    result["admitted_epoch"] = self.epoch
+                    return self.commit_prepared(task, result)
             return self._result(task_id, result)

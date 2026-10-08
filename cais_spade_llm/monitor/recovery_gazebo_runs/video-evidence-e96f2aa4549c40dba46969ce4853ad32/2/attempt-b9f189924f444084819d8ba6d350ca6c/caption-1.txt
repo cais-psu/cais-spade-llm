@@ -1,1 +1,0 @@
-Failure observed | Machining station handling robot breakdown (ur5e-1)

@@ -2841,7 +2841,7 @@ def _composition_task(context, part, name):
 
 def _composition_runtime(context):
     return SimpleNamespace(context=context, jids={rid: rid + "@localhost" for rid in context.models},
-                           stopped=False, admission=None,
+                           stopped=False, admission=None, safety_retry_goals=set(),
                            operation_goals={part: context.requirements[part][-1]
                                             for part in context.selected_parts})
 
@@ -3237,8 +3237,13 @@ def test_local_holds_release_only_unstarted_candidate_reservations(inputs, monke
         assert context.pending_for(tasks[0]["task_id"]) is None
         assert context.pending_for(tasks[1]["task_id"]) == tasks[1]
         assert all(owner != tasks[0]["task_id"] for owner in context.reservations.values())
-        held_revision = runtime.held_at_revision[SQUARE]
-        assert (held_revision == "") is (reason == "stale_snapshot")
+        if reason == "stale_snapshot":
+            assert SQUARE not in runtime.held_at_revision
+            assert SQUARE not in runtime.held_tasks
+            assert runtime.safety_retry_goals == {SQUARE}
+        else:
+            assert runtime.held_at_revision[SQUARE]
+            assert not runtime.safety_retry_goals
 
     asyncio.run(scenario())
 
@@ -3265,7 +3270,75 @@ def test_resource_start_hold_rechecks_only_stale_composition(inputs, reason):
         loop.receive = AsyncMock(return_value=packet)
         assert await loop._collect_acknowledgement(runtime)
         assert context.pending_for(task["task_id"]) is None
-        assert (runtime.held_at_revision["gear_small"] == "") is (reason == "stale_snapshot")
+        if reason == "stale_snapshot":
+            assert "gear_small" not in runtime.held_at_revision
+            assert "gear_small" not in runtime.held_tasks
+            assert runtime.safety_retry_goals == {"gear_small"}
+        else:
+            assert runtime.held_at_revision["gear_small"]
+            assert not runtime.safety_retry_goals
+
+
+    asyncio.run(scenario())
+
+
+def test_stale_CCA_approval_renegotiates_without_waiting_for_new_ack(inputs, monkeypatch):
+    from cais_spade_llm.recovery_framework import environment_runtime
+
+    inputs["product_order"]["parts"] = ["gear_small"]
+
+    async def scenario():
+        async with network(inputs) as (runtime, driver):
+            context = runtime.context
+            actor = context.resources["ur5e-4"]
+            for name in actor.model["local_event_alphabet"]:
+                actor.bind_executor(name, AsyncMock(return_value={}), lambda *_: True,
+                                    validate_start=AsyncMock(return_value=True))
+            loop = environment_runtime.EnvironmentProductLoop()
+            driver.agent.add_behaviour(loop)
+            runtime.prepare_execution = AsyncMock()
+            runtime.queue_save = Mock()
+            loop._report_kickoff = Mock()
+            queue = asyncio.Queue()
+            approvals = []
+            dispatched = []
+
+            async def send(_behaviour, packet):
+                payload = json.loads(packet.body)
+                if packet.metadata["type"] == "plan_safety_check":
+                    current = list(context.pending_tasks.values())
+                    if approvals:
+                        assert approvals[0][0]["task_id"] not in context.pending_tasks
+                        assert all(owner != approvals[0][0]["task_id"]
+                                   for owner in context.reservations.values())
+                    approvals.append(deepcopy(current))
+                    decision = ({"status": "inconclusive", "reason": "stale_snapshot"}
+                                if len(approvals) == 1 else {"status": "allowed"})
+                    reply = message(runtime.product_jid, "plan_safety_result", {
+                        "request_id": payload["request_id"], "ok": True,
+                        "decisions": {task["task_id"]: decision for task in current},
+                    })
+                    reply.sender = driver.agent.cca_jid
+                    await queue.put(reply)
+                elif packet.metadata["type"] == "task":
+                    dispatched.append(payload)
+                    runtime.stopped = True
+
+            async def receive(**_kwargs):
+                try:
+                    return await asyncio.wait_for(queue.get(), .01)
+                except asyncio.TimeoutError:
+                    return None
+
+            loop.receive = receive
+            monkeypatch.setattr(environment_runtime, "send_agent_message", send)
+            await asyncio.wait_for(loop.work(runtime), 10)
+            assert len(approvals) == 2 and len(dispatched) == 1
+            assert approvals[0][0]["task_id"] != dispatched[0]["task_id"]
+            assert approvals[1][0] == dispatched[0]
+            assert not context.acknowledgements
+            assert not runtime.held_tasks and not runtime.safety_retry_goals
+            assert any(row["kind"] == "safety_retry" for row in context.negotiations)
 
     asyncio.run(scenario())
 
@@ -3378,3 +3451,21 @@ def test_environment_teardown_waits_for_fault_effects_without_self_awaiting(inpu
             assert runtime.conveyor_fault._injection_task.done()
 
     asyncio.run(scenario())
+
+
+def test_repeated_Stop_preserves_interrupted_task_correlation(inputs):
+    async def scenario():
+        async with network(inputs) as (runtime, _driver):
+            task = runtime.context.prepare(next(candidates(
+                runtime.context.models["KMR"], runtime.context.snapshot(), SQUARE,
+                runtime.context.requirements[SQUARE][0], runtime.context.requirements[SQUARE])),
+                simulated=True)
+            runtime.stop("operator Stop")
+            assert runtime.outcome["cancelled_tasks"] == [task]
+            runtime.stop("teardown Stop")
+            assert runtime.outcome["cancelled_tasks"] == [task]
+            assert not runtime.context.pending_tasks and not runtime.context.reservations
+            assert not runtime.context.acknowledgements
+
+    asyncio.run(scenario())
+

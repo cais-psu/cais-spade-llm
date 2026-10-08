@@ -78,7 +78,7 @@ def test_predefined_compile_save_load_preserves_rule_local_labels_without_llm(tm
 def test_invalid_given_definitions_never_fall_back_to_llm(tmp_path: Path, change: str) -> None:
     document = _document()
     if change == "version":
-        document["version"] = 2
+        document["version"] = 99
     elif change == "scope":
         document["requirement_scopes"].pop()
     elif change == "target":
@@ -334,3 +334,57 @@ def test_predefined_bundle_cannot_be_native_verified_or_replanned_without_safety
     planner.build_high_level.assert_awaited_once()
     planner.expand_requirements_to_tasks.assert_awaited_once()
     planner.replan_with_feedback_offline.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["old_descriptor", "definition_context", "record_context", "condition_context", "identity_mismatch"])
+def test_context_free_ppr_definitions_reject_retired_or_ambiguous_identity(change):
+    from cais_spade_llm.agents.central_controller.ppr_ap import (
+        ap_record, make_ap_definition, parse_ap_record,
+    )
+    definition = make_ap_definition("ap_state", "product/1", "assembly", "robot@1",
+                                    "any", {"region": "assembly_board-v1"})
+    record = ap_record("ap001", definition, "Resource region state.")
+    if change == "old_descriptor":
+        record = {"full": "ap_state/assembly/any/robot/positioned/any"}
+    elif change == "definition_context":
+        record["definition"]["context"] = {}
+    elif change == "record_context":
+        record["context"] = {}
+    elif change == "condition_context":
+        record["definition"]["state"]["arguments"]["context"] = "assembly_board-v1"
+    else:
+        record["definition"]["resource"] = "different_robot"
+    with pytest.raises(ValueError):
+        parse_ap_record(record)
+
+
+def test_ppr_ap_identity_preserves_exact_symbols_and_typed_arguments():
+    from cais_spade_llm.agents.central_controller.ppr_ap import (
+        ap_record, canonical_ap_key, make_ap_definition, parse_ap_definition,
+    )
+    definition = make_ap_definition("ap_event", "Gear_Plate/Gear_Shaft_1",
+                                    "Assembly", "Robot@A", "release_part",
+                                    {"part": "Part/One", "enabled": True, "limit": 2.0})
+    assert parse_ap_definition(canonical_ap_key(definition)) == definition
+    record = ap_record("ap001", definition, "A grounded event.")
+    assert record["definition"] == definition
+    assert record["full"] == canonical_ap_key(definition)
+
+
+@pytest.mark.parametrize("kind", ["document", "catalog", "artifact"])
+def test_legacy_safety_versions_explicitly_require_recompilation(kind):
+    document = _document()
+    if kind == "document":
+        document["version"] = 1
+        operation = lambda: parse_predefined_safety(json.dumps(document))
+    elif kind == "catalog":
+        document["catalog"]["version"] = 1
+        operation = lambda: compile_predefined_safety(document)
+    else:
+        from cais_spade_llm.agents.central_controller.predefined_safety import predefined_safety_metadata
+
+        payload = predefined_safety_metadata(document, json.dumps(document))
+        payload.pop("ap_schema_version")
+        operation = lambda: validate_predefined_safety_artifact(payload)
+    with pytest.raises(ValueError, match="recompile required"):
+        operation()

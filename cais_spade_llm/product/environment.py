@@ -259,6 +259,10 @@ class EnvironmentProductContext:
         for part, owner in initial_owners.items():
             if self.part_tracker[part]["location"] is None:
                 self.part_tracker[part].update(location=owner, state="ready")
+        for entry in configured_scene.get("failure_initial_conditions", []):
+            self.part_tracker[entry["part_name"]].update(
+                location=entry["resource_id"], state="ready",
+                processCompleted=deepcopy(entry["processCompleted"]))
         self.initial_product_states = deepcopy(self.part_tracker)
         self.run_id = uuid4().hex
         self.revision = 0

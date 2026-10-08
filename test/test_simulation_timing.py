@@ -579,15 +579,16 @@ def test_controlled_transport_profiles_reach_target_with_bounded_acceleration(sp
     assert _motion_distance(duration / 2.0, 1.0, speed, 1.0) <= 1.0
 
 
+@pytest.mark.parametrize("handle_status", [2, 4])
 @pytest.mark.parametrize('feedback, succeeds', [([None, .04, 0.], True), ([None, None, None], False)])
-def test_controller_acknowledgement_also_requires_fresh_observed_targets(feedback, succeeds, monkeypatch):
+def test_controller_acknowledgement_also_requires_fresh_observed_targets(feedback, succeeds, handle_status, monkeypatch):
     messages = pytest.importorskip('trajectory_msgs.msg')
     from unittest.mock import Mock
 
     trajectory = messages.JointTrajectory(joint_names=['joint'])
     trajectory.points = [messages.JointTrajectoryPoint(positions=[0.])]
     result = SimpleNamespace(status=4, result=SimpleNamespace(error_code=0))
-    goal = SimpleNamespace(accepted=True, status=4, get_result_async=lambda: result)
+    goal = SimpleNamespace(accepted=True, status=handle_status, get_result_async=lambda: result)
     client = SimpleNamespace(wait_for_server=lambda **kwargs: True, send_goal_async=lambda _: goal)
     samples = iter(feedback)
     polls = iter([True, True, True, False])
@@ -598,7 +599,7 @@ def test_controller_acknowledgement_also_requires_fresh_observed_targets(feedbac
         _motion_pending=lambda _: lambda: next(polls), _simulation_goal=None,
         arm_joint_names=['joint'],
         _angular_joint_error=GazeboPickPlaceController._angular_joint_error,
-        _note_motion_dispatch=Mock(),
+        _note_motion_dispatch=Mock(), _cancel_simulation_goal=Mock(),
         _node=SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0))),
     )
     monkeypatch.setattr(time, 'sleep', lambda _: None)
@@ -606,6 +607,8 @@ def test_controller_acknowledgement_also_requires_fresh_observed_targets(feedbac
         controller, '/arm/joint_trajectory', trajectory) is succeeds
     assert measured.call_count == 3
     assert controller._simulation_goal is None
+    assert controller._simulation_motion_intervals[-1]["terminal_status"] == 4
+    controller._cancel_simulation_goal.assert_not_called()
 
 
 def test_controller_endpoint_accepts_equivalent_revolute_joint_angle(monkeypatch):

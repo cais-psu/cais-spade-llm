@@ -1,6 +1,6 @@
-"""Authoritative recovery admission with explicitly configured mock evidence owners."""
-
 from __future__ import annotations
+
+"""Authoritative recovery admission with explicitly configured mock evidence owners."""
 
 import asyncio
 import hashlib
@@ -8,8 +8,12 @@ import json
 from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
+from threading import RLock
+from types import SimpleNamespace
 
 import pytest
+
+from ppr_ap_migration import migrate_ppr_fixture
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
 from cais_spade_llm.agents.central_controller.local_composition import Budget
@@ -29,7 +33,7 @@ def _case() -> dict:
     assert hashlib.sha256(path.read_bytes()).hexdigest() == reference["sha256"]
     inputs = json.loads(path.read_text())["inputs"]
     inputs.update(document["grounding_input_overrides"])
-    return {"grounding_inputs": inputs, **document["inputs"]}
+    return migrate_ppr_fixture({"grounding_inputs": inputs, **document["inputs"]})
 
 
 class _Harness:
@@ -551,3 +555,195 @@ def test_assembly_effect_replay_commits_only_with_actual_effect_and_native_ack(m
             assert not harness.session["invalid_reason"]
 
     asyncio.run(scenario())
+
+
+def _region_observation(revision=0, *, r1=False, r2=False, stationary=None):
+    return {"revision": revision, "time_exact": str(revision),
+            "region_occupancy": {"assembly_board-v1": {"r1": r1, "r2": r2}},
+            "stationary_resources": ["r1", "r2"] if stationary is None else stationary}
+
+
+def _claim_region(ledger, resource, task, *, revision=None):
+    return ledger.reserve(
+        token=task, task_id=task, resource_id=resource, regions=["assembly_board-v1"],
+        expected_revision=ledger.revision if revision is None else revision,
+        observation_revision=ledger.observation_revision,
+        conflicting_resources={"assembly_board-v1": ["r1", "r2"]},
+    )
+
+
+def test_nominal_and_recovery_region_admission_race_has_one_winner() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = RegionReservationLedger()
+    ledger.observe(_region_observation())
+    revision = ledger.revision
+    barrier = Barrier(2)
+
+    def enter(resource, task):
+        barrier.wait()
+        try:
+            return _claim_region(ledger, resource, task, revision=revision)["task_id"]
+        except ValueError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(enter, "r1", "nominal")
+        second = pool.submit(enter, "r2", "recovery")
+        results = [first.result(), second.result()]
+    assert results.count("stale_region_reservation_snapshot") == 1
+    assert len(ledger.claims) == 1
+    winner = next(iter(ledger.claims.values()))
+    loser = "r2" if winner["resource_id"] == "r1" else "r1"
+    with pytest.raises(ValueError, match="region_reserved_by_another_resource"):
+        _claim_region(ledger, loser, "retry")
+
+
+def test_region_claim_preserves_whole_program_future_entry() -> None:
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = RegionReservationLedger()
+    ledger.observe(_region_observation())
+    _claim_region(ledger, "r1", "nominal")
+    ledger.activate("nominal")
+    ledger.observe(_region_observation(1))
+    with pytest.raises(ValueError, match="region_reserved_by_another_resource"):
+        _claim_region(ledger, "r2", "recovery")
+    assert ledger.claims["nominal"]["regions"] == ["assembly_board-v1"]
+
+
+def test_region_mutex_allows_sole_occupant_exit_and_blocks_other_entry() -> None:
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = RegionReservationLedger()
+    ledger.observe(_region_observation(r1=True))
+    with pytest.raises(ValueError, match="region_occupied_by_another_resource"):
+        _claim_region(ledger, "r2", "entry")
+    assert _claim_region(ledger, "r1", "exit")["status"] == "pending"
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_region_claim_survives_completion_or_failure_until_stopped_clear(success) -> None:
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = RegionReservationLedger()
+    ledger.observe(_region_observation())
+    _claim_region(ledger, "r1", "work")
+    ledger.activate("work")
+    ledger.finish("work", success=success)
+    ledger.observe(_region_observation(1, r1=True))
+    assert "work" in ledger.claims
+    ledger.observe(_region_observation(2, r1=None))
+    assert "work" in ledger.claims
+    ledger.observe(_region_observation(3, stationary=["r2"]))
+    assert "work" in ledger.claims
+    ledger.observe(_region_observation(4))
+    assert "work" not in ledger.claims
+    assert _claim_region(ledger, "r2", "next")["status"] == "pending"
+
+
+def test_region_claim_rejects_stale_or_unknown_clearance() -> None:
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = RegionReservationLedger()
+    ledger.observe(_region_observation(2, r2=None))
+    with pytest.raises(ValueError, match="region_clearance_unverified"):
+        _claim_region(ledger, "r1", "recovery")
+    with pytest.raises(ValueError, match="stale_region_observation"):
+        ledger.observe(_region_observation(1))
+    with pytest.raises(ValueError, match="region_observation_revision_reused"):
+        ledger.observe(_region_observation(2))
+    assert not ledger.claims
+
+
+def test_region_reservation_is_atomic_for_the_entire_program_region_set() -> None:
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = RegionReservationLedger()
+    observation = _region_observation()
+    observation["region_occupancy"]["storage"] = {"r1": False, "r2": True}
+    ledger.observe(observation)
+    with pytest.raises(ValueError, match="region_occupied_by_another_resource"):
+        ledger.reserve(token="recovery", task_id="recovery", resource_id="r1",
+                       regions=["assembly_board-v1", "storage"],
+                       expected_revision=ledger.revision,
+                       observation_revision=ledger.observation_revision)
+    assert not ledger.claims
+
+
+def _configured_runtime_owner():
+    from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+
+    runtime = SimpleNamespace(
+        product_jid=_PRODUCT, resource_agents=[],
+        context=SimpleNamespace(admission_lock=RLock(), run_id="owner-run",
+            inputs={"scene": {"safety_preparation": {"provider": "gazebo_idle_continuous_v1"}}}),
+    )
+    cca = SimpleNamespace(
+        resource_agents=[], recovery_composition_admissions={},
+        predefined_safety_required=True, allow_mock_recovery_execution=False,
+        safety_monitor=OnlineSafetyMonitor({}, []),
+        _environment_runtime_for_sender=lambda product: runtime if product == _PRODUCT else None,
+    )
+    return runtime, cca
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_physical_installation_reuses_one_cca_coordinator_without_resetting_history(existing):
+    from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
+        install_live_runtime, physical_admission, recovery_admission,
+    )
+
+    runtime, cca = _configured_runtime_owner()
+    previous = recovery_admission(cca, _PRODUCT) if existing else None
+    coordinator = install_live_runtime(runtime, cca)
+    if previous is not None:
+        assert coordinator is previous
+    assert type(coordinator) is RecoveryCompositionAdmission
+    assert cca.recovery_composition_admissions == {_PRODUCT: coordinator}
+    assert cca.live_safety_runtime is runtime.live_safety_runtime is coordinator
+    assert coordinator.lock is runtime.context.admission_lock
+    assert coordinator.region_reservations is cca.recovery_region_reservations
+    assert callable(coordinator.native_history_commit)
+    assert callable(coordinator.start_validator)
+    assert callable(coordinator.preparation_authorizer)
+    assert coordinator.preparation.reader is None
+    coordinator.sessions["retained"] = {"grants": {"task": {"token": "retained"}}}
+    assert install_live_runtime(runtime, cca) is coordinator
+    assert recovery_admission(cca, _PRODUCT) is coordinator
+    assert physical_admission(cca, _PRODUCT) is coordinator
+    assert coordinator.sessions["retained"]["grants"]["task"]["token"] == "retained"
+
+
+def test_physical_installation_cannot_replace_an_existing_graph_session():
+    from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
+        install_live_runtime, recovery_admission,
+    )
+
+    runtime, cca = _configured_runtime_owner()
+    coordinator = recovery_admission(cca, _PRODUCT)
+    coordinator.sessions["retained"] = {"grants": {"task": {"token": "retained"}}}
+    with pytest.raises(ValueError):
+        install_live_runtime(runtime, cca)
+    assert cca.recovery_composition_admissions[_PRODUCT] is coordinator
+    assert coordinator.sessions["retained"]["grants"]["task"]["token"] == "retained"
+    assert getattr(cca, "live_safety_runtime", None) is None
+
+
+@pytest.mark.parametrize("status", ["running", "completed"])
+def test_shared_coordinator_observes_nominal_once_and_preserves_native_acknowledgement_route(status):
+    from cais_spade_llm.agents.central_controller.central_controller_agent import CentralControllerAgent
+
+    records = []
+    coordinator = SimpleNamespace(
+        observe=lambda record, *, sender: records.append((record, sender)), holds=lambda: True)
+    cca = SimpleNamespace(live_safety_runtime=coordinator,
+                          recovery_composition_admissions={_PRODUCT: coordinator})
+    event = {"task_id": "nominal", "function_name": "move_cartesian", "status": status, "params": {}}
+    message = SimpleNamespace(sender="owner@localhost", body=json.dumps(event))
+    handled = asyncio.run(CentralControllerAgent._Monitor._handle_recovery_composition_message(
+        SimpleNamespace(agent=cca), message))
+    assert handled is False
+    assert records == [(event, "owner@localhost")]

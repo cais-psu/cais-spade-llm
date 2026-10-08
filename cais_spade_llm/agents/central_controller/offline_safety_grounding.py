@@ -21,10 +21,8 @@ from cais_spade_llm.agents.central_controller._product_effect_evidence import (
     _validate_product_checkpoint,
 )
 from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import (
-    _AP_BINDING_FIELDS,
-    _MEANINGS,
-    _TARGET_COMPLETED,
     _ap_binding,
+    _ground_rule_aps,
     _catalog,
     _digest,
     _evaluate_frozen_trace,
@@ -36,10 +34,15 @@ from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety 
     _symbol,
     _valuation,
 )
+from cais_spade_llm.agents.central_controller.ppr_ap import (
+    ap_condition, parse_ap_record, physical_ap_kind, physical_binding_fields,
+)
+from urllib.parse import unquote
+
 from cais_spade_llm.resources.environment_models import build_environment_models
 from cais_spade_llm.resources.primitive_observations import model_primitive_observations
 
-_CLOCK_VERSION = "grounded_primitive_observations_joint_trace_v1"
+_CLOCK_VERSION = "grounded_ppr_primitive_observations_joint_trace_v2"
 _TASK_FIELDS = {
     "task_id",
     "resource_id",
@@ -104,21 +107,29 @@ def _groundings(
     resource_associations: dict[str, str],
 ) -> dict[str, Any]:
     mappings = _object(raw, "ap_groundings")
-    structured = {ap["label"]: ap for ap in definition["aps"] if ap["full"] not in _MEANINGS}
+    structured = {ap["label"]: ap for ap in definition["aps"] if physical_ap_kind(ap) is None}
     if set(mappings) != set(structured):
         raise ValueError(
             "Every structured AP needs exactly one explicit grounding; physical AP meanings cannot be replaced"
         )
     for label, ap in structured.items():
         binding = _object(mappings[label], "AP grounding")
-        prefix, process, product, resource, symbol, context = ap["full"].split("/", 5)
-        required = {"source", "resource_id", "resource_symbol", "process", "product", "context"}
+        descriptor = parse_ap_record(ap)
+        prefix, process, product, resource = (descriptor[field] for field in ("kind", "process", "product", "resource"))
+        condition = ap_condition(descriptor)
+        symbol, arguments = condition["symbol"], condition["arguments"]
+        required = {"source", "resource_id", "resource_symbol", "process", "product"}
+        if arguments:
+            required.add("arguments")
         required |= {"function"} if prefix == "ap_event" else {"state_field", "state_value"}
         if set(binding) != required:
             raise ValueError("Structured AP grounding fields do not match the descriptor kind")
         for name, value in binding.items():
-            _symbol(value, f"AP grounding.{name}")
-        if binding["resource_id"] not in models or resource in {"any", "robot"}:
+            if name != "arguments":
+                _symbol(value, f"AP grounding.{name}")
+        if binding.get("arguments", {}) != arguments:
+            raise ValueError("AP grounding changes its typed condition arguments")
+        if binding["resource_id"] not in models or resource in {"*", "any", "robot"}:
             raise ValueError("Structured APs require an explicit configured resource association")
         if resource in models and resource != binding["resource_id"]:
             raise ValueError("A configured resource identifier cannot denote another resource")
@@ -129,7 +140,6 @@ def _groundings(
             "resource_symbol": resource,
             "process": process,
             "product": product,
-            "context": context,
         }
         if any(binding[field] != value for field, value in expected.items()):
             raise ValueError("Structured AP grounding changes the preserved descriptor")
@@ -177,7 +187,7 @@ def _rules(
             raise ValueError("A scoped specification is missing from the reviewed catalog")
         definition = definitions[identifier]
         required = set().union(
-            *(_AP_BINDING_FIELDS[ap["full"]] for ap in definition["aps"] if ap["full"] in _MEANINGS)
+            *(physical_binding_fields(ap) for ap in definition["aps"] if physical_ap_kind(ap) is not None)
         )
         physical_bindings = (
             _physical_bindings(definition, scope["physical_ap_bindings"])
@@ -190,7 +200,7 @@ def _rules(
         expected_fields = required | {"specification"}
         if physical_bindings is not None:
             expected_fields.add("physical_ap_bindings")
-        has_structured = any(ap["full"] not in _MEANINGS for ap in definition["aps"])
+        has_structured = any(physical_ap_kind(ap) is None for ap in definition["aps"])
         if has_structured:
             expected_fields.add("ap_groundings")
         if set(scope) != expected_fields:
@@ -226,14 +236,19 @@ def _rules(
                 raise ValueError("Duplicate grounded requirement instance")
             seen.add(rule_id)
             rules.append(
-                {
+                _ground_rule_aps({
                     **deepcopy(definition),
                     "rule_id": rule_id,
                     "binding": binding,
                     "ap_groundings": groundings,
                     **({"physical_ap_bindings": physical_bindings} if physical_bindings is not None else {}),
-                }
+                })
             )
+        for grounded_rule in rules:
+            if grounded_rule["id"] == identifier:
+                for ap in grounded_rule["aps"]:
+                    if physical_ap_kind(ap):
+                        _scope_geometry(_ap_binding(grounded_rule, ap), geometry, regions, models)
         used.add(identifier)
     if used != set(definitions):
         raise ValueError("Every reviewed requirement needs an explicit requirement scope")
@@ -410,9 +425,30 @@ def _states(
 
 def _matches(binding: dict[str, Any], row: dict[str, Any], fields: tuple[str, ...]) -> bool:
     return binding["resource_id"] == row["resource_id"] and all(
-        binding[field] == row[field] or (field != "function" and binding[field] == "any")
+        binding[field] == row[field] or (field != "function" and binding[field] in {"*", "any"})
         for field in fields
     )
+
+
+
+def _arguments_match(binding: dict[str, Any], row: dict[str, Any]) -> bool:
+    """Evaluate typed qualifiers against complete owner evidence."""
+    arguments = binding.get("arguments", {})
+    actual = row.get("arguments", {})
+    if not isinstance(actual, dict):
+        raise ValueError("Owner condition arguments must be an object")
+    actual = dict(actual)
+    context = row.get("context", "any")
+    if context != "any":
+        for pair in context.split("&"):
+            if "=" not in pair:
+                raise ValueError("Owner task metadata cannot ground named AP arguments")
+            key, value = pair.split("=", 1)
+            actual.setdefault(unquote(key), unquote(value))
+    missing = set(arguments) - {"region"} - set(actual)
+    if missing:
+        raise ValueError("AP condition arguments lack complete owner evidence: " + ", ".join(sorted(missing)))
+    return all(key == "region" or actual[key] == value for key, value in arguments.items())
 
 
 def _structured_value(
@@ -429,7 +465,8 @@ def _structured_value(
         matching = [
             row["task_id"]
             for row in tasks.values()
-            if _matches(binding, row, ("process", "product", "function", "context"))
+            if _matches(binding, row, ("process", "product", "function"))
+            and _arguments_match(binding, row)
             and _time(row["start_time"], "task start") <= time < _time(row["end_time"], "task end")
         ]
         return bool(matching), {
@@ -444,7 +481,8 @@ def _structured_value(
     if binding["state_field"] not in row["values"]:
         raise ValueError("Resource-state AP field has no complete observation evidence")
     value = (
-        _matches(binding, row, ("process", "product", "context"))
+        _matches(binding, row, ("process", "product"))
+        and _arguments_match(binding, row)
         and _scalar_symbol(row["values"][binding["state_field"]]) == binding["state_value"]
     )
     return value, {
@@ -492,16 +530,13 @@ def _valuations(  # noqa: PLR0913
         for rule in rules:
             values[rule["rule_id"]] = {}
             for ap in rule["aps"]:
-                if ap["full"] in _MEANINGS:
+                if physical_ap_kind(ap) is not None:
                     bound = _ap_binding(rule, ap)
-                    if 'occupancy_possibilities' in observation and ap['full'] in {
-                        'ap_state/physical_observation/shared_area_first_resource',
-                        'ap_state/physical_observation/shared_area_second_resource',
-                    }:
-                        resource = bound['resources'][0 if ap['full'].endswith('first_resource') else 1]
-                        value = deepcopy(observation['occupancy_possibilities'][bound['region']][resource])
-                    elif ap['full'] == 'ap_event/physical_observation/part_region_entry' and 'part_entry_possibilities' in observation:
-                        value = deepcopy(observation['part_entry_possibilities'][bound['region']][bound['part']])
+                    kind = physical_ap_kind(ap)
+                    if "occupancy_possibilities" in observation and kind == "resource_region":
+                        value = deepcopy(observation["occupancy_possibilities"][bound["region"]][bound["resource"]])
+                    elif kind == "part_region_entry" and "part_entry_possibilities" in observation:
+                        value = deepcopy(observation["part_entry_possibilities"][bound["region"]][bound["part"]])
                     else:
                         value = _valuation(
                             {**rule, "aps": [ap]}, observation,
@@ -512,7 +547,7 @@ def _valuations(  # noqa: PLR0913
                         "observation_index": index,
                         "predicate": ap["full"],
                     }
-                    if ap["full"] == _TARGET_COMPLETED:
+                    if physical_ap_kind(ap) == "process_target_completed":
                         part = observation["parts"][bound["part"]]
                         source["checkpoint"] = deepcopy(part["processCompleted_evidence"])
                         source["product_effect_evidence"] = deepcopy(part.get("product_effect_evidence", []))
@@ -521,6 +556,13 @@ def _valuations(  # noqa: PLR0913
                     value, source = _structured_value(
                         bound, time, tasks, state, task_ledger, state_ledger
                     )
+                    region = bound.get("arguments", {}).get("region")
+                    if region is not None:
+                        if region not in observation["region_occupancy"]:
+                            raise ValueError("Qualified AP region has no physical observation")
+                        spatial = observation.get("occupancy_possibilities", {}).get(region, {}).get(bound["resource_id"])
+                        value = ([value and item for item in spatial] if spatial is not None
+                                 else value and observation["region_occupancy"][region][bound["resource_id"]])
                 values[rule["rule_id"]][ap["label"]] = value
                 evidence.append(
                     {
@@ -723,13 +765,9 @@ def _prepare_grounded_primitive_trace(  # noqa: PLR0913
                     cell_values = deepcopy(values)
                     for rule in rules:
                         for ap in rule['aps']:
-                            if ap['full'] in {
-                                'ap_state/physical_observation/shared_area_first_resource',
-                                'ap_state/physical_observation/shared_area_second_resource',
-                            }:
+                            if physical_ap_kind(ap) == "resource_region":
                                 binding = _ap_binding(rule, ap)
-                                resource = binding['resources'][0 if ap['full'].endswith('first_resource') else 1]
-                                cell_values[rule['rule_id']][ap['label']] = cell['occupancy_possibilities'][binding['region']][resource]
+                                cell_values[rule["rule_id"]][ap["label"]] = cell["occupancy_possibilities"][binding["region"]][binding["resource"]]
                     observation['rule_cells'].append(cell_values)
         return {
             "frozen": frozen,

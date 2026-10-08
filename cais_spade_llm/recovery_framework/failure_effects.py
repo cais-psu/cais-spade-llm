@@ -39,6 +39,32 @@ def _observe_part(controller, model: str) -> dict:
             **{"q" + axis: float(getattr(pose.orientation, axis)) for axis in ("x", "y", "z", "w")}}
 
 
+def _detach_slipped_part(controller, model: str) -> dict:
+    mating = getattr(controller, "_simulation_mating_context", None)
+    if mating and mating.get("model_name") != model:
+        raise ValueError("Slippage cannot change an unrelated mating context")
+    if not mating:
+        return controller.detach_part(model, assume_released_if_open=False)
+    # A placement fault releases an unseated payload; nominal fixture handoff
+    # remains bound to its interrupted task and must not execute here.
+    controller._simulation_mating_context = {**mating, "retain_fixture_attachment": False}
+    try:
+        return controller.detach_part(model, assume_released_if_open=False)
+    finally:
+        controller._simulation_mating_context = mating
+
+
+def _upright_angle(pose: dict) -> float:
+    """Measure tilt of the part's local vertical axis, independently of yaw."""
+    values = [pose["q" + axis] for axis in ("x", "y", "z", "w")]
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("Dropped part orientation must be finite")
+    norm = sum(value * value for value in values)
+    if not math.isclose(norm, 1., abs_tol=1e-6):
+        raise ValueError("Dropped part orientation must be a unit quaternion")
+    return math.acos(max(-1., min(1., 1. - 2. * (values[0] ** 2 + values[1] ** 2) / norm)))
+
+
 async def slip_part(runtime, configuration: dict, evidence: dict) -> None:
     """Detach only the selected held part and retain partial-effect evidence.
 
@@ -61,7 +87,7 @@ async def slip_part(runtime, configuration: dict, evidence: dict) -> None:
         raise ValueError("Slipping robot gripper did not open")
     agent._gripper_state = "open"
     # An open gripper alone cannot prove that the simulated attachment was removed.
-    result = await asyncio.to_thread(controller.detach_part, model, assume_released_if_open=False)
+    result = await asyncio.to_thread(_detach_slipped_part, controller, model)
     evidence["detach"] = deepcopy(result)
     if not result.get("success") or str(result.get("release_mode", "")).startswith("assumed"):
         evidence["custody_uncertain"] = True
@@ -83,7 +109,8 @@ async def slip_part(runtime, configuration: dict, evidence: dict) -> None:
     if not placed.get("success"):
         raise ValueError("Gazebo rejected the configured slippage target")
     previous = None
-    for _ in range(20):
+    stable_samples = 0
+    for _ in range(30):
         observed = await asyncio.to_thread(_observe_part, controller, model)
         if any(not math.isfinite(observed[axis]) for axis in ("x", "y", "z")):
             raise ValueError("Dropped part observation contains non-finite coordinates")
@@ -92,7 +119,13 @@ async def slip_part(runtime, configuration: dict, evidence: dict) -> None:
             [observed[axis] for axis in ("x", "y", "z")],
             [previous[axis] for axis in ("x", "y", "z")],
         ) <= 0.002:
-            break
+            if configuration.get("require_upright"):
+                evidence["upright_angle_rad"] = _upright_angle(observed)
+                stable_samples = stable_samples + 1 if evidence["upright_angle_rad"] <= .05 else 0
+                if stable_samples >= 8:
+                    break
+            else:
+                break
         previous = observed
         await asyncio.sleep(0.1)
     else:

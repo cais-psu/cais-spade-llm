@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
+from itertools import product
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+from cais_spade_llm.agents.central_controller.local_composition import Budget
+from cais_spade_llm.recovery_framework import fingerprint
 
 
 class OnlineSafetyMonitor(BaseSafetyChecker):
@@ -28,6 +32,7 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         # STATE: Track currently running actions across the factory
         self.running_aps: set[str] = set()
         self.history_error: dict[str, Any] | None = None
+        self.physical_monitor = LivePhysicalMonitor()
 
         # STATE: Track currently active state APs across the factory
         self.resource_state_aps: dict[str, set[str]] = {}
@@ -166,7 +171,8 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         completion (process_finish_event) so that a failed task does not
         prematurely satisfy ordering requirements.
         """
-        event_params = dict(event.get("params") or {})
+        event_params = self._registered_process_params(
+            event["resource_jid"], event["function_name"], dict(event.get("params") or {}))
         task_id = str(event.get("task_id") or "").strip()
         if task_id:
             event_params.setdefault("task_id", task_id)
@@ -197,7 +203,8 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         and advance the DFA using the original function's APs (not .done).
         Only successful completion should satisfy ordering requirements.
         """
-        event_params = dict(event.get("params") or {})
+        event_params = self._registered_process_params(
+            event["resource_jid"], event["function_name"], dict(event.get("params") or {}))
         task_id = str(event.get("task_id") or "").strip()
         if task_id:
             event_params.setdefault("task_id", task_id)
@@ -238,7 +245,8 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
         Since the action did not complete, the DFA stays in the
         pre-completion state, so dependent actions remain blocked.
         """
-        event_params = dict(event.get("params") or {})
+        event_params = self._registered_process_params(
+            event["resource_jid"], event["function_name"], dict(event.get("params") or {}))
         task_id = str(event.get("task_id") or "").strip()
         if task_id:
             event_params.setdefault("task_id", task_id)
@@ -259,3 +267,96 @@ class OnlineSafetyMonitor(BaseSafetyChecker):
                 current_state,
                 params=event_params,
             )
+
+
+class LivePhysicalMonitor:
+    """Retain all monitor states compatible with accepted physical executions.
+
+    A continuous cell denotes every finite nonempty AP word over its certified
+    alphabet. Predictions use copies; only an authenticated execution outcome
+    commits the resulting state set. A failed command retains every safe prefix.
+    """
+
+    def __init__(self) -> None:
+        self.rules = None
+        self.checker = None
+        self.states: dict[str, set] = {}
+        self.revision = 0
+        self.history: list[dict] = []
+        self.invalid_reason = ""
+
+    def check(self, prepared: dict, *, budget: Budget | None = None) -> dict:
+        """Check all selected rules across every certified primitive interval."""
+        budget = budget or Budget()
+        if self.invalid_reason:
+            raise ValueError(self.invalid_reason)
+        rules = prepared["rules"]
+        identity = fingerprint(rules)
+        if self.rules is not None and identity != fingerprint(self.rules):
+            raise ValueError("Physical AP definitions changed during the run")
+        checker = self.checker or BaseSafetyChecker(
+            {row["rule_id"]: row["dfa_dot"] for row in rules}, rules)
+        states = ({key: set(value) for key, value in self.states.items()} if self.states else
+                  {identifier: {row["initial"]} for identifier, row in checker.dfas.items()})
+        prefixes = deepcopy(states)
+        for observation, values in zip(prepared["observations"], prepared["valuations"], strict=True):
+            for cell in observation.get("rule_cells") or [values]:
+                for identifier, current in states.items():
+                    labels = list(cell[identifier])
+                    options = [value if isinstance(value, list) else [value]
+                               for value in cell[identifier].values()]
+                    if any(not values or any(type(v) is not bool for v in values) for values in options):
+                        raise ValueError("Physical AP has unresolved Boolean semantics")
+                    alphabets = [frozenset(label for label, bit in zip(labels, bits, strict=True) if bit)
+                                 for bits in product(*options)]
+                    pending, reached = list(current), set()
+                    while pending:
+                        budget.check(len(reached))
+                        state = pending.pop()
+                        for alphabet in alphabets:
+                            transition = checker.transition_evidence(identifier, state, alphabet)
+                            if transition["status"] != "passed":
+                                return {"status": "held", "reason": "possible_physical_requirement_violation",
+                                        "rule_id": identifier, "transition": transition,
+                                        "time_exact": observation["time_exact"]}
+                            target = transition["to"]
+                            if target not in reached:
+                                reached.add(target)
+                                if observation["phase"] == "between":
+                                    pending.append(target)
+                    states[identifier] = reached
+                    prefixes[identifier].update(reached)
+        pending_rules = sorted(identifier for identifier, values in states.items()
+                               if not values <= set(checker.dfas[identifier]["accepting_states"]))
+        if pending_rules:
+            return {"status": "inconclusive", "reason": "temporal_continuation_proof_unavailable",
+                    "prefix_safe": True, "pending_rule_ids": pending_rules,
+                    "end_states": {key: sorted(value) for key, value in states.items()},
+                    "end_accepting": False, "history_revision": self.revision}
+        return {"status": "allowed", "prefix_safe": True, "pending_rule_ids": [],
+                "end_accepting": True, "rules_fingerprint": identity,
+                "history_revision": self.revision, "rules": deepcopy(rules),
+                "end_states": {key: sorted(value) for key, value in states.items()},
+                "prefix_states": {key: sorted(value) for key, value in prefixes.items()},
+                "certificate_fingerprint": fingerprint({"rules": rules,
+                    "observations": prepared["observations"], "valuations": prepared["valuations"]})}
+
+    def commit(self, proof: dict, *, success: bool, execution_evidence: dict) -> None:
+        """Retain conservative history only after the trusted owner reports execution."""
+        if (proof.get("status") != "allowed" or proof["history_revision"] != self.revision
+                or type(success) is not bool or not execution_evidence):
+            raise ValueError("Physical execution history or proof changed before commit")
+        if self.rules is not None and fingerprint(self.rules) != proof["rules_fingerprint"]:
+            raise ValueError("Physical monitor definitions changed before commit")
+        if self.rules is None:
+            self.rules = deepcopy(proof["rules"])
+            self.checker = BaseSafetyChecker({row["rule_id"]: row["dfa_dot"] for row in self.rules}, self.rules)
+        self.states = {key: set(value) for key, value in proof[
+            "end_states" if success else "prefix_states"].items()}
+        self.history.append({"revision": self.revision, "success": success,
+            "certificate_fingerprint": proof["certificate_fingerprint"],
+            "execution_evidence": deepcopy(execution_evidence),
+            "states": {key: sorted(value) for key, value in self.states.items()}})
+        self.revision += 1
+        if not success:
+            self.invalid_reason = "physical_failure_stopping_coverage_unverified"

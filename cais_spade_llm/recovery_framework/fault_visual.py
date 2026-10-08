@@ -31,7 +31,7 @@ def marker_geometry(scene: dict) -> dict:
     pose = list(robot["base_xyz"]) + list(robot["base_rpy"])
     if scenario == "ur5e-1 breakdown":
         return {"model_name": "cais_ur5e_1_breakdown", "pose": pose,
-                "length": 0.5, "width": 0.5, "height": 0.05,
+                "length": 0.5, "width": 0.5, "height": 0.05, "label_height": 1.15,
                 "material": "CAIS/RobotBreakdown", "label": scenario}
     if scenario != "Part slippage":
         raise ValueError("Unknown failure marker")
@@ -39,7 +39,7 @@ def marker_geometry(scene: dict) -> dict:
     if observed:
         pose = [observed[axis] for axis in ("x", "y", "z")] + [0, 0, 0]
     return {"model_name": "cais_Part_slippage", "pose": pose,
-            "length": 0.18, "width": 0.18, "height": 0.0,
+            "length": 0.18, "width": 0.18, "height": 0.0, "label_height": 0.85,
             "material": "CAIS/PartSlippage", "label": scenario + " (" + rid + ")"}
 
 
@@ -63,7 +63,7 @@ def marker_sdf(scene: dict) -> str:
         )
     sign = (
         '<visual name="failure_label">'
-        f"<pose>0 0 {height + 0.55} 0 0 0</pose>"
+        f"<pose>0 0 {height + geometry.get('label_height', 0.55)} 0 0 0</pose>"
         "<geometry><box><size>1.4 .025 .28</size></box></geometry>"
         "<material><script><uri>model://conveyor_fault_marker/materials/scripts</uri>"
         "<uri>model://conveyor_fault_marker/materials/textures</uri>"

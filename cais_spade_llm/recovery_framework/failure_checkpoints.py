@@ -8,8 +8,14 @@ CHECKPOINTS = {
     "Conveyor breakdown": "after_M1_pick_before_release",
     "ur5e-1 breakdown": "after_M1_processing_before_pick",
     "Machining breakdown during part processing": "during_processing_halfway",
-    "Part slippage": "after_both_pickups_before_place",
+    "Part slippage": "during_place_lowering",
 }
+
+
+SUPPORTED_CHECKPOINTS = {scenario: (name,) for scenario, name in CHECKPOINTS.items()}
+SUPPORTED_CHECKPOINTS["Part slippage"] = (
+    "during_place_lowering", "after_both_pickups_before_place",
+)
 
 
 def acknowledged_pickup(context, resource_id: str, part: str) -> dict | None:
@@ -32,10 +38,50 @@ def acknowledged_pickup(context, resource_id: str, part: str) -> dict | None:
     return None
 
 
+def _slippage_pickups(context, configuration: dict) -> dict | None:
+    other = configuration["additional_condition"]
+    records = {}
+    for robot, part in ((configuration["resource_id"], configuration["part_name"]),
+                        (other["resource_id"], other["part_name"])):
+        record = acknowledged_pickup(context, robot, part)
+        if record is None:
+            return None
+        records[robot] = deepcopy(record)
+    return {"part_name": configuration["part_name"], "custodian": configuration["resource_id"],
+            "other_custodian": other["resource_id"], "other_part_name": other["part_name"],
+            "pickups": records}
+
+
+def placement_checkpoint(context, configuration: dict, task: dict) -> dict | None:
+    """Require both pickups and the selected, still-unacknowledged placement task.
+
+    Args:
+        context: Current run's observed state and pending tasks.
+        configuration: Selected Part slippage configuration.
+        task: Placement task still pending, or retained after Stop cancelled it.
+
+    Returns:
+        Observed pickup custody, without asserting a placement interruption.
+    """
+    if (configuration.get("scenario") != "Part slippage"
+            or configuration.get("checkpoint") != "during_place_lowering"
+            or task.get("run_id") != context.run_id
+            or task.get("resource_id") != configuration["resource_id"]
+            or task.get("event_name") != "place_approach"
+            or task.get("parameters", {}).get("part_name") != configuration["part_name"]):
+        return None
+    evidence = _slippage_pickups(context, configuration)
+    if evidence is None or any(
+        pending.get("resource_id") in evidence["pickups"] and pending != task
+        for pending in context.pending_tasks.values()
+    ):
+        return None
+    return evidence
+
+
 def checkpoint(context, configuration: dict) -> dict | None:
     """Return observed fault evidence without projecting a successful task."""
     scenario = configuration["scenario"]
-    rid = configuration["resource_id"]
     if scenario == "Conveyor breakdown":
         part = context.resources["ur5e-1"].valuation.get("held_part")
         record = acknowledged_pickup(context, "ur5e-1", part) if part else None
@@ -65,29 +111,28 @@ def checkpoint(context, configuration: dict) -> dict | None:
                 return {"task_id": task["task_id"], "part_name": part, "custodian": "M1",
                         "processing_observations": deepcopy(record["observations"])}
             return None
-    if scenario == "Part slippage":
-        other = configuration["additional_condition"]
-        records = {}
-        for robot, part in ((rid, configuration["part_name"]),
-                            (other["resource_id"], other["part_name"])):
-            record = acknowledged_pickup(context, robot, part)
-            if record is None:
-                return None
-            records[robot] = deepcopy(record)
-        if any(task["resource_id"] in records for task in context.pending_tasks.values()):
+    if scenario == "Part slippage" and configuration.get("checkpoint") == "after_both_pickups_before_place":
+        evidence = _slippage_pickups(context, configuration)
+        if evidence is None or any(
+            task["resource_id"] in evidence["pickups"] for task in context.pending_tasks.values()
+        ):
             return None
-        return {"part_name": configuration["part_name"], "custodian": rid,
-                "other_custodian": other["resource_id"], "other_part_name": other["part_name"],
-                "pickups": records}
+        return evidence
     return None
 
 
 def holds_task(context, configuration: dict | None, task: dict) -> bool:
-    """Hold selected pickup states until the joint checkpoint exists."""
+    """Hold selected custody while allowing the configured placement to lower."""
     if not configuration or configuration["scenario"] != "Part slippage":
         return False
     other = configuration["additional_condition"]
     parts = {configuration["resource_id"]: configuration["part_name"],
              other["resource_id"]: other["part_name"]}
     rid = task["resource_id"]
-    return rid in parts and acknowledged_pickup(context, rid, parts[rid]) is not None
+    if rid not in parts or acknowledged_pickup(context, rid, parts[rid]) is None:
+        return False
+    if configuration.get("checkpoint") == "during_place_lowering" and rid == configuration["resource_id"]:
+        return (task.get("event_name") != "place_approach"
+                or task.get("parameters", {}).get("part_name") != parts[rid]
+                or acknowledged_pickup(context, other["resource_id"], other["part_name"]) is None)
+    return True

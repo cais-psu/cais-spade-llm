@@ -1,4 +1,0 @@
-{
-  "scenario": "mutex rule applied into ur5e 3 and ur5e4",
-  "reason": "Command '['/usr/bin/python3', '-c', 'import json, sys; from cais_spade_llm.recovery_framework.failure_videos import _read_navigation_readiness; sys.stdout.write(json.dumps(_read_navigation_readiness()))']' timed out after 15 seconds"
-}

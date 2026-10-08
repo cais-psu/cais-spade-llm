@@ -1,15 +1,15 @@
-"""Runtime environmental matching behind the existing Start System surface."""
-
 from __future__ import annotations
+
+"""Runtime environmental matching behind the existing Start System surface."""
 
 import asyncio
 import json
 import logging
 import threading
 import time
-from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from uuid import uuid4
 
 from spade.behaviour import CyclicBehaviour
@@ -23,19 +23,23 @@ from cais_spade_llm.agents.shared_information.environment_capabilities import (
 )
 from cais_spade_llm.agents.shared_information.local_dispatch import send_agent_message
 from cais_spade_llm.product.environment import (
-    EnvironmentProductContext, admission_transaction, fingerprint,
+    EnvironmentProductContext,
+    admission_transaction,
+    fingerprint,
 )
 from cais_spade_llm.recovery_framework import ROOT
-from cais_spade_llm.resources.gazebo_programs import current_program_revision, resource_program_revision
-from cais_spade_llm.resources.function_contracts import validated_function_contract
+from cais_spade_llm.recovery_framework.reports import LatestReport
 from cais_spade_llm.resources.environment_models import (
     feasibility,
     matches_requirement,
     process_json,
     project_transition,
 )
-
-from cais_spade_llm.recovery_framework.reports import LatestReport
+from cais_spade_llm.resources.function_contracts import validated_function_contract
+from cais_spade_llm.resources.gazebo_programs import (
+    current_program_revision,
+    resource_program_revision,
+)
 
 logger = logging.getLogger(__name__)
 RUN_DIRECTORY = ROOT / "cais_spade_llm/monitor/environment_runs"
@@ -268,6 +272,7 @@ class EnvironmentRuntime:
         self.admission = None
         self.held_tasks: dict[str, dict] = {}
         self.held_at_revision: dict[str, str] = {}
+        self.safety_retry_goals: set[str] = set()
         self.agent = agent
         self.product_jid = str(agent.jid).split("/", 1)[0]
         self.context = EnvironmentProductContext(
@@ -597,10 +602,13 @@ class EnvironmentRuntime:
             for task_id in tuple(self.context.pending_tasks)
         ]
         if self.outcome.get("status") != "completed":
+            retained = {task["task_id"]: deepcopy(task)
+                        for task in self.outcome.get("cancelled_tasks", [])}
+            retained.update({task["task_id"]: task for task in cancelled if task is not None})
             self.outcome = {
                 "status": "stopped",
                 "reason": reason,
-                "cancelled_tasks": [task for task in cancelled if task is not None],
+                "cancelled_tasks": list(retained.values()),
                 "partial_execution": partial,
             }
         fault = getattr(self, "conveyor_fault", None)
@@ -833,6 +841,15 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         if not await self._dispatch_approved(runtime, approval, decision, attempted):
                             return
                         approval = None
+                for key in runtime.safety_retry_goals:
+                    if context.part_tracker.get(key, {}).get("location") == "Storage":
+                        attempted.pop("intake", None)
+                        failures.pop("intake", None)
+                    attempted.pop(key, None)
+                    failures.pop(key, None)
+                    runtime.held_tasks.pop(key, None)
+                    runtime.held_at_revision.pop(key, None)
+                runtime.safety_retry_goals.clear()
                 hold_revision = _hold_revision(runtime)
                 for key, held_revision in list(runtime.held_at_revision.items()):
                     if held_revision != hold_revision:
@@ -971,7 +988,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
                     payload = runtime.composition_request(pending, request_id)
                     self._awaiting_plan_request = request_id
                     await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
-                if not discoveries and not context.pending_tasks:
+                if not discoveries and not context.pending_tasks and not runtime.safety_retry_goals:
                     if ready and all(runtime.conveyor_fault.holds_task(row["tasks"][0]) for row in ready.values()):
                         runtime.outcome = {"status": "blocked", "reason": "Both observed pickups could not be established"}
                         runtime.conveyor_fault.not_reached()
@@ -1047,6 +1064,17 @@ class EnvironmentProductLoop(CyclicBehaviour):
             permitted = candidate_result.get("status") == "allowed"
             if not permitted:
                 context.cancel_pending(task["task_id"])
+                if (candidate_result.get("status") == "inconclusive"
+                        and candidate_result.get("reason") == "stale_snapshot"):
+                    runtime.safety_retry_goals.add(goal_key)
+                    attempted.pop(goal_key, None)
+                    runtime.held_tasks.pop(goal_key, None)
+                    runtime.held_at_revision.pop(goal_key, None)
+                    context.negotiations.append({
+                        "kind": "safety_retry", "task_id": task["task_id"],
+                        "goal_key": goal_key, "reason": "stale_snapshot", "timestamp": time.time(),
+                    })
+                    continue
                 runtime.held_tasks[goal_key] = deepcopy(candidate_result or decision)
                 runtime.held_at_revision[goal_key] = (
                     "" if candidate_result.get("status") == "inconclusive"
@@ -1301,10 +1329,17 @@ class EnvironmentProductLoop(CyclicBehaviour):
             composition = next((row for row in reversed(runtime.context.negotiations)
                                 if row.get("kind") == "local_composition"
                                 and row.get("task_id") == task["task_id"]), {})
-            runtime.held_at_revision[goal_key] = (
-                "" if composition.get("status") == "inconclusive"
-                and composition.get("reason") == "stale_snapshot" else _hold_revision(runtime)
-            )
+            if (composition.get("status") == "inconclusive"
+                    and composition.get("reason") == "stale_snapshot"):
+                runtime.held_tasks.pop(goal_key, None)
+                runtime.held_at_revision.pop(goal_key, None)
+                runtime.safety_retry_goals.add(goal_key)
+                runtime.context.negotiations.append({
+                    "kind": "safety_retry", "task_id": task["task_id"],
+                    "goal_key": goal_key, "reason": "stale_snapshot", "timestamp": time.time(),
+                })
+            else:
+                runtime.held_at_revision[goal_key] = _hold_revision(runtime)
             runtime.queue_save()
             return True
         if payload.get("status") != "completed":
@@ -1413,6 +1448,8 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
         )
 
     observations = None
+    live = None
+    grant = None
     context.negotiations.append({
         "kind": "task_received", "task_id": task_id, "resource_id": actor.resource_id,
         "timestamp": time.time(),
@@ -1491,6 +1528,13 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             or not context.relevant_revisions_match(task)
         ):
             raise ValueError("CCA permission missing or execution context changed")
+        live = getattr(runtime, "live_safety_runtime", None)
+        if live is not None:
+            grant = agent._recovery_composition_grants.pop(task_id, None)
+            if not isinstance(grant, dict):
+                raise ValueError("Nominal task has no exact physical execution grant")
+        physical_binding = ({"recovery_composition_ref": deepcopy(grant["recovery_composition_ref"])}
+                            if grant is not None else {})
         await ack("running")
         if not runtime.diagnostic_cca_bypass:
             await send_agent_message(
@@ -1505,6 +1549,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
                         "function_name": name,
                         "params": task["parameters"],
                         "status": "running",
+                        **physical_binding,
                     },
                 ),
             )
@@ -1513,13 +1558,23 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             "resource_id": actor.resource_id, "event_name": name,
             "part_name": part, "timestamp": time.time(),
         })
-        execution = asyncio.create_task(actor.executors[name](deepcopy(task)))
+        if live is not None:
+            operation = live.execute_nominal(task=deepcopy(task), grant=grant)
+        else:
+            operation = actor.executors[name](deepcopy(task))
+        execution = asyncio.create_task(operation)
         runtime.active_executions.add(execution)
         try:
-            observations = await asyncio.wait_for(execution, agent.tool_timeout_s)
+            # A timeout is not a certified stop. Keep live motion owned and tracked.
+            awaited = asyncio.shield(execution) if live is not None else execution
+            observations = await asyncio.wait_for(awaited, agent.tool_timeout_s)
         finally:
-            runtime.active_executions.discard(execution)
-        if await runtime.conveyor_fault.accept_machine_failure(task, observations):
+            if execution.done():
+                runtime.active_executions.discard(execution)
+            else:
+                execution.add_done_callback(runtime.active_executions.discard)
+        if (await runtime.conveyor_fault.accept_robot_failure(task, observations)
+                or await runtime.conveyor_fault.accept_machine_failure(task, observations)):
             return
         if runtime.stopped or actor.completion_validators[name](task, observations) is not True:
             raise ValueError("Resource completion evidence did not validate")
@@ -1546,6 +1601,7 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
                         "function_name": name,
                         "params": task["parameters"],
                         "status": "completed",
+                        **physical_binding,
                     },
                 ),
             )
@@ -1553,6 +1609,13 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
     except (ValueError, KeyError, TypeError, RuntimeError, OSError, TimeoutError) as exc:
         if observations is not None:
             actor.completion_observations[task_id] = deepcopy(observations)
+        if live is not None and grant is not None:
+            await send_agent_message(behaviour, message(agent.cca_jid, "resource_event", {
+                "task_id": task_id, "resource_jid": str(agent.jid),
+                "run_id": context.run_id, "function_name": task["event_name"],
+                "params": deepcopy(task["parameters"]), "status": "failed",
+                "recovery_composition_ref": deepcopy(grant["recovery_composition_ref"]),
+            }))
         await ack(
             "blocked",
             reason=str(exc),

@@ -1,12 +1,12 @@
 {
   "mode": "predefined",
-  "version": 1,
+  "version": 2,
   "product_geometry": {
     "path": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
     "environment": "gazebo"
   },
   "catalog": {
-    "version": 1,
+    "version": 2,
     "specifications": [
       {
         "id": "SAFE_shared_area_mutex",
@@ -15,13 +15,37 @@
         "aps": [
           {
             "label": "ap001",
-            "full": "ap_state/physical_observation/shared_area_first_resource",
-            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$first_resource\",\"state\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"any\"}}",
+            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$first_resource",
+              "state": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "any"
+              }
+            }
           },
           {
             "label": "ap002",
-            "full": "ap_state/physical_observation/shared_area_second_resource",
-            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$second_resource\",\"state\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"any\"}}",
+            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$second_resource",
+              "state": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "any"
+              }
+            }
           }
         ]
       },
@@ -32,13 +56,37 @@
         "aps": [
           {
             "label": "ap001",
-            "full": "ap_event/physical_observation/part_region_entry",
-            "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+            "full": "{\"event\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"$part\",\"resource\":\"*\"}",
+            "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry.",
+            "definition": {
+              "event": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "part_region_entry"
+              },
+              "kind": "ap_event",
+              "process": "*",
+              "product": "$part",
+              "resource": "*"
+            }
           },
           {
             "label": "ap002",
-            "full": "ap_state/processCompleted/process_target_completed",
-            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+            "full": "{\"kind\":\"ap_state\",\"process\":\"$process\",\"product\":\"$part\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"$target\"},\"symbol\":\"processCompleted\"}}",
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "$process",
+              "product": "$part",
+              "resource": "*",
+              "state": {
+                "arguments": {
+                  "target": "$target"
+                },
+                "symbol": "processCompleted"
+              }
+            }
           }
         ]
       }

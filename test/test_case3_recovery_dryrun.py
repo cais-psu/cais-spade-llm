@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import pytest
 import json
 import logging
 import os
@@ -163,6 +164,51 @@ from cais_spade_llm.recovery_framework.scenario_runner import (
     _parse_args,
     main,
  )
+
+
+@pytest.fixture(autouse=True)
+def archived_outline_ap_fixture(monkeypatch):
+    """Keep archived task-abstraction scenarios separate from physical admission.
+
+    These fixtures predate physical primitive grounding. Their explicit abstract
+    selectors remain useful for testing symbolic planning and DFA history, but
+    they are never used as current runtime safety definitions.
+    """
+    from ppr_ap_migration import migrate_ap_key
+    from cais_spade_llm.agents.central_controller.ppr_ap import (
+        make_ap_definition, canonical_ap_key, parse_ap_definition,
+    )
+
+    def archived_projection(rule):
+        destination = (rule.get("context") or {}).get("destination", "")
+        priority = rule.get("constraint_type") == "ordering_place_approach_priority"
+        products = rule.get("product") or []
+        gateway = str(products[0]).lower() if products else ""
+        rows = []
+        for ap in rule.get("aps") or []:
+            definition = parse_ap_definition(migrate_ap_key(ap["full"]))
+            kind = definition["kind"]
+            part, resource = definition["product"], definition["resource"]
+            symbol = definition["state" if kind == "ap_state" else "event"]["symbol"]
+            if priority:
+                part, resource = part.lower(), "any"
+                condition = "part_goal_satisfied" if part == gateway else "move_part_to_destination"
+                kind = "ap_state" if part == gateway else "ap_event"
+                selector = {"mode": condition, "part": part, "resource": resource,
+                            "destination": destination}
+                if part == gateway:
+                    selector["states"] = ["assembled", "placed"]
+            else:
+                condition = "resource_move_to_destination" if kind == "ap_event" else "resource_in_destination"
+                selector = {"mode": condition, "part": part, "resource": resource,
+                            "destination": destination}
+            projected = make_ap_definition(kind, part, "*", resource, condition,
+                                           {"destination": destination})
+            rows.append({"label": ap["label"], "full": canonical_ap_key(projected),
+                         "definition": projected, "selector": selector})
+        return rows
+    monkeypatch.setattr(ProcessPlannerPrepareTrace, "_recovery_rule_recovery_aps",
+                        staticmethod(archived_projection))
 
 
 def _load_response_fixture(filename: str) -> dict[str, Any]:
@@ -3265,69 +3311,19 @@ def test_production_structured_request_records_actual_messages() -> None:
     assert "tools" not in agent._last_structured_request
 
 
-def test_recovery_safety_request_records_only_user_prompt_and_schema(
-    tmp_path: Path,
-) -> None:
-    class _RecoverySafetyAgent:
-        tools_catalog = [{"type": "function", "function": {"name": "not_sent"}}]
-        logger = logging.getLogger(__name__)
+def test_recovery_safety_never_calls_llm_or_accepts_legacy_empty_rules(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
-        def __init__(self) -> None:
-            self._last_structured_request: dict[str, Any] = {}
-
-        async def ask_llm_structured(
-            self,
-            prompt: str,
-            *,
-            response_format: dict[str, Any],
-            include_agent_instructions: bool = True,
-        ) -> dict[str, Any]:
-            assert include_agent_instructions is False
-            self._last_structured_request = {
-                "model": "test-model",
-                "messages": [{"role": "user", "content": prompt}],
-                "reasoning_effort": "low",
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": deepcopy(response_format),
-                },
-                "response_source": "mocked_test",
-                "request_sent": False,
-            }
-            return {"rules": []}
-
-    result = asyncio.run(
-        generate_recovery_safety_bundle(
-            _RecoverySafetyAgent(),
-            {
-                "recovery_safety_dir": str(tmp_path / "recovery_safety"),
-                "recovery_safety_scope_id": "test_scope",
-                "accepted_outline_prefix": [],
-                "loaded_safety_rules": [],
-                "tools_catalog": [
-                    {"type": "function", "function": {"name": "not_sent"}}
-                ],
-            },
-        )
-    )
-
-    assert result["ok"] is True
-    captured_request = json.loads(
-        Path(result["grounding_prompt_artifact_path"]).read_text(encoding="utf-8")
-    )
-    assert captured_request["messages"] == [
-        {
-            "role": "user",
-            "content": captured_request["messages"][0]["content"],
-        }
-    ]
-    assert captured_request["messages"][0]["content"].startswith(
-        "You are selecting which supplied recovery outline rows"
-    )
-    assert "tools" not in captured_request
-    assert captured_request["response_format"]["json_schema"]["name"] == (
-        "recovery_safety_grounding"
-    )
+    agent = SimpleNamespace(ask_llm_structured=AsyncMock(
+        side_effect=AssertionError("Recovery cannot select its own safety rules")))
+    with pytest.raises(ValueError, match="recompile"):
+        asyncio.run(generate_recovery_safety_bundle(agent, {
+            "recovery_safety_dir": str(tmp_path), "recovery_safety_scope_id": "test_scope",
+            "loaded_safety_rules": [],
+        }))
+    agent.ask_llm_structured.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_candidate_validation_feedback_is_rendered_once() -> None:
@@ -4151,13 +4147,13 @@ def test_recovery_macro_uses_successor_history_and_other_tasks() -> None:
             }
         """,
         "recovery_aps": [
-            {"label": "ap1", "full": "ap_state/p/any/xarm6/failed",
+            {"label": "ap1", "full": '{"kind":"ap_state","process":"p","product":"any","resource":"xarm6","state":{"arguments":{},"symbol":"failed"}}',
              "selector": {"mode": "resource_state", "resource": "xarm6", "state": "failed"}},
-            {"label": "ap2", "full": "ap_state/p/any/xarm6/idle",
+            {"label": "ap2", "full": '{"kind":"ap_state","process":"p","product":"any","resource":"xarm6","state":{"arguments":{},"symbol":"idle"}}',
              "selector": {"mode": "resource_state", "resource": "xarm6", "state": "idle"}},
-            {"label": "ap3", "full": "ap_state/p/any/ur5e/printing",
+            {"label": "ap3", "full": '{"kind":"ap_state","process":"p","product":"any","resource":"ur5e","state":{"arguments":{},"symbol":"printing"}}',
              "selector": {"mode": "resource_state", "resource": "ur5e", "state": "printing"}},
-            {"label": "ap4", "full": "ap_event/p/MCP/ur5e/place_approach",
+            {"label": "ap4", "full": '{"event":{"arguments":{},"symbol":"place_approach"},"kind":"ap_event","process":"p","product":"MCP","resource":"ur5e"}',
              "selector": {"mode": "move_part_to_destination", "part": "MCP",
                           "resource": "ur5e", "destination": "assembly_board-v1"}},
         ],
@@ -4368,7 +4364,7 @@ def test_local_independence_checks_persistent_AP_valuations() -> None:
     from cais_spade_llm.recovery_framework.environment_composition import EnvironmentPlant
 
     rule = {"id": "SPEC", "aps": [
-        {"label": "ap1", "full": "ap_state/operation/any/m1/loaded/any"}]}
+        {"label": "ap1", "full": '{"kind":"ap_state","process":"operation","product":"any","resource":"m1","state":{"arguments":{},"symbol":"loaded"}}'}]}
     monitor = OnlineSafetyMonitor({"SPEC": """
         digraph DFA { node [shape = doublecircle]; 0; 1; init -> 0;
           0 -> 1 [label="ap1"]; 0 -> 0 [label="!ap1"]; 1 -> 1 [label="true"]; }

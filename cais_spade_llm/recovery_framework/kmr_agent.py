@@ -1,6 +1,6 @@
-"""KMR ResourceAgent execution through the existing task and CCA protocol."""
-
 from __future__ import annotations
+
+"""KMR ResourceAgent execution through the existing task and CCA protocol."""
 
 import json
 import math
@@ -36,6 +36,54 @@ class KMRResourceAgent(ResourceAgent):
         for name in ('pick_approach', 'pick_part', 'move_to_resource',
                      'place_approach', 'place_release', 'move_to_location'):
             self.executables[name] = getattr(self, name)
+
+    def configure_recovery_safety_observer(self, observer, record: dict) -> None:
+        """Bind the KMR owner to its configured continuous observation model."""
+        from cais_spade_llm.recovery_framework.kmr_live_safety import configure_observer
+
+        configure_observer(self, observer, record)
+
+    def capture_recovery_safety_state(self, *, max_age: float = 2.) -> dict:
+        """Read the configured KMR physical state without dispatching motion."""
+        from cais_spade_llm.recovery_framework.kmr_live_safety import capture_state
+
+        return capture_state(self, max_age=max_age)
+
+    def get_recovery_safety_primitive_model(self):
+        """Expose KMR owner kinematics for physical AP evaluation."""
+        from cais_spade_llm.recovery_framework.kmr_live_safety import primitive_model
+
+        return primitive_model(self)
+
+    def prepare_recovery_safety_program(self, program: dict, checkpoint: dict) -> dict:
+        """Prepare a native KMR program on an existing preparation worker thread."""
+        from cais_spade_llm.recovery_framework.kmr_live_safety import prepare_program_sync
+
+        return prepare_program_sync(self, program, checkpoint)
+
+    async def prepare_recovery_safety_program_async(self, program: dict, checkpoint: dict) -> dict:
+        """Prepare KMR native motion without blocking the agent event loop."""
+        from cais_spade_llm.recovery_framework.kmr_live_safety import prepare_program
+
+        return await prepare_program(self, program, checkpoint)
+
+    def validate_recovery_safety_step(self, planned: dict, step: dict) -> None:
+        """Require the exact worker-retained trajectory and primitive binding."""
+        evidence = step["model_evidence"]
+        if (planned["primitive"] != step["primitive"] or planned["params"] != step["resolved_params"]
+                or planned["joint_trajectory"] != evidence["joint_trajectory"]
+                or planned["continuous_motion"] != evidence["continuous_motion"]):
+            raise ValueError("KMR physical evidence differs from its native preparation")
+
+    async def execute_recovery_composition_step(self, *, primitive: str, params: dict,
+            task_id: str, step_index: int, grant: dict, owner) -> dict:
+        """Execute only worker-retained KMR motion authorized by the CCA."""
+        provider = getattr(self, "recovery_composition_evidence_provider", None)
+        execute = getattr(provider, "execute_async_step", None)
+        if not callable(execute):
+            raise ValueError("KMR prepared execution provider is unavailable")
+        return await execute(resource_agent=self, task_id=task_id, step_index=step_index,
+                             primitive=primitive, params=params, grant=grant)
 
     def recovery_execution_primitive_catalog(self) -> list[dict]:
         """Expose only primitives selectable in this pinned Gazebo scene."""

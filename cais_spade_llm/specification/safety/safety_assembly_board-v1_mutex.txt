@@ -1,2 +1,60 @@
-[Safety Requirements]
-- At most one resource may occupy the assembly_board-v1 destination area at any time.
+{
+  "mode": "predefined",
+  "version": 2,
+  "product_geometry": {
+    "path": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+    "environment": "gazebo"
+  },
+  "catalog": {
+    "version": 2,
+    "specifications": [
+      {
+        "id": "SAFE_shared_area_mutex",
+        "requirement": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
+        "formula": "G !(ap001 & ap002)",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$first_resource\",\"state\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"any\"}}",
+            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$first_resource",
+              "state": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "any"
+              }
+            }
+          },
+          {
+            "label": "ap002",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$second_resource\",\"state\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"any\"}}",
+            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$second_resource",
+              "state": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "any"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "requirement_scopes": [
+    {
+      "specification": "SAFE_shared_area_mutex",
+      "region": "assembly_board-v1"
+    }
+  ]
+}

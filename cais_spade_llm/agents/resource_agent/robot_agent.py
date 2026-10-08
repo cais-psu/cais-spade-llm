@@ -1,6 +1,6 @@
-"""Robot resource agent exposing pick/move/place primitives for assembly."""
-
 from __future__ import annotations
+
+"""Robot resource agent exposing pick/move/place primitives for assembly."""
 
 import asyncio
 import json
@@ -2117,7 +2117,12 @@ class RobotAgent(ResourceAgent):
             return {**ResourceAgent.prepare_recovery_safety_program(self, program, checkpoint),
                     "reason": "Resource is already executing; preparation cannot interrupt it"}
         try:
-            return prepare(deepcopy(program), deepcopy(checkpoint), resource_jid=str(self.jid))
+            result = prepare(deepcopy(program), deepcopy(checkpoint), resource_jid=str(self.jid))
+            provider = getattr(self, "recovery_composition_evidence_provider", None)
+            register = getattr(provider, "register_program", None)
+            if result.get("status") == "prepared" and callable(register):
+                register(result)
+            return result
         finally:
             self._robot_motion_lock.release()
 

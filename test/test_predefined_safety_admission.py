@@ -1,6 +1,6 @@
-"""Fixed safety definitions remain authoritative at the actual CCA message gates."""
-
 from __future__ import annotations
+
+"""Fixed safety definitions remain authoritative at the actual CCA message gates."""
 
 import asyncio
 import json
@@ -88,7 +88,7 @@ def test_recovery_generation_associates_fixed_rules_without_generation(monkeypat
         cca = _fixed_cca()
         generation = AsyncMock(side_effect=AssertionError("No replacement safety generation"))
         module = "cais_spade_llm.agents.central_controller.central_controller_agent"
-        monkeypatch.setattr(module + ".generate_recovery_safety_bundle", generation)
+        monkeypatch.setattr("cais_spade_llm.agents.central_controller.recovery_safety_generation.generate_recovery_safety_bundle", generation)
         sent = AsyncMock()
         monkeypatch.setattr(module + ".send_agent_message", sent)
         inbox = cca._RecoverySafetyGeneration()
@@ -183,8 +183,12 @@ def _fixed_nominal_case():
     context = SimpleNamespace(
         admission_lock=RLock(), run_id="synthetic_predefined_nominal_run", revision=0,
         reservations={}, part_tracker=deepcopy(native["products"]), transitions=[],
+        unavailable_resources=set(), requirements={},
+        geometry=deepcopy(harness.case["grounding_inputs"]["geometry"]),
+        permitted_resources=list(harness.jids), negotiations=[],
         snapshot=lambda: deepcopy(values), revisions=lambda: {key: 0 for key in values},
         pending_for=lambda identity: deepcopy(pending.get(identity)),
+        pending_tasks=pending, relevant_revisions_match=lambda task: True,
         _task_reservations=lambda task, part: ["resource:" + task["resource_id"]],
         _task_participants=lambda task: [task["resource_id"]],
     )
@@ -270,6 +274,9 @@ def test_predefined_nominal_complete_owner_evidence_grants_and_replays_acknowled
         decision = await _request_fixed_nominal(case)
         assert decision.args[2] == "allow", decision
         assert decision.kwargs["recovery_composition"]["committed"] is True
+        grant = decision.kwargs["recovery_composition_grant"]
+        assert grant["nominal_task"] == case.pending[first]
+        assert grant["run_id"] == case.context.run_id
         assert case.admission.grants[first].task == case.pending[first]
         assert first in case.harness.session["grants"]
         analysis = case.harness.session["analysis"]
@@ -359,4 +366,46 @@ def test_other_product_cannot_restart_physical_monitor_prospectively():
         })}
         with pytest.raises(ValueError, match="existing_physical_history_requires_checkpoint"):
             _context(cca, _PRODUCT, harness.request["recovery_id"])
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", [None, "task", "run", "resource", "sender"])
+def test_nominal_physical_grant_inbox_binds_exact_pending_task(change):
+    """A CCA reply can only authorize its current resource-owned nominal task."""
+    from logging import getLogger
+    from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
+
+    async def scenario():
+        task = {"task_id": "nominal-prepared", "resource_id": "KMR",
+                "event_name": "move_base", "parameters": {"destination": "Storage"}}
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(run_id="run-current", pending_for=lambda _: deepcopy(task)),
+            jids={"KMR": "kmr@localhost"},
+        )
+        actor = SimpleNamespace(cca_jid="cca@localhost", jid="kmr@localhost",
+            agent_name="KMR", environment_runtime=runtime, logger=getLogger(__name__),
+            _pending_recovery_composition_refs={}, _pending_recovery_composition_request_ids={},
+            _recovery_composition_grants={}, _safety_decisions={})
+        grant = {"nominal_task": deepcopy(task), "run_id": "run-current",
+                 "preparation_id": "owner-prepared", "recovery_composition_ref": {"task_id": task["task_id"]}}
+        sender = "cca@localhost"
+        if change == "task":
+            grant["nominal_task"]["parameters"]["destination"] = "M1"
+        elif change == "run":
+            grant["run_id"] = "run-previous"
+        elif change == "resource":
+            grant["nominal_task"]["resource_id"] = "ur5e-1"
+        elif change == "sender":
+            sender = "untrusted@localhost"
+        packet = _packet(sender, "safety_decision", {
+            "task_id": task["task_id"], "decision": "allow", "recovery_composition_grant": grant})
+        inbox = SimpleNamespace(agent=actor, receive=AsyncMock(return_value=packet))
+        await ResourceAgent._SafetyDecisionInbox.run(inbox)
+        if change is None:
+            assert actor._safety_decisions == {task["task_id"]: "allow"}
+            assert actor._recovery_composition_grants[task["task_id"]] == grant
+        else:
+            assert actor._safety_decisions == {}
+            assert actor._recovery_composition_grants == {}
+
     asyncio.run(scenario())

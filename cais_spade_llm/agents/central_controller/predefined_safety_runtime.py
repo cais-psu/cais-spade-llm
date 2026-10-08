@@ -1,6 +1,6 @@
-"""CCA ownership of predefined specifications and their physical admission gate."""
-
 from __future__ import annotations
+
+"""CCA ownership of predefined specifications and their physical admission gate."""
 
 import json
 from copy import deepcopy
@@ -15,6 +15,7 @@ from cais_spade_llm.agents.central_controller.predefined_safety import (
     validate_predefined_safety_artifact,
 )
 from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import _digest
+from cais_spade_llm.agents.central_controller.ppr_ap import physical_ap_kind
 
 
 def predefined_required(agent) -> bool:
@@ -22,10 +23,6 @@ def predefined_required(agent) -> bool:
     if getattr(agent, "predefined_safety_required", False):
         return True
     try:
-        from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import (
-            _MEANINGS,
-        )
-
         bundle = getattr(agent, "precomputed_bundle", {}) or {}
         if not isinstance(bundle, dict):
             raise ValueError("invalid_safety_bundle")
@@ -48,7 +45,7 @@ def predefined_required(agent) -> bool:
             marked = marked or payload.get("mode") == "predefined"
             marked = marked or any(key.startswith("predefined_") for key in payload)
             marked = marked or any(
-                ap.get("full") in _MEANINGS for rule in payload.get("rules", [])
+                physical_ap_kind(ap) is not None for rule in payload.get("rules", [])
                 if isinstance(rule, dict) for ap in rule.get("aps", []) if isinstance(ap, dict)
             )
     except (ValueError, TypeError, OSError):
@@ -198,10 +195,22 @@ async def check_predefined_nominal_start(agent, task: dict, product_jid: str, *,
     permission result. CCA checks the same graph and exact start as recovery.
     """
     from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
-        recovery_admission,
+        physical_admission,
         register_recovery_composition,
     )
 
+    if getattr(agent, "predefined_safety_error", ""):
+        return nominal_unavailable(agent)
+    runtime = agent._environment_runtime_for_sender(product_jid)
+    if runtime is not None:
+        install = getattr(agent, "_environment_admission", None)
+        if callable(install):
+            install(runtime)
+        live = getattr(runtime, "live_safety_runtime", None)
+        if live is not None:
+            if runtime.context.pending_for(task["task_id"]) != task:
+                return {"status": "inconclusive", "reason": "nominal_task_identity_changed"}
+            return await live.check_nominal(deepcopy(task), product_jid, commit=commit)
     provider = getattr(agent, "recovery_composition_context_provider", None)
     prepare = getattr(provider, "nominal_request", None)
     if prepare is None or getattr(agent, "predefined_safety_error", ""):
@@ -228,7 +237,7 @@ async def check_predefined_nominal_start(agent, task: dict, product_jid: str, *,
             "params": {**deepcopy(requested["params"]),
                        "recovery_composition_ref": registration["task_refs"][task["task_id"]]},
         }
-        return await recovery_admission(agent, product_jid).check(
+        return await physical_admission(agent, product_jid).check(
             event, sender=requested["resource_jid"], commit=commit)
     except (ValueError, KeyError, TypeError, StopIteration, OSError) as exc:
         return {"status": "inconclusive", "reason": str(exc)}

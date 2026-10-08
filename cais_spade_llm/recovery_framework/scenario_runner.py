@@ -42,9 +42,6 @@ from cais_spade_llm.agents.central_controller import (  # noqa: E402
 from cais_spade_llm.agents.central_controller.outline_macro_safety import (  # noqa: E402
     validate_outline_macro_recovery_safety,
 )
-from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
-    generate_recovery_safety_bundle,
-)  # noqa: E402
 from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner  # noqa: E402
 from cais_spade_llm.agents.intelligent_product.product_recovery_controller import (  # noqa: E402
     _private_pending_nominal_tasks,
@@ -1913,8 +1910,39 @@ async def _run_safety_from_outline(
         debug_root=debug_root,
     )
     if not payload:
-        raise AssertionError("safety synthsis requires an accepted recovery outline")
-    return await generate_recovery_safety_bundle(product_agent, payload)
+        raise AssertionError("Safety binding requires an accepted recovery outline")
+    from cais_spade_llm.agents.central_controller.predefined_safety import (
+        compile_predefined_safety, validate_predefined_safety_artifact,
+    )
+
+    artifact_path = product_agent.precomputed_bundle.get("artifacts", {}).get("safety_logic_json")
+    if not artifact_path:
+        raise ValueError("Saved predefined safety artifact unavailable; recompile required")
+    artifact = _load_json(Path(artifact_path))
+    if artifact.get("ap_schema_version") != 2:
+        raise ValueError("Saved safety AP schema is obsolete; recompile required")
+    document = validate_predefined_safety_artifact(artifact)
+    if document is None:
+        raise ValueError("Recovery requires the predefined safety catalog; recompile required")
+    rules, dfas = compile_predefined_safety(document)
+    directory = Path(payload["recovery_safety_dir"])
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / "cca_safety_logic.json"
+    _write_json(target, artifact)
+    dot_files = []
+    for identifier, dot in dfas.items():
+        path = directory / f"{identifier}_dfa.dot"
+        path.write_text(dot, encoding="utf-8")
+        dot_files.append(str(path.resolve()))
+    return {
+        "ok": True, "recovery_safety_status": "ready",
+        "recovery_safety_scope_id": payload["recovery_safety_scope_id"],
+        "accepted_outline_prefix": deepcopy(payload["accepted_outline_prefix"]),
+        "rule_ids": [rule["id"] for rule in rules],
+        "rules": rules, "rule_dfas": dfas,
+        "requires_grounded_composition": True, "execution_authorized": False,
+        "recovery_safety_logic_json": str(target.resolve()), "dfa_dot_files": dot_files,
+    }
 
 
 def _primitive_ready_payload(

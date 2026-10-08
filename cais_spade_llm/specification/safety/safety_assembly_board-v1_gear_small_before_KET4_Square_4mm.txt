@@ -1,2 +1,70 @@
-[Safety Requirements]
-- Placement of KET4_Square_4mm at assembly_board-v1 may begin only after assembly of gear_small is completed.
+{
+  "mode": "predefined",
+  "version": 2,
+  "product_geometry": {
+    "path": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+    "environment": "gazebo"
+  },
+  "catalog": {
+    "version": 2,
+    "specifications": [
+      {
+        "id": "SAFE_gear_small_before_KET4_Square_4mm",
+        "requirement": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
+        "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "{\"event\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"$part\",\"resource\":\"*\"}",
+            "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry.",
+            "definition": {
+              "event": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "part_region_entry"
+              },
+              "kind": "ap_event",
+              "process": "*",
+              "product": "$part",
+              "resource": "*"
+            }
+          },
+          {
+            "label": "ap002",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"$process\",\"product\":\"$part\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"$target\"},\"symbol\":\"processCompleted\"}}",
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "$process",
+              "product": "$part",
+              "resource": "*",
+              "state": {
+                "arguments": {
+                  "target": "$target"
+                },
+                "symbol": "processCompleted"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "requirement_scopes": [
+    {
+      "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "KET4_Square_4mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "gear_small",
+          "process": "assembly",
+          "target": "Gear_Plate/Gear_Shaft_1"
+        }
+      }
+    }
+  ]
+}

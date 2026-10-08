@@ -300,101 +300,15 @@ Convert the following instructions into structured requirements:
 # Safety parsing prompt
 # ----------------------------------------------------------------------
 SAFETY_PARSE_PROMPT = dedent("""
-You convert natural-language safety statements into structured rule objects.
-
-------------------------------------------------------------
-STRUCTURED RULE FORMAT
-------------------------------------------------------------
-For each safety sentence, produce:
-
-{
-  "raw_text": string,
-  "constraint_type": string | null,
-  "process": string | null,
-  "product": [string] | null,
-  "resources": [string],
-  "resource_types": [string] | null,
-  "event": string | null,
-  "context": object | null
-}
-
-------------------------------------------------------------
-FIELD RULES
-------------------------------------------------------------
-• raw_text
-  - Copy the original sentence exactly.
-
-• constraint_type
-  - A short snake_case label summarizing the safety meaning.
-  - Not restricted to a fixed set of types.
-
-• process
-  - If a matching tool can be identified, use tool.process.
-  - Otherwise set to null.
-
-• event
-  - If a matching tool matches the described action, use tool.function.
-  - Otherwise set to null.
-
-• resources
-  - If the natural-language rule explicitly refers to specific resources,
-    list those resources (using tool.function_owner_agent identifiers).
-  - If the rule does NOT care which specific resource executes the action, either:
-    - use ["any"].
-  - Avoid over-specifying resources just because they exist in the tools catalogue.
-
-• resource_types
-  - Use this when the rule is about a class of resources rather than named resources
-    (for example: printers, robots, conveyors).
-  - Ground values from `tool.resource_type` when available.
-  - If the rule explicitly names concrete resources, `resource_types` may be null or omitted.
-  - If no resource-type constraint applies, set it to null.
-
-• context
-  - Represent contextual information as an OBJECT (dictionary).
-  - Keys correspond to ontology-aligned contextual roles implied by the tools or the text.
-  - Use concise canonical role names, not prose fragments or sentence snippets.
-  - Reuse the exact context keys exposed by matching tools via `required_context_keys`
-    whenever a tool family clearly applies.
-  - Values should be canonical identifiers whenever possible, drawn from
-    TOOLS_CATALOGUE or CAPABILITY_OVERVIEW, or normalized from the
-    natural language when no direct canonical match exists.
-  - The object must be FLAT: keys map only to scalar values (string, number, or boolean).
-  - Do NOT return nested objects, arrays, or free-form explanation text in context.
-  - Include all relevant context dimensions in:
-        "context": { "<key>": "<value>", ... }
-  - If no meaningful contextual information applies, set context to null.
-  - Do NOT invent a synthetic "ordering" or "before/after" context; for ordering-only rules,
-    leave context null unless the text explicitly specifies a concrete location/zone/tool context.
-  - Do NOT invent generic stand-ins like "location" when the tools expose a canonical
-    role such as `origin`, `destination`, or `machine`.
-  - Do NOT encode temporal semantics as boolean context such as `simultaneous`,
-    `overlap`, `before`, or `after`.
-
-• product
-  - List ALL specific referenced products/parts (e.g. ["pin", "gear"]).
-  - If a rule describes an ordering between Part A and Part B, include BOTH in this list.
-  - Even if only one product is mentioned, return a list with one item (e.g. ["pin"]).
-  - Do NOT use "any" if specific parts are named.
-
-------------------------------------------------------------
-GENERAL RULES
-------------------------------------------------------------
-• Use ONLY values grounded in the TOOLS_CATALOGUE, CAPABILITY_OVERVIEW.
-• Prefer canonical identifiers from TOOLS_CATALOGUE or CAPABILITY_OVERVIEW
-  over ad-hoc free-text names.
-• Do not invent tools, events, processes, or contexts that are not supported
-  by the catalogues or the sentence.
-• Use lowercase + underscores for identifiers where applicable.
-• When information is missing or ambiguous, leave fields null or empty.
-• Output MUST be valid JSON.
-
-------------------------------------------------------------
-OUTPUT FORMAT
-------------------------------------------------------------
-{
-  "rules": [ ... ]
-}
+Convert safety statements into {"rules": [...]} with fields raw_text,
+constraint_type, product (list), process, resources, resource_types, event,
+and arguments (flat condition parameters, or null).
+Preserve exact product, process, resource, function and state identifiers.
+Copy raw_text unchanged. Only use identifiers grounded in the supplied models.
+Use "*" for an unconstrained scope. Do not invent physical facts or event names.
+Arguments belong to the event/state condition; there is no AP context field.
+Use exact function parameter or modeled state field names for arguments.
+Keep temporal meaning in the formula, never in synthetic boolean arguments.
 """).strip()
 
 
@@ -441,7 +355,7 @@ CAPABILITY_OVERVIEW:
 {capability_overview}
 
 Use these catalogues to choose grounded processes, events, resources,
-and canonical context identifiers.
+and exact condition arguments.
 {refinement_section}
 
 SAFETY_TEXT:
@@ -454,37 +368,20 @@ SAFETY_TEXT:
 # ----------------------------------------------------------------------
 
 SAFETY_AP_TEMPLATE_DOC = dedent("""
-Atomic propositions (APs) describe discrete system events or persistent states.
-
-The compiler emits only these two final AP kinds:
-
-1. Event APs
-   ap_event/<process>/<product>/<resource>/<function>/<context>
-
-2. State APs
-   ap_state/<process>/<product>/<resource>/<state>/<context>
-
-Shared segment meanings:
-  - process: operational phase associated with the function/state
-  - product: referenced product, or "any" if not specific
-  - resource: concrete resource identifier, or "any" if resource identity
-              does not matter for the rule
-  - function/state: tool function name for `ap_event`, discrete resource
-                    state name for `ap_state`
-  - context: compact representation of relevant contextual information
-             (for example location, zone, machine, buffer, destination)
-
-Context rules:
-  - If the rule has no context, use "any".
-  - When multiple context entries are present, combine them systematically
-    as compact key/value bindings.
-  - Context must stay aligned with the parsed rule and TOOLS_CATALOGUE.
-
-General rules:
-  - Segments should be lowercase and underscore-separated when needed.
-  - Do not invent new processes, functions, states, resources, or context
-    values that are not grounded in the parsed rule or TOOLS_CATALOGUE.
-  - `ap_selector` is compile-time only and must never appear in final APs.
+APs use product-first, context-free Product-Process-Resource definitions:
+  ap_event(product, process, resource, event)
+  ap_state(product, process, resource, state)
+A structured definition has kind, product, process, resource, and event or state.
+The condition is {"symbol": "<exact registered symbol>", "arguments": {...}}.
+There is no context field and no slash-separated AP encoding.
+Scopes use "*" for a wildcard. Preserve all manufacturing identifiers exactly.
+Resource wildcards for mutex expand into separate APs for distinct resources.
+State any@region means symbol "any" with arguments {"region": "<region>"}.
+Its truth requires physical geometry observations throughout primitive execution;
+nominal task states and destination parameters cannot establish it.
+Event symbols are registered function names or registered observation events.
+Task state symbols must come from the declared state model.
+The compiler assigns ap001/ap002 labels and canonical identities.
 """).strip()
 
 SAFETY_LTLF_TEMPLATE_DOC = dedent("""
@@ -542,82 +439,21 @@ Note: Use ONLY for one-shot prerequisites where B is blocked until A fires. Do N
 """).strip()
 
 SAFETY_FORMULA_AST_TEMPLATE_DOC = dedent("""
-Return a typed `formula_ast`, not final AP strings.
-
-Leaf node types:
-
-1. `ap_event_atom`
-   - Represents one event AP that the compiler will turn into:
-     `ap_event/<process>/<product>/<resource>/<function>/<context>`
-   - Shape:
-     {
-       "type": "ap_event_atom",
-       "resource": "<catalog resource id>" | "any",
-       "resource_var": "$r",         # optional instead of resource
-       "process": "<optional process id>",
-       "resource_type": "<optional resource type>",
-       "function": "<tool function name>",
-       "product": "<product or any>", # optional
-       "context": { ... }             # optional flat object
-     }
-
-2. `ap_state_atom`
-   - Represents one persistent state AP that the compiler will turn into:
-     `ap_state/<process>/<product>/<resource>/<state>/<context>`
-   - Shape:
-     {
-       "type": "ap_state_atom",
-       "resource": "<catalog resource id>" | "any",
-       "resource_var": "$r",        # optional instead of resource
-       "process": "<optional process id>",
-       "resource_type": "<optional resource type>",
-       "state": "<state name>",
-       "product": "<product or any>", # optional
-       "context": { ... }            # optional flat object
-     }
-
-3. `ap_selector`
-   - Compile-time macro only. Use this when the rule describes a condition like
-     being at a workstation, inside a machine area, or within a state slice,
-     and the compiler should infer the
-     relevant `ap_event` + `ap_state` terms from the tools/state graph.
-   - Shape:
-     {
-       "type": "ap_selector",
-       "resource": "<catalog resource id>" | "any",
-       "resource_var": "$r",         # optional instead of resource
-       "match": {
-         "process": "<optional process id>",
-         "resource_type": "<optional resource type>",
-         "functions": ["<optional function name>", "..."],
-         "context": { ... },         # optional flat object
-         "states": ["<optional state name>", "..."]
-       },
-       "include_entry_events": true,
-       "include_state_aps": true
-     }
-
-General grounding rules:
-- Prefer `resource_var` when the same rule pattern should be expanded over all matching resources.
-- `resource_var` is grounded by the compiler from matching tool rows, not by a fixed resource list.
-- `states` is optional; omit it when the compiler should infer the relevant persistent states.
-- If the structured rule already names concrete resources, prefer concrete `resource`
-  fields over `resource_var`.
-- Do NOT emit multiple distinct `resource_var` names in one `formula_ast`.
-- Reuse canonical context keys from INPUT RULES / TOOLS_CATALOGUE; do not replace them
-  with generic stand-ins like `location`.
-- Keep one selector branch aligned to one context-role family and state slice.
-  Do NOT mix rows that require different context keys inside the same selector.
-
-Allowed temporal operator nodes:
-- {"op": "G", "arg": ...}
-- {"op": "F", "arg": ...}
-- {"op": "X", "arg": ...}
-- {"op": "!", "arg": ...}
-- {"op": "&", "args": [node1, node2, ...]}
-- {"op": "|", "args": [node1, node2, ...]}
-- {"op": "->", "left": node1, "right": node2}
-- {"op": "U", "left": node1, "right": node2}
+Return a typed formula_ast. Atom examples:
+  {"type":"ap_event_atom","product":"*","process":"assembly",
+   "resource":"<exact resource>","function":"<registered function>","arguments":{}}
+  {"type":"ap_state_atom","product":"*","process":"*",
+   "resource":"<exact resource>","state":"<modeled state>","arguments":{}}
+A condition may use exact function parameters or modeled state fields as arguments.
+Do not supply context. Do not represent physical mutex with task-name/state selectors.
+Resource variables may bind repeated instances of the same pattern from declared models.
+For task-state patterns only, an ap_selector can use a match object containing
+process, resource_type, functions, states and arguments. This is a compile-time
+selector over the task model; it does not prove spatial clearance.
+Operators:
+  {"op":"G"|"F"|"X"|"!","arg":node}
+  {"op":"&"|"|","args":[node,...]}
+  {"op":"->"|"U","left":node,"right":node}
 """).strip()
 
 
@@ -631,7 +467,7 @@ def build_safety_logic_prompt(
     previous_preview_rules: list[dict] | None = None,
 ) -> str:
     """
-    Prompt to convert structured safety rules -> AP strings + LTLf.
+    Prompt to convert structured safety rules -> structured AP definitions + LTLf.
     Includes the TOOLS_CATALOGUE and uses the AP/LTLf templates + few-shot.
     """
     rules_json = json.dumps(rules, ensure_ascii=False, indent=2)
@@ -679,7 +515,7 @@ For each structured safety rule in INPUT RULES you receive fields such as:
   - id
   - raw_text
   - constraint_type
-  - process, product, resources, resource_types, event, context
+  - product, process, resources, resource_types, event, arguments
 
 Your task for each rule:
   1) Build a typed `formula_ast` over event/state atoms.
@@ -688,8 +524,8 @@ Your task for each rule:
      the concrete `ap_event` and `ap_state` terms.
 
 The system will deterministically compile your `formula_ast` into concrete
-AP strings, then into an LTLf formula, then into a DFA.
-Do NOT emit final AP strings yourself.
+structured AP definitions, then into an LTLf formula, then into a DFA.
+Do NOT emit final structured AP definitions yourself.
 
 GENERIC TEMPORAL FAMILIES:
 - precedence / before / ordering:
@@ -714,11 +550,9 @@ MANDATORY GROUNDING:
 - Use `ap_selector` instead of inventing many explicit atoms when the rule refers
   to a condition like being at a location, being inside a machine/station area,
   or being in a state slice.
-- Reuse exact context keys from INPUT RULES or tool `required_context_keys`.
-  Do not replace a canonical key with a generic key like `location`.
-- Do not invent synthetic boolean context such as `simultaneous=true/false`.
-- Inside one `ap_selector`, keep functions/states aligned to one context-role family.
-  Do not mix rows that require different context keys.
+- Use exact condition argument names from the registered functions or modeled state.
+- Do not add a context field or infer geometric occupancy from a task selector.
+- Physical predicates are grounded by trusted observers, never by the LLM.
 - If a rule already names specific resources, use concrete `resource` fields rather
   than multiple distinct `resource_var` names.
 
@@ -775,7 +609,7 @@ Rules for interpretation:
 - Base the explanation on the generated APs and the generated LTLf.
 - Do NOT simply restate the original raw_text requirement.
 - Do NOT use the phrase "intent statement".
-- Use the concrete grounded resources, events, products, and context from the APs.
+- Use the concrete product, process, resource, and state/event condition arguments from the APs.
 - If the generated rule is narrower, broader, asymmetric, or otherwise different
   from the original requirement, say so plainly.
 - Keep the explanation short, operator-facing, and easy to understand.

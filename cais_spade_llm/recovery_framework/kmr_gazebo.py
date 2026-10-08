@@ -1,6 +1,6 @@
-"""Cancellable ROS worker for observed KMR Storage-to-M1 task execution."""
-
 from __future__ import annotations
+
+"""Cancellable ROS worker for observed KMR Storage-to-M1 task execution."""
 
 import json
 import os
@@ -1773,6 +1773,16 @@ def run(request: dict, session: dict | None = None) -> dict:
             node.get_logger().info('[KMR] All services/actions ready; fresh joint feedback, startup pose, clearance, and scene identity verified.')
             return {'status': 'completed', **probe, 'operations': operations, 'part_pose': initial,
                     'KMR_pose': base, 'timing': timings()}
+        if mode in {'safety_prepare', 'safety_execute'}:
+            from cais_spade_llm.recovery_framework.kmr_safety_execution import worker_safety_request
+
+            return worker_safety_request(
+                request=request, session=session, probe=probe, config=config, kmr=kmr,
+                observed_state=observed_state, updated_state=updated_state,
+                plan_motion=plan_motion, execute_plan=execute_plan,
+                base_pose=entity('KMR'), execution_evidence=lambda: deepcopy(operations),
+                tcp_pose=lambda: configuration_pose(
+                    observed_state(), [joint_values[name] for name in kmr['arm_joint_names']]))
         if mode == 'validate_pickup':
             targets = compute_pick_targets(initial)
             pose = scene['Storage']['KMR_pick_docking_poses'][part]

@@ -1,6 +1,0 @@
-[INFO] [1790975619.922280810] [KMR.lifecycle_manager_navigation]: Creating
-[INFO] [1790975620.285554535] [KMR.lifecycle_manager_navigation]: [34m[1mCreating and initializing lifecycle service clients[0m[0m
-[INFO] [1790975621.770762277] [KMR.lifecycle_manager_navigation]: [34m[1mStarting managed nodes bringup...[0m[0m
-[INFO] [1790975621.770883849] [KMR.lifecycle_manager_navigation]: [34m[1mConfiguring map_server[0m[0m
-[INFO] [1790975694.502956298] [rclcpp]: signal_handler(SIGINT/SIGTERM)
-[INFO] [1790975694.503210348] [KMR.lifecycle_manager_navigation]: Running Nav2 LifecycleManager rcl preshutdown (lifecycle_manager_navigation)

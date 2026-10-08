@@ -1,6 +1,6 @@
-"""Central Controller Agent (CCA) orchestrating safety checks and replanning."""
-
 from __future__ import annotations
+
+"""Central Controller Agent (CCA) orchestrating safety checks and replanning."""
 
 import asyncio
 import json
@@ -24,9 +24,7 @@ from cais_spade_llm.agents.central_controller.outline_macro_safety import (
     validate_outline_macro_recovery_safety,
 )
 from cais_spade_llm.agents.central_controller.plan_safety_validator import PlanSafetyValidator
-from cais_spade_llm.agents.central_controller.recovery_safety_generation import (
-    generate_recovery_safety_bundle,
-)
+from cais_spade_llm.agents.central_controller.ppr_ap import canonical_ap_key, parse_ap_definition
 from cais_spade_llm.agents.central_controller.predefined_safety_runtime import (
     check_predefined_nominal_start,
     initialize_predefined_safety,
@@ -117,12 +115,15 @@ class CentralControllerAgent(LlmAgent):
     def _environment_admission(self, runtime):
         """Reuse one run coordinator and its authoritative specification monitor."""
         from cais_spade_llm.recovery_framework.environment_admission import EnvironmentAdmission
+        from cais_spade_llm.agents.central_controller.recovery_admission_runtime import install_live_runtime
 
         with runtime.context.admission_lock:
             if runtime.admission is None:
-                return EnvironmentAdmission(runtime, self.safety_monitor)
+                EnvironmentAdmission(runtime, self.safety_monitor)
             if runtime.admission.monitor is not self.safety_monitor:
                 runtime.admission.invalidate("specifications_changed_during_run")
+            if not self.allow_mock_recovery_execution:
+                runtime.live_safety_runtime = install_live_runtime(runtime, self)
             return runtime.admission
 
     async def _wait_for_safety_monitor_ready(self, *, timeout_s: float = 30.0) -> bool:
@@ -325,54 +326,20 @@ class CentralControllerAgent(LlmAgent):
 
     @staticmethod
     def _ap_full_without_task_id_context(full: Any) -> str:
-        token = str(full or "").strip()
-        parts = token.split("/")
-        if len(parts) < 6:
-            return token
-        context = str(parts[5] or "").strip()
-        if not context or context == "any" or "task_id=" not in context:
-            return token
-        kept = []
-        for item in context.split("&"):
-            key = item.split("=", 1)[0].strip()
-            if key == "task_id":
-                continue
-            if item:
-                kept.append(item)
-        parts[5] = "&".join(kept) if kept else "any"
-        return "/".join(parts)
+        definition = parse_ap_definition(full)
+        definition["state" if definition["kind"] == "ap_state" else "event"]["arguments"].pop("task_id", None)
+        return canonical_ap_key(definition)
 
     @classmethod
-    def _ap_full_for_rebound_source_task_ids(
-        cls,
-        full: Any,
-        source_task_ids: list[str],
-    ) -> str:
-        task_ids = [
-            str(task_id or "").strip() for task_id in source_task_ids if str(task_id or "").strip()
-        ]
-        token = str(full or "").strip()
-        if len(task_ids) != 1:
-            return cls._ap_full_without_task_id_context(token)
-        parts = token.split("/")
-        if len(parts) < 6:
-            return token
-        context = str(parts[5] or "").strip()
-        if not context or context == "any":
-            return token
-        replaced = False
-        rebound_items: list[str] = []
-        for item in context.split("&"):
-            key = item.split("=", 1)[0].strip()
-            if key == "task_id":
-                rebound_items.append(f"task_id={task_ids[0]}")
-                replaced = True
-            elif item:
-                rebound_items.append(item)
-        if replaced:
-            parts[5] = "&".join(rebound_items) if rebound_items else "any"
-            return "/".join(parts)
-        return token
+    def _ap_full_for_rebound_source_task_ids(cls, full: Any, source_task_ids: list[str]) -> str:
+        definition = parse_ap_definition(full)
+        arguments = definition["state" if definition["kind"] == "ap_state" else "event"]["arguments"]
+        if "task_id" in arguments:
+            if len(source_task_ids) == 1:
+                arguments["task_id"] = source_task_ids[0]
+            else:
+                arguments.pop("task_id")
+        return canonical_ap_key(definition)
 
     @staticmethod
     def _live_fsa_task_ids(fsa: dict[str, Any]) -> list[str]:
@@ -474,6 +441,7 @@ class CentralControllerAgent(LlmAgent):
         probe_ap = deepcopy(ap)
         probe_ap["source_task_ids"] = []
         probe_ap["full"] = self._ap_full_without_task_id_context(probe_ap.get("full"))
+        probe_ap["definition"] = parse_ap_definition(probe_ap["full"])
         probe_rule = deepcopy(rule)
         probe_rule["aps"] = [probe_ap]
         checker = OnlineSafetyMonitor(
@@ -550,6 +518,7 @@ class CentralControllerAgent(LlmAgent):
                     ap.get("full"),
                     deduped_matches,
                 )
+                ap["definition"] = parse_ap_definition(ap["full"])
                 if len(deduped_matches) == 1:
                     ap["id"] = deduped_matches[0]
                 ap["live_fsa_rebound_source_task_ids"] = deduped_matches
@@ -1501,8 +1470,8 @@ class CentralControllerAgent(LlmAgent):
             if not isinstance(rule, dict):
                 continue
 
-            rule_context = dict(rule.get("context") or {})
-            trigger_symbol = str(rule_context.get("trigger_event") or "").strip()
+            rule_arguments = dict(rule.get("arguments") or {})
+            trigger_symbol = str(rule_arguments.get("trigger_event") or "").strip()
             required_event_aps: list[dict[str, Any]] = []
             required_state_aps: list[dict[str, Any]] = []
 
@@ -1562,7 +1531,7 @@ class CentralControllerAgent(LlmAgent):
                                 "product": "any",
                                 "resource": resource_token,
                                 "symbol": fallback_event,
-                                "context": "",
+                                "arguments": {},
                                 "label": "",
                                 "full": "",
                             }
@@ -1749,7 +1718,7 @@ class CentralControllerAgent(LlmAgent):
             from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
                 interacting_recovery_admission,
                 observe_recovery_event,
-                recovery_admission,
+                physical_admission,
             )
 
             agent = self.agent
@@ -1785,7 +1754,7 @@ class CentralControllerAgent(LlmAgent):
                             recovery_composition={"status": "held",
                                                   "reason": "another_product_recovery_proof_is_active"})
                         return True
-                    coordinator = recovery_admission(agent, product_jid)
+                    coordinator = physical_admission(agent, product_jid)
                     result = await coordinator.check(event, sender=sender, commit=True)
                     await self._send_decision(
                         sender, event.get("task_id"),
@@ -1808,7 +1777,8 @@ class CentralControllerAgent(LlmAgent):
                             agent, task, runtime.product_jid, commit=True)
                     await self._send_decision(sender, event.get("task_id"),
                                               "allow" if result["status"] == "allowed" else "block",
-                                              recovery_composition=result)
+                                              recovery_composition=result,
+                                              recovery_composition_grant=result.get("recovery_composition_grant"))
                     return True
                 if interacting_recovery_admission(agent):
                     await self._send_decision(sender, event.get("task_id"), "block",
@@ -1818,10 +1788,20 @@ class CentralControllerAgent(LlmAgent):
                                               })
                     return True
                 return False
-            coordinators = getattr(agent, "recovery_composition_admissions", {})
+            live = getattr(agent, "live_safety_runtime", None)
+            if live is not None:
+                try:
+                    observe_recovery_event(agent, live, event, sender)
+                except (ValueError, KeyError, TypeError) as exc:
+                    live.invalidate("execution_evidence_unavailable: " + str(exc))
+                if recovery or event.get("status") == "recovery_acknowledgement":
+                    return True
+            coordinators = [coordinator for coordinator in
+                            getattr(agent, "recovery_composition_admissions", {}).values()
+                            if coordinator is not live]
             if recovery or event.get("status") == "recovery_acknowledgement" or any(
-                    coordinator.holds() for coordinator in coordinators.values()):
-                for coordinator in coordinators.values():
+                    coordinator.holds() for coordinator in coordinators):
+                for coordinator in coordinators:
                     try:
                         observe_recovery_event(agent, coordinator, event, sender)
                     except (ValueError, KeyError, TypeError) as exc:
@@ -2310,8 +2290,9 @@ class CentralControllerAgent(LlmAgent):
             )
             if getattr(agent.safety_monitor, "history_error", None) is not None:
                 validation_unavailable_reason = "CCA safety monitor history is unavailable"
-            if predefined_required(agent):
-                validation_unavailable_reason = "Predefined physical rules require grounded composition evidence"
+            defer_physical_validation = predefined_required(agent)
+            if defer_physical_validation and not monitor_ready:
+                validation_unavailable_reason = "CCA safety monitor is unavailable"
             current_rules = [
                 deepcopy(rule)
                 for rule in agent.safety_rules
@@ -2392,22 +2373,37 @@ class CentralControllerAgent(LlmAgent):
                     projected_dfa_states = candidate.get("safety_dfa_states_before")
                     if not isinstance(projected_dfa_states, dict):
                         projected_dfa_states = deepcopy(live_safety_dfa_states)
-                    result = validate_outline_macro_recovery_safety(
-                        task=deepcopy(validation_input.get("task") or {}),
-                        signature=deepcopy(validation_input.get("signature") or {}),
-                        pre_resources=deepcopy(
-                            validation_input.get("pre_resources") or {}
-                        ),
-                        pre_parts=deepcopy(validation_input.get("pre_parts") or {}),
-                        projected_resources=deepcopy(
-                            validation_input.get("projected_resources") or {}
-                        ),
-                        projected_parts=deepcopy(
-                            validation_input.get("projected_parts") or {}
-                        ),
-                        llm_input=llm_input,
-                        safety_dfa_states_before=deepcopy(projected_dfa_states),
-                    )
+                    if defer_physical_validation:
+                        result = {
+                            "is_safe": False,
+                            "validation_status": "deferred_physical",
+                            "planning_only": True,
+                            "execution_authorized": False,
+                            "findings": [],
+                            "safety_ctx": {
+                                "rule_ids": rule_ids,
+                                "required_validation": "grounded_primitive_composition",
+                            },
+                            "safety_dfa_states_before": deepcopy(live_safety_dfa_states),
+                            "safety_dfa_states_after": deepcopy(live_safety_dfa_states),
+                        }
+                    else:
+                        result = validate_outline_macro_recovery_safety(
+                            task=deepcopy(validation_input.get("task") or {}),
+                            signature=deepcopy(validation_input.get("signature") or {}),
+                            pre_resources=deepcopy(
+                                validation_input.get("pre_resources") or {}
+                            ),
+                            pre_parts=deepcopy(validation_input.get("pre_parts") or {}),
+                            projected_resources=deepcopy(
+                                validation_input.get("projected_resources") or {}
+                            ),
+                            projected_parts=deepcopy(
+                                validation_input.get("projected_parts") or {}
+                            ),
+                            llm_input=llm_input,
+                            safety_dfa_states_before=deepcopy(projected_dfa_states),
+                        )
                 except Exception as exc:
                     agent.logger.exception(
                         "[CCA] Recovery outline safety validation failed for candidate=%d.",
@@ -2438,6 +2434,9 @@ class CentralControllerAgent(LlmAgent):
                         "candidate_index": candidate_index,
                         "event_id": str(candidate.get("event_id") or "").strip(),
                         "is_safe": bool(result.get("is_safe") is True),
+                        "validation_status": result.get("validation_status", "evaluated"),
+                        "planning_only": bool(result.get("planning_only")),
+                        "execution_authorized": False,
                         "findings": findings,
                         "active_rule_identifiers": deepcopy(rule_ids),
                         "safety_context": deepcopy(result.get("safety_ctx") or {}),
@@ -2494,6 +2493,12 @@ class CentralControllerAgent(LlmAgent):
                         and str(row.get("event_id") or "").strip()
                     }
                 ),
+                "planning_expandable_event_ids": sorted(
+                    str(row.get("event_id") or "") for row in results
+                    if row.get("validation_status") == "deferred_physical"
+                    and row.get("planning_only") is True
+                    and row.get("event_id")
+                ),
                 "active_rule_identifiers": deepcopy(rule_ids),
                 "safety_rule_fingerprint": safety_rule_fingerprint,
                 "live_safety_dfa_states": deepcopy(live_safety_dfa_states),
@@ -2537,7 +2542,7 @@ class CentralControllerAgent(LlmAgent):
                         raise ValueError("predefined_safety_not_ready")
                     result = predefined_scope(agent, recovery_safety_scope_id)
                 else:
-                    result = await generate_recovery_safety_bundle(agent, payload)
+                    raise ValueError("Recovery requires the context-free predefined safety catalog; recompile required")
             except Exception as exc:
                 agent.logger.exception(
                     "[CCA] Recovery safety generation failed for scope=%s.",
@@ -2554,9 +2559,6 @@ class CentralControllerAgent(LlmAgent):
                     "rule_ids": [],
                     "failure_reason": str(exc),
                 }
-
-            if recovery_safety_scope_id and not predefined_required(agent):
-                agent._register_recovery_safety_scope_result(result)
 
             if not product_jid:
                 return
@@ -2584,6 +2586,11 @@ class CentralControllerAgent(LlmAgent):
                 return
 
             if await asyncio.to_thread(initialize_predefined_safety, agent):
+                if agent.safety_monitor is not None and not agent.allow_mock_recovery_execution:
+                    for resource in agent.resource_agents:
+                        runtime = getattr(resource, "environment_runtime", None)
+                        if runtime is not None:
+                            agent._environment_admission(runtime)
                 return
 
             # Bundle fast-path: load precomputed structured safety + DFA artifacts.

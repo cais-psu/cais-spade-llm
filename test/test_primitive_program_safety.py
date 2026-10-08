@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from ppr_ap_migration import migrate_ap_key, migrate_ppr_fixture
+
 from cais_spade_llm.agents.central_controller import primitive_program_safety
 from cais_spade_llm.agents.central_controller.primitive_program_safety import (
     validate_primitive_program_safety,
@@ -575,7 +577,7 @@ def test_inconsistent_ap_definitions_do_not_silently_select_other_semantics(
     if corruption == "document":
         definitions = []
     elif corruption == "version":
-        definitions["version"] = 2
+        definitions["version"] = 99
     elif corruption == "specifications":
         definitions["specifications"] = {}
     elif corruption == "specification":
@@ -782,7 +784,7 @@ _REVIEWED_FIXTURE = (
 
 
 def _reviewed_case() -> dict:
-    return json.loads((_REVIEWED_FIXTURE / "safety_evidence.json").read_text())["inputs"]
+    return migrate_ppr_fixture(json.loads((_REVIEWED_FIXTURE / "safety_evidence.json").read_text())["inputs"])
 
 
 def _reviewed_check(case: dict, **kwargs) -> dict:
@@ -1341,7 +1343,7 @@ def test_reviewed_compilation_failure_never_omits_a_rule(monkeypatch, returncode
 
 
 def _grounded_case() -> dict:
-    return json.loads((_REVIEWED_FIXTURE / "automatic_grounding_evidence.json").read_text())["inputs"]
+    return migrate_ppr_fixture(json.loads((_REVIEWED_FIXTURE / "automatic_grounding_evidence.json").read_text())["inputs"])
 
 
 def _grounded_check(case: dict, **kwargs) -> dict:
@@ -1381,7 +1383,7 @@ def _gear_precedence_case(*, completion_time: float | None = None) -> dict:
     case["geometry"]["parts"]["gear_small"] = {
         "frame": "world", "footprint": [[-.01, .01]] * 3, "target": target,
     }
-    case["catalog"] = {"version": 1, "specifications": [{
+    case["catalog"] = {"version": 2, "specifications": [{
         "id": "gear_small_before_KET4_Square_4mm",
         "requirement": "gear_small assembly completes before KET4_Square_4mm entry.",
         "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
@@ -1632,6 +1634,9 @@ def _grounded_structured(case: dict, formula: str = "G (ap002 -> F ap008)") -> N
         "updates": [{**identity, "task_id": "synthetic_place_approach", "time": 13.123,
                      "values": {"resource_state": "positioned"}}],
     }
+    migrated = migrate_ppr_fixture(case)
+    case.clear()
+    case.update(migrated)
 
 
 def test_grounded_frozen_scene_derives_all_66_pairs_and_preserves_recovery() -> None:
@@ -1970,7 +1975,7 @@ def test_grounded_malformed_or_impossible_evidence_is_unavailable(mutation) -> N
 
 def _grounded_state_field(case: dict, resource: str, field: str, value: str, observed) -> None:
     descriptor = f"ap_state/any/any/{resource}/{field}={value}/any"
-    case["catalog"] = {"version": 1, "specifications": [{
+    case["catalog"] = {"version": 2, "specifications": [{
         "id": "exact_state_field", "requirement": "The supplied state predicate must remain false.",
         "formula": "G !ap001", "aps": [{"label": "ap001", "full": descriptor,
                                        "meaning": "Exact resource-owned state field equality."}],
@@ -1985,6 +1990,9 @@ def _grounded_state_field(case: dict, resource: str, field: str, value: str, obs
         "initial": [{"resource_id": resource, "process": "any", "product": "any", "context": "any",
                      "values": {field: observed}}], "updates": [],
     }
+    migrated = migrate_ppr_fixture(case)
+    case.clear()
+    case.update(migrated)
 
 
 def test_grounded_boolean_state_cannot_silently_become_false() -> None:
@@ -2043,11 +2051,27 @@ def test_grounded_adjacent_tasks_and_simultaneous_state_updates_are_joint() -> N
 
 
 @pytest.fixture(scope="module")
-def part_slippage_checker():
-    """Load the offline demonstration without invoking its CLI or any executor."""
+def part_slippage_checker(tmp_path_factory):
+    """Replay an explicitly migrated copy while keeping archived evidence intact."""
+    import functools
+    import hashlib
     import runpy
+    import shutil
 
-    return runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/check_part_slippage_safety.py"))
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/check_part_slippage_safety.py"))
+    archived = module["FIXTURES"]
+    directory = tmp_path_factory.mktemp("ppr_part_slippage")
+    for name in ("initial_context.json", "mutex.json", "precedence.json", "safe.json"):
+        shutil.copyfile(archived / name, directory / name)
+    context = json.loads((directory / "initial_context.json").read_text())
+    source = context["sources"]["predefined_safety"]
+    source["sha256"] = hashlib.sha256((module["ROOT"] / source["path"]).read_bytes()).hexdigest()
+    (directory / "initial_context.json").write_text(json.dumps(context))
+    module["load_candidate"] = functools.partial(module["load_candidate"], directory=directory)
+    module["check_candidates"] = functools.partial(module["check_candidates"], directory=directory)
+    module["FIXTURES"] = directory
+    module["ARCHIVED_FIXTURES"] = archived
+    return module
 
 
 @pytest.fixture(scope="module")
@@ -2180,7 +2204,46 @@ def test_mock_part_slippage_report_keeps_supplied_formulas_aps_and_saved_results
         assert compiled["ltlf"] == supplied["formula"]
         assert compiled["aps"] == supplied["aps"]
         assert "digraph" in compiled["dfa_dot"]
-    saved = json.loads((directory / "report.json").read_text())
-    assert saved == part_slippage_report
+    archived = part_slippage_checker["ARCHIVED_FIXTURES"]
+    saved = json.loads((archived / "report.json").read_text())
+    for old, current in zip(saved["cases"], part_slippage_report["cases"], strict=True):
+        for field in ("case_id", "events", "expected", "status", "configured_resources",
+                      "concrete_rule_count", "modeled_final_state", "expectations_met"):
+            assert current[field] == old[field]
+        for identifier, old_rule in old["specifications"].items():
+            assert current["specifications"][identifier]["status"] == old_rule["status"]
+        if old["counterexample"]:
+            for field in ("specification", "time", "ap_values", "active_steps"):
+                assert current["counterexample"][field] == old["counterexample"][field]
     for name, expected in saved["fixture_sha256"].items():
+        assert hashlib.sha256((archived / name).read_bytes()).hexdigest() == expected
+    for name, expected in part_slippage_report["fixture_sha256"].items():
         assert hashlib.sha256((directory / name).read_bytes()).hexdigest() == expected
+
+
+@pytest.mark.parametrize("extra_resource,expected_pairs", [(False, 66), (True, 78)])
+def test_ppr_wildcard_mutex_authoring_expands_every_configured_resource(extra_resource, expected_pairs):
+    from cais_spade_llm.agents.central_controller.ppr_ap import (
+        build_mutex_specification, make_ap_definition,
+    )
+    case = _grounded_case()
+    if extra_resource:
+        _grounded_extra_resource(case)
+    definition = build_mutex_specification(
+        "SAFE_shared_area_mutex", "At most one resource may be in the region.",
+        make_ap_definition("ap_state", "*", "*", "*", "any", {"region": "assembly_board-v1"}),
+    )
+    case["catalog"] = {"version": 2, "specifications": [definition]}
+    case["requirement_scopes"] = [{"specification": "SAFE_shared_area_mutex"}]
+    result = _grounded_check(case, trace_complete=True)
+    assert result["status"] in {"satisfied", "violated"}, result["reason"]
+    assert len(result["bindings"]) == expected_pairs
+    observed = {}
+    for row in result["ap_evidence"]:
+        ap = row["descriptor"]["definition"]
+        assert ap["kind"] == "ap_state"
+        assert ap["state"] == {"symbol": "any", "arguments": {"region": "assembly_board-v1"}}
+        assert not ap["resource"].startswith("$")
+        observed.setdefault(row["rule_id"], set()).add(ap["resource"])
+    assert all(len(pair) == 2 for pair in observed.values())
+    assert len(observed) == expected_pairs

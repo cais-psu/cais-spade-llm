@@ -1,6 +1,47 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
-**Status reviewed on 2026-10-05: paper-aligned RA derivation, CCA outline checks,
+**Status reviewed on 2026-10-08:** nominal and recovery physical admission now
+share `RecoveryCompositionAdmission`, its admission lock, command ledger,
+reservations and physical execution history. `EnvironmentAdmission` retains
+nominal eligibility and joint-completion authority through `commit_prepared`.
+Exact prepared command ownership and authenticated feedback plumbing are
+implemented. The current target is the user's four-step model-based Gazebo
+method: fixed AP definitions, recovery events mapped to known primitives,
+intermediate motion and modeled failure AP evaluation, and local composition with
+relevant nominal operations. Stronger physical guarantees and automatic nominal
+resumption are explicitly outside this implementation. Background Gazebo checks captured 11 controllers
+and all 12 configured resources with both predefined specifications active and
+`diagnostic_cca_bypass=false`. The supplied single-motion path now reaches an
+allowed common composition graph with 67 instantiated rules and a committed
+CCA grant. In `acceptance-11`, the native controller executed the exact authorized
+trajectory and CCA committed authenticated observed completion once. This passes
+the first empty-custody supplied `move_cartesian` gate under explicit models;
+`physical_execution_verified` remains false. Earlier failed feedback and its
+reservation remain recorded without retroactive completion. Both dedicated Gazebo
+launches are stopped. Live occupied-region rejection, ongoing nominal composition,
+modeled failure branches and retained history across successive executions remain
+unfinished. Full `part_slippage` recovery and the four failure scenarios have not
+been established.
+
+**Roadmap maintenance requirement:** after every implementation or verification
+update, synchronize the current status and dependencies in this file and append
+a dated entry containing changes, checks performed, evidence paths, remaining
+blockers and the next acceptance gate. This is the single current roadmap; retain
+historical results as dated evidence rather than treating them as current results.
+
+The accepted implementation grounds the existing CCA path for nominal and
+recovery execution under explicit motion and failure-model assumptions, preserving
+the Gazebo plant and actuator behavior. CCA must still evaluate intermediate motion,
+include relevant nominal work, bind grants to exact prepared commands, and retain
+observed monitor history. Missing model inputs remain `NEEDS_CONTEXT`. Model-based
+admission does not assert proven bounds on every physical deviation, contact or
+stopping motion. Use background Gazebo on school WSL. Actual recovery-event
+generation for the four failure scenarios follows validation of this CCA path;
+automatic nominal resumption and full physical guarantees are later milestones.
+No new Python modules are required.
+
+**Historical status reviewed on 2026-10-05 (superseded where stated above):
+paper-aligned RA derivation, CCA outline checks,
 and diagnostic evidence are implemented; local parallel composition is implemented
 for nominal execution through `EnvironmentRuntime`. The new offline slice implements
 reusable reviewed LTLf checking over primitive observations, automatic grounding
@@ -54,9 +95,11 @@ additional-resource providers exercise the common path. The first supplied candi
 use the existing UR5e controllers; configured fixed equipment and stationary KMR
 now expose stamped physics observations through registered owners. Continuous
 bounds preserve prepared joint interpolation and do not infer straight TCP paths.
-Live preparation acceptance remains the next dependency before guarded execution:
+The earlier live preparation attempts were blocked before guarded execution:
 observed link motion, missing controller idle records and incomplete part geometry
-blocked the dedicated session; a later retry also timed out reading the service. Missing geometry, custody evidence, stationary
+blocked those sessions; a later retry also timed out reading the service. Those
+single-motion blockers are superseded by the 2026-10-08 model-based acceptance
+recorded above. Missing geometry, custody evidence, stationary
 coverage, or supported motion interpolation remains `NEEDS_CONTEXT`. It cannot
 install an execution proof, grant permission, or advance either monitor history.
 The later part_slippage captures obtain the board envelope from its explicitly
@@ -65,8 +108,9 @@ holding, active/pending goals, controller incarnation and command revision. A
 dedicated launch with navigation disabled returned all 11 controller observations
 covering the 17 configured action endpoints, alongside the complete physics
 snapshot. This establishes current idle evidence, not future stationary coverage.
-Checkpoint freshness, execution-evidence providers and prepared native custody
-execution remain open. Pure continuous owner models now support explicit grasp,
+Fresh checkpoint validation and owner model evidence are exercised by the first
+supplied-motion acceptance; prepared native custody execution remains open.
+Pure continuous owner models now support explicit grasp,
 carried-part geometry and release effects in synthetic checking; the live controller
 does not yet supply or execute that complete contract.
 
@@ -107,12 +151,12 @@ than a new paper-level validation contribution.
 | Nominal Gazebo execution | Retained 11-part run with 195 matching transitions; machining uses simulated processing and gears start preprinted. | Establish a fresh baseline with active rules and CCA bypass disabled before recovery experiments. |
 | Feasibility and DFA validation | Union of all successor-support primitives; witnesses for every distinct primitive; shared strict DFA transitions, prefix continuation checks, and detailed findings. | Extend physical witnesses and resource contracts to all four larger-setup scenarios; selector correction remains a separate work item. |
 | Recovery safety generation | Legacy offline `receiving_region_entry` and `shared_area_mutex` use fixed DFAs and 1D observations. Automatic offline grounding now derives the complete population from `build_environment_models(scene)`: 12 resources and 66 mutex pairs, without participant lists or exclusions. Reviewed scopes and explicit physical/task/state evidence preserve AP meanings. Predefined mode compiles the supplied definitions unchanged and uses them throughout CCA; legacy natural-language mode retains LLM rule/event selection. | 2: resolve the legacy counterexample; validate reviewed hazard coverage and trusted evidence for live admission. |
-| CCA composition | Local parallel composition is implemented for nominal `EnvironmentRuntime` execution, including dependency closure, joint completion analysis, caching, snapshot validation, and atomic CCA admission. A separate offline path composes generated recovery events with fixed running work and reviewed primitive observations using finite supplied start alternatives. The `validated` PA → RA → CCA route now registers the sequence and gates each requested start against the retained composition and observed history. Global plan FSA and active-window runtime paths remain. | 3: complete trusted live preparation/observation contracts, actual controllability, the branching clock for `X`, and valid nominal resumption. |
+| CCA composition | As of 2026-10-08, `RecoveryCompositionAdmission` shares nominal/recovery physical admission, command authorization, reservations and history; `EnvironmentAdmission.commit_prepared` retains nominal commitment. Local parallel composition is implemented for nominal `EnvironmentRuntime` execution, including dependency closure, joint completion analysis, caching, snapshot validation, and atomic CCA admission. A separate offline path composes generated recovery events with fixed running work and reviewed primitive observations using finite supplied start alternatives. The `validated` PA → RA → CCA route now registers the sequence and gates each requested start against the retained composition and observed history. Global plan FSA and active-window runtime paths remain. The first supplied empty-custody `move_cartesian` now passed live common composition, exact authorization, execution and one observed completion with both selected specifications active and bypass disabled. | 3: validate occupied-region rejection in Gazebo, then connect relevant moving nominal work, remaining recovery events, modeled failure AP observations and retained continuous history across live programs. Full physical guarantees and automatic nominal resumption are later milestones. `X` remains unsupported. |
 | KMR recovery preparation | The synthetic `storage_interruption` fixture has four events and 22 primitives: stage `KET8_Square_8mm`, recover `KET4_Square_4mm`, then reacquire `KET8_Square_8mm`. Companions supply complete 12-resource evidence and two explicit timing alternatives with already-running `ur5e-3` withdrawal. Original fixture JSONs are retained. | Establish physical feasibility and later pending M1 delivery separately; the offline endpoint restores the Storage checkpoint. |
 | Mock part_slippage safety experiment | Three supplied plans each contain seven newly identified events and 19 modeled primitives. The unchanged predefined mutex and strict precedence produce the expected separate violations and a complete safe trace. All 12 configured resources and 66 mutex pairs are included; event renaming preserves physical AP values. Separate Gazebo companions retain these identifiers; the combined 20× exporter preserves distinct trial evidence. | Complete native preparation, staged checkpoints and observed CCA-granted execution before publishing one video of the three trials with both specifications active. No live violation or successful recovery has been established. Actual LLM generation remains a separate evaluation. |
 | Diagnostic UI | Reusable `scenario_runner`, frozen dependencies, explicit live/replay modes, immutable per-attempt capture, RA/CCA evidence, and input inspection. | Reviewed fixtures/snapshots and resource adapters for the four larger-setup failures; deterministic `safety` mode depends on milestone 2. |
 | Physical failure scenarios | Simulation failure injection support is implemented; the [2026-10-02 validation notes](../../docs/conveyor_breakdown.md#validation-on-2026-10-02) record blocked checkpoint attempts. | 5: establish checkpoint acceptance with CCA enabled, then recovery execution, observation, and resumption. |
-| Resource-owned preparation | Recovery-page Prepare and check uses common owner hooks and a registered entity reader. `scene.resource_models` appends trusted declarations and preserves existing owner identities; native programs stay in `resource_programs.resources`. Pure models provide supported physical effects independently of AP meanings. A synthetic additional resource produces 78 mutex pairs; equipment and seven-joint mocks use the same checking path. Existing UR5e `move_cartesian` planning remains in its controller. The read-only Gazebo service and configured owner readers capture the complete population; continuous polynomial/FK bounds feed the same composition path. Static constituent geometry resolves the empty board carrier envelope. The opt-in controller query establishes current idle ownership; synthetic continuous custody effects and explicit joint-error envelopes extend detached checking. | Complete safe and conflicting supplied-motion Gazebo checks. Stable future coverage and execution-evidence providers remain unresolved. Native grasp/release preparation, observed carried-part transforms, exact prepared execution and validated feedback are needed for the three part_slippage trials. Registration and an idle observation alone supply no execution capability. |
+| Resource-owned preparation | Recovery-page Prepare and check uses common owner hooks and a registered entity reader. `scene.resource_models` appends trusted declarations and preserves existing owner identities; native programs stay in `resource_programs.resources`. Pure models provide supported physical effects independently of AP meanings. A synthetic additional resource produces 78 mutex pairs; equipment and seven-joint mocks use the same checking path. Existing UR5e `move_cartesian` planning remains in its controller. The read-only Gazebo service and configured owner readers capture the complete population; continuous polynomial/FK bounds feed the same composition path. Static constituent geometry resolves the empty board carrier envelope. The opt-in controller query establishes current idle ownership; synthetic continuous custody effects and explicit joint-error envelopes extend detached checking. | Exact prepared command ownership and authenticated feedback passed the first supplied live motion. Physical tracking, future stationary containment and stopping guarantees remain unavailable and outside this scope; the accepted path uses explicit models. Complete conflicting supplied-motion acceptance, then native grasp/release, observed carried-part transforms and required KMR/machine/Conveyor/Buffer effects. Registration and idle observations alone supply no physical execution guarantee. |
 | Paper evaluation | Protocol specified here; no new trials collected by this change. | Experimental design after the relevant acceptance gates. |
 
 The 2026-09-29 baseline settings selected `safety_none.txt`, `diagnostic_cca_bypass=true`,
@@ -575,8 +619,10 @@ to the same composition search, and fingerprints their descriptors. Executable
 callbacks cannot arrive in serialized context; changed contracts invalidate a
 registered proof. `RobotAgent` can delegate a registered macro to the common
 grant-consuming executor only when its owner and initialized controller both
-declare prepared execution support. The live controller currently lacks that
-support, so this connection still blocks live dispatch. Continuous observed-history
+declare prepared execution support. As of 2026-10-08, the native controller and
+owner adapters implement exact prepared command ownership and dispatch plumbing,
+but do not provide justified tracking, stationary containment or stopping bounds;
+physical execution coverage therefore still blocks live dispatch. Continuous observed-history
 replay across recovery boundaries remains required; exact synthetic graph states
 cannot stand in for measured Gazebo states.
 Individual permission messages cannot authorize an atomic multi-resource start
@@ -1311,3 +1357,210 @@ local links and `git diff --check` passed. The recorder module retains pre-exist
 lint findings outside the new exporter. All **26 headings** and **77 protected
 files** are preserved. The unchanged specifications, approvals, fixtures, runtime
 authorities, legacy counterexample, `X` restriction and budget defaults remain.
+
+
+**2026-10-08 consolidation and grounded CCA implementation:** the
+[retained consolidation verification](../../cais_spade_llm/monitor/recovery_gazebo_runs/cca-consolidation-20261008T033602Z/verification.json)
+records the shared coordinator, removal of five superseded production `live_*.py`
+modules, exact nominal grant/command fixes and checks performed. Test groups in
+that report overlap and must not be summed. Three pre-existing UI fixture failures
+remain explicitly reported. Its background Gazebo run captured 11 controllers and
+12 resources with `SAFE_shared_area_mutex` and
+`SAFE_gear_small_before_KET4_Square_4mm` active and bypass disabled. Observed UR
+link motion prevented a complete idle checkpoint; no command or physical-history
+entry was committed. Shutdown required forced termination, recorded separately.
+
+Implementation now follows the accepted grounding sequence above. The first
+blocking gate is a justified native tracking, stationary-containment and stopping
+contract under unchanged Gazebo behavior. Existing position commands, sampled
+stationarity and observed error maxima do not establish it. Record precise missing
+evidence and retain `NEEDS_CONTEXT` wherever a guarantee cannot be established.
+Continuous history and a recoverable hold are supporting implementation work;
+neither is successful recovery or permission to resume. Full acceptance requires
+actual grants, unchanged prepared execution, authenticated effects and valid nominal
+continuation with both selected specifications active. Recovery-event generation
+for the four failure scenarios remains downstream of that gate.
+
+**2026-10-08 scope clarification (supersedes the full physical-guarantee gate
+above):** the user confirmed that the required implementation is Safety Monitor
+Construction and Validation (Modified), Steps 1–4, working in Gazebo under explicit
+motion and failure models. Proving universal physical tracking/contact/stopping
+bounds and implementing automatic nominal resumption are not prerequisites for
+this scope. Keep model-based CCA decisions and observed execution distinct from
+physical guarantees; never mark `physical_execution_verified` true for modeled
+evidence. Retain exact command authorization, selected specifications and
+`diagnostic_cca_bypass=false`. Optional runtime hold changes from the broader plan
+are being removed; continuous-history replay and evidence-identity checks remain
+relevant. The next acceptance gate is an actual CCA-checked modeled motion in
+Gazebo, plus a rejected modeled conflict and retained observations.
+
+**2026-10-08 model-based integration update:** continuous checkpoint version 2
+now replays possible DFA states across contiguous modeled programs while retaining
+the scalar checkpoint contract. Prepared-motion admission now requires an allowed
+immediate start from the existing common composition engine; missing graphs,
+wrong events and unfulfilled temporal continuations cannot authorize dispatch.
+The optional runtime hold changes were removed after the scope clarification.
+Owner model preparation separates declared interpolation/stationary assumptions
+from `physical_execution_verified`, which remains false. Native provenance checks
+remain available as diagnostics without making perfect sampled stationarity a
+prerequisite for the model-based method.
+
+The [current background Gazebo evidence](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-2/result.json)
+captures all 12 resources without an unresolved modeled checkpoint. It has both
+selected specifications active and bypass disabled. Native preparation then rejected
+the first trajectory timestamp, 1 ns rather than 0 ns. The raw rejected points are
+retained in the owner preparation; no command was authorized or sent. The next
+gate is complete native preparation and common-composition evaluation before any
+execution. These results do not establish successful recovery.
+
+
+**2026-10-08 native preparation and evidence update:** owner preparation now
+retains the raw native trajectory and explicitly inserts its observed initial hold
+at time zero for the specific 1 ns, identical-position, zero-derivative initial
+waypoint. Every native waypoint and the final duration remain unchanged; CCA and
+execution use the same resulting prepared trajectory. Other invalid start times
+remain unsupported. The resource-preparation suite passed 104 tests. Fresh
+admission validation now binds controller identity and command revisions as well
+as the declared motion model; its 70 admission tests passed before the subsequent
+stationary-observation refinement.
+
+The next [Gazebo attempt](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-3.log)
+reached report writing but could not serialize a native unsigned numeric value.
+Its CCA decision is unavailable and cannot count as a completed acceptance run.
+[Read-only reconciliation](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-3/post-failure-observations.json)
+found unchanged controller instances and command revisions, with no active or
+pending goals. The harness now preserves native integral values as JSON integers;
+11 focused harness and Boolean-mode tests passed. Stronger physical guarantees
+remain excluded. The next gate is a fully retained common-composition decision,
+exact grant, dispatched trajectory and fresh observed completion under the
+explicit models.
+
+
+**2026-10-08 modeled admission and validation update:** fresh observed geometry
+is re-grounded through every selected AP and the complete composition calculation;
+changed measurements can proceed only when the AP trace, temporal boundaries and
+winning immediate start agree. Controller incarnation, command revision, custody
+and model configuration remain bound. Sampled `observed_stationary` is retained
+as evidence but is not a physical-guarantee prerequisite in explicit model mode.
+Source `resource_jid` remains optional as in the existing primitive schema; when
+provided it must agree, and prepared owner bindings are checked independently.
+Post-execution capture now refreshes Gazebo observations and uses the retained
+per-joint model allowance when checking the final joint state.
+
+The [fifth live attempt](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-5/result.json)
+passed owner model preparation with `model_execution_verified=true` and
+`physical_execution_verified=false`. It exposed missing configured assembly-target
+metadata in measured part geometry before the common graph could run; no command
+was sent. The geometry adapter now preserves the exact `assembly_target_map`
+symbol alongside measured envelopes, without asserting an assembly completion.
+The next gate remains a fully recorded permitted live motion and observed outcome.
+
+Current checks include 81 admission, 60 live-safety/nominal-adapter, 45 continuous
+motion, 140 KMR and 23 nominal-admission tests passing. All 90 preparation cases
+passed across the core run and the separately run UI case; the sandbox UI stall
+was resolved by running that case outside the restricted sandbox. The combined
+resource/simulation-timing run had 367 passes (including all 115 resource tests)
+and six failures in existing collision-policy expectations and a missing archived
+recording fixture. The broader coordinator run exceeded its 120-second limit;
+its partial progress is not a passing suite. Poetry, compilation and UI CLI help
+passed. Repository-wide diff checking reports an unrelated trailing blank line in
+`test/test_environment_capabilities.py`; touched-file checks are clean. Logs remain
+in the [run checks directory](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/checks).
+
+
+**2026-10-08 first live-grounded common composition:** the
+[sixth background Gazebo attempt](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-6/result.json)
+returned an allowed common composition for the supplied first `move_cartesian`.
+The graph includes all 12 configured resources, both selected specifications as
+67 instantiated rules, an allowed start and a completion witness. This is a
+prediction using live observations and native preparation, not observed execution.
+Fresh admission then rejected a missing modeled-start binding in the installed
+nominal adapter, which overrides the controller preparation method. No grant or
+command was emitted. The next gate is preserving the same model binding through
+that existing shared adapter and observing the authorized command's outcome.
+
+All 93 current preparation tests passed after preserving assembly-target metadata.
+Final retained replay tests passed 22 cases, and source-provenance tests passed two.
+The implementation uses supplied recovery motion to test CCA integration; no new
+LLM recovery generation has occurred. The single-motion harness assumes other
+resources remain in commanded holds. Incorporation of moving nominal work and
+modeled failure branches is still a remaining implementation milestone.
+
+
+**2026-10-08 granted native motion and retained failure evidence:** fixed-link
+validation now uses literal native containing links and exact URDF fixed ancestry.
+Captured, fresh and modeled root-fixed groups must have identical definite
+occupancy for every bound region under the declared stationary model. Moving-body
+enclosures remain checked separately, so arm occupancy cannot hide a changed base
+AP. This adds no distance tolerance or physical guarantee. Observed initial joints
+may differ from the planned initial joints only within named, declared model
+bounds; their values and the prepared trajectory are not rewritten. The three
+owner/adapter/preparation suites passed 239 tests; continuous motion passed 54,
+continuous replay passed 17, and admission passed 81 after these changes.
+
+The [ninth live attempt](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-9/result.json)
+received a committed CCA grant with both specifications active and bypass disabled.
+Its native goal identity is retained. The observation executor then failed because
+installed ROS Humble calls subscription callbacks with one argument, while the
+reader required message metadata as a second argument. This caused a read-only
+service timeout and prevented observed completion from being committed.
+[Direct read-only reconciliation](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-9/post-run-direct-observations.json)
+found the same controller incarnation, no active/pending goal, and final joints
+within 2.93e-5 rad of the exact prepared endpoint. That observation is not a
+retroactive CCA completion. The failed command and reservation remain recorded.
+
+The callback now accepts the installed one-argument interface. Missing publisher
+metadata remains unauthenticated for the legacy topic-only idle path; configured
+native controller services remain the owner evidence source. Thirteen focused
+callback/owner-query tests passed. A fresh identical Gazebo world will test the
+complete corrected path without migrating the old grant or erasing its evidence.
+Successful exactly-once completion and live occupied-region rejection remain the
+next acceptance gates; moving nominal work, modeled failure branches and the four
+full recovery scenarios remain unfinished.
+
+
+**2026-10-08 first supplied live motion completed:**
+[acceptance-11](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-11/result.json)
+passed the first empty-custody `move_cartesian` gate in a fresh background Gazebo
+world on school WSL. Both `SAFE_shared_area_mutex` and
+`SAFE_gear_small_before_KET4_Square_4mm` were active, with
+`diagnostic_cca_bypass=false`. The common composition allowed the supplied event;
+CCA committed a grant; the prepared, authorized and executed trajectories are
+identical; authenticated observed completion was committed once, advancing
+physical history to revision 1. The
+[verification summary](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/acceptance-11/verification-summary.json)
+retains the exact command and native goal identities. This is a manually supplied
+engineering candidate, not an LLM-generated recovery or completed `part_slippage`
+scenario. `physical_execution_verified=false` remains explicit.
+
+AP occupancy comes from the resource geometry along the prepared trajectory,
+not the `move_cartesian` symbol or only its TCP target. In this run the configured
+`assembly_board-v1` region has world bounds x/y [-0.25, 0.25] m and z [1.05, 1.4] m.
+The final observed TCP is approximately (-0.100, -0.080, 1.500) m, while an observed
+`ur5e-4` gripper finger envelope has x [-0.079, -0.048], y [-0.144, -0.113], and
+z [1.299, 1.357] m, inside that region. Intermediate AP possibilities were evaluated
+from continuous modeled geometry before dispatch; final geometry is separately
+retained as observation evidence. These envelopes do not assert universal contact
+or tracking guarantees.
+
+Final checks include 239 owner/nominal-adapter/preparation tests, the updated full
+95-case preparation suite after the callback correction, 81 admission tests,
+54 continuous-motion tests, 17 continuous-checkpoint tests, 22 replay tests,
+60 live-safety/nominal-adapter tests, 140 KMR tests and 23 nominal-admission tests.
+Groups overlap and must not be summed. Poetry, compilation, ROS-free imports,
+UI/harness CLI help, `make bootstrap-gazebo` (16 packages), and scoped diff checking
+passed. The six unrelated simulation-timing failures and timed-out broader
+coordinator run described above remain limitations; the global diff check still
+reports the unrelated trailing blank line. No new Python modules were added.
+The [aggregate verification record](../../cais_spade_llm/monitor/recovery_gazebo_runs/grounded-cca-20261008T040700Z/verification.json)
+indexes checks, all attempts and cleanup. Both owned Gazebo launches and their
+descendants stopped; the earlier failed grant/history was not migrated or rewritten.
+
+The next acceptance gate is a candidate rejected before dispatch because observed
+geometry places another resource in the same region. Subsequent work connects
+moving nominal operations, remaining recovery events, supported modeled failure
+outcomes and authenticated continuous history across successive live programs.
+Grasp/release and required KMR/machine/Conveyor/Buffer effects remain unfinished.
+Actual recovery-event generation for the four scenarios remains downstream of
+those model-based CCA gates. Automatic nominal resumption and universal physical
+bounds remain outside this implementation scope.

@@ -22,14 +22,19 @@ from typing import Any
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
 from cais_spade_llm.resources.primitive_observations import model_primitive_observations
 
+from cais_spade_llm.agents.central_controller.ppr_ap import (
+    ap_record, bind_ap_record, canonical_ap_key, make_ap_definition,
+    parse_ap_record, physical_ap_binding, physical_ap_kind, physical_binding_fields,
+)
+
 _CLOCK_VERSION = "primitive_observations_joint_trace_v1"
-_FIRST = "ap_state/physical_observation/shared_area_first_resource"
-_SECOND = "ap_state/physical_observation/shared_area_second_resource"
-_ENTRY = "ap_event/physical_observation/part_region_entry"
-_COMPLETED = "ap_state/processCompleted/process_result_completed"
-_TARGET_COMPLETED = "ap_state/processCompleted/process_target_completed"
-_RECEIVING_ENTRY = "ap_event/physical_observation/receiving_region_entry"
-_CONTAINS_OTHER = "ap_state/physical_observation/receiving_resource_contains_other_part"
+_FIRST = canonical_ap_key(make_ap_definition("ap_state", "*", "*", "$first_resource", "any", {"region": "$region"}))
+_SECOND = canonical_ap_key(make_ap_definition("ap_state", "*", "*", "$second_resource", "any", {"region": "$region"}))
+_ENTRY = canonical_ap_key(make_ap_definition("ap_event", "$part", "*", "*", "part_region_entry", {"region": "$region"}))
+_COMPLETED = canonical_ap_key(make_ap_definition("ap_state", "$part", "$process", "*", "processCompleted", {"result": "$result"}))
+_TARGET_COMPLETED = canonical_ap_key(make_ap_definition("ap_state", "$part", "$process", "*", "processCompleted", {"target": "$target"}))
+_RECEIVING_ENTRY = canonical_ap_key(make_ap_definition("ap_event", "$part", "*", "$resource", "receiving_region_entry", {"region": "$region"}))
+_CONTAINS_OTHER = canonical_ap_key(make_ap_definition("ap_state", "$part", "*", "$receiving_resource", "contains_other_part"))
 _MEANINGS = {
     _FIRST: "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
     _SECOND: "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
@@ -39,15 +44,20 @@ _MEANINGS = {
     _RECEIVING_ENTRY: "The bound resource's incoming tool/part begins occupying the bound receiving region while carrying the bound part. Boundary contact counts as occupancy; initial occupancy does not create an entry.",
     _CONTAINS_OTHER: "The complete modeled inventory of the bound receiving_resource contains a part other than the bound incoming part.",
 }
-_AP_BINDING_FIELDS = {
-    _FIRST: {"region", "resources"},
-    _SECOND: {"region", "resources"},
-    _ENTRY: {"region", "part"},
-    _COMPLETED: {"part", "process", "result"},
-    _TARGET_COMPLETED: {"part", "process", "target"},
-    _RECEIVING_ENTRY: {"region", "resource", "part"},
-    _CONTAINS_OTHER: {"receiving_resource", "part"},
+_PHYSICAL_MEANINGS = {
+    physical_ap_kind(full): meaning for full, meaning in _MEANINGS.items()
 }
+
+
+def _ground_rule_aps(rule: dict[str, Any]) -> dict[str, Any]:
+    """Replace template references with exact PPR identities for one rule."""
+    rule = deepcopy(rule)
+    rule["aps"] = [
+        bind_ap_record(ap, _ap_binding(rule, ap)) if physical_ap_kind(ap) else deepcopy(ap)
+        for ap in rule["aps"]
+    ]
+    return rule
+
 
 
 def _object(value: Any, name: str) -> dict[str, Any]:
@@ -155,9 +165,9 @@ def _catalog(catalog: Any, *, structured_groundings: bool = False) -> dict[str, 
     if (
         set(document) != {"version", "specifications"}
         or type(document["version"]) is not int
-        or document["version"] != 1
+        or document["version"] != 2
     ):
-        raise ValueError("Unsupported reviewed catalog version or fields")
+        raise ValueError("Unsupported reviewed catalog version or fields; recompile required")
     definitions = {}
     for raw in _list(document["specifications"], "catalog.specifications"):
         row = _object(raw, "specification")
@@ -172,23 +182,25 @@ def _catalog(catalog: Any, *, structured_groundings: bool = False) -> dict[str, 
         fulls = set()
         for ap in _list(row["aps"], "specification.aps"):
             ap = _object(ap, "AP")
-            if set(ap) != {"label", "full", "meaning"}:
+            if set(ap) not in ({"label", "full", "meaning"}, {"label", "full", "definition", "meaning"}):
                 raise ValueError("APs require exact label, full, and meaning fields")
             label = _symbol(ap["label"], "AP.label")
             full = _symbol(ap["full"], "AP.full")
             if re.fullmatch(r"ap[0-9]+", label) is None or label in labels or full in fulls:
                 raise ValueError("Unsupported or duplicate reviewed AP identifier")
-            if full in _MEANINGS:
-                if ap["meaning"] != _MEANINGS[full]:
+            definition = parse_ap_record(ap)
+            kind = physical_ap_kind(definition)
+            if kind is not None:
+                expected = _MEANINGS.get(full, _PHYSICAL_MEANINGS[kind])
+                if kind == "resource_region" and definition["resource"] in {"$first_resource", "$second_resource"}:
+                    expected = _MEANINGS[_FIRST if definition["resource"] == "$first_resource" else _SECOND]
+                if ap["meaning"] != expected:
                     raise ValueError("Unsupported predicate or changed fixed AP meaning")
-            elif (
-                not structured_groundings
-                or len(full.split("/")) != 6
-                or full.split("/")[0] not in {"ap_event", "ap_state"}
-            ):
-                raise ValueError("Unsupported predicate or changed fixed AP meaning")
+            elif not structured_groundings:
+                raise ValueError("Unsupported typed predicate: complete structured grounding is required")
             else:
                 _symbol(ap["meaning"], "structured AP meaning")
+            ap["definition"] = definition
             labels.add(label)
             fulls.add(full)
         if not labels:
@@ -301,7 +313,7 @@ def _rules(  # noqa: C901
         if specification not in definitions:
             raise ValueError("Applicable requirement is absent from the reviewed catalog")
         definition = definitions[specification]
-        required = set().union(*(_AP_BINDING_FIELDS[ap["full"]] for ap in definition["aps"]))
+        required = set().union(*(physical_binding_fields(ap) for ap in definition["aps"]))
         physical_bindings = _reviewed_physical_bindings(definition, raw, geometry, scope)
         if physical_bindings is not None:
             required = {"physical_ap_bindings"}
@@ -341,13 +353,13 @@ def _rules(  # noqa: C901
             if identifier in identifiers:
                 raise ValueError("Duplicate applicable rule instance")
             identifiers.add(identifier)
-            rules.append({**deepcopy(definition), "rule_id": identifier, "binding": binding})
+            rules.append(_ground_rule_aps({**deepcopy(definition), "rule_id": identifier, "binding": binding}))
     if used != set(definitions):
         raise ValueError("Reviewed catalog contains an applicable requirement without bindings")
     required_pairs = {
         (identifier, region)
         for identifier, definition in definitions.items()
-        if any("resources" in _AP_BINDING_FIELDS[ap["full"]] for ap in definition["aps"])
+        if any("resources" in physical_binding_fields(ap) for ap in definition["aps"])
         for region in regions
     }
     if expansions != required_pairs:
@@ -366,11 +378,11 @@ def _boolean(value: Any) -> bool:
 def _physical_bindings(definition: dict[str, Any], raw: Any) -> dict[str, Any]:
     """Validate explicit per-AP physical bindings without selecting participants."""
     bindings = _object(raw, "physical_ap_bindings")
-    physical = {ap["label"]: ap for ap in definition["aps"] if ap["full"] in _MEANINGS}
+    physical = {ap["label"]: ap for ap in definition["aps"] if physical_ap_kind(ap) is not None}
     if not physical or set(bindings) != set(physical):
         raise ValueError("Every physical AP needs exactly one explicit binding")
     for label, ap in physical.items():
-        fields = _AP_BINDING_FIELDS[ap["full"]]
+        fields = physical_binding_fields(ap)
         binding = _object(bindings[label], "physical AP binding")
         if "resources" in fields or set(binding) != fields:
             raise ValueError("Physical AP bindings require exact fields and no caller-selected pairs")
@@ -381,7 +393,8 @@ def _physical_bindings(definition: dict[str, Any], raw: Any) -> dict[str, Any]:
 
 def _ap_binding(rule: dict, ap: dict) -> dict:
     bindings = rule.get("physical_ap_bindings", rule["binding"].get("physical_ap_bindings", {}))
-    return bindings.get(ap["label"], rule["binding"])
+    binding = bindings.get(ap["label"], rule["binding"])
+    return physical_ap_binding(ap, binding) if physical_ap_kind(ap) else binding
 
 
 def _complete_target_ledger(part: dict[str, Any]) -> list[dict[str, Any]]:
@@ -406,11 +419,11 @@ def _valuation(
     values = {}
     for ap in rule["aps"]:
         binding = _ap_binding(rule, ap)
-        full = ap["full"]
-        if full in {_FIRST, _SECOND}:
-            resource = binding["resources"][0 if full == _FIRST else 1]
+        kind = physical_ap_kind(ap)
+        if kind == "resource_region":
+            resource = binding["resource"]
             value = _boolean(observation["region_occupancy"][binding["region"]][resource])
-        elif full == _ENTRY:
+        elif kind == "part_region_entry":
             inside = _boolean(
                 observation["part_region_occupancy"][binding["region"]][binding["part"]]
             )
@@ -420,10 +433,10 @@ def _valuation(
                 else _boolean(previous["part_region_occupancy"][binding["region"]][binding["part"]])
             )
             value = inside and not before
-        elif full == _TARGET_COMPLETED:
+        elif kind == "process_target_completed":
             ledger = _complete_target_ledger(observation["parts"][binding["part"]])
             value = {"process": binding["process"], "target": binding["target"]} in ledger
-        elif full == _COMPLETED:
+        elif kind == "process_result_completed":
             part = observation["parts"][binding["part"]]
             provenance = _object(part.get("processCompleted_evidence"), "processCompleted_evidence")
             if (
@@ -441,7 +454,7 @@ def _valuation(
                 _symbol(record.get("process"), "processCompleted.process")
                 _symbol(record.get("result"), "processCompleted.result")
             value = {"process": binding["process"], "result": binding["result"]} in ledger
-        elif full == _RECEIVING_ENTRY:
+        elif kind == "receiving_region_entry":
             inside = _boolean(
                 observation["region_occupancy"][binding["region"]][binding["resource"]]
             )
@@ -452,12 +465,14 @@ def _valuation(
             )
             carried = _symbols(observation["carried_parts"][binding["resource"]], "carried_parts")
             value = inside and not before and binding["part"] in carried
-        else:
+        elif kind == "contains_other_part":
             inventory = _symbols(
                 observation["resources"][binding["receiving_resource"]]["contained_parts"],
                 "contained_parts",
             )
             value = any(part != binding["part"] for part in inventory)
+        else:
+            raise ValueError("Unsupported physical AP condition")
         values[ap["label"]] = value
     return values
 

@@ -1,6 +1,6 @@
-"""Explicit non-dispatching preparation on the recovery evidence page."""
-
 from __future__ import annotations
+
+"""Explicit non-dispatching preparation on the recovery evidence page."""
 
 import asyncio
 import json
@@ -21,7 +21,7 @@ def render_safety_preparation(bridge) -> None:
                               value='GAZEBO_MOTION_SAFE',label='Supplied mock motion candidate')
 
         async def load_candidate():
-            from cais_spade_llm.recovery_framework.live_safety_preparation import (
+            from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
                 build_supplied_candidate,
             )
             try:

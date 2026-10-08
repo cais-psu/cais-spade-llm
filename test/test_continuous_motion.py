@@ -1,6 +1,6 @@
-"""Continuous interpolation bounds and uncertainty in recovery composition."""
-
 from __future__ import annotations
+
+"""Continuous interpolation bounds and uncertainty in recovery composition."""
 
 import math
 from copy import deepcopy
@@ -147,7 +147,7 @@ def composition_case(*, conflict=False, crossing=False):
         part.update(contained_by=None, stationary_until=1, current_pose=[-3, 0, 0, 0, 0, 0, 1])
     rid = "ur5e-4"
     state = case["snapshot"]["resources"][rid]
-    state.update(current_pose=[0, 0, 0, 0, 0, 0, 1], joint_positions=[0.0])
+    state.update(current_pose=[0, 0, 0, 0, 0, 0, 1], joint_positions=[0.0], joint_names=["slide"])
     if conflict:
         case["snapshot"]["resources"]["ur5e-3"]["current_pose"] = [1, 0, 0, 0, 0, 0, 1]
     source = {
@@ -356,6 +356,24 @@ def test_tracking_bounds_enclose_more_than_the_commanded_endpoint():
     assert occupancy(motion.boxes(0, 1), [[.1,.12], [-.1,.1], [-.1,.1]]) == [False, True]
 
 
+def test_tracking_bounds_prevent_admission_beside_a_stationary_occupied_region():
+    case, models = composition_case(conflict=True)
+    inputs = case["grounding_inputs"]
+    inputs["geometry"]["regions"]["assembly_board-v1"]["bounds"][0] = [1.12, 1.3]
+    inputs["snapshot"]["resources"]["ur5e-3"]["current_pose"][0] = 1.22
+    clear = _analyze(case, models)
+    assert clear["status"] == "allowed", clear
+
+    # This supplied bound tests geometry only; it is not native execution evidence.
+    for program in (inputs["programs"][0], case["event_start_choices"][0]["programs"][0]):
+        continuous = program["step_results"][0]["model_evidence"]["continuous_motion"]
+        continuous["configuration"]["joint_position_error"] = {"slide": .2}
+    bounded = _analyze(case, models)
+    assert bounded["status"] in {"held", "inconclusive"}, bounded
+    assert bounded["completion_witness"] is None
+    assert any(row.get("possible_values") == [False, True] for row in bounded["ap_evidence"])
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -494,3 +512,45 @@ def test_stationary_component_geometry_preserves_the_same_occupancy_meaning():
         for label in ("ap001", "ap002")
     }
     assert all(False in values and True in values for values in by_label.values())
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("inside", "allowed"), ("boundary", "allowed"), ("outside", "inconclusive"),
+    ("missing_bound", "inconclusive"), ("missing_names", "inconclusive"),
+    ("changed_names", "inconclusive"), ("nonfinite", "inconclusive"),
+    ("incomplete", "inconclusive"), ("boolean", "inconclusive"),
+])
+def test_observed_initial_joints_use_only_the_registered_error_bound(change, expected):
+    case, models = composition_case()
+    observed = case["grounding_inputs"]["snapshot"]["resources"]["ur5e-4"]
+    observed["joint_positions"] = [.004]
+    observed["current_pose"][0] = .004
+    for program in (case["grounding_inputs"]["programs"][0], case["event_start_choices"][0]["programs"][0]):
+        config = program["step_results"][0]["model_evidence"]["continuous_motion"]["configuration"]
+        if change != "missing_bound":
+            config["joint_position_error"] = {"slide": .01}
+    if change == "boundary":
+        observed["joint_positions"] = [.01]
+    elif change == "outside":
+        observed["joint_positions"] = [.011]
+    elif change == "missing_names":
+        observed.pop("joint_names")
+    elif change == "changed_names":
+        observed["joint_names"] = ["different"]
+    elif change == "nonfinite":
+        observed["joint_positions"] = [float("inf")]
+    elif change == "incomplete":
+        observed["joint_positions"] = []
+    elif change == "boolean":
+        observed["joint_positions"] = [True]
+    original = deepcopy(case)
+    result = _analyze(case, models)
+    assert result["status"] == expected, result
+    assert case == original
+    trajectory_start = case["grounding_inputs"]["programs"][0]["step_results"][0]["model_evidence"]["continuous_motion"]["joint_trajectory"]["points"][0]["positions"]
+    assert trajectory_start == [0]
+    if expected == "allowed":
+        assert observed["joint_positions"] != trajectory_start
+        assert result["completion_witness"] is not None
+    else:
+        assert result["completion_witness"] is None

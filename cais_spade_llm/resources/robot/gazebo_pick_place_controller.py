@@ -24,6 +24,7 @@ from copy import copy, deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
@@ -35,6 +36,7 @@ from cais_spade_llm.resources.resource_safety_preparation import (
     pose_values,
     trajectory_record,
     validate_joint_trajectory,
+    validate_prepared_start,
 )
 from cais_spade_llm.resources.robot.target_calculations import (
     controlled_link_height,
@@ -3312,10 +3314,20 @@ class GazeboPickPlaceController:
         if self._first_motion_at_unix is None:
             self._first_motion_at_unix = time.time()
 
-    def _send_simulation_joint_trajectory(self, topic: str, trajectory) -> bool:
+    def _send_simulation_joint_trajectory(
+        self, topic: str, trajectory, *, placement_motion=None,
+        joint_position_error: dict[str, float] | None = None,
+    ) -> bool:
         from control_msgs.action import FollowJointTrajectory
 
         self._last_simulation_controller_succeeded = False
+        if joint_position_error is not None:
+            if (not isinstance(joint_position_error, dict)
+                    or set(joint_position_error) != set(trajectory.joint_names)
+                    or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                           for value in joint_position_error.values())):
+                raise ValueError('Prepared endpoint joint_position_error is incomplete or invalid')
+            joint_position_error = dict(joint_position_error)
         if not topic.endswith('/joint_trajectory'):
             raise ValueError(f'No simulation controller action for {topic}')
         endpoint = topic.removesuffix('/joint_trajectory') + '/follow_joint_trajectory'
@@ -3325,16 +3337,50 @@ class GazeboPickPlaceController:
         client = self._simulation_joint_clients[endpoint]
         if not client.wait_for_server(timeout_sec=5.):
             return False
+        if placement_motion is not None:
+            from cais_spade_llm.recovery_framework.placement_motion import _time_observed_lowering
+
+            _time_observed_lowering(self, trajectory, placement_motion)
+        guard = getattr(self, "_physical_dispatch_guard", None)
+        command_id = guard(topic, trajectory) if callable(guard) else None
         goal = self._wait_future(client.send_goal_async(
             FollowJointTrajectory.Goal(trajectory=trajectory)), 10., f'send:{endpoint}')
         if goal is None or not goal.accepted:
             return False
+        accepted = getattr(self, "_physical_dispatch_accepted", None)
+        if command_id is not None and callable(accepted):
+            accepted(command_id, [int(value) for value in goal.goal_id.uuid])
         self._note_motion_dispatch()
         self._simulation_goal = goal
+        step = getattr(self, "_robot_task_step", None)
+        motion_record = {
+            "resource_id": getattr(self, "robot_name", None), "task_id": getattr(self, "_simulation_task_id", None),
+            "run_id": getattr(self, "_simulation_task_run_id", None),
+            "part_name": getattr(self, "_simulation_task_part", None),
+            "function_name": step[0] if step else None, "step_id": step[1] if step else None,
+            "started_at_unix": time.time(),
+            "controller_goal_id": [int(value) for value in goal.goal_id.uuid] if hasattr(goal, "goal_id") else None,
+        }
+        if not hasattr(self, "_simulation_motion_intervals"):
+            self._simulation_motion_intervals = []
+        self._simulation_motion_intervals.append(motion_record)
         try:
             last = trajectory.points[-1].time_from_start
-            result = self._wait_future(goal.get_result_async(),
-                                       last.sec + last.nanosec/1e9 + 5., f'result:{endpoint}')
+            result_future = goal.get_result_async()
+            if placement_motion is not None:
+                from cais_spade_llm.recovery_framework.placement_motion import wait_for_placement_motion
+
+                result = wait_for_placement_motion(
+                    self, goal, result_future, last.sec + last.nanosec / 1e9 + 5., placement_motion)
+            else:
+                result = self._wait_future(result_future,
+                                           last.sec + last.nanosec/1e9 + 5., f'result:{endpoint}')
+            if result is not None:
+                motion_record.update(ended_at_unix=time.time(), terminal_status=result.status)
+            elif placement_motion is not None:
+                interruption = getattr(self, "_simulation_fault_evidence", {}) or {}
+                if interruption.get("controller_goal_id") == motion_record["controller_goal_id"]:
+                    motion_record["terminal_status"] = interruption.get("terminal_status")
             if not (result and result.status == 4 and result.result.error_code == 0):
                 return False
             self._last_simulation_controller_succeeded = True
@@ -3348,10 +3394,10 @@ class GazeboPickPlaceController:
                     value is not None
                     and (
                         self._angular_joint_error(value, targets[name])
-                        if name in self.arm_joint_names
+                        if joint_position_error is None and name in self.arm_joint_names
                         else abs(value - targets[name])
                     )
-                    <= 0.005
+                    <= (0.005 if joint_position_error is None else joint_position_error[name])
                     for name, value in measured.items()
                 ):
                     return True
@@ -3362,7 +3408,7 @@ class GazeboPickPlaceController:
                     if last_measured.get(name) is None
                     else (
                         self._angular_joint_error(last_measured[name], target)
-                        if name in self.arm_joint_names
+                        if joint_position_error is None and name in self.arm_joint_names
                         else abs(last_measured[name] - target)
                     )
                 )
@@ -3375,7 +3421,9 @@ class GazeboPickPlaceController:
             )
             return False
         finally:
-            if not goal.status in (4, 5, 6):
+            motion_record.setdefault("ended_at_unix", time.time())
+            motion_record.setdefault("terminal_status", goal.status)
+            if motion_record["terminal_status"] not in (4, 5, 6):
                 self._cancel_simulation_goal()
             self._simulation_goal = None
 
@@ -8817,6 +8865,29 @@ class GazeboPickPlaceController:
             description,root=configuration['root_link'],reference_link=self.ee_link,
             joint_names=list(self.arm_joint_names),observed_joints=model['joints'],
             root_pose=model['links'][configuration['root_link']]['pose'],interpolation=interpolation)
+        if getattr(observer.provider, 'model_execution', False) is True:
+            from rcl_interfaces.srv import GetParameters
+
+            parameter = 'trajectory_execution.allowed_start_tolerance'
+            client = self._node.create_client(
+                GetParameters, '/move_group/get_parameters', callback_group=self._cb_group)
+            try:
+                if not client.wait_for_service(timeout_sec=2.):
+                    raise ValueError('Modeled execution requires the observed MoveIt allowed_start_tolerance')
+                response = self._wait_future(client.call_async(GetParameters.Request(names=[parameter])),
+                                             timeout_sec=2., label='modeled execution allowed_start_tolerance')
+                if (response is None or len(response.values) != 1 or response.values[0].type != 3
+                        or not math.isfinite(response.values[0].double_value) or response.values[0].double_value < 0):
+                    raise ValueError('Observed MoveIt allowed_start_tolerance is unavailable')
+                tolerance = response.values[0].double_value
+                observer.motion_configuration['joint_position_error'] = {
+                    name: tolerance for name in self.arm_joint_names}
+                observer.motion_configuration['joint_position_error_source'] = {
+                    'node': '/move_group', 'parameter': parameter, 'value': tolerance,
+                    'physical_execution_verified': False,
+                }
+            finally:
+                self._node.destroy_client(client)
         self.recovery_safety_observer = observer
 
     def recovery_safety_configuration(self) -> dict:
@@ -8862,23 +8933,40 @@ class GazeboPickPlaceController:
                   "program": deepcopy(program), "program_fingerprint": fingerprint(program),
                   "checkpoint_id": checkpoint["checkpoint_id"], "steps": [], "status": "NEEDS_CONTEXT"}
         start = deepcopy(checkpoint["observations"][rid]["physical"])
+        start["model_execution"] = checkpoint.get("model_execution") is True
+        if start["model_execution"]:
+            start["model_execution_regions"] = deepcopy(checkpoint.get("geometry", {}).get("regions"))
         observed = self.capture_recovery_safety_state()
-        for field in ("joint_names", "joint_positions", "current_pose", "attachment", "launch_id", "frame"):
-            if observed[field] != start[field]:
-                return {**result, "reason": "Checkpoint changed before planning: " + field}
+        if not start["model_execution"]:
+            for field in ("joint_names", "joint_positions", "current_pose", "attachment", "launch_id", "frame"):
+                if observed[field] != start[field]:
+                    return {**result, "reason": "Checkpoint changed before planning: " + field}
         for index, step in enumerate(program["primitive_steps"]):
             binding = {"checkpoint_id": checkpoint["checkpoint_id"], "resource_id": rid,
                        "resource_jid": resource_jid, "program_fingerprint": result["program_fingerprint"],
                        "step_index": index, "source": deepcopy(step.get("source", {})),
-                       "run_id": checkpoint["runtime"]["run_id"], "launch_id": start["launch_id"]}
+                       "run_id": checkpoint["runtime"]["run_id"], "launch_id": start["launch_id"],
+                       "model_execution": start["model_execution"]}
+            if start["model_execution"]:
+                binding.update(model_execution_regions=deepcopy(start["model_execution_regions"]),
+                               stationary_contract=deepcopy(start.get("stationary_contract")))
             record = prepare_ur5e_motion(self, primitive=step["primitive"], params=step["params"],
                                         start=start, binding=binding)
             result["steps"].append(record)
             if record["status"] != "prepared":
                 return {**result, "reason": record["reason"]}
+            if index == 0 and start["model_execution"]:
+                try:
+                    validate_prepared_start(observed, start, continuous_motion=record.get("continuous_motion"))
+                except (ValueError, KeyError, TypeError) as exc:
+                    return {**result, "reason": str(exc)}
             start["joint_positions"] = record["joint_trajectory"]["points"][-1]["positions"]
             start["current_pose"] = record["target_pose"]
         return {**result, "status": "prepared"}
+
+    def execute_prepared_recovery_step(self, planned: dict) -> dict:
+        """Execute exactly the native trajectory admitted by the CCA."""
+        return execute_prepared_robot_step(self, planned)
 
     def validate_recovery_safety_step(self, planned: dict, step: dict) -> None:
         """Bind observation evidence to the exact prepared native trajectory."""
@@ -9062,10 +9150,21 @@ class GazeboPickPlaceController:
         endpoint_time = solution.joint_trajectory.points[-1].time_from_start
         self._trajectory_duration_sec += endpoint_time.sec + endpoint_time.nanosec / 1e9
         if self.execution_mode == "simulation" and self.arm_trajectory_topic:
-            joint_endpoint_observed = self._send_simulation_joint_trajectory(
-                self.arm_trajectory_topic,
-                solution.joint_trajectory,
-            )
+            from cais_spade_llm.recovery_framework.placement_motion import placement_motion
+
+            motion = placement_motion(self, target)
+            if motion is None:
+                joint_endpoint_observed = self._send_simulation_joint_trajectory(
+                    self.arm_trajectory_topic, solution.joint_trajectory)
+            else:
+                joint_endpoint_observed = self._send_simulation_joint_trajectory(
+                    self.arm_trajectory_topic, solution.joint_trajectory, placement_motion=motion)
+            interruption = getattr(self, "_simulation_fault_evidence", None)
+            if interruption is not None:
+                self._last_command_evidence = {
+                    "command_sent": True, "failure_injection": deepcopy(interruption),
+                }
+                return False
             controller_endpoint_observed = self._wait_for_simulation_cartesian_endpoint(
                 target
             )
@@ -9791,7 +9890,32 @@ def prepare_ur5e_motion(controller, *, primitive: str, params: dict,
             raise ValueError(controller._last_failure_message or "UR5e planning unavailable")
         if prepared[0].multi_dof_joint_trajectory.points:
             raise ValueError("UR5e preparation cannot omit multi-DOF motion")
-        trajectory = trajectory_record(prepared[0].joint_trajectory, list(controller.arm_joint_names))
+        trajectory = trajectory_record(prepared[0].joint_trajectory, validate=False)
+        record["planned_joint_trajectory"] = deepcopy(trajectory)
+        first = trajectory["points"][0]
+        first_time = first["time_from_start"]
+        if first_time == {"sec": 0, "nanosec": 1}:
+            if (first["positions"] != start["joint_positions"]
+                    or any(value != 0 for field in ("velocities", "accelerations", "effort")
+                           for value in first[field])):
+                record["joint_trajectory"] = deepcopy(trajectory)
+                raise ValueError("Native initial one-nanosecond point does not represent the observed stationary start")
+            # _scale_trajectory_timing retains a positive 1 ns first timestamp.
+            # Make its unchanged initial hold explicit before analysis. Original
+            # points, derivatives and duration remain exactly as planned.
+            initial = deepcopy(first)
+            initial["time_from_start"] = {"sec": 0, "nanosec": 0}
+            trajectory["points"].insert(0, initial)
+            record["trajectory_preparation"] = {
+                "initial_point_inserted": True,
+                "initial_point_source": "observed start and native zero derivatives",
+                "initial_joint_positions": deepcopy(start["joint_positions"]),
+                "original_first_time_ns": 1, "duration_ns": trajectory["duration_ns"],
+                "planned_joint_trajectory_fingerprint": fingerprint(record["planned_joint_trajectory"]),
+                "prepared_joint_trajectory_fingerprint": fingerprint(trajectory),
+            }
+        record["joint_trajectory"] = deepcopy(trajectory)
+        validate_joint_trajectory(trajectory, list(controller.arm_joint_names))
         if trajectory["joint_names"] != start["joint_names"] or any(
                 abs(a - b) > .000001 for a, b in zip(
                     trajectory["points"][0]["positions"], start["joint_positions"], strict=True)):
@@ -9862,3 +9986,138 @@ def _ur5e_motion_effects(*, primitive, params, evidence, start_time, end_time, c
 def register_preparation_contracts(registry: dict) -> None:
     """Retain explicit historical evidence contracts for offline callers."""
     registry['ur5e'] = lambda: PrimitiveModel('ur5e', 1, {}, _ur5e_motion_effects)
+
+
+def trajectory_message(record: dict):
+    """Reconstruct every original ROS trajectory value without retiming it."""
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+    validate_joint_trajectory(record, record["joint_names"])
+    result = JointTrajectory()
+    result.header.frame_id = record["header"]["frame_id"]
+    result.header.stamp.sec = record["header"]["stamp"]["sec"]
+    result.header.stamp.nanosec = record["header"]["stamp"]["nanosec"]
+    result.joint_names = list(record["joint_names"])
+    for row in record["points"]:
+        point = JointTrajectoryPoint()
+        for key in ("positions", "velocities", "accelerations", "effort"):
+            setattr(point, key, list(row[key]))
+        point.time_from_start.sec = row["time_from_start"]["sec"]
+        point.time_from_start.nanosec = row["time_from_start"]["nanosec"]
+        result.points.append(point)
+    if trajectory_record(result) != record:
+        raise ValueError("Prepared trajectory cannot be reconstructed exactly")
+    return result
+
+
+def _prepare_controller_contract(controller, planned: dict, checkpoint: dict) -> dict:
+    """Read native ownership evidence without arming or dispatching a command."""
+    from cais_lab_robotics.srv import SetRecoveryMotionContract
+
+    observer = controller.recovery_safety_observer
+    service = observer.configuration["controller_node"].rstrip("/") + "/recovery_motion_contract"
+    state_service = observer.configuration["controller_node"].rstrip("/") + "/recovery_state"
+    state = checkpoint.get("controller_goals", {}).get(state_service)
+    if not isinstance(state, dict) or not state.get("instance_id"):
+        raise ValueError("Exact controller instance and command revision were not observed")
+    request = SetRecoveryMotionContract.Request()
+    request.operation = "prepare"
+    request.expected_instance_id = state["instance_id"]
+    request.expected_command_revision = state["command_revision"]
+    request.expected_contract_revision = state.get("contract_revision", 0)
+    request.binding_fingerprint = fingerprint({
+        "checkpoint_id": checkpoint["checkpoint_id"],
+        "run_id": checkpoint["runtime"]["run_id"],
+        "preparation_id": planned["preparation_id"],
+        "start": planned["start"],
+        "geometry": checkpoint["geometry"],
+    })
+    request.stationary = False
+    request.trajectory = trajectory_message(planned["joint_trajectory"])
+    request.controller_goal_id = list(uuid4().bytes)
+    request.expected_positions = list(planned["start"]["joint_positions"])
+    client = controller._node.create_client(
+        SetRecoveryMotionContract, service, callback_group=controller._cb_group,
+    )
+    started = time.monotonic()
+    try:
+        if not client.wait_for_service(timeout_sec=2.0):
+            raise ValueError("Native motion contract service unavailable: " + service)
+        response = controller._wait_future(
+            client.call_async(request), timeout_sec=2.0, label="prepare native motion contract",
+        )
+        if response is None:
+            raise ValueError("Native motion contract observation timed out")
+        fields = (
+            "accepted", "reason", "instance_id", "command_revision", "contract_revision",
+            "reservation_token", "binding_fingerprint", "contract_state", "stationary",
+            "simulation_time", "physical_execution_verified", "physical_execution_reason",
+            "observed_stationary", "stationary_samples", "rejected_commands",
+            "maximum_observed_update_period",
+        )
+        record = {name: getattr(response, name) for name in fields}
+        for name in ("joint_names", "observed_positions", "observed_velocities",
+                     "maximum_observed_position_error"):
+            record[name] = list(getattr(response, name))
+        record.update(service=service, operation="prepare", received_monotonic=time.monotonic(),
+                      elapsed_wall_s=time.monotonic() - started,
+                      requested_binding_fingerprint=request.binding_fingerprint,
+                      expected_instance_id=request.expected_instance_id,
+                      expected_command_revision=request.expected_command_revision,
+                      expected_contract_revision=request.expected_contract_revision,
+                      requested_controller_goal_id=list(request.controller_goal_id),
+                      checkpoint_simulation_time=planned["start"]["simulation_time"])
+        return record
+    finally:
+        controller._node.destroy_client(client)
+
+
+def execute_prepared_robot_step(controller, planned: dict) -> dict:
+    """Dispatch an unchanged registered trajectory after fresh owner checks.
+
+    Args:
+        controller: The initialized robot controller owning planning and feedback.
+        planned: Its original non-dispatching preparation record.
+
+    Returns:
+        The actual success and fresh physical endpoint; never a predicted state.
+    """
+    if (planned.get("status") != "prepared"
+            or planned.get("observation_status") != "prepared"
+            or planned.get("preparation_id") != fingerprint({
+                key: value for key, value in planned.items() if key != "preparation_id"})):
+        raise ValueError("Prepared motion identity or continuous evidence changed")
+    if (controller.execution_mode != "simulation"
+            or planned["configuration_fingerprint"] != fingerprint(controller.controller_config)):
+        raise ValueError("Prepared motion controller configuration changed")
+    observed = controller.capture_recovery_safety_state()
+    continuous = planned.get("continuous_motion") if planned.get("binding", {}).get("model_execution") is True else None
+    validate_prepared_start(observed, planned["start"], continuous_motion=continuous)
+    trajectory = trajectory_message(planned["joint_trajectory"])
+    if trajectory.joint_names != list(controller.arm_joint_names):
+        raise ValueError("Prepared motion uses another controller's joints")
+    joint_position_error = continuous['configuration']['joint_position_error'] if continuous is not None else None
+    if joint_position_error is None:
+        success = controller._send_simulation_joint_trajectory(controller.arm_trajectory_topic, trajectory)
+    else:
+        success = controller._send_simulation_joint_trajectory(
+            controller.arm_trajectory_topic, trajectory, joint_position_error=joint_position_error)
+    if trajectory_record(trajectory) != planned["joint_trajectory"]:
+        raise ValueError("Controller modified the admitted trajectory")
+    observer = getattr(controller, 'recovery_safety_observer', None)
+    if observer is not None:
+        # A short motion can finish inside the reader's cache age. Its endpoint
+        # must come from a query made after the native result was received.
+        observer.provider.reader.snapshot(refresh=True)
+    current = controller.capture_recovery_safety_state()
+    endpoint = planned["joint_trajectory"]["points"][-1]["positions"]
+    if success and (current['joint_names'] != trajectory.joint_names
+                    or len(current['joint_positions']) != len(endpoint)
+                    or any(type(value) not in (int, float) or not math.isfinite(value)
+                           or abs(value - target) > (0.005 if joint_position_error is None else joint_position_error[name])
+                           for name, value, target in zip(
+                               trajectory.joint_names, current['joint_positions'], endpoint, strict=True))):
+        success = False
+    return {"success": success, "preparation_id": planned["preparation_id"],
+            "joint_trajectory": deepcopy(planned["joint_trajectory"]),
+            "observations": current, "command_sent": True}

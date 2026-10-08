@@ -9,14 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import (
-    _AP_BINDING_FIELDS,
-    _MEANINGS,
     _catalog,
     _digest,
     _list,
     _object,
     _symbol,
 )
+
+from cais_spade_llm.agents.central_controller.ppr_ap import physical_ap_kind, physical_binding_fields
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -43,8 +43,8 @@ def parse_predefined_safety(text: str) -> dict[str, Any] | None:
     required = {"mode", "version", "catalog", "requirement_scopes"}
     if set(document) - required - {"product_geometry"} or not required <= set(document):
         raise ValueError("Predefined safety requires mode, version, catalog and requirement_scopes")
-    if document["mode"] != "predefined" or type(document["version"]) is not int or document["version"] != 1:
-        raise ValueError("Unsupported predefined safety mode or version")
+    if document["mode"] != "predefined" or type(document["version"]) is not int or document["version"] != 2:
+        raise ValueError("Unsupported predefined safety mode or version; recompile required")
     _object(document["catalog"], "predefined catalog")
     _list(document["requirement_scopes"], "predefined requirement_scopes")
     if "product_geometry" in document:
@@ -81,14 +81,14 @@ def _validate_scopes(document: dict[str, Any], definitions: dict[str, Any]) -> N
         if identifier not in definitions:
             raise ValueError("Predefined scope references an undeclared specification")
         definition = definitions[identifier]
-        physical = [ap for ap in definition["aps"] if ap["full"] in _MEANINGS]
-        structured = [ap for ap in definition["aps"] if ap["full"] not in _MEANINGS]
+        physical = [ap for ap in definition["aps"] if physical_ap_kind(ap) is not None]
+        structured = [ap for ap in definition["aps"] if physical_ap_kind(ap) is None]
         expected = {"specification"}
         if "physical_ap_bindings" in scope:
             bindings = _physical_bindings(definition, scope["physical_ap_bindings"])
             expected.add("physical_ap_bindings")
         else:
-            fields = set().union(*(_AP_BINDING_FIELDS[ap["full"]] for ap in physical))
+            fields = set().union(*(physical_binding_fields(ap) for ap in physical))
             fields.discard("resources")
             expected.update(fields)
             bindings = {ap["label"]: {key: scope.get(key) for key in fields} for ap in physical}
@@ -151,6 +151,7 @@ def predefined_safety_metadata(document: dict[str, Any], source_text: str) -> di
         raise ValueError("Predefined source text disagrees with the supplied document")
     return {
         "mode": "predefined",
+        "ap_schema_version": 2,
         "predefined_safety": deepcopy(document),
         "predefined_source_sha256": hashlib.sha256(source_text.strip().encode("utf-8")).hexdigest(),
         "predefined_semantics_sha256": _digest(document),
@@ -171,8 +172,10 @@ def validate_predefined_safety_artifact(
               "predefined_geometry_sha256"}
     if payload.get("mode") != "predefined" and not fields.intersection(payload):
         if source_text is not None and parse_predefined_safety(source_text) is not None:
-            raise ValueError("Predefined source cannot load an unmarked legacy safety artifact")
+            raise ValueError("Predefined source cannot load an unmarked legacy safety artifact; recompile required")
         return None
+    if payload.get("ap_schema_version") != 2:
+        raise ValueError("Legacy AP artifacts are unsupported; recompile required")
     if payload.get("mode") != "predefined" or not fields <= set(payload):
         raise ValueError("Predefined safety artifact metadata is incomplete")
     document = payload["predefined_safety"]

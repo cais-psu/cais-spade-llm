@@ -1,0 +1,32 @@
+# Native command ownership only. This interface does not certify Gazebo physics.
+string operation
+string expected_instance_id
+uint64 expected_command_revision
+uint64 expected_contract_revision
+string reservation_token
+string binding_fingerprint
+bool stationary
+trajectory_msgs/JointTrajectory trajectory
+uint8[16] controller_goal_id
+float64[] expected_positions
+---
+bool accepted
+string reason
+string instance_id
+uint64 command_revision
+uint64 contract_revision
+string reservation_token
+string binding_fingerprint
+string contract_state
+bool stationary
+bool observed_stationary
+uint64 stationary_samples
+uint64 rejected_commands
+string[] joint_names
+float64[] observed_positions
+float64[] observed_velocities
+float64 simulation_time
+float64 maximum_observed_update_period
+float64[] maximum_observed_position_error
+bool physical_execution_verified
+string physical_execution_reason

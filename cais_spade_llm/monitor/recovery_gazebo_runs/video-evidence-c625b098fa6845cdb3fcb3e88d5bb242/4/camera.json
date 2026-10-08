@@ -1,5 +1,0 @@
-{
-  "requested_gui_message": "camera { name: \"user_camera\" view_controller: \"orbit\" pose { position { x: 0 y: -2.5 z: 3.6 } orientation { x: -0.2753603506 y: 0.2753603506 z: 0.6512884747 w: 0.6512884747 } } }",
-  "stdout": "",
-  "stderr": ""
-}

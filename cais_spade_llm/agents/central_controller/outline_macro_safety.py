@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
+from cais_spade_llm.agents.central_controller.ppr_ap import parse_ap_definition, physical_ap_kind
 
 
 def _normalize_token(value: Any) -> str:
@@ -50,14 +51,14 @@ def _recovery_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
             mode = dict(ap.get("selector") or {}).get("mode")
             supported = (
                 {"move_part_to_destination", "resource_move_to_destination"}
-                if ap["full"].startswith("ap_event/")
+                if parse_ap_definition(ap["full"])["kind"] == "ap_event"
                 else {
                     "part_goal_satisfied",
                     "part_at_destination",
                     "resource_in_destination",
                     "resource_state",
                 }
-                if ap["full"].startswith("ap_state/")
+                if parse_ap_definition(ap["full"])["kind"] == "ap_state"
                 else set()
             )
             if mode not in supported:
@@ -79,25 +80,13 @@ def _recovery_loaded_rules(llm_input: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _parse_recovery_selector_from_ap_full(ap_full: str) -> dict[str, Any] | None:
-    full = str(ap_full or "").strip()
-    if not full:
-        return None
-    segments = [segment.strip() for segment in full.split("/") if segment.strip()]
-    if len(segments) < 5:
-        return None
-    ap_kind = segments[0]
-    part = segments[2] if len(segments) > 2 else "any"
-    resource = segments[3] if len(segments) > 3 else "any"
-    verb = segments[4] if len(segments) > 4 else ""
-    params: dict[str, str] = {}
-    for segment in segments[5:]:
-        if "=" not in segment:
-            continue
-        key, value = segment.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if key and value:
-            params[key] = value
+    definition = parse_ap_definition(ap_full)
+    if physical_ap_kind(definition):
+        raise ValueError("Physical APs require primitive observations; outline endpoints are insufficient")
+    ap_kind = definition["kind"]
+    part, resource = definition["product"], definition["resource"]
+    condition = definition["state" if ap_kind == "ap_state" else "event"]
+    verb, params = condition["symbol"], condition["arguments"]
     destination = str(params.get("destination") or "").strip()
     if ap_kind == "ap_event":
         if destination:
@@ -405,7 +394,7 @@ def project_outline_macro_recovery_aps(
             full = str(raw_ap.get("full") or "").strip()
             if not label or not selector or not full:
                 continue
-            if full.startswith("ap_event/") and _selector_matches_event(
+            if parse_ap_definition(full)["kind"] == "ap_event" and _selector_matches_event(
                 selector,
                 task=task,
                 signature=signature,
@@ -413,7 +402,7 @@ def project_outline_macro_recovery_aps(
                 projected_parts=projected_parts,
             ):
                 candidate_aps.append(label)
-            elif full.startswith("ap_state/"):
+            elif parse_ap_definition(full)["kind"] == "ap_state":
                 _require_state_evidence(selector, pre_resources, pre_parts)
                 _require_state_evidence(selector, projected_resources, projected_parts)
                 if _selector_matches_state(

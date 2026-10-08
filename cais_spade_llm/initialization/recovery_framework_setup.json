@@ -18,7 +18,7 @@
     "3D Printing Station",
     "Exit"
   ],
-  "selected_safety_file": "cais_spade_llm/specification/safety/safety_none.txt",
+  "selected_safety_file": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
   "execution_mode": "simulation",
   "diagnostic_cca_bypass": false,
   "runtime_recovery_mode": "pre_ran",

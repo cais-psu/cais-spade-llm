@@ -1,3 +1,11 @@
+# Typed primitive-observation safety
+
+AP identities now use context-free structured Product-Process-Resource
+definitions in primitive_observation_safety.json (catalog version 2).
+The existing receiving-region and shared-area requirements retain their
+formulas and grounded physical meanings. Both use the shared typed evaluator
+and strict LTLf/MONA compiler; no fixed hand-built mutex DFA is substituted.
+
 # Offline primitive observations for reusable safety specifications
 
 `primitive_observation_safety.json` defines `receiving_region_entry` and
@@ -183,20 +191,19 @@ Opaque `current_state` and `resource_location` labels remain annotations; APs us
 the modeled pose, custody, containment, and process ledger fields. The checker
 does not infer physical facts from those state labels.
 
-### Fixed AP meanings and reviewed formulas
+### Typed AP meanings and reviewed formulas
 
-Catalog version 1 retains `id`, `requirement`, `formula`, and `aps`; each AP has
-`label`, `full`, and `meaning`. Labels use the existing `ap001` form. Exact
-identifiers and meaning strings must match the supported AP evaluators. Geometry
-and event/state names cannot substitute for their evidence.
+Catalog version 2 retains id, requirement, formula, and aps. Each AP has label,
+definition, a derived canonical JSON full key, and meaning. Labels retain the
+existing ap001 form. The definition contains kind, product, process, resource,
+and a state/event condition with symbol and typed arguments. Geometry and
+generated event/state names cannot substitute for their evidence.
 
-The existing `shared_area_first_resource` and `shared_area_second_resource`
-meanings remain unchanged. The new APs are:
-
-| Exact AP identifier | Meaning |
-| --- | --- |
-| `ap_event/physical_observation/part_region_entry` | The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry. |
-| `ap_state/processCompleted/process_result_completed` | The bound part's explicitly complete processCompleted ledger contains the exact bound process and result record. |
+The shared-region AP is ap_state(product, process, resource, any@region).
+Part-region entry uses an ap_event condition with symbol part_region_entry and
+a region argument. Product process records use ap_state with symbol
+processCompleted and a target or result argument. These are registered typed
+conditions; no legacy physical_observation path selects the evaluator.
 
 Part entry uses the part envelope even when the tool is already inside. A
 complete ledger containing the exact `{"process": "trim", "result": "square"}`
@@ -371,38 +378,40 @@ event is `move_home`. This does not install or dispatch a new robot. Changing
 the scene requires new model/trace identities; ordinal event references from
 another scene are not transferable continuation evidence.
 
-### Preserved task/state APs
+### Typed task/state APs
 
-The catalog retains each AP's exact `full`, `label`, and reviewed `meaning`.
-Existing task descriptors keep task-execution semantics. For example, the saved
-`ap002` is
-`ap_event/assembly/any/recovery-resource-3/place_approach/destination=assembly_board-v1`;
-the saved `ap008` is
-`ap_state/assembly/any/recovery-resource-3/positioned/destination=assembly_board-v1`.
-Their explicit scope associations are:
+Task execution and resource state keep their distinct semantics. For example,
+ap002 can use an ap_event definition with product "*", process "assembly",
+resource "recovery-resource-3", and event symbol "place_approach". ap008 can use
+the same PPR binding with state symbol "positioned". Optional typed arguments
+belong to the event/state condition; a region qualifier requires geometric
+observation rather than a destination parameter alone.
 
-```json
+Explicit grounding associates a preserved resource symbol to its configured
+resource identity:
+
+~~~json
 {
   "ap002": {
     "source": "task_event", "resource_id": "ur5e-3",
     "resource_symbol": "recovery-resource-3", "process": "assembly",
-    "product": "any", "function": "place_approach",
-    "context": "destination=assembly_board-v1"
+    "product": "*", "function": "place_approach"
   },
   "ap008": {
     "source": "resource_state", "resource_id": "ur5e-3",
     "resource_symbol": "recovery-resource-3", "process": "assembly",
-    "product": "any", "state_field": "resource_state", "state_value": "positioned",
-    "context": "destination=assembly_board-v1"
+    "product": "*", "state_field": "resource_state", "state_value": "positioned"
   }
 }
-```
+~~~
 
 This object is the requirement scope's `ap_groundings`. Each structured AP
 requires one association. Resource aliases are explicit reviewed bindings, not
 inferred from spelling. Each resource symbol has one consistent association; an
-existing configured identifier cannot be rebound to a different resource. `process`, `product`, and `context` support the existing
-`any` selector; task `function` is always exact, including a literal `any`.
+existing configured identifier cannot be rebound to a different resource.
+Product/process scopes accept "*" (and the preserved explicit "any" selector).
+Task function is always exact, including a literal "any". AP context is rejected;
+operational task/state evidence may retain its owner metadata context.
 Unbound resource selectors and unsupported descriptor forms remain unavailable.
 Strings retain their exact spelling and whitespace. Declared Boolean state
 values use `true` / `false`; the existing null scalar spelling is `None`.

@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 """Joint physical evidence with bounded motion and explicit custody boundaries.
 
 Versioned owner contracts can supply grasp/release effects and carried-part
 geometry. Deposited parts need stationary coverage until the next grasp.
 Unknown occupancy remains an alternative, never an authoritative false AP.
 """
-
-from __future__ import annotations
 
 import math
 from copy import deepcopy
@@ -78,8 +78,20 @@ def _prepare_step(command, row, rid, previous_steps, snapshot, horizon, primitiv
     ):
         raise ValueError("Discontinuous prepared joints")
     if not previous_steps:
-        joints = snapshot["resources"][rid].get("joint_positions")
-        if joints != motion.points[0]["positions"]:
+        observed = snapshot["resources"][rid]
+        joints, names = observed.get("joint_positions"), observed.get("joint_names")
+        if (not isinstance(joints, list) or len(joints) != len(motion.names)
+                or any(type(value) not in (int, float) or not math.isfinite(value) for value in joints)):
+            raise ValueError("Continuous motion requires complete finite observed initial joints")
+        if names is not None and names != motion.names:
+            raise ValueError("Continuous motion observed joint names differ from its registered model")
+        if motion.joint_position_error:
+            if names != motion.names:
+                raise ValueError("Bounded initial joints require the exact observed joint names")
+            if any(abs(value - target) > motion.joint_position_error[name]
+                   for name, value, target in zip(motion.names, joints, motion.points[0]["positions"], strict=True)):
+                raise ValueError("Observed initial joints exceed the declared joint_position_error")
+        elif joints != motion.points[0]["positions"]:
             raise ValueError("Continuous motion does not start at observed joints")
     return start, end, effect, motion
 

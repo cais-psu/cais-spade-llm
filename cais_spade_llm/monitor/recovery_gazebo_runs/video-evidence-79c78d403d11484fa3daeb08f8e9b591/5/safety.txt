@@ -1,2 +1,0 @@
-[Safety Requirements]
-- ur5e-3 and ur5e-4 must not be in the assembly_board-v1 destination area at the same time.

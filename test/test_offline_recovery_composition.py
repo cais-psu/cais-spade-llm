@@ -1,6 +1,6 @@
-"""Finite offline recovery composition, grounded safety, and preserved history."""
-
 from __future__ import annotations
+
+"""Finite offline recovery composition, grounded safety, and preserved history."""
 
 import hashlib
 import json
@@ -9,6 +9,7 @@ from functools import cache
 from pathlib import Path
 
 import pytest
+from ppr_ap_migration import migrate_ppr_fixture
 
 from cais_spade_llm.agents.central_controller.local_composition import Budget
 from cais_spade_llm.agents.central_controller.offline_safety_grounding import (
@@ -26,7 +27,7 @@ def _case() -> dict:
     assert hashlib.sha256(path.read_bytes()).hexdigest() == reference["sha256"]
     grounding = json.loads(path.read_text())["inputs"]
     grounding.update(document["grounding_input_overrides"])
-    return {"grounding_inputs": grounding, **document["inputs"]}
+    return migrate_ppr_fixture({"grounding_inputs": grounding, **document["inputs"]})
 
 
 def _analyze(case: dict, **kwargs) -> dict:
@@ -35,7 +36,7 @@ def _analyze(case: dict, **kwargs) -> dict:
     )
 
     kwargs.setdefault("budget", Budget(seconds=30))
-    return analyze_grounded_recovery_composition(**case, **kwargs)
+    return analyze_grounded_recovery_composition(**migrate_ppr_fixture(case), **kwargs)
 
 
 def _formula(case: dict, formula: str) -> None:
@@ -55,7 +56,7 @@ def _ledger(value, records: list[dict]) -> None:
 
 
 def _prepared(case: dict, choice: dict) -> dict:
-    inputs = deepcopy(case["grounding_inputs"])
+    inputs = migrate_ppr_fixture(case["grounding_inputs"])
     inputs.update({key: deepcopy(choice[key]) for key in
                    ("programs", "stationary", "task_evidence", "state_evidence") if key in choice})
     boundaries = sorted({time for row in case["event_start_choices"] for time in row["starts"].values()})
@@ -464,6 +465,7 @@ def _native_context(case: dict, formula: str = "F ap001", aps: list | None = Non
 
     placement = next(row for row in case["recovery_events"] if row["outline_id"] == _PLACEMENT)
     aps = aps or [{"label": "ap001", "full": f"ap_event/any/any/KMR/{placement['event_name']}/any"}]
+    aps = migrate_ppr_fixture(aps)
     rule = {"id": "native_rule", "formula": formula, "aps": aps}
     monitor = OnlineSafetyMonitor({"native_rule": _compile_formula(formula, {row["label"] for row in aps})}, [rule])
     resources = {rid: {"resource_state": "idle"} for rid in case["grounding_inputs"]["snapshot"]["resources"]}
@@ -674,7 +676,7 @@ def test_native_decision_uses_completion_endpoint_without_an_extra_physical_tick
                 if row["kind"] == "observation" and row["time"] == 5]) == 1
 
 
-def _physical_checkpoint(case: dict) -> dict:
+def _physical_checkpoint(case: dict, *, primitive_models=None) -> dict:
     from cais_spade_llm.agents.central_controller._recovery_monitor_history import (
         physical_trace_fingerprint,
     )
@@ -684,7 +686,8 @@ def _physical_checkpoint(case: dict) -> dict:
     choice = case["event_start_choices"][0]
     inputs.update({key: deepcopy(choice[key]) for key in ("programs", "stationary")})
     boundaries = [inputs["horizon"][0], *(time for row in case["event_start_choices"] for time in row["starts"].values())]
-    prepared = _prepare_grounded_primitive_trace(**inputs, observation_boundaries=boundaries)
+    prepared = _prepare_grounded_primitive_trace(
+        **inputs, observation_boundaries=boundaries, primitive_models=primitive_models)
     checker = BaseSafetyChecker({row["rule_id"]: row["dfa_dot"] for row in prepared["rules"]}, prepared["rules"])
     states = {rule: checker.transition_evidence(rule, dfa["initial"], frozenset(
         label for label, value in prepared["valuations"][0][rule].items() if value))["to"]
@@ -701,6 +704,225 @@ def test_physical_checkpoint_replays_history_and_does_not_repeat_boundary() -> N
     assert result["safety_dfa_states_before"] == checkpoint["safety_dfa_states"]
     observations = [row for row in result["completion_witness"]["path"] if row["kind"] == "observation"]
     assert all(row["time"] > 0 for row in observations)
+
+
+def test_continuous_physical_checkpoint_still_requires_verified_history_transfer() -> None:
+    from test_continuous_motion import composition_case
+
+    case, models = composition_case()
+    checkpoint = _physical_checkpoint(case, primitive_models=models)
+    before_case, before_checkpoint = deepcopy(case), deepcopy(checkpoint)
+    fresh = _analyze(case, primitive_models=models)
+    assert fresh["status"] == "allowed", fresh["reason"]
+    result = _analyze(case, physical_checkpoint=checkpoint, primitive_models=models)
+    assert result["status"] == "inconclusive", result
+    # Scalar replay can reject continuous Boolean possibilities before the
+    # explicit cross-clock guard. Neither rejection may restart the history.
+    assert result["reason"] in {
+        "Physical checkpoint contains rejected monitor history",
+        "Continuous physical history requires its own verified checkpoint; no cross-clock state transfer",
+    }
+    assert result["completion_witness"] is None
+    assert result["choices"] == result["decision_prefixes"] == []
+    assert result["explored_states"] == 0
+    assert "graph" not in result
+    assert case == before_case
+    assert checkpoint == before_checkpoint
+
+
+def _continuous_checkpoint(case, models, *, count=1, states=None):
+    from itertools import product
+
+    from cais_spade_llm.agents.central_controller._recovery_monitor_history import (
+        physical_trace_fingerprint,
+    )
+    from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+
+    inputs = deepcopy(case["grounding_inputs"])
+    choice = case["event_start_choices"][0]
+    inputs.update({key: deepcopy(choice[key]) for key in ("programs", "stationary")})
+    boundaries = [inputs["horizon"][0], *(time for row in case["event_start_choices"] for time in row["starts"].values())]
+    prepared = _prepare_grounded_primitive_trace(
+        **inputs, observation_boundaries=boundaries, primitive_models=models)
+    if states is None:
+        assert count == 1
+        checker = BaseSafetyChecker({row["rule_id"]: row["dfa_dot"] for row in prepared["rules"]}, prepared["rules"])
+        states = {}
+        for identifier, values in prepared["valuations"][0].items():
+            options = [value if isinstance(value, list) else [value] for value in values.values()]
+            states[identifier] = sorted({checker.transition_evidence(
+                identifier, checker.dfas[identifier]["initial"], frozenset(
+                    label for label, bit in zip(values, bits, strict=True) if bit))["to"]
+                for bits in product(*options)})
+    checkpoint = {"version": 2, "clock_version": prepared["clock_version"], "segments": [{
+        "grounding_inputs": inputs, "observation_boundaries": boundaries, "observation_count": count,
+        "trace_fingerprint": physical_trace_fingerprint(prepared)}],
+        "safety_dfa_states": {key: list(value) for key, value in states.items()}}
+    return checkpoint, prepared
+
+
+def test_continuous_checkpoint_replays_point_without_repeating_its_tick():
+    from test_continuous_motion import composition_case
+
+    case, models = composition_case()
+    checkpoint, _ = _continuous_checkpoint(case, models)
+    before = deepcopy([case, checkpoint])
+    result = _analyze(case, physical_checkpoint=checkpoint, primitive_models=models)
+    assert result["status"] == "allowed", result
+    assert {key: list(value) for key, value in result["safety_dfa_states_before"].items()} == checkpoint["safety_dfa_states"]
+    assert all(row["time"] > 0 for row in result["completion_witness"]["path"] if row["kind"] == "observation")
+    assert [case, checkpoint] == before
+
+
+def _next_continuous_checkpoint_case(case, prepared):
+    from test_continuous_motion import trajectory
+
+    result = deepcopy(case)
+    inputs = result["grounding_inputs"]
+    last = prepared["observations"][-1]
+    start, end = last["time"], last["time"] + 1
+    inputs["snapshot"].update(resources=deepcopy(last["resources"]), parts=deepcopy(last["parts"]))
+    inputs["horizon"] = [start, end]
+    for part in inputs["snapshot"]["parts"].values():
+        part["stationary_until"] = end
+    choice = result["event_start_choices"][0]
+    choice["starts"] = {key: start for key in choice["starts"]}
+    inputs["stationary"] = {rid: [] if rid == "ur5e-4" else [[start, end]]
+                            for rid in inputs["snapshot"]["resources"]}
+    choice["stationary"] = deepcopy(inputs["stationary"])
+    for program in (inputs["programs"][0], choice["programs"][0]):
+        program["primitive_steps"][0]["params"]["x"] = end
+        row = program["step_results"][0]
+        row["resolved_params"]["x"] = end
+        row.update(start_time=start, end_time=end)
+        row["model_evidence"]["continuous_motion"]["joint_trajectory"] = trajectory(start, end, None)
+    return result
+
+
+def test_continuous_checkpoint_replays_multiple_programs_without_reset():
+    from test_continuous_motion import composition_case
+
+    case, models = composition_case()
+    for program in (case["grounding_inputs"]["programs"][0], case["event_start_choices"][0]["programs"][0]):
+        points = program["step_results"][0]["model_evidence"]["continuous_motion"]["joint_trajectory"]["points"]
+        points[0]["positions"], points[1]["positions"] = [0.0], [1.0]
+    first = _analyze(case, primitive_models=models)
+    assert first["status"] == "allowed", first
+    _, prepared = _continuous_checkpoint(case, models)
+    checkpoint, prepared = _continuous_checkpoint(case, models, count=len(prepared["observations"]),
+        states=first["completion_witness"]["safety_dfa_states_after"])
+    following = _next_continuous_checkpoint_case(case, prepared)
+    second = _analyze(following, physical_checkpoint=checkpoint, primitive_models=models)
+    assert second["status"] == "allowed", second["reason"]
+    assert {key: list(value) for key, value in second["safety_dfa_states_before"].items()} == checkpoint["safety_dfa_states"]
+    _, prepared = _continuous_checkpoint(following, models)
+    next_checkpoint, prepared = _continuous_checkpoint(following, models, count=len(prepared["observations"]),
+        states=second["completion_witness"]["safety_dfa_states_after"])
+    checkpoint["segments"].extend(next_checkpoint["segments"])
+    checkpoint["safety_dfa_states"] = next_checkpoint["safety_dfa_states"]
+    third = _analyze(_next_continuous_checkpoint_case(following, prepared),
+                     physical_checkpoint=checkpoint, primitive_models=models)
+    assert third["status"] == "allowed", third["reason"]
+    assert {key: list(value) for key, value in third["safety_dfa_states_before"].items()} == checkpoint["safety_dfa_states"]
+
+
+def test_continuous_checkpoint_preserves_every_possible_pending_state(monkeypatch):
+    from cais_spade_llm.agents.central_controller import _recovery_monitor_history as history
+    from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+
+    dot = '''digraph DFA { node [shape = doublecircle]; 1;
+        init -> 0; 0 -> 0 [label="!ap001"]; 0 -> 1 [label="ap001"];
+        1 -> 1 [label="true"]; }'''
+    rules = [{"id": "SPEC", "rule_id": "SPEC", "formula": "F ap001", "dfa_dot": dot,
+              "aps": [{"label": "ap001", "full": "ap_state/any/any/ur5e-4/any"}]}]
+    checker = BaseSafetyChecker({"SPEC": dot}, rules)
+    observations = [{"time_exact": time, "phase": phase, "continuous_interval": bounds,
+                     "resources": {}, "parts": {}} for time, phase, bounds in (
+                         ("0", "at", ["0", "0"]), ("1/2", "between", ["0", "1"]),
+                         ("1", "at", ["1", "1"]))]
+    prior = {"rules": rules, "clock_version": "continuous_physical_boundaries_v1",
+             "fingerprint": {"source": "bounded_continuous_history_fixture"},
+             "model": {"evidence": {"continuous_motion": True}},
+             "frozen": {key: {} for key in ("scene", "catalog", "requirement_scopes", "geometry")},
+             "observations": observations, "valuations": [{"SPEC": {"ap001": values}}
+                                                           for values in ([False], [False, True], [False])]}
+    current = deepcopy(prior)
+    current["observations"] = deepcopy(observations[-1:])
+    current["valuations"] = deepcopy(prior["valuations"][-1:])
+    monkeypatch.setattr(history, "_prepare_grounded_primitive_trace", lambda **_: deepcopy(prior))
+    checkpoint = {"version": 2, "clock_version": prior["clock_version"], "segments": [{
+        "grounding_inputs": {}, "observation_boundaries": [], "observation_count": 3,
+        "trace_fingerprint": history.physical_trace_fingerprint(prior)}],
+        "safety_dfa_states": {"SPEC": ["0", "1"]}}
+    assert history.physical_history(checkpoint, current, checker, Budget()) == ({"SPEC": ("0", "1")}, True)
+    for change in ("valuations", "rule_cells"):
+        altered = deepcopy(current)
+        if change == "valuations":
+            altered["valuations"][0]["SPEC"]["ap001"] = [True]
+        else:
+            altered["observations"][0]["rule_cells"] = [{"SPEC": {"ap001": [True]}}]
+        with pytest.raises(ValueError, match="does not meet the new observed checkpoint"):
+            history.physical_history(checkpoint, altered, checker, Budget())
+    checkpoint["safety_dfa_states"] = {"SPEC": ["1"]}
+    with pytest.raises(ValueError, match="states do not match"):
+        history.physical_history(checkpoint, current, checker, Budget())
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_continuous_checkpoint_cannot_replay_unsafe_or_unresolved_prefix(uncertain):
+    from test_continuous_motion import composition_case
+
+    case, models = composition_case(conflict=True)
+    if uncertain:
+        case["grounding_inputs"]["geometry"]["regions"]["assembly_board-v1"]["bounds"][0] = [1.05, 1.2]
+    _, prepared = _continuous_checkpoint(case, models)
+    checkpoint, prepared = _continuous_checkpoint(case, models, count=len(prepared["observations"]), states={})
+    result = _analyze(_next_continuous_checkpoint_case(case, prepared),
+                      physical_checkpoint=checkpoint, primitive_models=models)
+    assert result["status"] == "inconclusive", result
+    assert result["reason"] == "Physical checkpoint contains rejected or unresolved continuous history"
+    assert result["completion_witness"] is None
+
+
+@pytest.mark.parametrize("change", ["state", "missing_rule", "scalar_state", "fingerprint", "clock", "count",
+                                   "between", "segments", "duplicate_segment", "geometry", "formula"])
+def test_continuous_checkpoint_rejects_changed_or_incomplete_history(change):
+    from test_continuous_motion import composition_case
+
+    case, models = composition_case()
+    checkpoint, _ = _continuous_checkpoint(case, models)
+    segment = checkpoint["segments"][0]
+    identifier = next(iter(checkpoint["safety_dfa_states"]))
+    if change == "state":
+        checkpoint["safety_dfa_states"][identifier] = ["unverified_state"]
+    elif change == "missing_rule":
+        checkpoint["safety_dfa_states"].pop(identifier)
+    elif change == "scalar_state":
+        checkpoint["safety_dfa_states"][identifier] = checkpoint["safety_dfa_states"][identifier][0]
+    elif change == "fingerprint":
+        segment["trace_fingerprint"] = "different_trace"
+    elif change == "clock":
+        checkpoint["clock_version"] = "grounded_ppr_primitive_observations_joint_trace_v2"
+    elif change == "count":
+        segment["observation_count"] = True
+    elif change == "between":
+        segment["observation_count"] = 2
+    elif change == "segments":
+        checkpoint["segments"] = []
+    elif change == "duplicate_segment":
+        checkpoint["segments"].append(deepcopy(segment))
+        checkpoint["segments"][0]["observation_count"] = 3
+    elif change == "geometry":
+        case["grounding_inputs"]["geometry"]["regions"]["assembly_board-v1"]["bounds"][0][0] -= .1
+    else:
+        case["grounding_inputs"]["catalog"]["specifications"][0]["formula"] = "G (ap001 | !ap001)"
+    before = deepcopy(checkpoint)
+    result = _analyze(case, physical_checkpoint=checkpoint, primitive_models=models)
+    assert result["status"] == "inconclusive", result
+    assert result["completion_witness"] is None
+    assert result["choices"] == []
+    assert "graph" not in result
+    assert checkpoint == before
 
 
 @pytest.mark.parametrize("mutation", ["state", "fingerprint", "gap", "formula"])
@@ -952,3 +1174,84 @@ def test_product_effect_replay_requires_actual_acknowledgement(mutation, planned
     else:
         assert acknowledged_product_effects_for_comparison(expected, observed, acknowledged) == expected
     assert observed == before
+
+
+def test_region_relevance_includes_initial_custody_and_internal_transit() -> None:
+    from fractions import Fraction
+
+    from cais_spade_llm.agents.central_controller.region_admission import event_region_relevance
+
+    observations = [
+        {"time_exact": "0", "region_occupancy": {"assembly_board-v1": {"r1": False},
+                                               "storage": {"r1": True}}},
+        {"time_exact": "1", "region_occupancy": {"assembly_board-v1": {"r1": True},
+                                               "storage": {"r1": False}}},
+        {"time_exact": "2", "region_occupancy": {"assembly_board-v1": {"r1": False},
+                                               "storage": {"r1": False}}},
+    ]
+    prepared = {"frozen": {"geometry": {"regions": {"assembly_board-v1": {}, "storage": {}}}},
+                "observations": observations}
+    result = event_region_relevance(prepared, "r1", (Fraction(0), Fraction(2)))
+    assert result["affected_regions"] == ["assembly_board-v1", "storage"]
+    assert result["unverified_regions"] == []
+    assert observations[-1]["region_occupancy"]["assembly_board-v1"]["r1"] is False
+
+
+def test_region_relevance_uses_swept_cells_and_retains_unknown() -> None:
+    from fractions import Fraction
+
+    from cais_spade_llm.agents.central_controller.region_admission import event_region_relevance
+
+    prepared = {
+        "frozen": {"geometry": {"regions": {"assembly_board-v1": {}, "unknown": {}}}},
+        "observations": [{
+            "time_exact": "1", "continuous_interval": ["0", "2"],
+            "region_occupancy": {"assembly_board-v1": {"r1": False}},
+            "continuous_cells": [
+                {"interval": ["0", "1"], "occupancy_possibilities": {
+                    "assembly_board-v1": {"r1": [False]}, "unknown": {"r1": [False]}}},
+                {"interval": ["1", "2"], "occupancy_possibilities": {
+                    "assembly_board-v1": {"r1": [False, True]}}},
+            ],
+        }],
+    }
+    result = event_region_relevance(prepared, "r1", (Fraction(0), Fraction(2)))
+    assert result["affected_regions"] == ["assembly_board-v1", "unknown"]
+    assert result["unverified_regions"] == ["assembly_board-v1", "unknown"]
+    assert "not_instantaneous_AP" in result["semantics"]
+
+
+def test_region_mutex_scope_uses_selected_predicate_binding_not_event_names() -> None:
+    from cais_spade_llm.agents.central_controller.ppr_ap import ap_record, make_ap_definition
+    from cais_spade_llm.agents.central_controller.region_admission import selected_region_mutexes
+
+    aps = [
+        ap_record(label, make_ap_definition("ap_state", "assembly_board-v1", "any", resource,
+                                           "any", {"region": "assembly_board-v1"}), "")
+        for label, resource in (("ap001", "r1"), ("ap002", "r2"))
+    ]
+    rule = {"rule_id": "SAFE_shared_area_mutex", "formula": "G !(ap001 & ap002)",
+            "aps": aps, "binding": {"region": "assembly_board-v1", "resources": ["r1", "r2"]}}
+    assert selected_region_mutexes([rule]) == [
+        {"rule_id": "SAFE_shared_area_mutex", "region": "assembly_board-v1", "resources": ["r1", "r2"]}
+    ]
+    rule["formula"] = "G (ap001 -> ap002)"
+    assert selected_region_mutexes([rule]) == []
+
+
+@pytest.mark.parametrize("source_jid,expected", [(None, "allowed"), ("another@localhost", "inconclusive")])
+def test_optional_resource_owner_source_preserves_program_association(source_jid, expected):
+    from test_continuous_motion import composition_case
+
+    case, models = composition_case()
+    case["grounding_inputs"]["snapshot"]["resources"]["ur5e-4"]["resource_jid"] = "ur5e-4@localhost"
+    programs = [*case["grounding_inputs"]["programs"], *case["event_start_choices"][0]["programs"]]
+    for program in programs:
+        for row in [*program["primitive_steps"], *program["step_results"]]:
+            row["source"].pop("resource_jid", None)
+            if source_jid is not None:
+                row["source"]["resource_jid"] = source_jid
+    result = _analyze(case, primitive_models=models)
+    assert result["status"] == expected, result
+    if source_jid is not None:
+        assert "resource association" in result["reason"]

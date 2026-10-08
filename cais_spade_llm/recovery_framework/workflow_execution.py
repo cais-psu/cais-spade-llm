@@ -7,7 +7,6 @@ import json
 import math
 import time
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
@@ -327,6 +326,18 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
             if registration.get("status") != "completed":
                 raise ValueError(registration.get("error") or "Could not register assembly fixtures to their carrier")
             runtime.assembly_fixture_registration = registration
+        from cais_spade_llm.recovery_framework.slippage_initialization import (
+            prepare_slippage_initial_conditions,
+        )
+
+        await prepare_slippage_initial_conditions(runtime)
+        configuration = getattr(getattr(runtime, "conveyor_fault", None), "configuration", {}) or {}
+        if (configuration.get("checkpoint") == "during_place_lowering"
+                and configuration.get("initial_conditions")
+                and getattr(runtime, "slippage_pickup_gate", None) is None):
+            from cais_spade_llm.recovery_framework.slippage_execution import SlippagePickupGate
+
+            runtime.slippage_pickup_gate = SlippagePickupGate(runtime, configuration)
         kmr = by_name.get("KMR")
         part = next((part for part in context.selected_parts
                      if part in context.inputs["scene"]["Storage"]["slots"]), None)
@@ -355,8 +366,26 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
             }:
 
                 async def execute_robot(task: dict, *, owner=agent) -> dict:
+                    gate = getattr(runtime, "slippage_pickup_gate", None)
+                    if gate is not None:
+                        await gate.wait(task)
                     program_name, arguments = _robot_arguments(context, owner, task)
-                    result = await getattr(owner, program_name)(**arguments)
+                    controller = owner._controller
+                    fault = runtime.conveyor_fault
+                    controller._simulation_task_id = task["task_id"]
+                    controller._simulation_task_run_id = task["run_id"]
+                    controller._simulation_task_part = task["parameters"].get("part_name")
+                    controller._simulation_fault_evidence = None
+                    controller._simulation_fault_request = fault.robot_request(task)
+                    controller._simulation_fault_armed = lambda: fault.status == "armed" and not runtime.stopped
+                    if controller._simulation_fault_request:
+                        controller._simulation_fault_request["model_name"] = context.geometry[
+                            task["parameters"]["part_name"]]["model_name"]
+                    motion_index = len(getattr(controller, "_simulation_motion_intervals", []))
+                    try:
+                        result = await getattr(owner, program_name)(**arguments)
+                    finally:
+                        controller._simulation_fault_request = None
                     simulation_execution = dict(result.get("observations", {})).get(
                         "simulation_execution", {}
                     )
@@ -366,7 +395,11 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                         "task_id": task["task_id"],
                         "controller_result": result,
                         "timing": deepcopy(simulation_execution.get("timing", {})),
+                        "physical_motions": deepcopy(getattr(controller, "_simulation_motion_intervals", [])[motion_index:]),
                     }
+                    interruption = getattr(controller, "_simulation_fault_evidence", None)
+                    if interruption is not None:
+                        evidence["failure_injection"] = deepcopy(interruption)
                     if task["event_name"] == "move_home" and result.get("status") == "completed":
                         evidence["home_observation"] = await asyncio.to_thread(_observe_robot_home, owner, result)
                     return evidence

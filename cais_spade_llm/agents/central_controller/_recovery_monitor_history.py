@@ -1,11 +1,13 @@
-"""Native task history and replayed physical checkpoints for recovery analysis."""
-
 from __future__ import annotations
+
+"""Native task history and replayed physical checkpoints for recovery analysis."""
 
 from copy import deepcopy
 from fractions import Fraction
+from itertools import product
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+from cais_spade_llm.agents.central_controller.local_composition import AnalysisLimit, Budget
 from cais_spade_llm.agents.central_controller.offline_safety_grounding import (
     _prepare_grounded_primitive_trace,
     _validate_composition_formulas,
@@ -96,13 +98,195 @@ def acknowledged_product_effects_for_comparison(
     return result
 
 
+def _continuous_alphabets(ap_values, expected):
+    if not isinstance(ap_values, dict) or set(ap_values) != set(expected):
+        raise ValueError("Continuous AP bindings changed within an observation")
+    labels = list(ap_values)
+    options = [value if isinstance(value, list) else [value] for value in ap_values.values()]
+    if any(not option or any(type(value) is not bool for value in option) for option in options):
+        raise ValueError("Continuous AP has unresolved Boolean semantics")
+    return labels, options
+
+
+def continuous_transition(checker: BaseSafetyChecker, rule_ids: list[str], monitors: tuple | list,
+                          values: dict, observation: dict, budget: Budget, *, explored_states: int = 0
+                          ) -> tuple[list[tuple[str, ...]], list[dict], dict | None, dict | None]:
+    """Retain all safe DFA states for one bounded continuous observation.
+
+    Open cells permit every finite nonempty word over their AP possibilities.
+    Numerical refinement cells are not independent task-clock observations.
+
+    Args:
+        checker: The existing compiled safety checker.
+        rule_ids: Rule identities in the same order as the monitor states.
+        monitors: Every currently possible DFA state for each rule.
+        values: Rule-local AP possibilities for the observation.
+        observation: Point or interval evidence, including any refined rule cells.
+        budget: Shared replay or composition limit.
+        explored_states: Already explored composition states charged to the limit.
+
+    Returns:
+        Possible states, checks, definite violation and unresolved violation.
+        Composition must retain unsafe alternatives even when safe states remain.
+    """
+    if (observation.get("phase") not in {"at", "between"}
+            or len(monitors) != len(rule_ids) or set(values) != set(rule_ids)):
+        raise ValueError("Incomplete continuous monitor observation")
+    cells = observation.get("rule_cells") or [values]
+    if not isinstance(cells, list) or any(not isinstance(cell, dict) or set(cell) != set(rule_ids)
+                                          for cell in cells):
+        raise ValueError("Incomplete continuous rule cells")
+    next_monitors, checks, violation, uncertainty = [], [], None, None
+    for identifier, current in zip(rule_ids, monitors, strict=True):
+        states = set(current)
+        if not states:
+            raise ValueError("Continuous monitor history has no possible state")
+        possible_violation = False
+        for cell in cells:
+            labels, options = _continuous_alphabets(cell[identifier], values[identifier])
+            pending, reached = list(states), set()
+            while pending:
+                budget.check(explored_states)
+                state = pending.pop()
+                for bits in product(*options):
+                    budget.check(explored_states)
+                    alphabet = frozenset(label for label, bit in zip(labels, bits, strict=True) if bit)
+                    row = checker.transition_evidence(identifier, state, alphabet)
+                    if row["reason"] in {"dfa_missing_transition", "dfa_ambiguous_transition"}:
+                        raise ValueError("Incomplete monitor transition for continuous evidence")
+                    if row["status"] != "passed":
+                        possible_violation = True
+                        continue
+                    if row["to"] not in reached:
+                        reached.add(row["to"])
+                        if observation["phase"] == "between":
+                            pending.append(row["to"])
+                if len(reached) > budget.max_states:
+                    raise AnalysisLimit("Continuous DFA closure exceeds state budget")
+            states = reached
+        check = {"rule_id": identifier, "ap_values": deepcopy(values[identifier]),
+                 "from": list(current), "to": sorted(states), "possible_violation": possible_violation}
+        checks.append(check)
+        if not states:
+            violation = violation or check
+        elif possible_violation:
+            uncertainty = uncertainty or check
+        next_monitors.append(tuple(sorted(states)))
+    return next_monitors, checks, violation, uncertainty
+
+
+def _continuous_prefix(prepared: dict, count: int) -> list[dict]:
+    observations = prepared["observations"]
+    if (type(count) is not int or not 0 < count <= len(observations)
+            or len(observations) != len(prepared["valuations"])):
+        raise ValueError("Physical checkpoint requires a nonempty contiguous observed prefix")
+    prefix = observations[:count]
+    previous = None
+    for index, observation in enumerate(prefix):
+        bounds = observation.get("continuous_interval")
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            raise ValueError("Continuous checkpoint interval evidence is missing")
+        start, end = map(Fraction, bounds)
+        time = Fraction(observation["time_exact"])
+        if index % 2 == 0:
+            if (observation.get("phase") != "at" or start != time or end != time
+                    or previous is not None and start != previous):
+                raise ValueError("Continuous checkpoint point boundaries are not contiguous")
+        elif (observation.get("phase") != "between" or start != previous or start >= end
+              or time != (start + end) / 2):
+            raise ValueError("Continuous checkpoint interval boundaries are not contiguous")
+        previous = end
+    if prefix[-1]["phase"] != "at":
+        raise ValueError("Continuous checkpoint must end at an observed point boundary")
+    return prefix
+
+
+def _continuous_physical_history(checkpoint: dict, prepared: dict, checker, budget,
+                                 primitive_models: dict | None) -> tuple[dict, bool]:
+    required = {"version", "clock_version", "segments", "safety_dfa_states"}
+    if (set(checkpoint) != required or checkpoint["clock_version"] not in {
+            "continuous_physical_boundaries_v1", "continuous_physical_boundaries_v2"}
+            or checkpoint["clock_version"] != prepared["clock_version"]
+            or not prepared.get("model", {}).get("evidence", {}).get("continuous_motion")):
+        raise ValueError("Unsupported continuous physical checkpoint or clock")
+    segments = checkpoint["segments"]
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("Continuous physical checkpoint requires observed segments")
+    rule_ids = list(checker.dfas)
+    monitors = [(checker.dfas[identifier]["initial"],) for identifier in rule_ids]
+    last, last_values = None, None
+    semantics = _physical_semantics(prepared)
+    for segment in segments:
+        budget.check()
+        if not isinstance(segment, dict) or set(segment) != {
+                "grounding_inputs", "observation_boundaries", "observation_count", "trace_fingerprint"}:
+            raise ValueError("Unsupported continuous physical checkpoint segment")
+        prior = _prepare_grounded_primitive_trace(
+            **segment["grounding_inputs"], observation_boundaries=segment["observation_boundaries"],
+            primitive_models=primitive_models, motion_budget=budget)
+        if segment["trace_fingerprint"] != physical_trace_fingerprint(prior):
+            raise ValueError("Physical checkpoint trace fingerprint changed")
+        if _physical_semantics(prior) != semantics:
+            raise ValueError("Physical checkpoint formulas, AP bindings, geometry or clock changed")
+        prefix = _continuous_prefix(prior, segment["observation_count"])
+        if last is not None and (
+                Fraction(last["time_exact"]) != Fraction(prefix[0]["time_exact"])
+                or _digest(_checkpoint_values(last)) != _digest(_checkpoint_values(prefix[0]))
+                or _digest(last_values) != _digest(prior["valuations"][0])
+                or _digest(last.get("rule_cells", [])) != _digest(prefix[0].get("rule_cells", []))):
+            raise ValueError("Continuous physical checkpoint segments are not contiguous")
+        for index, observation in enumerate(prefix):
+            if index == 0 and last is not None:
+                continue
+            monitors, _, violation, uncertainty = continuous_transition(
+                checker, rule_ids, monitors, prior["valuations"][index], observation, budget)
+            if violation is not None or uncertainty is not None:
+                raise ValueError("Physical checkpoint contains rejected or unresolved continuous history")
+        last, last_values = prefix[-1], prior["valuations"][len(prefix) - 1]
+    first = prepared["observations"][0]
+    _continuous_prefix(prepared, 1)
+    if (Fraction(last["time_exact"]) != Fraction(first["time_exact"])
+            or _digest(_checkpoint_values(last)) != _digest(_checkpoint_values(first))
+            or _digest(last_values) != _digest(prepared["valuations"][0])
+            or _digest(last.get("rule_cells", [])) != _digest(first.get("rule_cells", []))):
+        raise ValueError("Physical checkpoint does not meet the new observed checkpoint")
+    states = {identifier: tuple(current) for identifier, current in zip(rule_ids, monitors, strict=True)}
+    if _digest(checkpoint["safety_dfa_states"]) != _digest({key: list(value) for key, value in states.items()}):
+        raise ValueError("Physical checkpoint states do not match replayed observations")
+    return states, True
+
+
 def physical_history(checkpoint: dict | None, prepared: dict, checker: BaseSafetyChecker,
                      budget, *, primitive_models: dict | None = None) -> tuple[dict, bool]:
-    """Replay supplied history; never accept caller-asserted state IDs alone."""
+    """Replay owner-supplied history; never accept asserted state IDs alone.
+
+    Version 1 retains the scalar observation clock. Version 2 replays contiguous
+    continuous segments into possible-state sets. Replay establishes consistency;
+    the CCA context owner must independently authenticate actual observations.
+    Modeled traces alone do not establish live execution or permission.
+
+    Args:
+        checkpoint: Complete owner-authenticated history, or no preceding history.
+        prepared: The exact newly grounded trace at the continuation boundary.
+        checker: Compiled checker for that trace's unchanged rules.
+        budget: Shared replay or composition limit.
+        primitive_models: Registered owner models used to reconstruct the history.
+
+    Returns:
+        Replayed scalar states or continuous state tuples, and whether the first
+        observation has already been consumed by the preceding history.
+    """
     states = {identifier: row["initial"] for identifier, row in checker.dfas.items()}
+    continuous = bool(prepared.get("model", {}).get("evidence", {}).get("continuous_motion"))
     if checkpoint is None:
-        return states, False
+        return ({key: (value,) for key, value in states.items()} if continuous else states), False
     checkpoint = _object(checkpoint, "physical_checkpoint")
+    if type(checkpoint.get("version")) is not int:
+        raise ValueError("Unsupported physical checkpoint")
+    if checkpoint["version"] == 2:
+        return _continuous_physical_history(checkpoint, prepared, checker, budget, primitive_models)
+    if continuous:
+        raise ValueError("Continuous physical history requires its own verified checkpoint; no cross-clock state transfer")
     required = {"version", "grounding_inputs", "observation_boundaries", "observation_count",
                 "trace_fingerprint", "safety_dfa_states"}
     if set(checkpoint) != required or type(checkpoint["version"]) is not int or checkpoint["version"] != 1:

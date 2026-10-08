@@ -8,6 +8,7 @@ from itertools import combinations
 from typing import Any
 
 from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+from cais_spade_llm.agents.central_controller.ppr_ap import parse_ap_record
 from cais_spade_llm.agents.central_controller.local_composition import (
     Action, Budget, IncompleteModel, Scope,
 )
@@ -58,15 +59,17 @@ class EnvironmentPlant:
         self.context = context
         self.checker = checker
         state_aps = [ap for rule in checker.safety_rules for ap in rule.get("aps", [])
-                     if ap.get("full", "").startswith(("ap_state/", "sp/"))]
+                     if parse_ap_record(ap)["kind"] == "ap_state"]
         self._has_state_aps = bool(state_aps)
         self._has_state_context = self._has_state_aps
         for ap in state_aps:
-            parts = ap.get("full", "").split("/")
-            if (len(parts) != 6 or parts[2] != "any" or parts[5] != "any"
+            definition = parse_ap_record(ap)
+            condition = definition["state"]
+            if (definition["product"] not in {"*", "any"} or condition["arguments"]
                     or ap.get("source_task_ids") or ap.get("field") or ap.get("value")
-                    or "=" not in parts[4]
-                    or parts[4].partition("=")[0] not in context.models.get(parts[3], {}).get("state_variables", {})):
+                    or "=" not in condition["symbol"]
+                    or condition["symbol"].partition("=")[0] not in context.models.get(
+                        definition["resource"], {}).get("state_variables", {})):
                 break
         else:
             # These APs read owned valuations only. Their future truth cannot
@@ -242,13 +245,13 @@ class EnvironmentPlant:
                 raise IncompleteModel("unsupported_ap_descriptor")
             token = descriptor["resource"]
             resources.update(rid for rid, jid in self.jids.items()
-                             if token in {"any", "robot"}
+                             if token in {"*", "any"}
                              or token == rid or token == self.checker._resource_short_name(jid))
         return resources
 
     def _unmatched_stutters(self, rule_id: str, rule: dict, budget: Budget) -> bool:
         symbols = [ap["label"] for ap in rule.get("aps", [])
-                   if ap.get("full", "").startswith(("ap_state/", "sp/"))]
+                   if parse_ap_record(ap)["kind"] == "ap_state"]
         if len(symbols) > 12:
             return False
         dfa = self.checker.dfas[rule_id]

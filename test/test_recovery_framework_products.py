@@ -1,13 +1,16 @@
-"""Focused contracts for the recovery-framework known NIST Products catalog."""
+"""Recovery-framework NIST catalog and small-gear slippage contracts."""
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import math
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -362,3 +365,810 @@ def test_two_part_order_preserves_full_order_requirements_and_default_selection(
     from cais_spade_llm.ui.recovery_setup import default_setup
 
     assert default_setup()['selected_product_order_file'] == str(ORDER_PATH.relative_to(ROOT))
+
+
+
+def _record_small_gear_slippage_pickups(runtime) -> None:
+    context = runtime.context
+    context.part_tracker["KET4_Square_4mm"]["processCompleted"] = [
+        {"process": "trim", "result": "square"},
+    ]
+    runtime.retained_paths = {
+        part: {"path": [
+            {"resource_id": owner, "event_name": event,
+             "parameters": {"part_name": part, "destination_location": "assembly_board-v1"}}
+            for event in ("place_approach", "place_insert")
+        ]}
+        for owner, part in (("ur5e-4", "gear_small"), ("ur5e-3", "KET4_Square_4mm"))
+    }
+    for owner, part in (("ur5e-4", "gear_small"), ("ur5e-3", "KET4_Square_4mm")):
+        context.resources[owner].valuation.update(resource_state="picked", held_part=part)
+        context.part_tracker[part].update(state="in_gripper", location=owner)
+        agent = next(agent for agent in runtime.resource_agents if agent.agent_name == owner)
+        agent._held_part = part
+        agent._gripper_state = "closed"
+        context.transitions.append({
+            "acknowledgement": {
+                "resource_id": owner,
+                "event_name": "pick_grasp",
+                "task_id": owner + "_pickup",
+                "run_id": context.run_id,
+                "evidence": "resource",
+                "parameters": {"part_name": part},
+            },
+            "observations": {"controller_result": {"status": "completed", "gripper_state": "closed"}},
+        })
+
+
+@pytest.fixture
+def small_gear_slippage_runtime(tmp_path: Path, monkeypatch):
+    """Build real two-part runtimes with every ROS effect and report isolated."""
+    from cais_spade_llm.recovery_framework import environment_runtime, workflow_execution
+    from cais_spade_llm.ui import recovery_setup as settings
+
+    monkeypatch.setattr(environment_runtime, "RUN_DIRECTORY", tmp_path / "environment_runs")
+    monkeypatch.setattr(
+        workflow_execution, "GazeboWorker",
+        lambda **kwargs: SimpleNamespace(cancel=AsyncMock(), last_result=None),
+    )
+    monkeypatch.setattr(
+        "cais_spade_llm.recovery_framework.failure_effects._observe_part",
+        Mock(return_value={"x": 0.01, "y": 0.2, "z": 1.035,
+                           "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}),
+    )
+    monkeypatch.setattr(
+        "cais_spade_llm.recovery_framework.conveyor_fault.marker",
+        Mock(return_value={"status": "completed"}),
+    )
+    setup = settings.default_setup()
+    setup["failure_scenario"] = None
+    setup["selected_product_order_file"] = str(
+        ORDER_PATH.with_name("assembly_board-v1-two-parts.json").relative_to(ROOT)
+    )
+    inputs = settings.validate_setup(setup)
+    failure = settings.slippage_example(inputs["models"], "ur5e-4", "gear_small")
+    failure.update(
+        checkpoint="after_both_pickups_before_place",
+        drop_pose={"x": 0.0, "y": 0.2, "z": 1.04},
+        additional_condition={"resource_id": "ur5e-3", "part_name": "KET4_Square_4mm"},
+    )
+    setup["failure_scenario"] = failure
+    inputs = settings.validate_setup(setup)
+
+    def create(*, picked: bool = True, checkpoint: str = "after_both_pickups_before_place",
+               slipping_resource: str = "ur5e-4"):
+        run_setup = copy.deepcopy(setup)
+        run_setup["failure_scenario"]["checkpoint"] = checkpoint
+        if slipping_resource == "ur5e-3":
+            alternate = settings.slippage_example(inputs["models"], "ur5e-3", "KET4_Square_4mm")
+            alternate.update(checkpoint=checkpoint, drop_pose={"x": 0., "y": -.2, "z": 1.04},
+                             additional_condition={"resource_id": "ur5e-4", "part_name": "gear_small"})
+            run_setup["failure_scenario"] = alternate
+        resources = []
+        for rid in inputs["models"]:
+            controller = None
+            if rid in {"ur5e-3", "ur5e-4"}:
+                controller = SimpleNamespace(
+                    get_current_pose=Mock(return_value={
+                        "success": True, "pose": {"x": 0.0, "y": 0.0, "z": 1.2},
+                    }),
+                    open_gripper=Mock(return_value=True),
+                    detach_part=Mock(return_value={"success": True, "release_mode": "detached"}),
+                    set_entity_pose=Mock(return_value={"success": True}),
+                    _sync_part_collision=Mock(return_value=True),
+                    _last_command_evidence={"collision_scene_acknowledged": True},
+                    _cancel_simulation_goal=Mock(),
+                )
+            resources.append(SimpleNamespace(
+                agent_name=rid, jid=rid + "@localhost", execution_mode="simulation",
+                _controller=controller, _held_part=None, _gripper_state="open",
+            ))
+        runtime = environment_runtime.EnvironmentRuntime(
+            SimpleNamespace(jid="assembly_board-v1@localhost"),
+            {"setup": run_setup, "inputs": {key: inputs[key] for key in ("scene", "product_order", "geometry")}},
+            resources,
+        )
+        runtime.queue_save = Mock()
+        runtime.retained_paths = {}
+        for owner in ("ur5e-3", "ur5e-4"):
+            runtime.context.resources[owner].executors["place_insert"] = Mock()
+        if picked:
+            _record_small_gear_slippage_pickups(runtime)
+        return runtime
+
+    return create
+
+
+@pytest.mark.parametrize("first", ["ur5e-3", "ur5e-4"])
+def test_small_gear_slippage_holds_each_pickup_until_both_are_observed(
+    small_gear_slippage_runtime, first,
+) -> None:
+    """Either pickup order must hold the first robot before placement can start."""
+    runtime = small_gear_slippage_runtime()
+    context, fault = runtime.context, runtime.conveyor_fault
+    pickups = {record["acknowledgement"]["resource_id"]: record for record in context.transitions}
+    context.transitions.clear()
+    assert fault.checkpoint() is None
+    assert not fault.holds_task({"resource_id": first, "event_name": "place_approach"})
+    context.transitions.append(pickups[first])
+    second = "ur5e-4" if first == "ur5e-3" else "ur5e-3"
+    assert fault.holds_task({"resource_id": first, "event_name": "place_approach"})
+    assert not fault.holds_task({"resource_id": second, "event_name": "place_approach"})
+    assert not asyncio.run(fault.after_acknowledgement())
+    assert not runtime.stopped
+    context.transitions.append(pickups[second])
+    checkpoint = fault.checkpoint()
+    assert checkpoint["part_name"] == "gear_small"
+    assert checkpoint["custodian"] == "ur5e-4"
+    assert checkpoint["other_custodian"] == "ur5e-3"
+    assert checkpoint["other_part_name"] == "KET4_Square_4mm"
+    assert set(checkpoint["pickups"]) == {"ur5e-3", "ur5e-4"}
+    assert fault.holds_task({"resource_id": second, "event_name": "place_insert"})
+    assert not fault.holds_task({"resource_id": "ur5e-1", "event_name": "place_approach"})
+
+
+@pytest.mark.parametrize("owner", ["ur5e-3", "ur5e-4"])
+@pytest.mark.parametrize("invalid", [
+    "missing_pickup", "missing_observation", "stale_run", "simulated_evidence",
+    "wrong_part", "later_release", "wrong_location", "empty_gripper", "idle_robot", "pending_task",
+])
+def test_small_gear_slippage_rejects_invalid_pickup_evidence_without_effects(
+    small_gear_slippage_runtime, owner, invalid,
+) -> None:
+    """Both exact custodians need current observations and no outstanding robot task."""
+    runtime = small_gear_slippage_runtime()
+    context, fault = runtime.context, runtime.conveyor_fault
+    record = next(row for row in context.transitions if row["acknowledgement"]["resource_id"] == owner)
+    task = record["acknowledgement"]
+    part = task["parameters"]["part_name"]
+    if invalid == "missing_pickup":
+        context.transitions.remove(record)
+    elif invalid == "missing_observation":
+        record["observations"] = {}
+    elif invalid == "stale_run":
+        task["run_id"] = "previous_run"
+    elif invalid == "simulated_evidence":
+        task["evidence"] = "simulated"
+    elif invalid == "wrong_part":
+        task["parameters"]["part_name"] = "gear_large"
+    elif invalid == "later_release":
+        later = copy.deepcopy(record)
+        later["acknowledgement"].update(event_name="place_release", task_id=owner + "_release")
+        context.transitions.append(later)
+    elif invalid == "wrong_location":
+        context.part_tracker[part]["location"] = "assembly_board-v1"
+    elif invalid == "empty_gripper":
+        context.resources[owner].valuation["held_part"] = None
+    elif invalid == "idle_robot":
+        context.resources[owner].valuation["resource_state"] = "idle"
+    else:
+        context.pending_tasks["racing_place"] = {"resource_id": owner}
+    before = context.snapshot()
+    parts_before = copy.deepcopy(context.part_tracker)
+    assert fault.checkpoint() is None
+    assert not asyncio.run(fault.after_acknowledgement())
+    with pytest.raises(ValueError, match="Waiting"):
+        asyncio.run(fault.trigger())
+    assert context.snapshot() == before
+    assert context.part_tracker == parts_before
+    assert fault.status == "armed" and not runtime.stopped
+    assert not context.unavailable_resources
+    for agent in runtime.resource_agents:
+        if agent._controller is not None:
+            for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
+                getattr(agent._controller, method).assert_not_called()
+
+
+def test_small_gear_slippage_detaches_only_gear_and_retains_interrupted_obligations(
+    small_gear_slippage_runtime,
+) -> None:
+    """A confirmed gear drop preserves the held peg and both unfinished assemblies."""
+    runtime = small_gear_slippage_runtime()
+    context, fault = runtime.context, runtime.conveyor_fault
+    before, parts_before = context.snapshot(), copy.deepcopy(context.part_tracker)
+    requirements = copy.deepcopy(context.requirements)
+    continuations = copy.deepcopy(runtime.retained_paths)
+    pending = {"task_id": "interrupted_return", "run_id": context.run_id,
+               "resource_id": "KMR", "event_name": "move_to_resource",
+               "parameters": {"source_resource": "M1", "target_resource": "Storage"},
+               "reservations": ["resource:KMR"]}
+    context.pending_tasks[pending["task_id"]] = copy.deepcopy(pending)
+    context.reservations["resource:KMR"] = pending["task_id"]
+    assert fault.checkpoint() is not None
+    assert asyncio.run(fault.after_acknowledgement())
+    gear = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-4")
+    peg = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-3")
+    gear._controller.open_gripper.assert_called_once_with()
+    gear._controller.detach_part.assert_called_once_with("gear_small", assume_released_if_open=False)
+    gear._controller.set_entity_pose.assert_called_once_with(
+        "gear_small", **fault.configuration["drop_pose"], **fault.configuration["orientation_quat"],
+    )
+    gear._controller._sync_part_collision.assert_called_once_with("gear_small")
+    for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
+        getattr(peg._controller, method).assert_not_called()
+    assert gear._held_part is None and gear._gripper_state == "open"
+    assert peg._held_part == "KET4_Square_4mm" and peg._gripper_state == "closed"
+    assert context.part_tracker["gear_small"] == {
+        **parts_before["gear_small"], "state": "misplaced", "location": None,
+        "observed_pose": fault.evidence["observed_drop_pose"],
+    }
+    assert {part: state for part, state in context.part_tracker.items() if part != "gear_small"} == {
+        part: state for part, state in parts_before.items() if part != "gear_small"
+    }
+    assert context.resources["ur5e-4"].valuation["held_part"] is None
+    assert context.resources["ur5e-3"].valuation == before["ur5e-3"]
+    assert context.unavailable_resources == {"ur5e-4"}
+    assert not context.resources["ur5e-4"].executors
+    assert context.resources["ur5e-3"].executors
+    assert context.requirements == requirements
+    assert runtime.retained_paths == continuations
+    assert fault.evidence["requirements"] == requirements
+    assert fault.evidence["continuations"] == continuations
+    assert fault.evidence["pending_tasks"] == [pending]
+    assert runtime.outcome["cancelled_tasks"] == [pending]
+    assert not context.pending_tasks and not context.reservations
+    assert runtime.stopped and context.environment_model["closed"]
+    assert runtime.outcome["failed_resource"] == "ur5e-4"
+    assert fault.evidence["injection_status"] == "completed"
+    assert fault.evidence["requested_drop_pose"] != fault.evidence["observed_drop_pose"]
+    assert fault.evidence["collision_scene"]["collision_scene_acknowledged"] is True
+    assert runtime.agent.part_tracker == context.part_tracker
+    with pytest.raises(ValueError, match="No pending task"):
+        context.acknowledge({"task_id": pending["task_id"]})
+    assert not asyncio.run(fault.after_acknowledgement())
+    asyncio.run(fault.trigger())
+    assert gear._controller.detach_part.call_count == 1
+
+
+@pytest.mark.parametrize("stage", ["detach", "assumed_detach", "set_pose", "observation", "collision"])
+def test_small_gear_slippage_partial_effects_keep_peg_custody_and_failure_latch(
+    small_gear_slippage_runtime, monkeypatch, stage,
+) -> None:
+    """Partial gear effects need reconciliation while peg custody stays authoritative."""
+    runtime = small_gear_slippage_runtime()
+    context, fault = runtime.context, runtime.conveyor_fault
+    peg_before = copy.deepcopy(context.part_tracker["KET4_Square_4mm"])
+    gear = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-4")
+    if stage == "detach":
+        gear._controller.detach_part.return_value = {"success": False}
+    elif stage == "assumed_detach":
+        gear._controller.detach_part.return_value = {"success": True, "release_mode": "assumed_open"}
+    elif stage == "set_pose":
+        gear._controller.set_entity_pose.return_value = {"success": False}
+    elif stage == "observation":
+        monkeypatch.setattr(
+            "cais_spade_llm.recovery_framework.failure_effects._observe_part",
+            Mock(side_effect=ValueError("no settled gear observation")),
+        )
+    else:
+        gear._controller._sync_part_collision.return_value = False
+    asyncio.run(fault.trigger())
+    assert runtime.stopped and fault.status == "triggered"
+    assert fault.evidence["injection_status"] == "failed"
+    assert fault.evidence["physical_state_reconciliation_required"] is True
+    assert context.unavailable_resources == {"ur5e-4"}
+    assert context.part_tracker["KET4_Square_4mm"] == peg_before
+    assert context.resources["ur5e-3"].valuation["held_part"] == "KET4_Square_4mm"
+    peg = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-3")
+    for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
+        getattr(peg._controller, method).assert_not_called()
+    if stage in {"detach", "assumed_detach"}:
+        assert context.resources["ur5e-4"].valuation["held_part"] == "gear_small"
+        assert context.part_tracker["gear_small"]["location"] == "ur5e-4"
+        assert gear._held_part == "gear_small"
+        assert fault.evidence["custody_uncertain"] is True
+        gear._controller.set_entity_pose.assert_not_called()
+    else:
+        assert context.resources["ur5e-4"].valuation["held_part"] is None
+        assert context.part_tracker["gear_small"]["state"] == "misplaced"
+        assert gear._held_part is None
+        assert "observed_pose" not in context.part_tracker["gear_small"]
+    with pytest.raises(ValueError, match="reset"):
+        fault.arm(True)
+
+
+@pytest.mark.parametrize("clear_succeeds", [True, False])
+def test_small_gear_slippage_reset_requires_confirmation_and_rerun_uses_fresh_pickups(
+    small_gear_slippage_runtime, monkeypatch, clear_succeeds,
+) -> None:
+    """Only confirmed scene reset permits a fresh run with newly observed pickups."""
+    from cais_spade_llm.recovery_framework.conveyor_fault import reset_fault_scene
+
+    runtime = small_gear_slippage_runtime()
+    fault = runtime.conveyor_fault
+    asyncio.run(fault.trigger())
+    retained_evidence = copy.deepcopy(fault.evidence)
+    bridge = SimpleNamespace(
+        ros2_stop=Mock(return_value=None), ros2_start=Mock(return_value=None),
+        simulation_start_ready=Mock(return_value=(True, "")),
+    )
+    visual = Mock(return_value={"status": "completed" if clear_succeeds else "failed"})
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker", visual)
+    ok, reason = reset_fault_scene(bridge, runtime)
+    assert ok is clear_succeeds
+    assert bridge.ros2_stop.call_args_list == [call("recovery_rviz"), call("gazebo_dual")]
+    bridge.ros2_start.assert_called_once_with("gazebo_dual")
+    visual.assert_called_once_with(fault.marker_scene(), "clear")
+    assert fault.status == ("reset" if clear_succeeds else "triggered")
+    assert runtime.stopped and fault.evidence == retained_evidence
+    with pytest.raises(ValueError, match="reset"):
+        fault.arm(True)
+    if not clear_succeeds:
+        assert "absence could not be confirmed" in reason
+        visual.return_value = {"status": "completed"}
+        assert reset_fault_scene(bridge, runtime)[0]
+        assert fault.status == "reset"
+    rerun = small_gear_slippage_runtime(picked=False)
+    assert not rerun.stopped and rerun.conveyor_fault.status == "armed"
+    assert rerun.context.run_id != runtime.context.run_id
+    assert not rerun.context.transitions and not rerun.conveyor_fault.evidence
+    assert rerun.context.part_tracker == rerun.context.initial_product_states
+    assert not rerun.retained_paths
+    assert not rerun.context.unavailable_resources
+    assert rerun.context.resources["ur5e-4"].valuation["held_part"] is None
+    assert rerun.context.resources["ur5e-3"].valuation["held_part"] is None
+    assert not asyncio.run(rerun.conveyor_fault.after_acknowledgement())
+    _record_small_gear_slippage_pickups(rerun)
+    old_pickups = copy.deepcopy(list(retained_evidence["pickups"].values()))
+    rerun.context.transitions.extend(old_pickups)
+    assert rerun.conveyor_fault.checkpoint() is None
+    assert not asyncio.run(rerun.conveyor_fault.after_acknowledgement())
+    del rerun.context.transitions[-len(old_pickups):]
+    assert asyncio.run(rerun.conveyor_fault.after_acknowledgement())
+    assert rerun.conveyor_fault.evidence["run_id"] == rerun.context.run_id
+    assert all(record["acknowledgement"]["run_id"] == rerun.context.run_id
+               for record in rerun.conveyor_fault.evidence["pickups"].values())
+    assert rerun.context.resources["ur5e-3"].valuation["held_part"] == "KET4_Square_4mm"
+    assert rerun.context.part_tracker["gear_small"]["state"] == "misplaced"
+    assert fault.evidence == retained_evidence
+
+
+
+def _small_gear_place_task(runtime, *, owner="ur5e-4", part="gear_small", event="place_approach") -> dict:
+    task = {"run_id": runtime.context.run_id, "task_id": owner + "_placement",
+            "resource_id": owner, "event_name": event,
+            "parameters": {"part_name": part, "destination_location": "assembly_board-v1"},
+            "reservations": ["resource:" + owner, "workspace:assembly_board-v1"]}
+    runtime.context.pending_tasks[task["task_id"]] = copy.deepcopy(task)
+    runtime.context.reservations.update({key: task["task_id"] for key in task["reservations"]})
+    return task
+
+
+def _small_gear_placement_failure(task, *, progress=.5) -> dict:
+    observed = {"x": .1, "y": .2, "z": 1.5 - progress * .5}
+    stamp = time.time()
+    return {**{key: task[key] for key in ("run_id", "task_id", "resource_id")},
+            "part_name": task["parameters"]["part_name"], "checkpoint": "during_place_lowering",
+            "source": "gazebo_placement_motion", "function_name": "place_approach", "step_id": "descend",
+            "started_pose": {"x": .1, "y": .2, "z": 1.5},
+            "target_pose": {"x": .1, "y": .2, "z": 1.}, "observed_pose": observed,
+            "progress": progress, "goal_active": True, "goal_cancelled": True, "motion_stopped": True,
+            "controller_goal_id": list(range(16)), "observed_at_unix": stamp,
+            "stopped_at_unix": stamp + .15, "stopped_pose": copy.deepcopy(observed),
+            "stopped_joint_observation": {"positions": [.1] * 6, "stable": True},
+            "motion_path_validation": {"validated": True}}
+
+
+def _assert_no_slippage_effects(runtime) -> None:
+    for agent in runtime.resource_agents:
+        if agent._controller is not None:
+            for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
+                getattr(agent._controller, method).assert_not_called()
+
+
+def test_part_slippage_default_and_supported_legacy_checkpoints(small_gear_slippage_runtime):
+    from cais_spade_llm.recovery_framework.conveyor_fault import ConveyorFault
+    from cais_spade_llm.recovery_framework.failure_checkpoints import (
+        CHECKPOINTS,
+        SUPPORTED_CHECKPOINTS,
+    )
+
+    assert CHECKPOINTS["Part slippage"] == "during_place_lowering"
+    assert set(SUPPORTED_CHECKPOINTS["Part slippage"]) == {
+        "during_place_lowering", "after_both_pickups_before_place",
+    }
+    assert all(default in SUPPORTED_CHECKPOINTS[scenario] for scenario, default in CHECKPOINTS.items())
+    runtime = small_gear_slippage_runtime(checkpoint=CHECKPOINTS["Part slippage"])
+    invalid = {"execution_mode": "simulation", "failure_scenario": copy.deepcopy(runtime.conveyor_fault.configuration)}
+    invalid["failure_scenario"]["checkpoint"] = "during_unrelated_motion"
+    with pytest.raises(ValueError, match="configured observed failure checkpoints"):
+        ConveyorFault(runtime, invalid)
+
+
+@pytest.mark.parametrize("first", ["ur5e-3", "ur5e-4"])
+def test_lowering_slippage_holds_retained_pickup_and_only_allows_selected_approach(
+    small_gear_slippage_runtime, first,
+):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    context, fault = runtime.context, runtime.conveyor_fault
+    pickups = {row["acknowledgement"]["resource_id"]: row for row in context.transitions}
+    context.transitions.clear()
+    gear = {"resource_id": "ur5e-4", "event_name": "place_approach",
+            "parameters": {"part_name": "gear_small"}}
+    peg = {"resource_id": "ur5e-3", "event_name": "place_approach",
+           "parameters": {"part_name": "KET4_Square_4mm"}}
+    assert not fault.holds_task(gear) and not fault.holds_task(peg)
+    context.transitions.append(pickups[first])
+    assert fault.holds_task(gear) is (first == "ur5e-4")
+    assert fault.holds_task(peg) is (first == "ur5e-3")
+    context.transitions.append(pickups["ur5e-4" if first == "ur5e-3" else "ur5e-3"])
+    assert not fault.holds_task(gear)
+    assert fault.holds_task({**gear, "event_name": "place_insert"})
+    assert fault.holds_task({**gear, "parameters": {"part_name": "gear_large"}})
+    assert fault.holds_task(peg)
+    assert not fault.holds_task({"resource_id": "ur5e-1", "event_name": "place_approach"})
+    assert fault.checkpoint() is None and not fault.snapshot()["ready"]
+    assert not asyncio.run(fault.after_acknowledgement())
+    with pytest.raises(ValueError, match="Waiting"):
+        asyncio.run(fault.trigger())
+    task = _small_gear_place_task(runtime)
+    request = fault.robot_request(task)
+    assert request == {"run_id": context.run_id, "task_id": task["task_id"], "resource_id": "ur5e-4",
+                       "part_name": "gear_small", "checkpoint": "during_place_lowering",
+                       "placement_progress": .5}
+    task["parameters"]["part_name"] = "gear_large"
+    assert fault._robot_task["parameters"]["part_name"] == "gear_small"
+    assert fault.checkpoint() is None and not runtime.stopped
+    _assert_no_slippage_effects(runtime)
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing_pickup", "missing_observation", "old_pickup", "retained_released", "wrong_custody",
+    "later_ack", "retained_pending", "other_gear_pending", "not_pending", "wrong_event", "wrong_part",
+    "wrong_resource", "old_task", "disarmed", "stopped",
+])
+def test_lowering_robot_request_requires_current_both_pickups_and_bound_pending_task(
+    small_gear_slippage_runtime, invalid,
+):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    context, fault = runtime.context, runtime.conveyor_fault
+    task = _small_gear_place_task(runtime)
+    pickup = next(row for row in context.transitions if row["acknowledgement"]["resource_id"] == "ur5e-3")
+    if invalid == "missing_pickup":
+        context.transitions.remove(pickup)
+    elif invalid == "missing_observation":
+        pickup["observations"] = {}
+    elif invalid == "old_pickup":
+        pickup["acknowledgement"]["run_id"] = "old_run"
+    elif invalid == "retained_released":
+        context.resources["ur5e-3"].valuation["held_part"] = None
+    elif invalid == "wrong_custody":
+        context.part_tracker["KET4_Square_4mm"]["location"] = "assembly_board-v1"
+    elif invalid == "later_ack":
+        later = copy.deepcopy(pickup)
+        later["acknowledgement"].update(event_name="place_approach", task_id="later_placement")
+        context.transitions.append(later)
+    elif invalid in {"retained_pending", "other_gear_pending"}:
+        context.pending_tasks["other_placement"] = {"resource_id": "ur5e-3" if invalid == "retained_pending" else "ur5e-4"}
+    elif invalid == "not_pending":
+        context.cancel_pending(task["task_id"])
+    elif invalid in {"wrong_event", "wrong_resource", "old_task", "wrong_part"}:
+        if invalid == "wrong_event":
+            task["event_name"] = "place_insert"
+        elif invalid == "wrong_resource":
+            task["resource_id"] = "ur5e-3"
+        elif invalid == "old_task":
+            task["run_id"] = "old_run"
+        else:
+            task["parameters"]["part_name"] = "gear_large"
+        context.pending_tasks[task["task_id"]] = copy.deepcopy(task)
+    elif invalid == "disarmed":
+        fault.arm(False)
+    else:
+        runtime.stop("Stopped before placement")
+    before = context.snapshot()
+    assert fault.robot_request(task) == {}
+    assert fault._robot_task is None and fault.checkpoint() is None
+    assert context.snapshot() == before
+    _assert_no_slippage_effects(runtime)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("run_id", "old_run"), ("task_id", "other_task"), ("resource_id", "ur5e-3"),
+    ("part_name", "gear_large"), ("checkpoint", "after_both_pickups_before_place"),
+    ("source", "gazebo_processing_checkpoint"), ("function_name", "pick_grasp"), ("step_id", "travel"),
+])
+def test_lowering_slippage_rejects_mismatched_controller_evidence(small_gear_slippage_runtime, key, value):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    fault = runtime.conveyor_fault
+    assert fault.robot_request(task)
+    evidence = _small_gear_placement_failure(task)
+    evidence[key] = value
+    before = runtime.context.snapshot()
+    with pytest.raises(ValueError, match="Stale or unrelated"):
+        asyncio.run(fault.accept_robot_failure(task, {"failure_injection": evidence}))
+    assert runtime.context.pending_for(task["task_id"]) == task
+    assert runtime.context.snapshot() == before and not runtime.stopped
+    assert fault.status == "armed" and fault.checkpoint() is None
+    _assert_no_slippage_effects(runtime)
+
+
+@pytest.mark.parametrize("invalid", [
+    {"goal_active": False}, {"goal_cancelled": False}, {"motion_stopped": False}, {"motion_stopped": 1},
+    {"progress": .49}, {"progress": 1.}, {"progress": float("nan")}, {"progress": True},
+    {"controller_goal_id": []}, {"controller_goal_id": [256] * 16}, {"controller_goal_id": "goal"},
+    {"started_pose": {}}, {"target_pose": {"x": .1, "y": .2, "z": 1.6}},
+    {"observed_pose": {"x": .1, "y": .2, "z": 1.3}},
+    {"observed_pose": {"x": .1, "y": .2, "z": 1.}},
+    {"observed_pose": {"x": float("nan"), "y": .2, "z": 1.25}},
+    {"observed_at_unix": float("inf")}, {"observed_at_unix": 0},
+])
+def test_lowering_slippage_rejects_unconfirmed_or_unobserved_descent(small_gear_slippage_runtime, invalid):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    fault = runtime.conveyor_fault
+    assert fault.robot_request(task)
+    evidence = {**_small_gear_placement_failure(task), **invalid}
+    with pytest.raises(ValueError, match="Invalid|downward progress"):
+        asyncio.run(fault.accept_robot_failure(task, {"failure_injection": evidence}))
+    assert runtime.context.pending_for(task["task_id"]) == task
+    assert fault.status == "armed" and fault.checkpoint() is None and not runtime.stopped
+    assert not runtime.context.unavailable_resources
+    _assert_no_slippage_effects(runtime)
+
+
+@pytest.mark.parametrize("invalid", ["retained_custody", "gear_custody", "later_ack", "cancelled_without_binding"])
+def test_lowering_slippage_rechecks_custody_before_consuming_failure(small_gear_slippage_runtime, invalid):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    context, fault = runtime.context, runtime.conveyor_fault
+    task = _small_gear_place_task(runtime)
+    evidence = _small_gear_placement_failure(task)
+    if invalid != "cancelled_without_binding":
+        assert fault.robot_request(task)
+    if invalid in {"retained_custody", "gear_custody"}:
+        context.resources["ur5e-3" if invalid == "retained_custody" else "ur5e-4"].valuation["held_part"] = None
+    elif invalid == "later_ack":
+        later = copy.deepcopy(context.transitions[0])
+        later["acknowledgement"].update(event_name="place_approach", task_id="late_placement")
+        context.transitions.append(later)
+    else:
+        runtime.stop("No controller binding was created")
+    with pytest.raises(ValueError, match="Stale placement task|pickup custody"):
+        asyncio.run(fault.accept_robot_failure(task, {"failure_injection": evidence}))
+    assert fault.status == "armed" and not fault.evidence
+    _assert_no_slippage_effects(runtime)
+
+
+@pytest.mark.parametrize("progress", [.5, .75, .999])
+@pytest.mark.parametrize("disarmed_after_capture", [False, True])
+def test_lowering_slippage_retains_pending_placement_peg_and_obligations(
+    small_gear_slippage_runtime, progress, disarmed_after_capture,
+):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    context, fault = runtime.context, runtime.conveyor_fault
+    task = _small_gear_place_task(runtime)
+    assert fault.robot_request(task)
+    captured = _small_gear_placement_failure(task, progress=progress)
+    peg = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-3")
+    gear = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-4")
+    peg_before = copy.deepcopy(context.resources["ur5e-3"].valuation)
+    peg_part_before = copy.deepcopy(context.part_tracker["KET4_Square_4mm"])
+    requirements, continuations = copy.deepcopy(context.requirements), copy.deepcopy(runtime.retained_paths)
+    if disarmed_after_capture:
+        fault.arm(False)
+    assert asyncio.run(fault.accept_robot_failure(task, {"failure_injection": captured}))
+    assert fault.status == "triggered" and runtime.stopped
+    assert fault.evidence["placement_motion"] == captured
+    assert fault.evidence["pending_tasks"] == [task] == runtime.outcome["cancelled_tasks"]
+    assert not context.pending_tasks and not context.reservations
+    assert context.resources["ur5e-3"].valuation == peg_before
+    assert context.part_tracker["KET4_Square_4mm"] == peg_part_before
+    assert peg._held_part == "KET4_Square_4mm" and peg._gripper_state == "closed"
+    assert context.part_tracker["gear_small"]["state"] == "misplaced"
+    assert context.resources["ur5e-4"].valuation["held_part"] is None
+    assert context.requirements == fault.evidence["requirements"] == requirements
+    assert runtime.retained_paths == fault.evidence["continuations"] == continuations
+    assert all(row["acknowledgement"]["event_name"] == "pick_grasp" for row in context.transitions)
+    assert task["task_id"] not in context.acknowledgements
+    assert set(fault.evidence["pickups"]) == {"ur5e-3", "ur5e-4"}
+    gear._controller.detach_part.assert_called_once_with("gear_small", assume_released_if_open=False)
+    for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
+        getattr(peg._controller, method).assert_not_called()
+    assert asyncio.run(fault.accept_robot_failure(task, {"failure_injection": captured}))
+    assert not asyncio.run(fault.after_acknowledgement())
+    gear._controller.detach_part.assert_called_once()
+    captured["observed_pose"]["z"] = 99.
+    assert fault.evidence["placement_motion"]["observed_pose"]["z"] < 1.5
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_stop_retains_controller_lowering_evidence_after_request_cleanup(
+    small_gear_slippage_runtime, partial,
+):
+    async def exercise():
+        runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+        task = _small_gear_place_task(runtime)
+        fault = runtime.conveyor_fault
+        request = fault.robot_request(task)
+        controller = next(agent._controller for agent in runtime.resource_agents if agent.agent_name == "ur5e-4")
+        captured = _small_gear_placement_failure(task)
+        if partial:
+            captured.update(goal_cancelled=False, motion_stopped=False)
+        controller._simulation_fault_evidence = copy.deepcopy(captured)
+        controller._simulation_fault_request = {}
+        controller._simulation_task_id = None
+        assert request and fault._robot_task == task
+        runtime.stop("Stop cancelled the execution coroutine")
+        await fault.retain_worker_interruption()
+        if partial:
+            assert fault.status == "armed" and fault.checkpoint() is None
+            assert fault.evidence["injection_status"] == "interrupted"
+            assert fault.evidence["physical_state_reconciliation_required"]
+            assert fault.evidence["placement_motion"] == captured
+            assert fault.evidence["pending_tasks"] == [task]
+            assert fault.evidence["continuations"] == runtime.retained_paths
+            retained = copy.deepcopy(fault.evidence)
+            fault.not_reached()
+            assert fault.evidence == retained
+            _assert_no_slippage_effects(runtime)
+            controller._simulation_fault_evidence.update(goal_cancelled=True, motion_stopped=True)
+            await fault.retain_worker_interruption()
+        assert fault.status == "triggered" and fault.evidence["injection_status"] == "completed"
+        assert fault.evidence["pending_tasks"] == runtime.outcome["cancelled_tasks"] == [task]
+        assert fault.evidence["placement_motion"]["goal_cancelled"] is True
+        assert runtime.context.resources["ur5e-3"].valuation["held_part"] == "KET4_Square_4mm"
+        controller.detach_part.assert_called_once()
+        await fault.retain_worker_interruption()
+        controller.detach_part.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+def test_stop_ignores_stale_controller_fault_and_other_resource_capture(small_gear_slippage_runtime):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    fault = runtime.conveyor_fault
+    assert fault.robot_request(task)
+    gear = next(agent._controller for agent in runtime.resource_agents if agent.agent_name == "ur5e-4")
+    peg = next(agent._controller for agent in runtime.resource_agents if agent.agent_name == "ur5e-3")
+    gear._simulation_fault_evidence = {**_small_gear_placement_failure(task), "run_id": "old_run"}
+    peg._simulation_fault_evidence = _small_gear_placement_failure(task)
+    runtime.stop("Stop without current selected-controller evidence")
+    asyncio.run(fault.retain_worker_interruption())
+    assert fault.status == "armed" and not fault.evidence
+    _assert_no_slippage_effects(runtime)
+
+
+@pytest.mark.parametrize("clear_succeeds", [False, True])
+def test_lowering_fault_reset_and_rerun_require_a_new_bound_interruption(
+    small_gear_slippage_runtime, monkeypatch, clear_succeeds,
+):
+    from cais_spade_llm.recovery_framework.conveyor_fault import reset_fault_scene
+
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    fault = runtime.conveyor_fault
+    assert fault.robot_request(task)
+    captured = _small_gear_placement_failure(task)
+    assert asyncio.run(fault.accept_robot_failure(task, {"failure_injection": captured}))
+    retained = copy.deepcopy(fault.evidence)
+    bridge = SimpleNamespace(ros2_stop=Mock(return_value=None), ros2_start=Mock(return_value=None),
+                             simulation_start_ready=Mock(return_value=(True, "ready")))
+    visual = Mock(return_value={"status": "completed" if clear_succeeds else "failed"})
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker", visual)
+    ok, _ = reset_fault_scene(bridge, runtime)
+    assert ok is clear_succeeds and fault.evidence == retained
+    if not clear_succeeds:
+        assert fault.status == "triggered" and fault._robot_task == task
+        visual.return_value = {"status": "completed"}
+        assert reset_fault_scene(bridge, runtime)[0]
+    assert fault.status == "reset" and fault._robot_task is None and fault._robot_evidence is None
+    assert fault.robot_request(task) == {}
+    with pytest.raises(ValueError, match="reset"):
+        fault.arm(True)
+    rerun = small_gear_slippage_runtime(picked=False, checkpoint="during_place_lowering")
+    assert rerun.context.run_id != runtime.context.run_id
+    fresh_task = _small_gear_place_task(rerun)
+    assert rerun.conveyor_fault.robot_request(fresh_task) == {}
+    _record_small_gear_slippage_pickups(rerun)
+    assert not asyncio.run(rerun.conveyor_fault.after_acknowledgement())
+    assert rerun.conveyor_fault.robot_request(fresh_task)
+    with pytest.raises(ValueError, match="Stale or unrelated"):
+        asyncio.run(rerun.conveyor_fault.accept_robot_failure(fresh_task, {"failure_injection": captured}))
+    assert asyncio.run(rerun.conveyor_fault.accept_robot_failure(
+        fresh_task, {"failure_injection": _small_gear_placement_failure(fresh_task)}))
+    assert rerun.conveyor_fault.evidence["placement_motion"]["run_id"] == rerun.context.run_id
+    assert fault.evidence == retained
+
+
+@pytest.mark.parametrize("slipping_resource", ["ur5e-3", "ur5e-4"])
+def test_explicit_legacy_slippage_keeps_both_directions_and_pickup_trigger(
+    small_gear_slippage_runtime, slipping_resource,
+):
+    runtime = small_gear_slippage_runtime(slipping_resource=slipping_resource)
+    fault = runtime.conveyor_fault
+    assert fault.configuration["checkpoint"] == "after_both_pickups_before_place"
+    assert fault.checkpoint() is not None
+    assert fault.holds_task({"resource_id": slipping_resource, "event_name": "place_approach"})
+    assert fault.robot_request({"resource_id": slipping_resource, "event_name": "place_approach"}) == {}
+    assert asyncio.run(fault.after_acknowledgement())
+    other = fault.configuration["additional_condition"]
+    assert runtime.context.resources[other["resource_id"]].valuation["held_part"] == other["part_name"]
+    assert "placement_motion" not in fault.evidence
+
+
+
+def test_lowering_disarm_and_nominal_results_preserve_the_ordinary_task(small_gear_slippage_runtime):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    fault = runtime.conveyor_fault
+    before = runtime.context.snapshot()
+    fault.arm(False)
+    assert fault.robot_request(task) == {}
+    assert not asyncio.run(fault.accept_robot_failure(task, {"status": "completed"}))
+    assert not asyncio.run(fault.after_acknowledgement())
+    assert runtime.context.pending_for(task["task_id"]) == task
+    assert runtime.context.snapshot() == before and not runtime.stopped
+    fault.arm(True)
+    assert fault.robot_request(task)
+    assert not asyncio.run(fault.accept_robot_failure(task, {"failure_injection": None}))
+    assert fault.checkpoint() is None and runtime.context.pending_for(task["task_id"]) == task
+    _assert_no_slippage_effects(runtime)
+
+
+def test_lowering_request_and_evidence_obey_a_configured_later_progress(small_gear_slippage_runtime):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    fault = runtime.conveyor_fault
+    fault.configuration["placement_progress"] = .75
+    assert fault.robot_request(task)["placement_progress"] == .75
+    with pytest.raises(ValueError, match="Invalid"):
+        asyncio.run(fault.accept_robot_failure(task, {"failure_injection": _small_gear_placement_failure(task)}))
+    assert not runtime.stopped and runtime.context.pending_for(task["task_id"]) == task
+    assert asyncio.run(fault.accept_robot_failure(
+        task, {"failure_injection": _small_gear_placement_failure(task, progress=.75)}))
+
+
+@pytest.mark.parametrize("progress", [.49, 1., float("nan")])
+def test_lowering_request_rejects_invalid_progress_before_controller_dispatch(
+    small_gear_slippage_runtime, progress,
+):
+    runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+    task = _small_gear_place_task(runtime)
+    runtime.conveyor_fault.configuration["placement_progress"] = progress
+    with pytest.raises(ValueError, match="Placement interruption progress"):
+        runtime.conveyor_fault.robot_request(task)
+    assert runtime.conveyor_fault._robot_task is None and not runtime.stopped
+    assert runtime.context.pending_for(task["task_id"]) == task
+    _assert_no_slippage_effects(runtime)
+
+
+def test_lowering_caller_cancellation_keeps_fault_effects_and_blocks_early_reset(
+    small_gear_slippage_runtime, monkeypatch,
+):
+    from cais_spade_llm.recovery_framework.conveyor_fault import reset_fault_scene
+
+    async def exercise():
+        runtime = small_gear_slippage_runtime(checkpoint="during_place_lowering")
+        task = _small_gear_place_task(runtime)
+        fault = runtime.conveyor_fault
+        assert fault.robot_request(task)
+        captured = _small_gear_placement_failure(task)
+        entered, finish = asyncio.Event(), asyncio.Event()
+
+        async def slip(_runtime, _configuration, evidence):
+            evidence["detach"] = {"success": True}
+            entered.set()
+            await finish.wait()
+            evidence["observed_drop_pose"] = {"x": 0., "y": .2, "z": 1.04}
+
+        monkeypatch.setattr("cais_spade_llm.recovery_framework.failure_effects.slip_part", slip)
+        caller = asyncio.create_task(fault.accept_robot_failure(task, {"failure_injection": captured}))
+        await entered.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert fault.status == "triggered" and runtime.stopped
+        assert fault.evidence["pending_tasks"] == [task]
+        assert fault.evidence["placement_motion"] == captured
+        bridge = SimpleNamespace(ros2_stop=Mock())
+        ok, reason = reset_fault_scene(bridge, runtime)
+        assert not ok and "still recording" in reason
+        bridge.ros2_stop.assert_not_called()
+        assert (await fault.trigger())["status"] == "triggered"
+        finish.set()
+        await fault._injection_task
+        assert fault.evidence["injection_status"] == "completed"
+
+    asyncio.run(exercise())

@@ -1,4 +1,0 @@
-{
-  "scenario": "Part slippage (ur5e-3 part slips into ur5e-4\u2019s region)",
-  "reason": "ur5e-1 preparation failed: tf not ready for world -> ur5e_1_tool0"
-}

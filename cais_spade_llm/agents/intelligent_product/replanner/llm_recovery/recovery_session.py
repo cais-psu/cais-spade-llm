@@ -21,6 +21,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_r
     recovery_resource_capabilities,
     resolve_recovery_resource_type,
 )
+from cais_spade_llm.agents.central_controller.ppr_ap import parse_ap_record
 from cais_spade_llm.resources.resource_profile import (
     get_resource_profile,
     resource_event_fact_contract,
@@ -287,16 +288,8 @@ class RecoverySessionMixin:
 
     @staticmethod
     def _recovery_rule_ap_scope(rule: dict[str, Any]) -> str:
-        explicit_scope = str(rule.get("ap_scope") or "").strip().lower()
-        if explicit_scope in {"nominal", "recovery", "both"}:
-            return explicit_scope
-        constraint_type = str(rule.get("constraint_type") or "").strip().lower()
-        if constraint_type in {
-            "ordering_place_approach_priority",
-            "mutual_exclusion_in_destination_area",
-        }:
-            return "both"
-        return "nominal"
+        """Apply selected requirements to the joint nominal/recovery execution."""
+        return "both"
 
     @staticmethod
     def _recovery_rule_dfa_dot(
@@ -316,130 +309,11 @@ class RecoverySessionMixin:
 
     @staticmethod
     def _recovery_rule_recovery_aps(rule: dict[str, Any]) -> list[dict[str, Any]]:
-        constraint_type = str(rule.get("constraint_type") or "").strip().lower()
-        nominal_aps = [
-            deepcopy(ap)
-            for ap in (rule.get("aps") or [])
-            if isinstance(ap, dict)
-            and str(ap.get("label") or "").strip()
-            and str(ap.get("full") or "").strip()
-        ]
-        if not nominal_aps:
-            return []
-        if constraint_type == "ordering_place_approach_priority":
-            return RecoverySessionMixin._recovery_priority_rule_aps(rule, nominal_aps)
-        if constraint_type == "mutual_exclusion_in_destination_area":
-            return RecoverySessionMixin._recovery_mutex_rule_aps(rule, nominal_aps)
-        return []
-
-    @staticmethod
-    def _recovery_priority_rule_aps(
-        rule: dict[str, Any],
-        nominal_aps: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        destination = str((rule.get("context") or {}).get("destination") or "").strip()
-        products = [
-            str(item or "").strip().lower()
-            for item in (rule.get("product") or [])
-            if str(item or "").strip()
-        ]
-        gateway_product = products[0] if len(products) >= 1 else ""
-        blocked_product = products[1] if len(products) >= 2 else ""
-        recovery_aps: list[dict[str, Any]] = []
-        for ap in nominal_aps:
-            label = str(ap.get("label") or "").strip()
-            full = str(ap.get("full") or "").strip()
-            descriptor = full.split("/")
-            if len(descriptor) < 6:
-                continue
-            _, _, product, _, _, _ = descriptor[:6]
-            product_token = str(product or "").strip().lower()
-            if blocked_product and product_token == blocked_product:
-                recovery_aps.append(
-                    {
-                        "label": label,
-                        "full": (
-                            f"ap_event/recovery/{product_token}/any/"
-                            f"move_part_to_destination/destination={destination}"
-                        ),
-                        "selector": {
-                            "mode": "move_part_to_destination",
-                            "part": product_token or "any",
-                            "resource": "any",
-                            "destination": destination,
-                        },
-                    }
-                )
-                continue
-            if gateway_product and product_token == gateway_product:
-                recovery_aps.append(
-                    {
-                        "label": label,
-                        "full": (
-                            f"ap_state/recovery/{product_token}/any/"
-                            f"part_goal_satisfied/destination={destination}&state=assembled"
-                        ),
-                        "selector": {
-                            "mode": "part_goal_satisfied",
-                            "part": product_token or "any",
-                            "resource": "any",
-                            "destination": destination,
-                            "states": ["assembled", "placed"],
-                        },
-                    }
-                )
-        return recovery_aps
-
-    @staticmethod
-    def _recovery_mutex_rule_aps(
-        rule: dict[str, Any],
-        nominal_aps: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        destination = str((rule.get("context") or {}).get("destination") or "").strip()
-        recovery_aps: list[dict[str, Any]] = []
-        for ap in nominal_aps:
-            label = str(ap.get("label") or "").strip()
-            full = str(ap.get("full") or "").strip()
-            descriptor = full.split("/")
-            if len(descriptor) < 6:
-                continue
-            prefix, _, product, resource, symbol, _ = descriptor[:6]
-            resource_token = str(resource or "").strip().lower() or "any"
-            product_token = str(product or "").strip().lower() or "any"
-            if prefix == "ap_event":
-                recovery_aps.append(
-                    {
-                        "label": label,
-                        "full": (
-                            f"ap_event/recovery/{product_token}/{resource_token}/"
-                            f"resource_move_to_destination/destination={destination}"
-                        ),
-                        "selector": {
-                            "mode": "resource_move_to_destination",
-                            "part": product_token,
-                            "resource": resource_token,
-                            "destination": destination,
-                        },
-                    }
-                )
-                continue
-            if prefix == "ap_state":
-                recovery_aps.append(
-                    {
-                        "label": label,
-                        "full": (
-                            f"ap_state/recovery/{product_token}/{resource_token}/"
-                            f"resource_in_destination/destination={destination}&symbol={symbol}"
-                        ),
-                        "selector": {
-                            "mode": "resource_in_destination",
-                            "part": product_token,
-                            "resource": resource_token,
-                            "destination": destination,
-                        },
-                    }
-                )
-        return recovery_aps
+        """Retain AP meanings; primitive evidence supplies recovery valuations."""
+        result = deepcopy(rule.get("aps") or [])
+        for ap in result:
+            parse_ap_record(ap)
+        return result
 
     @staticmethod
     def _brief_safety_rule(rule: dict[str, Any]) -> dict[str, Any]:
@@ -466,117 +340,24 @@ class RecoverySessionMixin:
         return token
 
     def _filter_relevant_loaded_safety_rules(
-        self,
-        *,
-        raw_rules: list[dict[str, Any]],
-        active_rule_ids: list[str],
-        relevant_parts: list[str],
-        relevant_resource_jids: list[str],
+        self, *, raw_rules: list[dict[str, Any]], active_rule_ids: list[str],
+        relevant_parts: list[str], relevant_resource_jids: list[str],
         relevant_locations: list[str],
     ) -> list[dict[str, Any]]:
-        if not raw_rules:
-            return []
-
-        active_rule_id_set = {
-            str(rule_id or "").strip() for rule_id in active_rule_ids if str(rule_id or "").strip()
-        }
-        resource_tokens = {
-            self._normalize_resource_token(resource_jid)
-            for resource_jid in relevant_resource_jids
-            if self._normalize_resource_token(resource_jid)
-        }
-        location_tokens = {
-            str(location or "").strip().lower()
-            for location in relevant_locations
-            if str(location or "").strip()
-        }
-        part_tokens = {
-            str(part_name or "").strip().lower()
-            for part_name in relevant_parts
-            if str(part_name or "").strip()
-        }
-
-        selected: list[dict[str, Any]] = []
-        seen_signatures: set[str] = set()
-        for rule in raw_rules:
-            if not isinstance(rule, dict):
-                continue
-            rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
-            rule_resource_tokens = {
-                self._normalize_resource_token(item)
-                for item in (rule.get("resources") or [])
-                if self._normalize_resource_token(item)
-            }
-            context = dict(rule.get("context") or {})
-            destination = str(context.get("destination") or "").strip().lower()
-            search_blob = " ".join(
-                [
-                    str(rule.get("generated_interpretation") or ""),
-                    str(rule.get("text") or ""),
-                    str(rule.get("raw_text") or ""),
-                    json.dumps(context, sort_keys=True, default=str),
-                ]
-            ).lower()
-
-            matches = False
-            if (
-                rule_id
-                and rule_id in active_rule_id_set
-                or rule_resource_tokens
-                and resource_tokens.intersection(rule_resource_tokens)
-                or destination
-                and destination in location_tokens
-                or any(part_token in search_blob for part_token in part_tokens)
-            ):
-                matches = True
-
-            if not matches:
-                continue
-            signature = self._recovery_safety_rule_signature(rule)
-            if not signature or signature in seen_signatures:
-                continue
-            seen_signatures.add(signature)
-            selected_rule = deepcopy(rule)
-            selected_rule.setdefault("rule_id", rule_id)
-            selected_rule.setdefault(
-                "summary",
-                str(
-                    rule.get("generated_interpretation")
-                    or rule.get("text")
-                    or rule.get("raw_text")
-                    or ""
-                ).strip(),
-            )
-            selected.append(selected_rule)
-
-        if selected:
-            return selected
-
-        fallback: list[dict[str, Any]] = []
-        seen_fallback: set[str] = set()
-        for rule in raw_rules:
-            if not isinstance(rule, dict):
-                continue
-            signature = self._recovery_safety_rule_signature(rule)
-            if not signature or signature in seen_fallback:
-                continue
-            seen_fallback.add(signature)
-            fallback_rule = deepcopy(rule)
-            fallback_rule.setdefault(
-                "rule_id",
-                str(rule.get("id") or rule.get("rule_id") or "").strip(),
-            )
-            fallback_rule.setdefault(
-                "summary",
-                str(
-                    rule.get("generated_interpretation")
-                    or rule.get("text")
-                    or rule.get("raw_text")
-                    or ""
-                ).strip(),
-            )
-            fallback.append(fallback_rule)
-        return fallback
+        """Keep selected rules until trusted physical dependency analysis can exclude them."""
+        rules = deepcopy(raw_rules)
+        identifiers = []
+        for rule in rules:
+            identifier = str(rule.get("id") or rule.get("rule_id") or "")
+            if not identifier or identifier in identifiers:
+                raise ValueError("Selected safety requirements need unique identifiers")
+            identifiers.append(identifier)
+            rule.setdefault("rule_id", identifier)
+            rule.setdefault("summary", str(rule.get("generated_interpretation") or
+                                          rule.get("text") or rule.get("raw_text") or ""))
+        if set(active_rule_ids) - set(identifiers):
+            raise ValueError("Active safety requirements are missing")
+        return rules
 
     def _build_relevant_assembly_requirements(
         self,

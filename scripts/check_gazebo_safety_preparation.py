@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Inspect supplied candidates in an already launched, dedicated Gazebo test session.
 
 This creates registered owners and a CCA, but starts no SPADE behaviors, discovery,
@@ -5,8 +7,6 @@ admission or execution. Initialization ledgers remain configured assumptions unt
 the preparation gate establishes its checkpoint evidence. Saved results never
 authorize dispatch. Use a fresh test launch, not a production run with prior work.
 """
-
-from __future__ import annotations
 
 import argparse
 import asyncio
@@ -33,12 +33,10 @@ async def check_candidates(safety_file: Path, output_directory: Path) -> list[di
     from cais_spade_llm.product.environment import EnvironmentProductContext
     from cais_spade_llm.recovery_framework.environment_runtime import EnvironmentRuntime
     from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
-        capture_checkpoint,
-        prepare_and_check,
-    )
-    from cais_spade_llm.recovery_framework.live_safety_preparation import (
         build_supplied_candidate,
+        capture_checkpoint,
         install_live_preparation,
+        prepare_and_check,
     )
     from cais_spade_llm.recovery_framework.workflow_execution import (
         create_environment_resource_agents,

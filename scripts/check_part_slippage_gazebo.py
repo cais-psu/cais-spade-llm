@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 """Capture live prerequisites for the three supplied part_slippage Gazebo companions.
 
 This is a preflight, not a recovery executor or a safety-violation demonstration.
 It preserves missing evidence and never substitutes synthetic trajectories,
 stages entities, installs a proof, or records/publishes an unsuccessful trial.
 """
-
-from __future__ import annotations
 
 import argparse
 import asyncio
@@ -62,8 +62,10 @@ def _save(path: Path, report: dict) -> None:
 
 async def capture_case(companion: dict, runtime, cca) -> dict:
     """Capture a fresh checkpoint and report actual owner admission support."""
-    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import capture_checkpoint
-    from cais_spade_llm.recovery_framework.live_safety_preparation import install_live_preparation
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
+        capture_checkpoint,
+        install_live_preparation,
+    )
 
     report = {
         "version": 1, "case_id": companion["case_id"], "run_id": runtime.context.run_id,

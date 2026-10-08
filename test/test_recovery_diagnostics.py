@@ -24,6 +24,23 @@ TRACE = [
 ]
 
 
+@pytest.fixture
+def archived_harness_aps(monkeypatch):
+    """Migrate archived rule copies without changing saved diagnostic inputs."""
+    from ppr_ap_migration import migrate_ppr_fixture
+
+    current_parser = runner.ProcessPlannerPrepareTrace._recovery_rule_recovery_aps
+
+    def parse_archived_rule(rule):
+        return current_parser(migrate_ppr_fixture(rule))
+
+    monkeypatch.setattr(
+        runner.ProcessPlannerPrepareTrace,
+        "_recovery_rule_recovery_aps",
+        staticmethod(parse_archived_rule),
+    )
+
+
 def _checkpoint(path: Path) -> dict:
     data = {
         "input_fingerprint": diagnostics.inspect_inputs(CONTEXT)["fingerprint"],
@@ -242,7 +259,7 @@ def test_job_cancels_an_actual_isolated_process(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
-def test_runner_prepares_selected_failure_context_without_model_work(tmp_path):
+def test_runner_prepares_selected_failure_context_without_model_work(tmp_path, archived_harness_aps):
     context = diagnostics.read_object(CONTEXT)
     context["failure_scenario_id"] = "move_home_failure"
     context["failure_event"]["failed_task_id"] = "REQ_2_T5"
@@ -262,7 +279,7 @@ def test_runner_prepares_selected_failure_context_without_model_work(tmp_path):
     assert product_agent._scripted_responses == []
 
 
-def test_frozen_worker_rebinds_absolute_references_and_uses_only_saved_files(tmp_path, monkeypatch):
+def test_frozen_worker_rebinds_absolute_references_and_uses_only_saved_files(tmp_path, monkeypatch, archived_harness_aps):
     source = tmp_path / "source.json"
     context = diagnostics.read_object(CONTEXT)
     context["bundle_root"] = str(diagnostics.ROOT / context["bundle_root"])
@@ -341,7 +358,7 @@ def test_live_diagnostics_require_saved_cca_history_and_running_evidence():
     ("", "KET4_Square_4mm", "gear_large"),
     ("_reverse", "gear_large", "KET4_Square_4mm"),
 ])
-def test_current_slippage_diagnostics_preserve_both_interrupted_tasks(suffix, slipping, held, tmp_path):
+def test_current_slippage_diagnostics_preserve_both_interrupted_tasks(suffix, slipping, held, tmp_path, archived_harness_aps):
     path = CONTEXT.with_name("runtime_context" + suffix + ".json")
     inputs = diagnostics.inspect_inputs(path, SCENARIO)
     assert inputs["scenario"] == "part_slippage"
@@ -363,3 +380,23 @@ def test_current_slippage_diagnostics_preserve_both_interrupted_tasks(suffix, sl
     assert snapshots[custodian]["held_part"] == held
     assert all(row["resource_id"] in {"ur5e-3", "ur5e-4"} for row in snapshots.values())
     assert not product.turn_log
+
+
+def test_safety_stage_reuses_current_catalog_without_llm_or_execution_permission(tmp_path, monkeypatch):
+    from cais_spade_llm.agents.central_controller.predefined_safety import validate_predefined_safety_artifact
+    artifact = diagnostics.ROOT / "cais_spade_llm/safety/cca_safety_logic.json"
+    assert validate_predefined_safety_artifact(diagnostics.read_object(artifact)) is not None
+    agent = SimpleNamespace(precomputed_bundle={"artifacts": {"safety_logic_json": str(artifact)}},
+                            ask_llm=AsyncMock(side_effect=AssertionError("No LLM safety generation")))
+    monkeypatch.setattr(runner, "_build_recovery_safety_payload", lambda **_: {
+        "recovery_safety_scope_id": "test-scope", "accepted_outline_prefix": TRACE,
+        "recovery_safety_dir": str(tmp_path / "safety"),
+    })
+    result = asyncio.run(runner._run_safety_from_outline(
+        product_agent=agent, prepared_recovery_request={}, session_state={}))
+    assert result["ok"] and result["requires_grounded_composition"]
+    assert result["execution_authorized"] is False
+    assert result["rule_ids"] == ["SAFE_shared_area_mutex", "SAFE_gear_small_before_KET4_Square_4mm"]
+    assert validate_predefined_safety_artifact(
+        diagnostics.read_object(Path(result["recovery_safety_logic_json"]))) is not None
+    agent.ask_llm.assert_not_called()

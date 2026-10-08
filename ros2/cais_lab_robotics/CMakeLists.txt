@@ -9,9 +9,14 @@ find_package(Qt5 REQUIRED COMPONENTS Widgets)
 find_package(joint_trajectory_controller REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
+find_package(control_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(lifecycle_msgs REQUIRED)
 
 add_library(cais_recovery_joint_trajectory_controller SHARED src/recovery_joint_trajectory_controller.cpp)
-ament_target_dependencies(cais_recovery_joint_trajectory_controller joint_trajectory_controller pluginlib std_srvs)
+ament_target_dependencies(cais_recovery_joint_trajectory_controller
+  joint_trajectory_controller pluginlib std_srvs trajectory_msgs control_msgs rclcpp_action lifecycle_msgs)
 target_compile_features(cais_recovery_joint_trajectory_controller PRIVATE cxx_std_17)
 pluginlib_export_plugin_description_file(controller_interface recovery_controllers.xml)
 install(TARGETS cais_recovery_joint_trajectory_controller LIBRARY DESTINATION lib)
@@ -37,8 +42,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/MoveUR5eRelativeCartesian.action"
   "action/RecordUR5eInsertionDemonstration.action"
   "srv/SetUR5eCartesianJog.srv"
-  DEPENDENCIES geometry_msgs
+  "srv/SetRecoveryMotionContract.srv"
+  DEPENDENCIES geometry_msgs trajectory_msgs
 )
+rosidl_get_typesupport_target(cais_recovery_typesupport ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(cais_recovery_joint_trajectory_controller "${cais_recovery_typesupport}")
 
 ament_environment_hooks(env-hooks/cais_lab_robotics_gazebo.dsv.in)
 

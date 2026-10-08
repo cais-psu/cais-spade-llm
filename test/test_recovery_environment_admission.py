@@ -1,7 +1,8 @@
-"""Reuse real nominal acknowledgements while retaining recovery monitor history."""
-
 from __future__ import annotations
 
+"""Reuse real nominal acknowledgements while retaining recovery monitor history."""
+
+import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from cais_spade_llm.agents.central_controller._recovery_monitor_history import TaskMonitorHistories
-from cais_spade_llm.agents.central_controller.local_composition import Action
+from cais_spade_llm.agents.central_controller.local_composition import Action, Analysis, Scope
 from cais_spade_llm.agents.central_controller.online_safety_monitor import OnlineSafetyMonitor
 from cais_spade_llm.agents.central_controller.recovery_admission_runtime import (
     _context,
@@ -51,7 +52,7 @@ def _environment_ack_case(*, self_loop=False):
     dot = _DOT.replace("doublecircle]; 1; 2;", "doublecircle]; 0; 1; 2;").replace('0 -> 1 [label="ap001"]', '0 -> 0 [label="ap001"]') if self_loop else _DOT
     formula = "G(ap001 | !ap001)" if self_loop else "F(ap001)"
     monitor = OnlineSafetyMonitor({"nominal_completion": dot}, [{"id": "nominal_completion", "ltlf": formula, "aps": [
-        {"label": "ap001", "full": "ap/any/any/ur5e-3/move_home/any"}]}])
+        {"label": "ap001", "full": '{"event":{"arguments":{},"symbol":"move_home"},"kind":"ap_event","process":"any","product":"any","resource":"ur5e-3"}'}]}])
     runtime = SimpleNamespace(context=context, jids=jids, stopped=False, operation_goals={})
     admission = EnvironmentAdmission(runtime, monitor)
     labels = frozenset(monitor._map_task_to_aps(jids["ur5e-3"], "move_home", task["parameters"]))
@@ -190,3 +191,147 @@ def test_changed_nominal_audit_cannot_be_reused(change):
     assert case.monitor.current_states == {"nominal_completion": "1"}
     assert case.monitor.transition_evidence.call_count == 1
     assert case.session["path"] == []
+
+
+def test_typed_ap_arguments_and_process_require_registered_evidence():
+    from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+    from cais_spade_llm.agents.central_controller.ppr_ap import ap_record, make_ap_definition
+
+    definition = make_ap_definition("ap_event", "*", "assembly", "KMR", "insert", {"ready": True})
+    rules = [{"id": "typed", "aps": [ap_record("ap001", definition, "modeled insertion")]}]
+    catalog = [{"function_owner_agent": "KMR", "function": "insert", "process": "assembly"}]
+    checker = BaseSafetyChecker({}, rules, tools_catalog=catalog)
+    assert checker._map_task_to_aps("KMR", "insert", {"ready": True}) == ["ap001"]
+    assert checker._map_task_to_aps("KMR", "insert", {"ready": 1}) == []
+    assert checker._map_task_to_aps("another_resource", "insert", {}) == []
+    with pytest.raises(ValueError, match="argument evidence"):
+        checker._map_task_to_aps("KMR", "insert", {})
+    with pytest.raises(ValueError, match="process.*evidence"):
+        BaseSafetyChecker({}, rules)._map_task_to_aps("KMR", "insert", {"ready": True, "process": "assembly"})
+
+
+def _environment_commit_case(monkeypatch=None):
+    case = _environment_ack_case(self_loop=True)
+    case.admission.grants.clear()
+    case.monitor.running_aps.clear()
+    if monkeypatch is not None:
+        from cais_spade_llm.recovery_framework import environment_admission as module
+
+        case.task["parameters"]["part_name"] = "gear_small"
+        case.context.pending_tasks[case.task["task_id"]] = deepcopy(case.task)
+        scope = Scope(resources={"ur5e-3"}, products={"gear_small"},
+                      rules={"nominal_completion"}, goals=[{
+                          "part_name": "gear_small", "operation": {
+                              "processesToComplete": [{"process": "assembly"}]}}])
+        # These tests exercise retention and commit of a detached preview;
+        # the existing local-composition suite exercises its graph search.
+        monkeypatch.setattr(module, "analyze", lambda *_args, **_kwargs:
+                            Analysis("allowed", "", deepcopy(scope)))
+    return case
+
+
+def test_prepared_nominal_preview_commits_once_without_a_second_monitor_tick(monkeypatch):
+    case = _environment_commit_case(monkeypatch)
+    physical_monitor = case.monitor.physical_monitor
+    verdict = asyncio.run(case.admission.check(case.task, commit=False))
+    assert verdict["status"] == "allowed", verdict
+    before_states = deepcopy(case.monitor.current_states)
+    before_epoch = case.admission.epoch
+    assert case.admission.grants == {}
+    with case.context.admission_lock:
+        committed = case.admission.commit_prepared(case.task, verdict)
+    assert committed["status"] == "allowed", committed
+    assert committed["admitted_epoch"] == before_epoch + 1
+    assert case.admission.grants[case.task["task_id"]].task == case.task
+    assert case.admission.goals == {"gear_small": {"processesToComplete": [{"process": "assembly"}]}}
+    assert case.monitor.running_aps == {"ap001"}
+    assert case.monitor.current_states == before_states
+    assert case.monitor.physical_monitor is physical_monitor
+    replay = case.admission.commit_prepared(case.task, verdict)
+    assert replay["status"] == "inconclusive"
+    assert replay["reason"] == "prepared_admission_unavailable"
+    assert case.admission.epoch == before_epoch + 1
+    assert len(case.admission.grants) == 1
+
+
+def test_nominal_check_commit_uses_the_retained_commit_transaction(monkeypatch):
+    case = _environment_commit_case(monkeypatch)
+    case.admission.commit_prepared = Mock(wraps=case.admission.commit_prepared)
+    result = asyncio.run(case.admission.check(case.task, commit=True))
+    assert result["status"] == "allowed", result
+    assert case.admission.commit_prepared.call_count == 1
+    assert case.task["task_id"] in case.admission.grants
+
+
+@pytest.mark.parametrize("change", ["snapshot", "run_id", "task", "task_type", "pending", "verdict", "forged"])
+def test_prepared_nominal_commit_rejects_changed_or_missing_evidence(change, monkeypatch):
+    case = _environment_commit_case(monkeypatch)
+    verdict = asyncio.run(case.admission.check(case.task, commit=False))
+    assert verdict["status"] == "allowed", verdict
+    task = deepcopy(case.task)
+    expected = "stale_candidate"
+    if change == "snapshot":
+        case.context.revision += 1
+        expected = "stale_snapshot"
+    elif change == "run_id":
+        task["run_id"] = "another_run"
+    elif change == "task":
+        task["parameters"]["home_available"] = False
+    elif change == "task_type":
+        task["parameters"]["home_available"] = 1
+    elif change == "pending":
+        case.context.pending_tasks.pop(task["task_id"])
+    elif change == "verdict":
+        verdict["completion_conditions"] = [{"part_name": "gear_small", "operation": {"target": "changed"}}]
+        expected = "prepared_verdict_changed"
+    else:
+        case.admission._prepared_admissions.clear()
+        expected = "prepared_admission_unavailable"
+    epoch = case.admission.epoch
+    result = case.admission.commit_prepared(task, verdict)
+    assert result["status"] == "inconclusive", result
+    assert result["reason"] == expected
+    assert case.admission.grants == {}
+    assert case.admission.goals == {}
+    assert case.monitor.running_aps == set()
+    assert case.admission.epoch == epoch
+
+
+def test_prepared_nominal_commit_uses_retained_candidate_not_mutable_cache(monkeypatch):
+    case = _environment_commit_case(monkeypatch)
+    verdict = asyncio.run(case.admission.check(case.task, commit=False))
+    assert verdict["status"] == "allowed", verdict
+    case.admission.components[-1].plant.proposed.task["parameters"]["home_available"] = False
+    result = case.admission.commit_prepared(case.task, verdict)
+    assert result["status"] == "allowed", result
+    assert case.admission.grants[case.task["task_id"]].task == case.task
+
+
+def test_composition_start_uses_the_same_retained_commit_transaction():
+    case = _environment_commit_case()
+    case.admission.goals["gear_small"] = {"assembled": True}
+    before_states = deepcopy(case.monitor.current_states)
+    before_epoch = case.admission.epoch
+    with case.context.admission_lock:
+        verdict = case.admission._prepare_composition_start(case.task)
+        assert verdict["status"] == "allowed", verdict
+        assert case.admission.grants == {}
+        committed = case.admission.commit_prepared(case.task, verdict)
+    assert committed["status"] == "allowed", committed
+    assert case.admission.grants[case.task["task_id"]].task == case.task
+    assert case.monitor.running_aps == {"ap001"}
+    assert case.admission.goals == {"gear_small": {"assembled": True}}
+    assert case.admission.epoch == before_epoch + 1
+    assert case.monitor.current_states == before_states
+    assert case.admission._prepare_composition_start(case.task)["status"] == "inconclusive"
+
+
+def test_composition_start_rejects_modified_pending_identity():
+    case = _environment_commit_case()
+    task = deepcopy(case.task)
+    task["parameters"]["home_available"] = False
+    result = case.admission._prepare_composition_start(task)
+    assert result["status"] == "inconclusive", result
+    assert result["reason"] == "stale_candidate"
+    assert not case.admission._prepared_admissions
+    assert not case.admission.grants

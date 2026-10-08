@@ -27,10 +27,14 @@ from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
 )
 from cais_spade_llm.resources.environment_models import build_environment_models
 from cais_spade_llm.resources.resource_safety_preparation import (
+    LiveCommandLedger,
+    PreparedRobotEvidence,
     PrimitiveModel,
+    _validate_controller_contract,
     cartesian_coverage_fingerprint,
     register_resource_provider,
     validate_joint_trajectory,
+    validate_prepared_start,
 )
 from cais_spade_llm.resources.robot.gazebo_pick_place_controller import prepare_ur5e_motion
 
@@ -343,14 +347,15 @@ def test_declared_machine_completion_uses_native_guards_and_preserves_actual_his
 
 def test_machine_process_completion_has_one_native_and_physical_composition_witness(controller):
     from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
-    from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import _MEANINGS
+    from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import _COMPLETED, _MEANINGS
+    from cais_spade_llm.agents.central_controller.ppr_ap import ap_record, parse_ap_definition
 
     case, models = _machine_completion(controller)
     part = 'KET4_Square_4mm'
     record = {'process': 'trim', 'result': 'square'}
-    full = 'ap_state/processCompleted/process_result_completed'
+    full = _COMPLETED
     case['catalog']['specifications'].append({'id': 'test_pending_trim', 'requirement': 'Complete trim with result square.',
-        'formula': 'F ap001', 'aps': [{'label': 'ap001', 'full': full, 'meaning': _MEANINGS[full]}]})
+        'formula': 'F ap001', 'aps': [ap_record('ap001', parse_ap_definition(full), _MEANINGS[full])]})
     case['requirement_scopes'].append({'specification': 'test_pending_trim',
         'physical_ap_bindings': {'ap001': {'part': part, **record}}})
     source = {'outline_id': 'test_machining_recovery', 'des_event_id': 'test_machining_des',
@@ -666,3 +671,530 @@ def test_registered_new_action_reaches_composition_without_shared_action_dispatc
     result = analyze_grounded_recovery_composition(**composition, primitive_models=models, budget=Budget(seconds=30))
     assert result['status'] == 'held', result['reason']
     assert case['catalog'] == before['grounding_inputs']['catalog']
+
+
+def _native_preparation_case():
+    owner = SimpleNamespace(agent_name='ur5e-3', _controller=SimpleNamespace(execution_mode='simulation'))
+    provider = PreparedRobotEvidence(owner, LiveCommandLedger())
+    planned = {'primitive': 'move_cartesian', 'observation_status': 'prepared',
+               'joint_trajectory': {'joint_names': ['slide']},
+               'start': {'joint_positions': [0.]}}
+    planned['preparation_id'] = fingerprint(planned)
+    prepared = {'status': 'prepared', 'resource_id': owner.agent_name, 'steps': [planned]}
+    provider.register_program(prepared)
+    checkpoint = {'checkpoint_id': 'checkpoint', 'unresolved': [], 'observations': {
+        owner.agent_name: {'physical': {'idle': True, 'custody_complete': True,
+            'attachment': {'model_name': None}, 'observation_state': {'held_part': None}}}}}
+    native = {'operation': 'prepare', 'accepted': True, 'reason': '',
+        'instance_id': 'instance', 'expected_instance_id': 'instance',
+        'command_revision': 3, 'expected_command_revision': 3,
+        'contract_revision': 0, 'expected_contract_revision': 0, 'rejected_commands': 0,
+        'binding_fingerprint': 'binding', 'requested_binding_fingerprint': 'binding',
+        'joint_names': ['slide'], 'observed_positions': [0.], 'observed_velocities': [0.],
+        'stationary': False, 'reservation_token': '', 'physical_execution_verified': False,
+        'physical_execution_reason': 'gazebo_physics_containment_and_stopping_unverified',
+        'contract_state': 'unlocked', 'observed_stationary': True, 'stationary_samples': 3,
+        'simulation_time': 1., 'checkpoint_simulation_time': 1., 'elapsed_wall_s': .1,
+        'maximum_observed_update_period': .001, 'maximum_observed_position_error': [0.]}
+    return provider, prepared, checkpoint, native
+
+
+@pytest.mark.parametrize(('fields', 'reason'), [
+    ({'instance_id': '', 'expected_instance_id': ''}, 'identity is unavailable'),
+    ({'binding_fingerprint': None, 'requested_binding_fingerprint': None}, 'identity is unavailable'),
+    ({'command_revision': True, 'expected_command_revision': True}, 'revision or count'),
+    ({'contract_revision': -1, 'expected_contract_revision': -1}, 'revision or count'),
+    ({'rejected_commands': False}, 'revision or count'),
+    ({'reason': 'Native owner snapshot changed'}, 'conflicting reason'),
+    ({'reservation_token': None}, 'unexpectedly acquired execution authority'),
+    ({'physical_execution_reason': ''}, 'unavailability reason'),
+    ({'maximum_observed_update_period': float('nan')}, 'sample diagnostics'),
+    ({'maximum_observed_update_period': -1.}, 'sample diagnostics'),
+    ({'maximum_observed_update_period': True}, 'sample diagnostics'),
+    ({'maximum_observed_position_error': []}, 'sample diagnostics'),
+    ({'maximum_observed_position_error': [float('inf')]}, 'sample diagnostics'),
+    ({'maximum_observed_position_error': [-.001]}, 'sample diagnostics'),
+])
+def test_native_preparation_rejects_self_consistent_invalid_provenance(fields, reason):
+    _, prepared, _, native = _native_preparation_case()
+    native.update(fields)
+    with pytest.raises(ValueError, match=reason):
+        _validate_controller_contract(native, prepared['steps'][0])
+
+
+@pytest.mark.parametrize('change', ['command', 'reservation', 'preparation', 'checkpoint'])
+def test_native_preparation_query_cannot_outlive_local_evidence(monkeypatch, change):
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    provider, prepared, checkpoint, native = _native_preparation_case()
+    if change == 'reservation':
+        identifier = provider.ledger.prepare(resource_id='ur5e-3', task_id='pending', command={},
+                                             owner_identity={'preparation_id': 'pending'})
+    before_revision = provider.ledger.revision
+
+    def query(*args):
+        if change == 'command':
+            provider.ledger.prepare(resource_id='ur5e-3', task_id='other', command={},
+                                    owner_identity={'preparation_id': 'other'})
+        elif change == 'reservation':
+            provider.ledger.authorize(identifier, reservation_token='concurrent',
+                                      expected_revision=provider.ledger.revision)
+        elif change == 'preparation':
+            provider.steps[prepared['steps'][0]['preparation_id']]['start']['joint_positions'] = [1.]
+        else:
+            checkpoint['checkpoint_id'] = 'another checkpoint'
+        return deepcopy(native)
+
+    monkeypatch.setattr(gazebo_pick_place_controller, '_prepare_controller_contract', query)
+    result = provider.prepare_execution_coverage(prepared=prepared, checkpoint=checkpoint)
+    assert result['status'] == 'NEEDS_CONTEXT' and not result['native_preparation_verified']
+    assert 'changed during native preparation' in result['reason']
+    assert result['native_contract'] == native and result['command_ledger_revision'] == before_revision
+    assert not result['physical_execution_verified'] and not result['command_sent']
+
+
+@pytest.mark.parametrize('change', ['unresolved', 'observations', 'owner', 'attachment', 'observation_state'])
+def test_native_preparation_requires_explicit_checkpoint_and_empty_custody(monkeypatch, change):
+    from unittest.mock import Mock
+
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    provider, prepared, checkpoint, _ = _native_preparation_case()
+    if change in {'unresolved', 'observations'}:
+        checkpoint.pop(change)
+    elif change == 'owner':
+        checkpoint['observations'].clear()
+    else:
+        checkpoint['observations']['ur5e-3']['physical'].pop(change)
+    query = Mock()
+    monkeypatch.setattr(gazebo_pick_place_controller, '_prepare_controller_contract', query)
+    result = provider.prepare_execution_coverage(prepared=prepared, checkpoint=checkpoint)
+    assert result['status'] == 'NEEDS_CONTEXT' and not result['native_preparation_verified']
+    assert not result['dispatch_authorized'] and not result['command_sent']
+    query.assert_not_called()
+
+
+@pytest.mark.parametrize('observed_error', [0., 100.])
+def test_native_preparation_samples_never_establish_physical_bounds(monkeypatch, observed_error):
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    provider, prepared, checkpoint, native = _native_preparation_case()
+    native['maximum_observed_position_error'] = [observed_error]
+    monkeypatch.setattr(gazebo_pick_place_controller, '_prepare_controller_contract',
+                        lambda *args: deepcopy(native))
+    before = deepcopy(prepared), deepcopy(checkpoint), provider.ledger.snapshot()
+    result = provider.prepare_execution_coverage(prepared=prepared, checkpoint=checkpoint)
+    assert result['native_preparation_verified'] is True
+    assert result['physical_execution_reason'] == native['physical_execution_reason']
+    assert result['missing_physical_evidence'] == [
+        'verified tracking bounds', 'future stationary containment bounds', 'failure stopping bounds']
+    assert result['prepared_fingerprint'] == fingerprint(prepared)
+    assert result['checkpoint_fingerprint'] == fingerprint(checkpoint)
+    assert result['status'] == 'NEEDS_CONTEXT' and not result['physical_execution_verified']
+    assert not result['dispatch_authorized'] and not result['command_sent']
+    assert before == (prepared, checkpoint, provider.ledger.snapshot())
+
+
+def _modeled_execution_case():
+    from test_continuous_motion import configuration, trajectory
+
+    provider, prepared, checkpoint, native = _native_preparation_case()
+    model = configuration()
+    model['joint_position_error'] = {'slide': .001}
+    controller = provider.owner._controller
+    controller.controller_config = {'id': 'owner'}
+    controller.recovery_safety_observer = SimpleNamespace(
+        motion_configuration=deepcopy(model), configuration={'controller_node': '/arm'})
+    planned = prepared['steps'][0]
+    planned.pop('preparation_id')
+    planned['joint_trajectory'] = trajectory(0., 1., velocities=None)
+    planned['continuous_motion'] = {'joint_trajectory': deepcopy(planned['joint_trajectory']),
+                                    'configuration': model}
+    planned['configuration_fingerprint'] = fingerprint(controller.controller_config)
+    planned['preparation_id'] = fingerprint(planned)
+    provider.register_program(prepared)
+    checkpoint['model_execution'] = True
+    physical = checkpoint['observations']['ur5e-3']['physical']
+    physical['idle'] = False
+    physical['stationary_contract'] = {'kind': 'idle_commanded_hold', 'requires_no_active_goals': True}
+    checkpoint['controller_goals'] = {'/arm/recovery_state': {
+        'instance_id': 'instance', 'controller': '/arm', 'command_revision': 3, 'contract_revision': 0,
+        'holding': True, 'has_active_goal': False, 'has_pending_goal': False, 'contract_state': 'unlocked',
+        'reservation_token': '', 'observed_stationary': False, 'stationary_samples': 0,
+        'velocities': [.032], 'positions': [.000004], 'simulation_time': 1.,
+    }}
+    native.update(accepted=False, reason='Native owner has not observed a stationary hold',
+                  observed_stationary=False, stationary_samples=0, observed_velocities=[.032])
+    return provider, prepared, checkpoint, native
+
+
+@pytest.mark.parametrize('native_available', [True, False])
+def test_modeled_execution_does_not_require_certified_physics_or_exact_sampled_stillness(monkeypatch, native_available):
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    provider, prepared, checkpoint, native = _modeled_execution_case()
+    before = deepcopy(prepared), deepcopy(checkpoint), provider.ledger.snapshot()
+
+    def query(*args):
+        if not native_available:
+            raise ValueError('Native motion contract service unavailable')
+        return deepcopy(native)
+
+    monkeypatch.setattr(gazebo_pick_place_controller, '_prepare_controller_contract', query)
+    result = provider.prepare_execution_coverage(prepared=prepared, checkpoint=checkpoint)
+    assert result['status'] == 'prepared' and result['model_execution_verified'] is True
+    assert not result['native_preparation_verified'] and not result['physical_execution_verified']
+    assert not result['dispatch_authorized'] and not result['command_sent']
+    assumptions = result['model_execution_assumptions']
+    assert assumptions['continuous_motion'] == prepared['steps'][0]['continuous_motion']
+    assert assumptions['stationary_contracts']['ur5e-3'] == checkpoint['observations']['ur5e-3']['physical']['stationary_contract']
+    assert assumptions['controller_goals']['/arm/recovery_state']['command_revision'] == 3
+    assert not {'positions', 'velocities', 'stationary_samples'} & assumptions['controller_goals']['/arm/recovery_state'].keys()
+    assert result['native_preparation_reason']
+    assert before == (prepared, checkpoint, provider.ledger.snapshot())
+
+
+@pytest.mark.parametrize('change', [
+    'detached', 'boolean', 'controller_active', 'controller_pending', 'not_holding', 'native_reserved',
+    'native_restarted', 'native_command_changed', 'stationary_contract', 'registered_model', 'controller_config',
+])
+def test_modeled_execution_requires_its_exact_owner_assumptions(monkeypatch, change):
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    provider, prepared, checkpoint, native = _modeled_execution_case()
+    state = checkpoint['controller_goals']['/arm/recovery_state']
+    if change == 'detached':
+        checkpoint.pop('model_execution')
+    elif change == 'boolean':
+        checkpoint['model_execution'] = 1
+    elif change == 'controller_active':
+        state['has_active_goal'] = True
+    elif change == 'controller_pending':
+        state['has_pending_goal'] = True
+    elif change == 'not_holding':
+        state['holding'] = False
+    elif change == 'native_reserved':
+        state['reservation_token'] = 'another grant'
+    elif change == 'native_restarted':
+        native['instance_id'] = 'restarted'
+    elif change == 'native_command_changed':
+        native['command_revision'] += 1
+    elif change == 'stationary_contract':
+        checkpoint['observations']['ur5e-3']['physical'].pop('stationary_contract')
+    elif change == 'registered_model':
+        provider.owner._controller.recovery_safety_observer.motion_configuration['joint_position_error']['slide'] = .1
+    else:
+        provider.owner._controller.controller_config['id'] = 'changed owner'
+    monkeypatch.setattr(gazebo_pick_place_controller, '_prepare_controller_contract', lambda *args: deepcopy(native))
+    result = provider.prepare_execution_coverage(prepared=prepared, checkpoint=checkpoint)
+    assert result['status'] == 'NEEDS_CONTEXT' and not result['model_execution_verified']
+    assert not result['dispatch_authorized'] and not result['command_sent']
+
+
+def test_modeled_execution_detects_ledger_change_even_when_native_diagnostic_is_rejected(monkeypatch):
+    from cais_spade_llm.resources.robot import gazebo_pick_place_controller
+
+    provider, prepared, checkpoint, native = _modeled_execution_case()
+
+    def query(*args):
+        provider.ledger.prepare(resource_id='ur5e-3', task_id='concurrent', command={},
+                                owner_identity={'preparation_id': 'concurrent'})
+        return deepcopy(native)
+
+    monkeypatch.setattr(gazebo_pick_place_controller, '_prepare_controller_contract', query)
+    result = provider.prepare_execution_coverage(prepared=prepared, checkpoint=checkpoint)
+    assert result['status'] == 'NEEDS_CONTEXT' and not result['model_execution_verified']
+    assert 'changed during native preparation' in result['reason']
+
+
+def _modeled_start_case():
+    provider, prepared, _, _ = _modeled_execution_case()
+    motion = deepcopy(prepared['steps'][0]['continuous_motion'])
+    motion['configuration']['joint_position_error'] = {'slide': .01}
+    start = {'model_execution': True, 'joint_names': ['slide'], 'joint_positions': [0.],
+             'frame': 'world', 'launch_id': 'launch', 'attachment': {'model_name': None},
+             'current_pose': [0., 0., 0., 0., 0., 0., 1.],
+             'component_bounds': [{'id': 'observed::body::collision', 'link': 'body', 'bounds': [[-.05, .05]] * 3}],
+             'geometry_source': {'configuration': 'retained'}, 'custody_complete': True,
+             'observation_state': {'held_part': None, 'current_pose': [0., 0., 0., 0., 0., 0., 1.]}}
+    observed = deepcopy(start)
+    observed['joint_positions'] = [.004]
+    observed['current_pose'][0] = .004
+    observed['observation_state']['current_pose'][0] = .004
+    observed['component_bounds'][0]['bounds'][0] = [-.046, .054]
+    return start, observed, motion
+
+
+def test_modeled_start_accepts_only_declared_joint_and_geometry_enclosures():
+    start, observed, motion = _modeled_start_case()
+    before = deepcopy(start), deepcopy(observed), deepcopy(motion)
+    validate_prepared_start(observed, start, continuous_motion=motion)
+    assert before == (start, observed, motion)
+    start.pop('model_execution')
+    with pytest.raises(ValueError, match='moved after physical motion preparation'):
+        validate_prepared_start(observed, start, continuous_motion=motion)
+
+
+@pytest.mark.parametrize(('change', 'reason'), [
+    ('joint', 'joint_position_error'), ('pose', 'initial FK enclosure'),
+    ('orientation', 'initial FK enclosure'), ('collision', 'observed::body::collision'),
+    ('extra_collision', 'observed::unmodeled::collision'), ('missing_collision', 'component_bounds'),
+    ('custody', 'observation_state'), ('configuration', 'geometry_source'),
+    ('missing_assumption', 'joint_position_error'), ('root', 'root_pose'),
+])
+def test_modeled_start_rejects_observations_outside_the_exact_assumptions(change, reason):
+    start, observed, motion = _modeled_start_case()
+    if change == 'joint':
+        observed['joint_positions'] = [.011]
+    elif change == 'pose':
+        observed['current_pose'][0] = .011
+    elif change == 'orientation':
+        observed['current_pose'][3:] = [0., 0., .1, (1. - .1 ** 2) ** .5]
+    elif change == 'collision':
+        observed['component_bounds'][0]['bounds'][0][1] = .061
+    elif change == 'extra_collision':
+        observed['component_bounds'].append({'id': 'observed::unmodeled::collision', 'bounds': [[1., 2.]] * 3})
+    elif change == 'missing_collision':
+        observed['component_bounds'] = []
+    elif change == 'custody':
+        observed['observation_state']['held_part'] = 'gear_small'
+    elif change == 'configuration':
+        observed['geometry_source']['configuration'] = 'changed'
+    elif change == 'missing_assumption':
+        motion['configuration'].pop('joint_position_error')
+    else:
+        start['root_pose'] = [0., 0., 0., 0., 0., 0., 1.]
+        observed['root_pose'] = [.1, 0., 0., 0., 0., 0., 1.]
+    with pytest.raises(ValueError, match=reason):
+        validate_prepared_start(observed, start, continuous_motion=motion)
+
+
+def test_modeled_joint_error_records_observed_moveit_parameter_without_changing_it(monkeypatch):
+    pytest.importorskip('rcl_interfaces.srv')
+    from unittest.mock import Mock
+    from test_continuous_motion import configuration
+
+    from cais_spade_llm.resources import continuous_geometry
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+
+    monkeypatch.setattr(continuous_geometry, 'load_continuous_geometry', lambda *args, **kwargs: configuration())
+    response = SimpleNamespace(values=[SimpleNamespace(type=3, double_value=.01)])
+    client = SimpleNamespace(wait_for_service=lambda **kwargs: True, call_async=Mock(return_value=response))
+    node = SimpleNamespace(create_client=Mock(return_value=client), destroy_client=Mock())
+    controller = SimpleNamespace(_node=node, _cb_group=None, _wait_future=lambda value, **kwargs: value,
+                                 ee_link='body', arm_joint_names=['slide'])
+    observer = SimpleNamespace(configuration={'root_link': 'world', 'model': 'dual_robot',
+        'description_node': '/robot_state_publisher', 'controller_node': '/arm'},
+        provider=SimpleNamespace(model_execution=True, reader=SimpleNamespace(parameter=lambda *args: 'fixture')))
+    snapshot = {'models': {'dual_robot': {'joints': {}, 'links': {'world': {'pose': [0, 0, 0, 0, 0, 0, 1]}}}}}
+    GazeboPickPlaceController.configure_recovery_safety_observer(controller, observer, snapshot)
+    assert client.call_async.call_args.args[0].names == ['trajectory_execution.allowed_start_tolerance']
+    assert node.create_client.call_args.args[1] == '/move_group/get_parameters'
+    assert observer.motion_configuration['joint_position_error'] == {'slide': .01}
+    assert observer.motion_configuration['joint_position_error_source'] == {
+        'node': '/move_group', 'parameter': 'trajectory_execution.allowed_start_tolerance',
+        'value': .01, 'physical_execution_verified': False}
+    node.destroy_client.assert_called_once_with(client)
+
+
+@pytest.mark.parametrize(('first_ns', 'last_ns', 'index'), [(1_000_000, 1_000_000_000, 0), (0, 0, 1)])
+def test_invalid_native_timing_is_preserved_in_failed_preparation(controller, monkeypatch, first_ns, last_ns, index):
+    messages = pytest.importorskip('trajectory_msgs.msg')
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+
+    trajectory = messages.JointTrajectory(joint_names=controller.arm_joint_names)
+    for value, nanos in ((0., first_ns), (.1, last_ns)):
+        point = messages.JointTrajectoryPoint(positions=[value] * len(controller.arm_joint_names))
+        point.time_from_start.sec, point.time_from_start.nanosec = divmod(nanos, 1_000_000_000)
+        trajectory.points.append(point)
+    plan = SimpleNamespace(joint_trajectory=trajectory, multi_dof_joint_trajectory=SimpleNamespace(points=[]))
+    monkeypatch.setattr(GazeboPickPlaceController, '_prepare_cartesian_motion', lambda *args, **kwargs: (plan,))
+    result = prepare_ur5e_motion(controller, primitive='move_cartesian',
+        params={'x': 1.5, 'y': 0., 'z': 1.}, start=_start(controller), binding={})
+    assert result['status'] == 'NEEDS_CONTEXT' and result['command_sent'] is False
+    assert f'point_index={index}' in result['reason']
+    assert f'time_from_start_ns={first_ns if index == 0 else last_ns}' in result['reason']
+    raw = result['joint_trajectory']
+    assert raw['points'][0]['time_from_start']['nanosec'] == first_ns
+    assert raw['duration_ns'] == last_ns
+    assert len(raw['points']) == 2
+    assert trajectory.points[0].time_from_start.nanosec == first_ns
+    controller._send_simulation_joint_trajectory.assert_not_called()
+
+
+@pytest.mark.parametrize('change', [None, 'position', 'velocity'])
+def test_preparation_materializes_only_observed_one_nanosecond_initial_hold(controller, monkeypatch, change):
+    messages = pytest.importorskip('trajectory_msgs.msg')
+    from cais_spade_llm.resources.resource_safety_preparation import trajectory_record
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController, trajectory_message
+
+    trajectory = messages.JointTrajectory(joint_names=controller.arm_joint_names)
+    for value, nanos in ((0., 1), (.1, 1_000_000_000)):
+        point = messages.JointTrajectoryPoint(positions=[value] * len(controller.arm_joint_names),
+            velocities=[0.] * len(controller.arm_joint_names), accelerations=[0.] * len(controller.arm_joint_names))
+        point.time_from_start.sec, point.time_from_start.nanosec = divmod(nanos, 1_000_000_000)
+        trajectory.points.append(point)
+    if change == 'position':
+        trajectory.points[0].positions[0] = .001
+    elif change == 'velocity':
+        trajectory.points[0].velocities[0] = .001
+    original = trajectory_record(trajectory, validate=False)
+    plan = SimpleNamespace(joint_trajectory=trajectory, multi_dof_joint_trajectory=SimpleNamespace(points=[]))
+    monkeypatch.setattr(GazeboPickPlaceController, '_prepare_cartesian_motion', lambda *args, **kwargs: (plan,))
+    result = prepare_ur5e_motion(controller, primitive='move_cartesian',
+        params={'x': 1.5, 'y': 0., 'z': 1.}, start=_start(controller), binding={})
+    assert result['planned_joint_trajectory'] == original
+    assert trajectory_record(trajectory, validate=False) == original
+    if change is None:
+        assert result['status'] == 'prepared'
+        retained = result['joint_trajectory']
+        assert retained['points'][0]['time_from_start'] == {'sec': 0, 'nanosec': 0}
+        assert retained['points'][0]['positions'] == _start(controller)['joint_positions']
+        assert retained['points'][1:] == original['points']
+        assert retained['duration_ns'] == original['duration_ns']
+        assert trajectory_record(trajectory_message(retained)) == retained
+        assert result['trajectory_preparation']['planned_joint_trajectory_fingerprint'] == fingerprint(original)
+        assert result['trajectory_preparation']['prepared_joint_trajectory_fingerprint'] == fingerprint(retained)
+    else:
+        assert result['status'] == 'NEEDS_CONTEXT'
+        assert 'does not represent the observed stationary start' in result['reason']
+        assert result['joint_trajectory'] == original
+    controller._send_simulation_joint_trajectory.assert_not_called()
+
+
+@pytest.mark.parametrize(('allowance', 'offset', 'succeeds'), [
+    (.01, .006, True), (.001, .002, False), (0., 0., True), (0., .000001, False),
+    (.01, float('nan'), False),
+])
+def test_prepared_endpoint_uses_fresh_observation_and_retained_joint_error(allowance, offset, succeeds):
+    pytest.importorskip('trajectory_msgs.msg')
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import execute_prepared_robot_step
+
+    start, _, continuous = _modeled_start_case()
+    continuous['configuration']['joint_position_error'] = {'slide': allowance}
+    continuous['joint_trajectory']['header'] = {'frame_id': 'world', 'stamp': {'sec': 0, 'nanosec': 0}}
+    continuous['joint_trajectory']['points'][-1]['positions'] = [.1]
+    planned = {'status': 'prepared', 'observation_status': 'prepared', 'start': start,
+               'configuration_fingerprint': fingerprint({}), 'binding': {'model_execution': True},
+               'continuous_motion': continuous, 'joint_trajectory': deepcopy(continuous['joint_trajectory'])}
+    planned['preparation_id'] = fingerprint(planned)
+    before = deepcopy(planned)
+    current = deepcopy(start)
+    current['simulation_time'] = 42.
+    calls = []
+
+    def capture():
+        calls.append('capture')
+        return deepcopy(current)
+
+    def dispatch(topic, trajectory, **kwargs):
+        calls.append('dispatch')
+        assert kwargs == {'joint_position_error': {'slide': allowance}}
+        assert list(trajectory.points[-1].positions) == [.1]
+        return True
+
+    def snapshot(*, refresh):
+        assert refresh is True and calls[-1] == 'dispatch'
+        calls.append('refresh')
+        current['joint_positions'] = [.1 + offset]
+        # Actual receipt time is retained; it need not equal the modeled end.
+        current['simulation_time'] = 43.25
+        return deepcopy(current)
+
+    controller = SimpleNamespace(execution_mode='simulation', controller_config={}, arm_joint_names=['slide'],
+        arm_trajectory_topic='/arm/joint_trajectory', capture_recovery_safety_state=capture,
+        _send_simulation_joint_trajectory=dispatch,
+        recovery_safety_observer=SimpleNamespace(provider=SimpleNamespace(reader=SimpleNamespace(snapshot=snapshot))))
+    result = execute_prepared_robot_step(controller, planned)
+    assert result['success'] is succeeds
+    assert result['observations']['simulation_time'] == 43.25
+    assert calls == ['capture', 'dispatch', 'refresh', 'capture']
+    assert planned == before and result['joint_trajectory'] == planned['joint_trajectory']
+
+
+@pytest.mark.parametrize(('allowance', 'observed', 'succeeds'), [
+    (.01, .006, True), (.001, .002, False), (0., 0., True), (0., .000001, False),
+    (None, .004, True), (None, .006, False),
+])
+def test_native_result_endpoint_poll_uses_only_the_declared_joint_error(allowance, observed, succeeds, monkeypatch):
+    messages = pytest.importorskip('trajectory_msgs.msg')
+    from unittest.mock import Mock
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+
+    trajectory = messages.JointTrajectory(joint_names=['joint'])
+    trajectory.points = [messages.JointTrajectoryPoint(positions=[0.])]
+    result = SimpleNamespace(status=4, result=SimpleNamespace(error_code=0))
+    goal = SimpleNamespace(accepted=True, status=4, get_result_async=lambda: result)
+    client = SimpleNamespace(wait_for_server=lambda **kwargs: True, send_goal_async=lambda _: goal)
+    polls = iter([True, False])
+    controller = SimpleNamespace(
+        _simulation_joint_clients={'/arm/follow_joint_trajectory': client},
+        _wait_future=lambda future, *args: future, _get_joint_position=lambda name: observed,
+        _motion_pending=lambda _: lambda: next(polls), _simulation_goal=None,
+        arm_joint_names=['joint'], _angular_joint_error=GazeboPickPlaceController._angular_joint_error,
+        _note_motion_dispatch=Mock(), _cancel_simulation_goal=Mock(),
+        _node=SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=0))),
+    )
+    monkeypatch.setattr(time, 'sleep', lambda _: None)
+    errors = None if allowance is None else {'joint': allowance}
+    assert GazeboPickPlaceController._send_simulation_joint_trajectory(
+        controller, '/arm/joint_trajectory', trajectory, joint_position_error=errors) is succeeds
+    assert controller._last_simulation_controller_succeeded is True
+
+
+@pytest.mark.parametrize(('change', 'reason'), [
+    (None, None), ('cross_region', 'Fixed component occupancy changed'),
+    ('unknown', 'Fixed component occupancy changed or is unknown'),
+    ('missing_link', 'literal native link identities'), ('unknown_link', 'literal native link identities'),
+    ('missing_regions', 'model_execution_regions'), ('missing_hold', 'commanded stationary model'),
+    ('moving_escape', 'outside the configured initial enclosure'),
+    ('link_changed', 'native link population changed'),
+    ('captured_cross_region', 'Fixed component occupancy changed'),
+    ('masked_cross_region', 'Fixed component occupancy changed'),
+])
+def test_fixed_component_start_requires_independent_definite_region_occupancy(change, reason):
+    start, observed, motion = _modeled_start_case()
+    motion['configuration']['joints'].append({'name': 'base_fixed', 'parent': 'world', 'child': 'base_inertia',
+        'type': 'fixed', 'axis': [1., 0., 0.], 'xyz': [0., 0., 0.], 'rpy': [0., 0., 0.]})
+    motion['configuration']['components'].append({'id': 'configured_base', 'link': 'base_inertia', 'bounds': [[-.1, .1]] * 3})
+    fixed = {'id': 'native::base::collision', 'link': 'world', 'bounds': [[-.1, .1]] * 3}
+    regions = {'assembly_board-v1': {'frame': 'world', 'bounds': [[.2, .3], [-1., 1.], [-1., 1.]]}}
+    if change == 'masked_cross_region':
+        motion['configuration']['components'][-1]['bounds'][0] = [-.4, -.3]
+        fixed['bounds'][0] = [-.4, -.3]
+        regions['assembly_board-v1']['bounds'][0] = [-.02, .02]
+    for state in (start, observed):
+        state['component_bounds'].append(deepcopy(fixed))
+        state['model_execution_regions'] = deepcopy(regions)
+        state['stationary_contract'] = {'kind': 'idle_commanded_hold', 'requires_no_running_tasks': True,
+            'requires_no_active_goals': True, 'future_execution_tracking': 'not_established'}
+    # Deliberately outside the retained base's floating-point world enclosure,
+    # while preserving its definite occupancy in every configured region.
+    observed['component_bounds'][-1]['bounds'][0][0] -= 1e-13
+    if change == 'cross_region':
+        observed['component_bounds'][-1]['bounds'][0] = [.21, .3]
+    elif change == 'captured_cross_region':
+        start['component_bounds'][-1]['bounds'][0] = [.21, .3]
+    elif change == 'unknown':
+        start['model_execution_regions']['assembly_board-v1']['bounds'][0] = [.1, .2]
+    elif change == 'missing_link':
+        observed['component_bounds'][-1].pop('link')
+    elif change == 'unknown_link':
+        observed['component_bounds'][-1]['link'] = 'unknown native link'
+    elif change == 'missing_regions':
+        start.pop('model_execution_regions')
+    elif change == 'missing_hold':
+        observed.pop('stationary_contract')
+    elif change == 'moving_escape':
+        observed['component_bounds'][0]['bounds'][0] = [-.05, .08]
+    elif change == 'link_changed':
+        observed['component_bounds'][0]['link'] = 'world'
+    elif change == 'masked_cross_region':
+        observed['component_bounds'][-1]['bounds'][0] = [-.01, .01]
+    before = deepcopy((start, observed, motion))
+    if reason is None:
+        validate_prepared_start(observed, start, continuous_motion=motion)
+    else:
+        with pytest.raises(ValueError, match=reason):
+            validate_prepared_start(observed, start, continuous_motion=motion)
+    assert (start, observed, motion) == before

@@ -12,8 +12,8 @@ from typing import Any
 
 from cais_spade_llm.product.order import validate_completion_conditions, validate_product_order
 from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, read_json
+from cais_spade_llm.recovery_framework.failure_checkpoints import SUPPORTED_CHECKPOINTS
 from cais_spade_llm.resources.nominal_des import build_nominal_resource_des_models
-from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS as FAILURE_CHECKPOINTS
 
 SETUP_PATH = ROOT / "cais_spade_llm/initialization/recovery_framework_setup.json"
 SETUP_RELATIVE = SETUP_PATH.relative_to(ROOT)
@@ -31,6 +31,7 @@ FAILURE_SCENARIOS = (
     "Part slippage",
 )
 CHECKPOINTS = {
+    "during_place_lowering": "During observed downward placement motion",
     "after_M1_processing_before_pick": "After M1 finishes processing, before ur5e-1 pickup",
     "during_processing_halfway": "At 50% of the configured machining duration",
     "after_both_pickups_before_place": "After both robots acquire their parts, before placement",
@@ -228,6 +229,8 @@ def task_label(event: dict) -> str:
 
 
 def _validate_drop_pose(failure: dict) -> None:
+    if "require_upright" in failure and type(failure["require_upright"]) is not bool:
+        raise ValueError("require_upright must be a boolean")
     for field, keys in (
         ("drop_pose", ("x", "y", "z")),
         ("orientation_quat", ("qx", "qy", "qz", "qw")),
@@ -285,12 +288,16 @@ def _validate_failure(failure: Any, models: dict, parts: list[str], permitted: l
         raise ValueError("Part slippage task bindings do not match the configured capability")
     _validate_drop_pose(failure)
     _validate_additional_condition(failure, models, parts, permitted)
-    if failure["checkpoint"] == FAILURE_CHECKPOINTS["Part slippage"]:
+    if failure["checkpoint"] in SUPPORTED_CHECKPOINTS["Part slippage"]:
         other = failure.get("additional_condition") or {}
         if {rid, other.get("resource_id")} != {"ur5e-3", "ur5e-4"}:
             raise ValueError("Part slippage requires ur5e-3 and ur5e-4 holding different parts")
         if failure["event_name"] != "place_insert":
             raise ValueError("Part slippage must retain the interrupted place_insert obligation")
+        if failure["checkpoint"] == "during_place_lowering":
+            progress = failure.get("placement_progress")
+            if type(progress) not in {int, float} or not math.isfinite(progress) or not .5 <= progress < 1:
+                raise ValueError("placement_progress must lie from 0.5 to below 1.0")
 
 
 def _validate_additional_condition(
@@ -375,7 +382,16 @@ def validate_setup(setup: dict, *, root: Path = ROOT) -> dict[str, Any]:
         )
     _validate_failure(setup.get("failure_scenario"), models, parts, permitted)
     failure = setup.get("failure_scenario") or {}
-    if failure.get("checkpoint") == FAILURE_CHECKPOINTS["Part slippage"]:
+    if failure.get("initial_conditions") is not None:
+        from cais_spade_llm.recovery_framework.slippage_initialization import (
+            apply_initial_conditions,
+        )
+
+        scene = apply_initial_conditions(scene, failure, inputs["product_order"], permitted)
+        context = EnvironmentProductContext(scene, inputs["product_order"], inputs["geometry"], permitted)
+        models = context.models
+        scene = context.inputs["scene"]
+    if failure.get("checkpoint") in SUPPORTED_CHECKPOINTS["Part slippage"]:
         robots = {row["resource_id"]: row for row in scene["robots"]}
         rid = failure["resource_id"]
         other = failure["additional_condition"]["resource_id"]
@@ -426,7 +442,7 @@ def startup_block_reason(setup: dict, *, root: Path = ROOT) -> str:
             "Machining breakdown during part processing": {failure["resource_id"]},
             "Part slippage": {"ur5e-3", "ur5e-4"},
         }[failure["scenario"]]
-        supported = (failure["checkpoint"] == FAILURE_CHECKPOINTS[failure["scenario"]]
+        supported = (failure["checkpoint"] in SUPPORTED_CHECKPOINTS[failure["scenario"]]
                      and setup["execution_mode"] == "simulation"
                      and "completion_conditions" not in inputs["product_order"]
                      and required.issubset(setup["permitted_resources"]))
@@ -563,7 +579,7 @@ def slippage_example(models: dict, resource_id: str, part_name: str) -> dict:
         "event_id": event["event_id"],
         "event_name": event["event_name"],
         "parameter_bindings": deepcopy(event["parameter_bindings"]),
-        "checkpoint": FAILURE_CHECKPOINTS["Part slippage"],
+        "checkpoint": "after_both_pickups_before_place",
         "mode": "once",
         "drop_pose": {axis: None for axis in ("x", "y", "z")},
         "orientation_quat": {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
@@ -572,3 +588,31 @@ def slippage_example(models: dict, resource_id: str, part_name: str) -> dict:
             "part_name": "gear_large" if part_name != "gear_large" else "KET4_Square_4mm",
         },
     }
+
+
+def slippage_preset(models: dict, *, root: Path = ROOT) -> dict:
+    """Load an editable Part slippage preset with current task bindings.
+
+    Args:
+        models: Current resource capability models.
+        root: Project root containing the Part slippage descriptor.
+
+    Returns:
+        An independent preset draft with the current place_insert task.
+        validate_setup checks selected parts and permitted resources.
+    """
+    preset = deepcopy(
+        read_json(root / "cais_spade_llm/initialization/failure_scenarios/part_slippage.json")[
+            "preset"
+        ]
+    )
+    try:
+        example = slippage_example(models, preset["resource_id"], preset["part_name"])
+    except (KeyError, StopIteration) as exc:
+        raise ValueError(
+            "Part slippage preset requires a configured place_insert task for "
+            f"{preset['resource_id']} / {preset['part_name']}"
+        ) from exc
+    for field in ("event_id", "event_name", "parameter_bindings"):
+        preset[field] = example[field]
+    return preset

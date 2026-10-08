@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 """Resource agent that receives work orders, selects a tool via LLM, and executes it."""
 
 # agents/resource_agent/resource_agent.py
-from __future__ import annotations
-
 import asyncio
 import inspect
 import json
@@ -1894,13 +1894,16 @@ class ResourceAgent(LlmAgent):
                 return
 
             primitive_observations = []
+            physical_identity = ({"run_id": grant["run_id"],
+                                  "recovery_composition_ref": deepcopy(reference)}
+                                 if reference is not None and isinstance(grant, dict) and grant.get("run_id") else {})
 
             async def report_primitive_observation(observation: dict[str, Any]) -> None:
                 primitive_observations.append(deepcopy(observation))
                 observed_msg = Message(to=agent.cca_jid)
                 observed_msg.set_metadata("type", "resource_event")
                 observed_msg.body = json.dumps({
-                    "task_id": task_id, "resource_jid": str(agent.jid),
+                    **physical_identity, "task_id": task_id, "resource_jid": str(agent.jid),
                     "function_name": fn_name, "params": fn_args,
                     "status": "recovery_primitive_observed", "observations": observation,
                 })
@@ -1919,7 +1922,7 @@ class ResourceAgent(LlmAgent):
                 running_msg.set_metadata("type", "resource_event")
                 running_msg.body = json.dumps(
                     {
-                        "task_id": task_id,
+                        **physical_identity, "task_id": task_id,
                         "resource_jid": str(agent.jid),
                         "function_name": fn_name,
                         "params": fn_args,
@@ -1952,10 +1955,17 @@ class ResourceAgent(LlmAgent):
                     accepted = set(sig.parameters.keys())
                     filtered_args = {k: v for k, v in fn_args.items() if k in accepted}
 
-                result = await asyncio.wait_for(
-                    func(**filtered_args),
-                    timeout=agent.tool_timeout_s,
-                )
+                if physical_identity:
+                    execution = asyncio.create_task(func(**filtered_args))
+                    try:
+                        result = await asyncio.wait_for(asyncio.shield(execution), timeout=agent.tool_timeout_s)
+                    except asyncio.TimeoutError:
+                        # A motion may still be executing in its native owner. Keep
+                        # its grant and claims until its actual outcome is known.
+                        await execution
+                        raise
+                else:
+                    result = await asyncio.wait_for(func(**filtered_args), timeout=agent.tool_timeout_s)
                 if reference is not None and isinstance(result, dict):
                     result.setdefault("observations", {})["primitive_observations"] = deepcopy(primitive_observations)
                 state_after = agent._snapshot_state()
@@ -1977,7 +1987,7 @@ class ResourceAgent(LlmAgent):
                         done_msg.set_metadata("type", "resource_event")
                         done_msg.body = json.dumps(
                             {
-                                "task_id": task_id,
+                                **physical_identity, "task_id": task_id,
                                 "resource_jid": str(agent.jid),
                                 "function_name": fn_name,
                                 "params": fn_args,
@@ -2026,7 +2036,7 @@ class ResourceAgent(LlmAgent):
                     fail_msg.set_metadata("type", "resource_event")
                     fail_msg.body = json.dumps(
                         {
-                            "task_id": task_id,
+                            **physical_identity, "task_id": task_id,
                             "resource_jid": str(agent.jid),
                             "function_name": fn_name,
                             "params": fn_args,
@@ -2188,8 +2198,20 @@ class ResourceAgent(LlmAgent):
                 request_id = agent._pending_recovery_composition_request_ids.get(task_id)
                 if not request_id or data.get("recovery_composition_request_id") != request_id:
                     return
-            elif data.get("recovery_composition_request_id") or data.get("recovery_composition_grant") is not None:
+            elif data.get("recovery_composition_request_id"):
                 return
+            elif data.get("recovery_composition_grant") is not None:
+                runtime = getattr(agent, "environment_runtime", None)
+                grant = data["recovery_composition_grant"]
+                task = runtime.context.pending_for(task_id) if runtime is not None else None
+                if (not isinstance(grant, dict) or task is None
+                        or grant.get("nominal_task") != task
+                        or grant.get("run_id") != runtime.context.run_id
+                        or task.get("resource_id") != agent.agent_name
+                        or runtime.jids.get(agent.agent_name) != str(agent.jid)):
+                    return
+                if decision == "allow":
+                    agent._recovery_composition_grants[task_id] = deepcopy(grant)
             if reference is not None and decision == "allow":
                 grant = data.get("recovery_composition_grant")
                 if not isinstance(grant, dict) or grant.get("recovery_composition_ref") != reference:

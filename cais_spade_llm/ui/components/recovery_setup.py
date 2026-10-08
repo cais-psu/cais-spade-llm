@@ -10,8 +10,8 @@ from typing import Any
 from nicegui import ui
 
 from cais_spade_llm.recovery_framework import ROOT, read_json
-from cais_spade_llm.resources.nominal_des import build_nominal_resource_des_models
 from cais_spade_llm.resources.environment_models import build_environment_models
+from cais_spade_llm.resources.nominal_des import build_nominal_resource_des_models
 from cais_spade_llm.ui import recovery_setup as settings
 
 
@@ -197,7 +197,7 @@ def _render_slippage(
         else []
     )
 
-    if failure["checkpoint"] == settings.FAILURE_CHECKPOINTS["Part slippage"]:
+    if failure["checkpoint"] in settings.SUPPORTED_CHECKPOINTS["Part slippage"]:
         events = [event for event in events if event["event_name"] == "place_insert"]
 
     def task_changed(e) -> None:
@@ -240,7 +240,7 @@ def _render_slippage(
         refresh()
 
     condition = failure.get("additional_condition")
-    required = failure["checkpoint"] == settings.FAILURE_CHECKPOINTS["Part slippage"]
+    required = failure["checkpoint"] in settings.SUPPORTED_CHECKPOINTS["Part slippage"]
     condition_checkbox = ui.checkbox(
         "Another resource holds a selected part",
         value=condition is not None,
@@ -289,12 +289,25 @@ def _render_slippage(
 
 
 def _render_failure_form(
-    draft: dict, models: dict, selected_parts: list[str], changed, refresh
+    draft: dict, models: dict, selected_parts: list[str], changed, refresh, *, root: Path = ROOT
 ) -> None:
     failure = draft.get("failure_scenario")
 
+    def use_preset() -> None:
+        try:
+            draft["failure_scenario"] = settings.slippage_preset(models, root=root)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            ui.notify(f"Part slippage preset could not be loaded: {exc}", type="negative")
+            refresh()
+            return
+        changed()
+        refresh()
+
     def choose_scenario(e) -> None:
         scenario = e.value
+        if scenario == "Part slippage":
+            use_preset()
+            return
         if not scenario:
             draft["failure_scenario"] = None
         else:
@@ -302,7 +315,6 @@ def _render_failure_form(
                 "Conveyor breakdown": "Conveyor",
                 "ur5e-1 breakdown": "ur5e-1",
                 "Machining breakdown during part processing": "M1",
-                "Part slippage": "ur5e-3",
             }[scenario]
             draft["failure_scenario"] = {
                 "scenario": scenario,
@@ -310,18 +322,6 @@ def _render_failure_form(
                 "mode": "once",
                 "checkpoint": settings.FAILURE_CHECKPOINTS[scenario],
             }
-            if scenario == "Part slippage":
-                draft["failure_scenario"].update(
-                    {
-                        "part_name": None,
-                        "event_id": None,
-                        "event_name": None,
-                        "parameter_bindings": {},
-                        "drop_pose": {axis: None for axis in ("x", "y", "z")},
-                        "orientation_quat": {"qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
-                        "additional_condition": {"resource_id": "ur5e-4", "part_name": None},
-                    }
-                )
         changed()
         refresh()
 
@@ -339,6 +339,7 @@ def _render_failure_form(
             on_change=choose_scenario,
         ).classes("w-full")
         with ui.row().classes("gap-2 flex-wrap"):
+            ui.button("Preset: ur5e-4 / gear_small", on_click=use_preset).props("flat")
             for rid, part in (("ur5e-3", "KET4_Square_4mm"), ("ur5e-4", "gear_large")):
                 button = ui.button(
                     f"Example: {rid} / {part}",
@@ -350,11 +351,19 @@ def _render_failure_form(
                     and part in settings.eligible_parts(models[rid], selected_parts)
                 )
         ui.label(
-            "All four failures support Simulation checkpoints, observed stopped-state evidence, and Gazebo markers. Examples fill a draft; save explicit drop coordinates."
+            "All four failures support Simulation checkpoints, observed stopped-state evidence, and Gazebo markers. The Part slippage preset includes drop coordinates. Preset and examples fill an editable draft; use Save setup to store changes."
         ).classes("text-amber-800 text-sm")
         if not failure:
             return
         ui.label("Occurrence: once per run").classes("text-sm")
+        if "require_upright" in failure:
+            ui.checkbox("Require upright landing", on_change=lambda _: changed()).bind_value(failure, "require_upright")
+        if failure.get("checkpoint") == "during_place_lowering":
+            ui.number("Placement progress", min=.5, max=.99, step=.01, on_change=lambda _: changed()).bind_value(failure, "placement_progress")
+            for entry in failure.get("initial_conditions", []):
+                orientation = "upright" if entry.get("orientation_quat") == {"qx": 0, "qy": 0, "qz": 0, "qw": 1} else "configured buffer orientation"
+                processes = ", ".join(f"{fact['process']}/{fact['result']}" for fact in entry["processCompleted"])
+                ui.label(f"Starting state: {entry['part_name']} {orientation} in {entry['resource_id']} zone {entry['zone']}; completed {processes}").classes("text-sm")
         if failure["scenario"] == "Conveyor breakdown":
             failure["checkpoint"] = "after_M1_pick_before_release"
             ui.label("Automatically armed on Start System. Run provides Arm, Disarm and checkpoint-guarded Trigger controls.").classes("text-sm")
@@ -362,7 +371,7 @@ def _render_failure_form(
             ui.label("Conveyor becomes unavailable while ur5e-1 keeps the completed part. Reset Gazebo or Reset All clears the latched breakdown.").classes("text-sm")
             return
         ui.select(
-            _keep_value({settings.FAILURE_CHECKPOINTS[failure["scenario"]]: settings.CHECKPOINTS[settings.FAILURE_CHECKPOINTS[failure["scenario"]]]}, failure.get("checkpoint")),
+            _keep_value({key: settings.CHECKPOINTS[key] for key in settings.SUPPORTED_CHECKPOINTS[failure["scenario"]]}, failure.get("checkpoint")),
             label="Trigger point",
             on_change=lambda _: changed(),
         ).bind_value(failure, "checkpoint").classes("w-full")
@@ -533,7 +542,7 @@ def render_setup(bridge: Any, *, root: Path = ROOT, loaded: tuple | None = None)
 
     @ui.refreshable
     def failure_form() -> None:
-        _render_failure_form(draft, models, selected_parts, changed, failure_form.refresh)
+        _render_failure_form(draft, models, selected_parts, changed, failure_form.refresh, root=root)
 
     @ui.refreshable
     def recovery_options() -> None:

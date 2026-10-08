@@ -18,19 +18,27 @@ from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety 
     _compile_formula,
 )
 from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
+from cais_spade_llm.agents.central_controller.ppr_ap import (
+    ap_record, parse_ap_record, parse_ap_definition, canonical_ap_key, make_ap_definition,
+)
+from ppr_ap_migration import migrate_ppr_fixture
 from cais_spade_llm.recovery_framework.environment_composition import state_labels
 from cais_spade_llm.resources.environment_models import build_environment_models
 
 _ROOT = Path(__file__).resolve().parents[1]
-_REFERENCE = _ROOT / "cais_spade_llm/specification/safety/assembly_board-v1_preview_reference.json"
+_REFERENCE = _ROOT / "test/fixtures/legacy_task_ap_preview.json"
 
 
 @lru_cache(maxsize=2)
 def _reference_checker(kind: str) -> tuple[dict, BaseSafetyChecker]:
-    reference = json.loads(_REFERENCE.read_text())
+    reference = migrate_ppr_fixture(json.loads(_REFERENCE.read_text()))
     rule = next(row["rule"] for row in reference["previews"] if row["kind"] == kind)
     dot = _compile_formula(rule["ltlf"], {ap["label"] for ap in rule["aps"]})
-    return rule, BaseSafetyChecker({rule["id"]: dot}, [rule])
+    tools = [{"function_owner_agent": resource + "@localhost", "function": function,
+              "process": "assembly"}
+             for resource in ("ur5e-3", "ur5e-4")
+             for function in ("place_approach", "place_insert")]
+    return rule, BaseSafetyChecker({rule["id"]: dot}, [rule], tools_catalog=tools)
 
 
 def _accepts(checker: BaseSafetyChecker, trace: tuple[frozenset[str], ...]) -> bool:
@@ -77,12 +85,10 @@ def _logic(payload: dict) -> SafetyLogic:
 @pytest.mark.parametrize("route", ["formula_ast", "raw"])
 def test_preview_routes_preserve_product_symbols_through_labeling(route: str) -> None:
     entry = (
-        "ap_event/assembly/KET4_Square_4mm/ur5e-3/"
-        "place_approach/destination=assembly_board-v1"
+        '{"event":{"arguments":{"destination":"assembly_board-v1"},"symbol":"place_approach"},"kind":"ap_event","process":"assembly","product":"KET4_Square_4mm","resource":"ur5e-3"}'
     )
     completion = (
-        "ap_state/assembly/gear_small/ur5e-4/"
-        "placed/destination=assembly_board-v1"
+        '{"kind":"ap_state","process":"assembly","product":"gear_small","resource":"ur5e-4","state":{"arguments":{"destination":"assembly_board-v1"},"symbol":"placed"}}'
     )
     payload = {"id": "SAFE_1"}
     if route == "formula_ast":
@@ -95,7 +101,7 @@ def test_preview_routes_preserve_product_symbols_through_labeling(route: str) ->
                     "function": "place_approach",
                     "resource": "ur5e-3",
                     "product": "KET4_Square_4mm",
-                    "context": {"destination": "assembly_board-v1"},
+                    "arguments": {"destination": "assembly_board-v1"},
                 },
             },
             "right": {
@@ -103,11 +109,11 @@ def test_preview_routes_preserve_product_symbols_through_labeling(route: str) ->
                 "state": "placed",
                 "resource": "ur5e-4",
                 "product": "gear_small",
-                "context": {"destination": "assembly_board-v1"},
+                "arguments": {"destination": "assembly_board-v1"},
             },
         }
     else:
-        payload.update(aps=[entry, completion], ltlf=f"(!({entry}) U {completion})")
+        payload.update(aps=[entry, completion], ltlf="(!ap001 U ap002)")
     logic = _logic(payload)
 
     logic.logic_raw = asyncio.run(logic._llm_build_safety_logic())
@@ -115,8 +121,8 @@ def test_preview_routes_preserve_product_symbols_through_labeling(route: str) ->
     logic._apply_labels_into_rules()
 
     assert logic.rules[0]["aps"] == [
-        {"label": "ap001", "full": entry},
-        {"label": "ap002", "full": completion},
+        ap_record("ap001", parse_ap_definition(entry), ""),
+        ap_record("ap002", parse_ap_definition(completion), ""),
     ]
     assert "ket4_square_4mm" not in json.dumps(logic.logic_raw)
     assert "ap001" in logic.rules[0]["ltlf"]
@@ -136,7 +142,7 @@ def test_ast_state_descriptor_preserves_rule_product_and_field_state(
         {"type": "ap_state_atom", "state": state, "resource": "ur5e-4"},
     )
 
-    assert formula == f"ap_state/assembly/{product}/ur5e-4/{state}/any"
+    assert formula == canonical_ap_key(make_ap_definition("ap_state", product, "assembly", "ur5e-4", state))
     assert aps == [formula]
     assert logic._ap_segments(formula) == {
         "prefix": "ap_state",
@@ -144,12 +150,12 @@ def test_ast_state_descriptor_preserves_rule_product_and_field_state(
         "product": product,
         "resource": "ur5e-4",
         "event": state,
-        "context": "any",
+        "arguments": {},
     }
 
 
 def test_raw_route_retains_existing_rejection_of_unsupported_field_state() -> None:
-    ap = "ap_state/assembly/gear_small/ur5e-4/part_state=assembled/any"
+    ap = '{"kind":"ap_state","process":"assembly","product":"gear_small","resource":"ur5e-4","state":{"arguments":{},"symbol":"part_state=assembled"}}'
     logic = _logic({"id": "SAFE_1", "aps": [ap], "ltlf": f"F ({ap})"})
 
     with pytest.raises(RuntimeError, match="produced no grounded APs"):
@@ -182,7 +188,7 @@ def test_reference_dfa_matches_independent_boolean_traces(kind: str) -> None:
 
 
 def test_reference_bindings_come_from_declared_board_capabilities() -> None:
-    reference = json.loads(_REFERENCE.read_text())
+    reference = migrate_ppr_fixture(json.loads(_REFERENCE.read_text()))
     models = build_environment_models(json.loads((_ROOT / reference["scene_source"]).read_text()))
     actors = sorted(rid for rid, model in models.items() if any(
         event["event_name"] == "place_approach"
@@ -194,11 +200,12 @@ def test_reference_bindings_come_from_declared_board_capabilities() -> None:
     assert reference["scene_resources"] == sorted(models)
     for row in reference["previews"]:
         rule = row["rule"]
-        source = _REFERENCE.parent / row["safety_file"]
-        assert source.read_text().strip() == "[Safety Requirements]\n- " + rule["raw_text"]
+        assert rule["raw_text"]
         assert rule["resources"] == actors
         for ap in rule["aps"]:
-            prefix, _, _, actor, symbol, _ = ap["full"].split("/", 5)
+            definition = parse_ap_record(ap)
+            prefix, actor = definition["kind"], definition["resource"]
+            symbol = definition["state" if prefix == "ap_state" else "event"]["symbol"]
             if prefix == "ap_event":
                 assert any(event["function_name"] == symbol for event in models[actor]["events"])
             else:
@@ -210,10 +217,10 @@ def test_reference_bindings_come_from_declared_board_capabilities() -> None:
 def test_mutex_preserves_board_occupancy_after_release_or_failure(state: str) -> None:
     _, checker = _reference_checker("mutex")
     occupied = checker._map_state_to_aps("ur5e-4@localhost", state, {
-        "resource_location": "assembly_board-v1", "held_part": None,
+        "resource_location": "assembly_board-v1", "held_part": None, "process": "assembly",
     })
     entering = checker._map_task_to_aps("ur5e-3@localhost", "place_approach", {
-        "part_name": "KET4_Square_4mm", "destination_location": "assembly_board-v1",
+        "part_name": "KET4_Square_4mm", "destination_location": "assembly_board-v1", "process": "assembly",
     })
     assert occupied == ["ap004"]
     assert entering == ["ap001"]
@@ -223,7 +230,7 @@ def test_mutex_preserves_board_occupancy_after_release_or_failure(state: str) ->
 
 def test_precedence_uses_acknowledged_part_state_and_remembers_completion() -> None:
     _, checker = _reference_checker("precedence")
-    params = {"part_name": "gear_small", "destination_location": "assembly_board-v1"}
+    params = {"part_name": "gear_small", "destination_location": "assembly_board-v1", "process": "assembly"}
     assert checker._map_task_to_aps("ur5e-4@localhost", "place_insert", params) == []
     done = state_labels(checker,
                         {"ur5e-4": {"resource_state": "placed", "held_part": None}},
@@ -231,7 +238,7 @@ def test_precedence_uses_acknowledged_part_state_and_remembers_completion() -> N
                         {"ur5e-4": "ur5e-4@localhost"}, {"ur5e-4": params})
     assert done == frozenset({"ap004"})
     entry = frozenset(checker._map_task_to_aps("ur5e-3@localhost", "place_approach", {
-        "part_name": "KET4_Square_4mm", "destination_location": "assembly_board-v1",
+        "part_name": "KET4_Square_4mm", "destination_location": "assembly_board-v1", "process": "assembly",
     }))
     assert entry == frozenset({"ap001"})
     assert not _accepts(checker, (frozenset(), entry))
@@ -257,7 +264,7 @@ def test_precedence_rejects_wrong_or_unfinished_completion_witness(
 def test_reference_native_aps_do_not_claim_unknown_recovery_events() -> None:
     _, checker = _reference_checker("precedence")
     assert checker._map_task_to_aps("ur5e-3@localhost", "execute_recovery_macro", {
-        "part_name": "KET4_Square_4mm", "destination_location": "assembly_board-v1",
+        "part_name": "KET4_Square_4mm", "destination_location": "assembly_board-v1", "process": "assembly",
     }) == []
 
 
@@ -276,3 +283,99 @@ def test_reference_completion_requires_the_declared_destination_context() -> Non
         "part_name": "gear_small", "destination_location": "M1",
         "part_location": "assembly_board-v1", "part_state": "assembled",
     }) == []
+
+
+def test_context_is_rejected_in_new_authoring_and_saved_aps() -> None:
+    logic = _logic({"id": "SAFE_1"})
+    with pytest.raises(ValueError, match="context"):
+        logic._compile_ast_state_atom(logic.rules[0], {
+            "type": "ap_state_atom", "resource": "ur5e-4", "state": "placed",
+            "context": {"destination": "assembly_board-v1"},
+        })
+    with pytest.raises(ValueError, match="recompile"):
+        parse_ap_definition("ap_state/assembly/any/ur5e-4/placed/any")
+
+
+def test_spatial_ap_cannot_be_inferred_from_stored_task_location() -> None:
+    definition = make_ap_definition("ap_state", "*", "*", "KMR", "any",
+                                    {"region": "assembly_board-v1"})
+    checker = BaseSafetyChecker({}, [{"id": "mutex", "aps": [ap_record("ap001", definition, "")]}])
+    with pytest.raises(ValueError, match="Physical AP"):
+        checker._map_state_to_aps("KMR@localhost", "positioned", {
+            "resource_location": "assembly_board-v1"})
+
+
+def test_registered_function_grounds_process_without_caller_supplied_label():
+    from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+    from cais_spade_llm.agents.central_controller.ppr_ap import ap_record, make_ap_definition
+    definition = make_ap_definition("ap_event", "gear_small", "Assembly", "KMR", "place_insert")
+    checker = BaseSafetyChecker({}, [{"id": "exact", "aps": [ap_record("ap001", definition, "exact")]}],
+        tools_catalog=[{"function_owner_agent": "KMR", "function": "place_insert", "process": "Assembly"}])
+    checker.resource_bindings = {"kmr@localhost": "KMR"}
+    assert checker._map_task_to_aps("kmr@localhost", "place_insert", {"part_name": "gear_small"}) == ["ap001"]
+    with pytest.raises(ValueError, match="disagrees"):
+        checker._map_task_to_aps("kmr@localhost", "place_insert", {"part_name": "gear_small", "process": "assembly"})
+    assert checker._map_task_to_aps("kmr@localhost", "another_function",
+        {"part_name": "gear_small", "process": "Assembly", "function_name": "place_insert"}) == []
+    with pytest.raises(ValueError, match="process.*evidence"):
+        BaseSafetyChecker({}, checker.safety_rules)._map_task_to_aps(
+            "KMR", "place_insert", {"part_name": "gear_small"})
+
+
+@pytest.mark.parametrize("formula", ["G !(ap001 & ap999)", "G !(ap001 & undeclared)"])
+def test_raw_authoring_rejects_undeclared_propositions(formula):
+    definition = make_ap_definition("ap_event", "*", "assembly", "ur5e-3", "place_approach")
+    logic = _logic({"id": "SAFE_1", "aps": [definition], "ltlf": formula})
+    with pytest.raises(ValueError, match="labels must exactly match"):
+        asyncio.run(logic._llm_build_safety_logic())
+
+
+@pytest.mark.parametrize("state", ["never_registered", "unknown_field=assembled", "part_state="])
+def test_ast_authoring_rejects_unregistered_state_conditions(state):
+    logic = _logic({"id": "SAFE_1"})
+    with pytest.raises(RuntimeError, match="no registered state condition"):
+        logic._compile_ast_state_atom(logic.rules[0], {
+            "type": "ap_state_atom", "resource": "ur5e-4", "state": state})
+
+
+@pytest.mark.parametrize("route", ["formula_ast", "raw"])
+def test_authoring_rejects_process_scope_inconsistent_with_registered_event(route):
+    logic = _logic({"id": "SAFE_1"})
+    if route == "formula_ast":
+        operation = lambda: logic._compile_ast_event_atom(logic.rules[0], {
+            "type": "ap_event_atom", "resource": "ur5e-3",
+            "function": "place_approach", "process": "wrong_process"})
+    else:
+        definition = make_ap_definition("ap_event", "*", "wrong_process", "ur5e-3", "place_approach")
+        logic = _logic({"id": "SAFE_1", "aps": [definition], "ltlf": "G !ap001"})
+        operation = lambda: asyncio.run(logic._llm_build_safety_logic())
+    with pytest.raises(ValueError, match="process disagrees"):
+        operation()
+
+
+def test_event_atom_does_not_borrow_function_from_another_resource():
+    logic = _logic({"id": "SAFE_1"})
+    with pytest.raises(RuntimeError, match="unregistered"):
+        logic._compile_ast_event_atom(logic.rules[0], {
+            "type": "ap_event_atom", "resource": "ur5e-4", "function": "place_approach"})
+
+
+def test_ast_physical_region_condition_keeps_its_separate_grounding_contract():
+    logic = _logic({"id": "SAFE_1"})
+    key, _ = logic._compile_ast_state_atom(logic.rules[0], {
+        "type": "ap_state_atom", "resource": "*", "process": "*",
+        "product": "*", "state": "any@assembly_board-v1"})
+    assert parse_ap_definition(key)["state"] == {
+        "symbol": "any", "arguments": {"region": "assembly_board-v1"}}
+
+
+def test_raw_label_substitution_never_rewrites_fixed_argument_symbols():
+    first = make_ap_definition("ap_event", "*", "assembly", "ur5e-3", "place_approach",
+                               {"tag": "ap002"})
+    second = make_ap_definition("ap_event", "*", "assembly", "ur5e-4", "place_insert")
+    logic = _logic({"id": "SAFE_1", "aps": [first, second], "ltlf": "G !(ap001 & ap002)"})
+    logic.logic_raw = asyncio.run(logic._llm_build_safety_logic())
+    logic._apply_labels_into_rules()
+    assert {ap["full"] for ap in logic.rules[0]["aps"]} == {
+        canonical_ap_key(first), canonical_ap_key(second)}
+    assert logic.rules[0]["ltlf"] == "G !(ap001 & ap002)"

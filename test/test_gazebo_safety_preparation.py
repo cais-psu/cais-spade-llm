@@ -1,8 +1,9 @@
-"""Non-dispatching planning, authoritative checkpoints and detached CCA checking."""
-
 from __future__ import annotations
 
+"""Non-dispatching planning, authoritative checkpoints and detached CCA checking."""
+
 import asyncio
+import hashlib
 import json
 import runpy
 import threading
@@ -22,6 +23,7 @@ from cais_spade_llm.agents.central_controller.online_safety_monitor import Onlin
 from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
 from cais_spade_llm.recovery_framework import fingerprint
 from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
+    LiveSafetyPreparation,
     _runtime_record,
     capture_checkpoint,
     prepare_and_check,
@@ -32,6 +34,154 @@ from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
     cartesian_coverage_fingerprint,
     prepare_ur5e_motion,
 )
+
+
+@pytest.mark.parametrize("decision", [
+    {"status": "held", "reason": "possible_physical_requirement_violation"},
+    {"status": "inconclusive", "reason": "live_execution_tracking_unverified"},
+    {"status": "allowed", "committed": False},
+])
+def test_live_motion_harness_never_dispatches_without_committed_cca_grant(decision):
+    from unittest.mock import AsyncMock
+
+    script = runpy.run_path(str(Path(__file__).parents[1] / "scripts/check_live_recovery_motion.py"))
+    task = {"task_id": "GAZEBO_MOTION_SAFE/ur5e-4", "resource_id": "ur5e-4",
+            "resource_jid": "owner@localhost", "function_name": "execute_recovery_macro",
+            "primitive_steps": [{"primitive": "move_cartesian", "params": {"x": 1.}}], "params": {}}
+    reference = {"recovery_id": "GAZEBO_MOTION_SAFE", "task_id": task["task_id"]}
+    owner = SimpleNamespace(agent_name="ur5e-4", execute_recovery_composition_step=AsyncMock())
+    runtime = SimpleNamespace(product_jid="product@localhost", resource_agents=[owner],
+                              context=SimpleNamespace(run_id="run"))
+    live = SimpleNamespace(
+        register=AsyncMock(return_value={"status": "allowed", "task_refs": {task["task_id"]: reference}}),
+        check=AsyncMock(return_value=decision), observe=Mock(),
+    )
+    report = {"status": "NEEDS_CONTEXT", "dispatch_authorized": False,
+              "command_sent": False, "acceptance_complete": False}
+    asyncio.run(script["check_and_execute"](live, runtime, task, report))
+    owner.execute_recovery_composition_step.assert_not_called()
+    live.observe.assert_not_called()
+    assert not report["dispatch_authorized"] and not report["command_sent"]
+    assert not report["acceptance_complete"]
+    assert live.check.call_args.kwargs == {"sender": "owner@localhost", "commit": True}
+
+
+def test_live_motion_harness_serializes_ros_integer_ids_without_stringifying_evidence():
+    import numpy
+
+    script = runpy.run_path(str(Path(__file__).parents[1] / "scripts/check_live_recovery_motion.py"))
+    value = {"controller_goal_id": [numpy.uint8(7), numpy.uint8(255)],
+             "sequence": numpy.uint64(2**64 - 1)}
+    encoded = json.dumps(value, allow_nan=False, default=script["_json_value"])
+    assert json.loads(encoded) == {"controller_goal_id": [7, 255], "sequence": 2**64 - 1}
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        json.dumps({"unrecognized_evidence": object()}, default=script["_json_value"])
+
+
+@pytest.mark.parametrize("model_execution", [1, "true", None])
+def test_model_execution_requires_literal_boolean_before_accessing_readers(model_execution):
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import controller_goal_identity
+
+    preparation = LiveSafetyPreparation(SimpleNamespace(), SimpleNamespace(), {})
+    with pytest.raises(ValueError, match="model_execution"):
+        preparation.initialize(model_execution=model_execution)
+    with pytest.raises(ValueError, match="model_execution"):
+        capture_checkpoint(SimpleNamespace(), SimpleNamespace(), model_execution=model_execution)
+    with pytest.raises(ValueError, match="model_execution"):
+        controller_goal_identity({}, model_execution=model_execution)
+
+
+def test_live_motion_harness_preserves_actual_owner_completion_and_grant_identity():
+    from unittest.mock import AsyncMock
+
+    script = runpy.run_path(str(Path(__file__).parents[1] / "scripts/check_live_recovery_motion.py"))
+    step = {"primitive": "move_cartesian", "params": {"x": 1.}}
+    task = {"task_id": "GAZEBO_MOTION_SAFE/ur5e-4", "resource_id": "ur5e-4",
+            "resource_jid": "owner@localhost", "function_name": "execute_recovery_macro",
+            "primitive_steps": [step], "params": {}}
+    reference = {"recovery_id": "GAZEBO_MOTION_SAFE", "task_id": task["task_id"]}
+    grant = {"primitive_steps": [step], "run_id": "run", "recovery_composition_ref": reference}
+    owner = SimpleNamespace(agent_name="ur5e-4", execute_recovery_composition_step=AsyncMock(
+        return_value={"success": True, "command_sent": True, "observations": {"sequence": 17}}))
+    runtime = SimpleNamespace(product_jid="product@localhost", resource_agents=[owner],
+                              context=SimpleNamespace(run_id="run"))
+    live = SimpleNamespace(
+        register=AsyncMock(return_value={"status": "allowed", "task_refs": {task["task_id"]: reference}}),
+        check=AsyncMock(return_value={"status": "allowed", "committed": True,
+                                     "recovery_composition_grant": grant}),
+        observe=Mock(return_value={"status": "observed", "success": True}),
+    )
+    report = {"status": "NEEDS_CONTEXT", "dispatch_authorized": False,
+              "command_sent": False, "acceptance_complete": False}
+    asyncio.run(script["check_and_execute"](live, runtime, task, report))
+    assert report["acceptance_complete"] and report["execution"]["observations"] == {"sequence": 17}
+    assert owner.execute_recovery_composition_step.call_args.kwargs["grant"] == grant
+    completion = live.observe.call_args.args[0]
+    assert completion["run_id"] == "run" and completion["recovery_composition_ref"] == reference
+    assert completion["resource_jid"] == live.observe.call_args.kwargs["sender"] == "owner@localhost"
+    owner.execute_recovery_composition_step.reset_mock()
+    grant["run_id"] = "changed"
+    with pytest.raises(ValueError, match="differs"):
+        asyncio.run(script["check_and_execute"](live, runtime, task, report))
+    owner.execute_recovery_composition_step.assert_not_called()
+
+
+def test_live_motion_harness_incomplete_checkpoint_only_queries_cca_without_commit():
+    from unittest.mock import AsyncMock
+
+    script = runpy.run_path(str(Path(__file__).parents[1] / "scripts/check_live_recovery_motion.py"))
+    task = {"task_id": "GAZEBO_MOTION_SAFE/ur5e-4", "resource_id": "ur5e-4",
+            "resource_jid": "owner@localhost", "function_name": "execute_recovery_macro", "params": {}}
+    owner = SimpleNamespace(agent_name="ur5e-4", execute_recovery_composition_step=AsyncMock())
+    runtime = SimpleNamespace(product_jid="product@localhost", resource_agents=[owner])
+    live = SimpleNamespace(
+        register=AsyncMock(return_value={"status": "allowed", "task_refs": {task["task_id"]: {}}}),
+        check=AsyncMock(return_value={"status": "allowed", "committed": True,
+                                     "recovery_composition_grant": {}}), observe=Mock(),
+    )
+    report = {"status": "NEEDS_CONTEXT", "dispatch_authorized": False, "command_sent": False,
+              "acceptance_complete": False, "checkpoint": {"unresolved": [{"resource_id": "ur5e-4"}]}}
+    asyncio.run(script["check_and_execute"](live, runtime, task, report))
+    assert live.check.call_args.kwargs["commit"] is False
+    assert report["cca_check_read_only"] and not report["dispatch_authorized"]
+    assert not report["command_sent"] and not report["acceptance_complete"]
+    owner.execute_recovery_composition_step.assert_not_called()
+    live.observe.assert_not_called()
+
+
+@pytest.mark.parametrize("composition", [None, {"status": "inconclusive", "reason": "running_work_missing"}])
+def test_live_motion_harness_retains_model_assumptions_and_exact_owner_records(composition):
+    script = runpy.run_path(str(Path(__file__).parents[1] / "scripts/check_live_recovery_motion.py"))
+    trajectory = {"joint_names": ["ur5e_4_elbow_joint"], "points": [{"positions": [1.25]}]}
+    assumptions = {"continuous_motion": {"joint_trajectory": deepcopy(trajectory)},
+                   "stationary_contracts": {"ur5e-3": {"kind": "declared"}}}
+    coverage = {"model_execution_verified": True, "physical_execution_verified": False,
+                "model_execution_assumptions": assumptions}
+    preparation = {"request": {"task_id": "task"}, "steps": [{"joint_trajectory": trajectory}],
+                   "result": {"command_ids": ["command"]}, "executed": {0}}
+    provider = SimpleNamespace(steps={"prepared": {"joint_trajectory": trajectory}},
+                               preparations={"program": preparation},
+                               execution_coverage_records={"coverage": coverage})
+    live = SimpleNamespace(lock=threading.RLock(),
+                           commands=SimpleNamespace(snapshot=lambda: {"commands": {"command": {"status": "active"}}}),
+                           monitor=SimpleNamespace(history=[{"observations": {"sequence": 19}}], states={"SAFE_shared_area_mutex": {"state"}}),
+                           preparation=SimpleNamespace(last_execution_coverage=coverage), last_results={})
+    report = {"cca_decision": {} if composition is None else {"common_composition": composition},
+              "dispatch_authorized": False, "command_sent": False}
+    owners = [SimpleNamespace(agent_name="ur5e-4", recovery_composition_evidence_provider=provider)]
+    script["retain_execution_evidence"](live, owners, report)
+    assert report["common_composition"] == composition
+    assert report["model_execution_assumptions"] == assumptions
+    assert report["execution_coverage"]["physical_execution_verified"] is False
+    assert report["prepared_programs"]["ur5e-4"]["steps"]["prepared"]["joint_trajectory"] == trajectory
+    assert report["prepared_programs"]["ur5e-4"]["preparations"]["program"]["executed"] == [0]
+    assert report["physical_history"] == [{"observations": {"sequence": 19}}]
+    trajectory["points"][0]["positions"][0] = 99.
+    assumptions["stationary_contracts"].clear()
+    assert report["prepared_programs"]["ur5e-4"]["steps"]["prepared"]["joint_trajectory"]["points"][0]["positions"] == [1.25]
+    assert report["model_execution_assumptions"]["stationary_contracts"]
+    assert not report["dispatch_authorized"] and not report["command_sent"]
+    json.dumps(report, allow_nan=False)
 
 
 @pytest.fixture
@@ -141,7 +291,9 @@ def test_live_controller_rejects_changed_interpolation_or_geometry(controller):
 
 @pytest.mark.parametrize('contract,idle', [(None,True), ({},True), ('supported',False)])
 def test_future_stationary_coverage_needs_the_owner_contract_and_idle_evidence(contract,idle):
-    from cais_spade_llm.recovery_framework.live_safety_preparation import GazeboResourceObservation
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
+        GazeboResourceObservation,
+    )
 
     if contract == 'supported':
         contract = {'kind':'idle_commanded_hold','requires_no_running_tasks':True,
@@ -153,7 +305,7 @@ def test_future_stationary_coverage_needs_the_owner_contract_and_idle_evidence(c
 
 
 def test_idle_observation_requires_a_record_from_the_current_publisher():
-    from cais_spade_llm.recovery_framework.live_safety_preparation import GazeboSafetyReader
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
 
     reader = object.__new__(GazeboSafetyReader)
     reader.configuration = {'controller_status_topics':['/configured_action/_action/status']}
@@ -174,10 +326,35 @@ def test_idle_observation_requires_a_record_from_the_current_publisher():
     assert reader.idle_goals()[topic]['goals'] == []
 
 
+@pytest.mark.parametrize('with_info', [False, True])
+def test_action_status_callback_supports_humble_without_authenticating_missing_info(with_info):
+    import numpy as np
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    reader = object.__new__(GazeboSafetyReader)
+    topic = '/configured_action/_action/status'
+    reader.configuration = {'controller_status_topics': [topic]}
+    reader._lock = threading.RLock()
+    reader._goal_status = {}
+    reader._node = SimpleNamespace(get_publishers_info_by_topic=lambda _: [SimpleNamespace(endpoint_gid=[1])])
+    message = SimpleNamespace(status_list=[SimpleNamespace(
+        goal_info=SimpleNamespace(goal_id=SimpleNamespace(uuid=[np.uint8(7)])), status=4,
+    )])
+    if with_info:
+        reader._record_goals(topic, message, SimpleNamespace(publisher_gid=[np.uint8(1)]))
+        assert reader.idle_goals()[topic]['publisher_gid'] == [1]
+    else:
+        reader._record_goals(topic, message)
+        assert reader._goal_status[topic]['publisher_gid'] == []
+        with pytest.raises(ValueError, match='unavailable'):
+            reader.idle_goals()
+    assert json.loads(json.dumps(reader._goal_status[topic]))['goals'] == [{'id': [7], 'status': 4}]
+
+
 @pytest.mark.parametrize("change", [None, "missing", "duplicate", "active", "pending", "not_holding",
                                      "stale", "incarnation", "navigation", "unavailable"])
 def test_controller_owner_query_requires_complete_fresh_idle_evidence(change):
-    from cais_spade_llm.recovery_framework.live_safety_preparation import GazeboSafetyReader
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
 
     reader = object.__new__(GazeboSafetyReader)
     topic = "/configured_controller/follow_joint_trajectory/_action/status"
@@ -219,21 +396,34 @@ def test_controller_owner_query_requires_complete_fresh_idle_evidence(change):
 
 
 def test_controller_goal_identity_retains_command_and_launch_changes():
-    from cais_spade_llm.recovery_framework.live_safety_preparation import controller_goal_identity
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import controller_goal_identity
 
     original = {"/controller/recovery_state": {"instance_id": "launch-1", "command_revision": 1,
-                "simulation_time": 2., "sequence": 3, "positions": [0.], "has_active_goal": False}}
+                "contract_revision": 1, "holding": True, "observed_stationary": True,
+                "has_pending_goal": False, "simulation_time": 2., "sequence": 3,
+                "positions": [0.], "has_active_goal": False}}
     fresh = deepcopy(original)
     fresh["/controller/recovery_state"].update(simulation_time=3., sequence=4, positions=[.001])
     assert controller_goal_identity(fresh) == controller_goal_identity(original)
-    for key, value in (("instance_id", "launch-2"), ("command_revision", 2), ("has_active_goal", True)):
+    sampled = deepcopy(fresh)
+    sampled["/controller/recovery_state"]["observed_stationary"] = False
+    assert controller_goal_identity(sampled) != controller_goal_identity(original)
+    assert controller_goal_identity(sampled, model_execution=True) == controller_goal_identity(
+        original, model_execution=True)
+    for key, value in (("instance_id", "launch-2"), ("command_revision", 2),
+                       ("contract_revision", 2), ("holding", False),
+                       ("has_active_goal", True), ("has_pending_goal", True)):
         changed = deepcopy(fresh)
         changed["/controller/recovery_state"][key] = value
         assert controller_goal_identity(changed) != controller_goal_identity(original)
+        assert controller_goal_identity(changed, model_execution=True) != controller_goal_identity(
+            original, model_execution=True)
 
 
 def test_configured_fixed_equipment_coverage_needs_no_gripper():
-    from cais_spade_llm.recovery_framework.live_safety_preparation import GazeboResourceObservation
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
+        GazeboResourceObservation,
+    )
 
     contract = {'kind': 'static_body_and_idle_containment', 'requires_no_running_tasks': True,
                 'requires_no_active_goals': True, 'future_execution_tracking': 'not_established'}
@@ -260,7 +450,7 @@ def _static_part_geometry_case():
 
 
 def test_empty_carrier_uses_explicit_observed_constituents_without_guessed_dimensions():
-    from cais_spade_llm.recovery_framework.live_safety_preparation import (
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
         _configured_static_part_geometry,
     )
 
@@ -273,7 +463,7 @@ def test_empty_carrier_uses_explicit_observed_constituents_without_guessed_dimen
 
 @pytest.mark.parametrize('change', ['missing', 'empty', 'moving', 'carrier', 'pose', 'duplicate', 'undeclared', 'instance', 'stamp'])
 def test_incomplete_constituent_geometry_is_unavailable(change):
-    from cais_spade_llm.recovery_framework.live_safety_preparation import (
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
         _configured_static_part_geometry,
     )
 
@@ -302,10 +492,11 @@ def test_incomplete_constituent_geometry_is_unavailable(change):
 
 
 def test_static_part_geometry_retains_sources_and_detects_repositioned_fixture():
-    from cais_spade_llm.recovery_framework.live_safety_preparation import LiveSafetyPreparation
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import LiveSafetyPreparation
 
     record, declaration, part = _static_part_geometry_case()
-    provider = LiveSafetyPreparation(None, None, {'regions': {}, 'part_geometry': {'assembly_board-v1': declaration}})
+    runtime = SimpleNamespace(context=SimpleNamespace(inputs={'geometry': {}}))
+    provider = LiveSafetyPreparation(runtime, None, {'regions': {}, 'part_geometry': {'assembly_board-v1': declaration}})
     provider.reader = SimpleNamespace(snapshot=lambda **_: record, entity=lambda *_, **__: deepcopy(part), idle_goals=lambda: {})
     parts = {'assembly_board-v1': deepcopy(part)}
     unresolved = []
@@ -320,13 +511,57 @@ def test_static_part_geometry_retains_sources_and_detects_repositioned_fixture()
         provider.revalidate(checkpoint)
 
 
-def _slippage_gazebo_script():
-    return runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/check_part_slippage_gazebo.py'))
+@pytest.mark.parametrize('target', ['Gear_Plate/Gear_Shaft_1', 'Gear_Plate/Gear_Shaft_2', None])
+def test_observed_part_geometry_retains_exact_configured_assembly_target(target):
+    from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import _scope_geometry
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import _envelope
+
+    record, _, part = _static_part_geometry_case()
+    part['name'] = 'Gear_Plate'
+    targets = {} if target is None else {'gear_small': target}
+    runtime = SimpleNamespace(context=SimpleNamespace(inputs={
+        'geometry': {'parts': {'assembly_target_map': targets}},
+    }))
+    provider = LiveSafetyPreparation(runtime, None, {'regions': {}})
+    provider.reader = SimpleNamespace(snapshot=lambda: record)
+    unresolved = []
+    geometry = provider.geometry({}, {'gear_small': part}, unresolved)
+    assert not unresolved
+    shape = geometry['parts']['gear_small']
+    assert shape['footprint'] == _envelope(record['models']['Gear_Plate']['links'], part['pose'])
+    assert shape['frame'] == 'world'
+    assert shape.get('target') == target
+    binding = {'part': 'gear_small', 'target': 'Gear_Plate/Gear_Shaft_1'}
+    if target == binding['target']:
+        _scope_geometry(binding, geometry, {}, {})
+    else:
+        with pytest.raises(ValueError, match='Scoped assembly target differs'):
+            _scope_geometry(binding, geometry, {}, {})
+
+
+def _slippage_gazebo_script(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    script = runpy.run_path(str(root / 'scripts/check_part_slippage_gazebo.py'))
+    archived = script["COMPANIONS"]
+    current = tmp_path / "current_companions"
+    current.mkdir(exist_ok=True)
+    for case in script["CASES"]:
+        companion = json.loads((archived / (case + ".json")).read_text())
+        companion["source_fixture"]["path"] = str(
+            (archived / companion["source_fixture"]["path"]).resolve())
+        # This is a new preflight input, not rewritten historical acceptance evidence.
+        source = root / companion["predefined_safety"]["path"]
+        companion["predefined_safety"]["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+        (current / (case + ".json")).write_text(json.dumps(companion))
+    load = script["load_companion"]
+    script["load_companion"] = lambda name, directory=current: load(name, directory)
+    script["COMPANIONS"] = current
+    return script
 
 
 @pytest.mark.parametrize('case', ['mutex', 'precedence', 'safe'])
-def test_gazebo_companions_preserve_events_without_importing_synthetic_motion(case):
-    companion = _slippage_gazebo_script()['load_companion'](case)
+def test_gazebo_companions_preserve_events_without_importing_synthetic_motion(tmp_path, case):
+    companion = _slippage_gazebo_script(tmp_path)['load_companion'](case)
     assert len(companion['outline_events']) == 7
     assert sum(len(event['primitive_steps']) for event in companion['outline_events']) == 19
     assert companion['diagnostic_cca_bypass'] is False
@@ -340,7 +575,7 @@ def test_gazebo_companions_preserve_events_without_importing_synthetic_motion(ca
 
 @pytest.mark.parametrize('change', ['event_name', 'predecessors', 'source', 'bypass', 'hash'])
 def test_gazebo_companion_rejects_changed_identity_or_authority(tmp_path, change):
-    script = _slippage_gazebo_script()
+    script = _slippage_gazebo_script(tmp_path)
     companion = script['load_companion']('mutex')
     companion['source_fixture']['path'] = str(script['COMPANIONS'] / companion['source_fixture']['path'])
     if change == 'event_name':
@@ -359,10 +594,10 @@ def test_gazebo_companion_rejects_changed_identity_or_authority(tmp_path, change
 
 
 @pytest.mark.parametrize('case', ['mutex', 'precedence', 'safe'])
-def test_live_preflight_cannot_count_missing_evidence_as_a_safety_rejection(monkeypatch, case):
-    from cais_spade_llm.recovery_framework import gazebo_safety_preparation, live_safety_preparation
+def test_live_preflight_cannot_count_missing_evidence_as_a_safety_rejection(tmp_path, monkeypatch, case):
+    from cais_spade_llm.recovery_framework import gazebo_safety_preparation
 
-    script = _slippage_gazebo_script()
+    script = _slippage_gazebo_script(tmp_path)
     companion = script['load_companion'](case)
     provider = SimpleNamespace(initialize=lambda: None, validate_idle=Mock(side_effect=ValueError('Missing goals')))
     cca = SimpleNamespace(recovery_safety_preparation_provider=provider)
@@ -370,7 +605,7 @@ def test_live_preflight_cannot_count_missing_evidence_as_a_safety_rejection(monk
         SimpleNamespace(agent_name=rid, jid=jid) for rid, jid in
         [('ur5e-3', 'recovery-resource-3@localhost'), ('ur5e-4', 'recovery-resource-4@localhost')]
     ])
-    monkeypatch.setattr(live_safety_preparation, 'install_live_preparation', lambda *_: None)
+    monkeypatch.setattr(gazebo_safety_preparation, 'install_live_preparation', lambda *_: None)
     monkeypatch.setattr(gazebo_safety_preparation, 'capture_checkpoint', lambda *_: {
         'unresolved': [{'reason': 'Missing goals'}], 'observations': {},
     })
@@ -384,7 +619,7 @@ def test_live_preflight_cannot_count_missing_evidence_as_a_safety_rejection(monk
 
 @pytest.mark.parametrize('field', ['current_pose','joint_positions','attachment','footprint'])
 def test_live_reobservation_rejects_even_small_unmodeled_changes(field):
-    from cais_spade_llm.recovery_framework.live_safety_preparation import LiveSafetyPreparation
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import LiveSafetyPreparation
 
     initial = {'launch_id':'run', 'custody_complete':True, 'attachment':{'revision':0},
                'stationary_contract':{'kind':'idle_commanded_hold'},
@@ -564,6 +799,57 @@ def test_real_preparation_adapter_checks_detached_composition_without_admission(
     assert runtime.context.pending_tasks == {"M1_delivery": {"status": "pending"}}
     assert json.loads(Path(result["artifact_path"]).read_text())["fingerprint"] == result["fingerprint"]
     controller._send_simulation_joint_trajectory.assert_not_called()
+
+
+def test_checkpoint_retains_prepared_sessions_and_physical_history_without_owner_objects():
+    context = SimpleNamespace(
+        run_id="run", revision=0, inputs={}, part_tracker={}, resources={},
+        pending_tasks={}, reservations={}, acknowledgements=[], snapshot=lambda: {},
+    )
+    runtime = SimpleNamespace(context=context, admission=None, resource_agents=[])
+    graph = {"node": "initial", "path": [], "ledger": [], "grants": {},
+             "invalid_reason": "", "physical_history": "history", "time_exact": "0"}
+    work = {"grant": {"task_id": "task"}, "proof": {"history_revision": 0},
+            "reservation": {"token": "reservation"}, "owner": threading.Lock(),
+            "executions": {}, "complete": False, "plan_events": {"start"}}
+    prepared = {"request": {"recovery_id": "recovery"}, "product_jid": "product@localhost",
+                "tasks": {"task": {"resource_jid": "resource@localhost"}}, "refs": {"task": {}},
+                "registration": {"registration_only": True}, "grants": {"task": work},
+                "complete": False, "completed_tasks": set(), "invalid_reason": ""}
+    monitor = OnlineSafetyMonitor({}, [], tools_catalog=[])
+    physical = monitor.physical_monitor
+    physical.rules = [{"rule_id": "SAFE_shared_area_mutex"}]
+    physical.states = {"SAFE_shared_area_mutex": {"state_b", "state_a"}}
+    physical.history = [{"revision": 0, "execution_evidence": {"task_id": "prior"}}]
+    physical.revision = 1
+    cca = SimpleNamespace(safety_monitor=monitor, recovery_safety_scopes={},
+                          recovery_composition_admissions={"scope": SimpleNamespace(
+                              sessions={"graph": graph, "prepared": prepared})})
+
+    before = _runtime_record(runtime, cca)
+    json.dumps(before, allow_nan=False)
+    assert before["physical_sessions"]["scope"]["graph"] == graph
+    saved = before["physical_sessions"]["scope"]["prepared"]
+    assert saved["completed_tasks"] == []
+    assert saved["grants"]["task"] == {
+        "grant": {"task_id": "task"}, "proof": {"history_revision": 0},
+        "reservation": {"token": "reservation"}, "executions": {},
+        "complete": False, "plan_events": ["start"],
+    }
+    assert before["monitors"][0]["physical_monitor"] == {
+        "rules": physical.rules, "states": {"SAFE_shared_area_mutex": ["state_a", "state_b"]},
+        "history": physical.history, "revision": 1, "invalid_reason": "",
+    }
+    work["executions"][0] = {"success": True, "observations": {"joint_positions": [0.]}}
+    assert _runtime_record(runtime, cca) != before
+    assert saved["grants"]["task"]["executions"] == {}
+    work["executions"].clear()
+    prepared["completed_tasks"].add("task")
+    assert _runtime_record(runtime, cca) != before
+    prepared["completed_tasks"].clear()
+    physical.history.append({"revision": 1, "execution_evidence": {"task_id": "task"}})
+    assert _runtime_record(runtime, cca) != before
+    assert len(before["monitors"][0]["physical_monitor"]["history"]) == 1
 
 
 @pytest.mark.parametrize("change", ["stale", "participant", "program", "completion", "coverage", "synthetic_live", "revision", "history"])
@@ -764,3 +1050,10 @@ def test_recovery_ui_requires_explicit_prepare_and_check_click(monkeypatch, tmp_
             check.assert_called_once_with(bridge, {"recovery_id": "inspected", "programs": []})
             assert any(getattr(element, "text", "") == "Safety check: NEEDS_CONTEXT" for element in client.elements.values())
     asyncio.run(scenario())
+
+
+def test_archived_companion_cannot_claim_current_schema_acceptance():
+    root = Path(__file__).resolve().parents[1]
+    script = runpy.run_path(str(root / "scripts/check_part_slippage_gazebo.py"))
+    with pytest.raises(ValueError, match="Predefined safety definitions changed"):
+        script["load_companion"]("mutex")

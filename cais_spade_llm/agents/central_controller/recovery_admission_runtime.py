@@ -1,10 +1,10 @@
+from __future__ import annotations
+
 """Connect CCA-owned recovery admission to configured evidence owners.
 
 Agent messages identify requests and report observations. They never install an
 evidence provider, compiled monitor, current DFA state, or mock execution mode.
 """
-
-from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
@@ -54,6 +54,7 @@ def _context(agent, product_jid: str, recovery_id: str) -> dict:
     # This audit belongs to the nominal admission authority, never the provider.
     context["nominal_acknowledgements"] = []
     context["nominal_run_id"] = None
+    context["nominal_pending_tasks"] = {}
     context["owner_incarnations"] = [(str(resource.jid), id(resource)) for resource in agent.resource_agents]
     native = context.get("task_monitor_context")
     if not isinstance(native, dict):
@@ -73,6 +74,7 @@ def _context(agent, product_jid: str, recovery_id: str) -> dict:
                       contexts=deepcopy(admission.contexts), jids=dict(runtime.jids))
         context["nominal_acknowledgements"] = deepcopy(admission.acknowledgement_history)
         context["nominal_run_id"] = runtime.context.run_id
+        context["nominal_pending_tasks"] = deepcopy(runtime.context.pending_tasks)
         context["nominal_running_tasks"] = [deepcopy(action.task) for action in admission.grants.values()]
         revision["runtime"] = {
             "run_id": runtime.context.run_id,
@@ -153,22 +155,17 @@ def _nominal_start_actions(agent, product_jid: str, context: dict, record: dict)
     admission = None
     runtime = agent._environment_runtime_for_sender(product_jid)
     if runtime is not None and record["kind"] == "start":
-        from cais_spade_llm.agents.central_controller.local_composition import Action
-        from cais_spade_llm.recovery_framework.environment_composition import task_key
-
         admission = agent._environment_admission(runtime)
         for identity in record.get("event_ids", []):
             task = context["tasks"][identity]["task"]
             if task.get("function_name") == "execute_recovery_macro":
                 continue
             pending = runtime.context.pending_for(task["task_id"])
-            if pending is None or any(pending.get(key) != task.get(key) for key in
-                                      ("task_id", "resource_id", "event_id", "event_name", "parameters")):
+            fields = ("task_id", "resource_id", "event_id", "event_name", "parameters")
+            if (pending is None or recovery_validation_fingerprint({key: pending.get(key) for key in fields})
+                    != recovery_validation_fingerprint({key: task.get(key) for key in fields})):
                 raise ValueError("nominal_task_identity_changed")
-            claims = frozenset(runtime.context._task_reservations(pending, pending["parameters"].get("part_name") or pending.get("part_name")))
-            labels = frozenset(agent.safety_monitor._map_task_to_aps(
-                runtime.jids[pending["resource_id"]], pending["event_name"], pending["parameters"]))
-            nominal_actions.append(Action(task_key(pending), deepcopy(pending), claims, labels))
+            nominal_actions.append((deepcopy(pending), admission._prepare_composition_start(pending)))
     return admission, nominal_actions
 
 
@@ -182,6 +179,10 @@ def _commit(agent, product_jid: str, recovery_id: str, state: dict, record: dict
     if {row["scope_id"] for row in histories} != set(monitors):
         raise ValueError("native_monitor_scope_changed")
     admission, nominal_actions = _nominal_start_actions(agent, product_jid, context, record)
+    for task, prepared in nominal_actions:
+        committed = admission.commit_prepared(task, prepared)
+        if committed["status"] != "allowed":
+            raise ValueError(committed["reason"])
     for row in histories:
         monitor = monitors[row["scope_id"]]
         history = row["state"]
@@ -210,9 +211,6 @@ def _commit(agent, product_jid: str, recovery_id: str, state: dict, record: dict
                 "current_state": values.get("resource_state", ""),
                 "params": {**history["contexts"].get(resource_id, {}), **deepcopy(values)},
             }
-    for action in nominal_actions:
-        admission.grants[action.task["task_id"]] = action
-        admission.epoch += 1
     plan_monitor = getattr(agent, "plan_fsa_monitor", None)
     if plan_monitor is not None:
         for transition in record.get("acknowledged_transitions", [record]):
@@ -229,23 +227,65 @@ def _commit(agent, product_jid: str, recovery_id: str, state: dict, record: dict
                     status="running" if started else "completed")
 
 
-def recovery_admission(agent, product_jid: str) -> RecoveryCompositionAdmission:
+def region_reservations(agent, *, lock=None):
+    """Return the one region ledger shared by nominal and recovery owners."""
+    from cais_spade_llm.agents.central_controller.region_admission import RegionReservationLedger
+
+    ledger = getattr(agent, "recovery_region_reservations", None)
+    if ledger is None:
+        ledger = RegionReservationLedger(lock=lock)
+        agent.recovery_region_reservations = ledger
+    return ledger
+
+
+def _authorize_preparation(agent, preparation: dict, claim: dict) -> bool:
+    owners = [owner for owner in agent.resource_agents
+              if str(owner.jid).split("/", 1)[0] == preparation["resource_jid"]]
+    if len(owners) != 1:
+        raise ValueError("resource_owner_unavailable")
+    provider = getattr(owners[0], "recovery_composition_evidence_provider", None)
+    authorize = getattr(provider, "authorize_preparation", None)
+    if not callable(authorize):
+        raise ValueError("exact_command_reservation_authorizer_unavailable")
+    return authorize(
+        preparation_id=preparation["preparation_id"],
+        reservation_token=claim["token"],
+        command_ids=deepcopy(preparation["command_ids"]),
+        expected_revision=preparation["command_ledger_revision"],
+    ) is True
+
+
+def recovery_admission(agent, product_jid: str, *, runtime=None, preparation=None) -> RecoveryCompositionAdmission:
     """Return the CCA coordinator sharing this run's admission transaction lock."""
     for resource in agent.resource_agents:
         resource.recovery_composition_start_guard = lambda: interacting_recovery_admission(agent)
     coordinators = getattr(agent, "recovery_composition_admissions", None)
     if coordinators is None:
         coordinators = agent.recovery_composition_admissions = {}
-    if product_jid not in coordinators:
+    if product_jid in coordinators and preparation is None:
+        return coordinators[product_jid]
+    if runtime is None:
         runtime = agent._environment_runtime_for_sender(product_jid)
-        lock = runtime.context.admission_lock if runtime is not None else RLock()
+    lock = runtime.context.admission_lock if runtime is not None else RLock()
+    with lock:
+        if product_jid in coordinators:
+            coordinator = coordinators[product_jid]
+            if preparation is not None:
+                coordinator.configure_live(runtime=runtime, cca=agent, preparation=preparation)
+            return coordinator
         coordinator = RecoveryCompositionAdmission(
             context_provider=lambda product, recovery: _context(agent, product, recovery),
             resource_evidence_provider=lambda request: _prepare(agent, request),
             primitive_models_provider=lambda: _primitive_models(agent),
             lock=lock,
+            region_reservations=region_reservations(agent, lock=lock),
+            preparation_authorizer=lambda preparation, claim: _authorize_preparation(
+                agent, preparation, claim),
             allow_mock_execution=getattr(agent, "allow_mock_recovery_execution", False),
             allow_nominal_tasks=getattr(agent, "predefined_safety_required", False),
+            runtime=runtime if preparation is not None else None,
+            cca=agent if preparation is not None else None,
+            preparation=preparation,
         )
         coordinator.native_history_commit = lambda state, record: _commit(
             agent, product_jid, record["recovery_id"], state, record)
@@ -264,10 +304,77 @@ def recovery_admission(agent, product_jid: str) -> RecoveryCompositionAdmission:
     return coordinators[product_jid]
 
 
+def install_live_runtime(runtime, cca):
+    """Configure physical evidence on this run's existing CCA coordinator."""
+    if (not getattr(cca, "predefined_safety_required", False)
+            or getattr(cca, "allow_mock_recovery_execution", False)):
+        return None
+    with runtime.context.admission_lock:
+        previous = getattr(cca, "live_safety_runtime", None)
+        if previous is not None and previous.runtime is not runtime:
+            raise ValueError("An active physical safety owner belongs to another run")
+        configuration = runtime.context.inputs["scene"].get("safety_preparation")
+        if configuration is None:
+            return None
+        from cais_spade_llm.recovery_framework.gazebo_safety_preparation import LiveSafetyPreparation
+
+        existing = getattr(cca, "recovery_composition_admissions", {}).get(runtime.product_jid)
+        preparation = getattr(existing, "preparation", None)
+        if preparation is None:
+            preparation = LiveSafetyPreparation(runtime, cca, configuration)
+        coordinator = recovery_admission(
+            cca, runtime.product_jid, runtime=runtime, preparation=preparation)
+        cca.recovery_safety_preparation_provider = preparation
+        cca.live_safety_runtime = runtime.live_safety_runtime = coordinator
+        return coordinator
+
+
+class _UnavailablePhysicalAdmission:
+    """Fail closed when selected physical rules have no configured live owner."""
+
+    async def register(self, request: dict, *, product_jid: str) -> dict:
+        """Reject registration until live physical evidence ownership is installed."""
+        return {"status": "inconclusive", "reason": "live_physical_safety_owner_unavailable"}
+
+    async def check(self, event: dict, *, sender: str, commit: bool = True) -> dict:
+        """Reject every protected dispatch without using the offline graph."""
+        return {"status": "inconclusive", "reason": "live_physical_safety_owner_unavailable",
+                "task_id": event.get("task_id", ""), "committed": False}
+
+    def observe(self, record: dict, *, sender: str) -> dict:
+        """Keep unaudited notifications from manufacturing monitor history."""
+        return {"status": "ignored", "reason": "live_physical_safety_owner_unavailable"}
+
+    def holds(self, event: dict | None = None) -> bool:
+        """Hold physical work while its required execution owner is unavailable."""
+        return True
+
+
+def physical_admission(agent, product_jid: str):
+    """Select the configured live owner, with no missing-evidence graph fallback."""
+    owner = getattr(agent, "live_safety_runtime", None)
+    if owner is not None:
+        return owner
+    from cais_spade_llm.agents.central_controller.predefined_safety_runtime import predefined_required
+
+    if predefined_required(agent) and not getattr(agent, "allow_mock_recovery_execution", False):
+        resolve = getattr(agent, "_environment_runtime_for_sender", None)
+        runtime = resolve(product_jid) if callable(resolve) else None
+        if runtime is not None:
+            owner = install_live_runtime(runtime, agent)
+            if owner is not None:
+                return owner
+        return _UnavailablePhysicalAdmission()
+    return recovery_admission(agent, product_jid)
+
+
 def interacting_recovery_admission(agent) -> bool:
     """Hold unmodeled starts while any complete-resource recovery proof is active."""
-    return bool(getattr(agent, "recovery_composition_registering", False)) or any(coordinator.holds() for coordinator in
-               getattr(agent, "recovery_composition_admissions", {}).values())
+    owner = getattr(agent, "live_safety_runtime", None)
+    live_holds = owner.holds() if owner is not None else False
+    return (live_holds or bool(getattr(agent, "recovery_composition_registering", False))
+            or any(coordinator.holds() for coordinator in
+                   getattr(agent, "recovery_composition_admissions", {}).values()))
 
 
 async def register_recovery_composition(agent, request: dict, product_jid: str) -> dict:
@@ -288,7 +395,7 @@ async def register_recovery_composition(agent, request: dict, product_jid: str) 
 
             if predefined_required(agent):
                 predefined_scope(agent, request.get("recovery_safety_scope_id"))
-            return await recovery_admission(agent, product_jid).register(request, product_jid=product_jid)
+            return await physical_admission(agent, product_jid).register(request, product_jid=product_jid)
         except (ValueError, KeyError, TypeError, OSError) as exc:
             return {"status": "inconclusive", "reason": str(exc)}
         finally:
@@ -297,6 +404,10 @@ async def register_recovery_composition(agent, request: dict, product_jid: str) 
 
 def observe_recovery_event(agent, coordinator, record: dict, sender: str) -> dict:
     """Let the configured owner validate feedback before the coordinator consumes it."""
+    if coordinator is getattr(agent, "live_safety_runtime", None):
+        return coordinator.observe(record, sender=sender)
+    if isinstance(coordinator, _UnavailablePhysicalAdmission):
+        return coordinator.observe(record, sender=sender)
     provider = getattr(agent, "recovery_composition_context_provider", None)
     validate = getattr(provider, "observe", None)
     with coordinator.lock:

@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from copy import deepcopy
@@ -16,9 +18,17 @@ from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS
-from cais_spade_llm.recovery_framework.gazebo_recording import RecordingAttempt, X11Capture, _write_json
+from cais_spade_llm.recovery_framework.gazebo_recording import (
+    RecordingAttempt,
+    X11Capture,
+    _write_json,
+)
 from cais_spade_llm.ui.recovery_setup import (
-    SETUP_PATH, load_setup, save_setup, slippage_example, validate_setup,
+    SETUP_PATH,
+    load_setup,
+    save_setup,
+    slippage_preset,
+    validate_setup,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,7 +38,7 @@ TITLES = (
     "Conveyor breakdown",
     "Machining station handling robot breakdown (ur5e-1)",
     "Machining breakdown during part processing (M1)",
-    "Part slippage (ur5e-3 part slips into ur5e-4’s region)",
+    "Part slippage (ur5e-4 gear slips during placement into ur5e-3’s region)",
     "mutex rule applied into ur5e 3 and ur5e4",
 )
 SCENARIOS = tuple(CHECKPOINTS)
@@ -71,9 +81,7 @@ def scenario_setup(number: int, safety_file: str | None = None) -> dict:
         scenario = SCENARIOS[number - 1]
         if scenario == "Part slippage":
             models = validate_setup(setup)["models"]
-            failure = slippage_example(models, "ur5e-3", "KET4_Square_4mm")
-            failure["additional_condition"]["part_name"] = "gear_small"
-            failure["drop_pose"] = {"x": 0.0, "y": -0.2, "z": 1.04}
+            failure = slippage_preset(models)
         else:
             failure = {
                 "scenario": scenario, "resource_id": ("Conveyor", "ur5e-1", "M1")[number - 1],
@@ -129,15 +137,359 @@ def validate_failure(sample: dict, configuration: dict) -> dict:
             raise ValueError("Part slippage has no confirmed detachment and observed pose")
         if any(not isinstance(observed.get(axis), (int, float))
                or not abs(observed[axis] - configuration["drop_pose"][axis]) <= .05 for axis in ("x", "y", "z")):
-            raise ValueError("Slipped part was not observed in the configured ur5e-4 region")
+            raise ValueError("Slipped part was not observed in the configured "
+                             + configuration["additional_condition"]["resource_id"] + " region")
         other = configuration["additional_condition"]
         if (before.get(configuration["resource_id"], {}).get("held_part") != configuration["part_name"]
                 or before.get(other["resource_id"], {}).get("held_part") != other["part_name"]):
             raise ValueError("Both robots did not hold their parts before Part slippage")
+        if sample["values"][configuration["resource_id"]].get("held_part") is not None:
+            raise ValueError("The slipping robot still holds a part after detachment")
         if sample["values"][other["resource_id"]].get("held_part") != other["part_name"]:
             raise ValueError("The other robot no longer holds its current part")
-    return {"validated": True, "run_id": sample["run_id"], "scenario": configuration["scenario"],
-            "failure": deepcopy(fault)}
+    validation = {"validated": True, "run_id": sample["run_id"], "scenario": configuration["scenario"],
+                  "failure": deepcopy(fault)}
+    if configuration.get("checkpoint") == "during_place_lowering":
+        validation["placement_slippage"] = _validate_placement_slippage(sample, configuration, evidence)
+    return validation
+
+
+def _validate_placement_slippage(sample: dict, configuration: dict, evidence: dict) -> dict:
+    """Require an interrupted placement and overlapping observed pickup motions."""
+    motion = evidence.get("placement_motion") or {}
+    start, target, observed = (motion.get(key) or {} for key in
+                               ("started_pose", "target_pose", "observed_pose"))
+    expected = {"run_id": sample["run_id"], "resource_id": configuration["resource_id"],
+                "part_name": configuration["part_name"], "checkpoint": "during_place_lowering",
+                "function_name": "place_approach", "step_id": "descend",
+                "source": "gazebo_placement_motion"}
+    if (any(motion.get(key) != value for key, value in expected.items())
+            or any(motion.get(key) is not True for key in
+                   ("goal_active", "goal_cancelled", "motion_stopped"))
+            or any(type(pose.get(axis)) not in {int, float} or not math.isfinite(pose[axis])
+                   for pose in (start, target, observed) for axis in ("x", "y", "z"))):
+        raise ValueError("Part slippage has no confirmed interruption during placement lowering")
+    distance = start["z"] - target["z"]
+    progress = (start["z"] - observed["z"]) / distance if distance > 0 else -1.
+    if (not configuration["placement_progress"] <= progress < 1.
+            or not math.isclose(progress, motion.get("progress", -1.), abs_tol=1e-6)):
+        raise ValueError("Part slippage did not interrupt the observed downward placement motion")
+    if not any(task.get("task_id") == motion.get("task_id")
+               and task.get("resource_id") == configuration["resource_id"]
+               and task.get("event_name") == "place_approach"
+               and task.get("parameters", {}).get("part_name") == configuration["part_name"]
+               for task in evidence.get("pending_tasks", [])):
+        raise ValueError("Interrupted placement task was not retained")
+    initialization = sample.get("slippage_initialization") or {}
+    if (initialization.get("run_id") != sample["run_id"]
+            or initialization.get("status") != "completed"):
+        raise ValueError("Buffer starting state was not physically confirmed")
+    other = configuration["additional_condition"]
+    pairs = [(configuration["resource_id"], configuration["part_name"]),
+             (other["resource_id"], other["part_name"])]
+    selections = []
+    for robot, part in pairs:
+        selections.append([
+            row for row in sample.get("physical_motions", [])
+            if row.get("run_id") == sample["run_id"] and row.get("resource_id") == robot
+            and row.get("part_name") == part and row.get("function_name") in {"pick_approach", "pick_grasp"}
+            and row.get("terminal_status") == 4
+            and all(type(row.get(key)) in {int, float} and math.isfinite(row[key])
+                    for key in ("started_at_unix", "ended_at_unix"))
+            and row["started_at_unix"] < row["ended_at_unix"]
+        ])
+    overlaps = [
+        {"robots": [a["resource_id"], b["resource_id"]],
+         "task_ids": [a["task_id"], b["task_id"]],
+         "start": max(a["started_at_unix"], b["started_at_unix"]),
+         "end": min(a["ended_at_unix"], b["ended_at_unix"])}
+        for a in selections[0] for b in selections[1]
+        if max(a["started_at_unix"], b["started_at_unix"])
+        < min(a["ended_at_unix"], b["ended_at_unix"])
+    ]
+    if not overlaps:
+        raise ValueError("The two resource-owned pickup motions did not overlap")
+    return {"validated": True, "pickup_overlap": overlaps,
+            "placement_motion": deepcopy(motion), "initialization": deepcopy(initialization)}
+
+
+def _slippage_pickup_check(bridge, configuration: dict, evidence: dict, directory: Path) -> dict:
+    """Check an empty-gripper Cartesian pickup without moving or changing custody.
+
+    Args:
+        bridge: Owning simulation bridge with its initialized controllers.
+        configuration: Saved slippage settings.
+        evidence: Completed injection with the initially settled part pose.
+        directory: Recording evidence directory.
+
+    Returns:
+        A collision-aware, complete pickup plan and unchanged physical observations.
+    """
+    from geometry_msgs.msg import Point, Pose, Quaternion
+    from moveit_msgs.msg import CollisionObject, PlanningSceneComponents
+    from moveit_msgs.srv import GetPlanningScene, GetPositionFK, GetStateValidity
+    from rosidl_runtime_py.convert import message_to_ordereddict
+
+    from cais_spade_llm.recovery_framework.failure_effects import _observe_part, _upright_angle
+    from cais_spade_llm.recovery_framework.part_collision import (
+        grasp_point_evidence,
+        observed_part_boxes,
+    )
+    from cais_spade_llm.recovery_framework.workflow_execution import _pick_geometry
+    from cais_spade_llm.resources.robot.cartesian_waypoints import trajectory_samples
+
+    runtime = next(agent.environment_runtime for agent in bridge.product_agents
+                   if getattr(agent, "environment_runtime", None) is not None)
+    context = runtime.context
+    receiver = configuration["additional_condition"]["resource_id"]
+    retained = configuration["additional_condition"]["part_name"]
+    agent = next(agent for agent in runtime.resource_agents if agent.agent_name == receiver)
+    controller = agent._controller
+    model = context.geometry[configuration["part_name"]]["model_name"]
+    retained_model = context.geometry[retained]["model_name"]
+    result = {"validated": False, "run_id": context.run_id, "resource_id": receiver,
+              "part_name": configuration["part_name"], "model_name": model,
+              "planning_only": True, "command_sent": False,
+              "projected_gripper": "empty and open", "retained_part": retained}
+    try:
+        if (agent.execution_mode != "simulation" or controller._attached_model != retained_model
+                or context.resources[receiver].valuation.get("held_part") != retained):
+            raise ValueError("Pickup planning requires the observed retained part to stay attached")
+        observed = _observe_part(controller, model)
+        result["observed_pose_after_aftermath"] = observed
+        original = evidence["observed_drop_pose"]
+        if any(not math.isfinite(pose[a]) for pose in (observed, original)
+               for a in ("x", "y", "z", "qx", "qy", "qz", "qw")):
+            raise ValueError("Dropped-part observations must be finite")
+        if math.dist([observed[a] for a in ("x", "y", "z")],
+                     [original[a] for a in ("x", "y", "z")]) > .005:
+            raise ValueError("Dropped part moved during the recorded aftermath")
+        # The injector's first observation can precede the end of physical
+        # tipping. Confirm support directly after the full recorded aftermath.
+        support = [{"observed_at_unix": time.time(), "pose": observed}]
+        result["support_observations"] = support
+        for _ in range(8):
+            time.sleep(.25)
+            settled = _observe_part(controller, model)
+            support.append({"observed_at_unix": time.time(), "pose": settled})
+            if (any(not math.isfinite(settled[a]) for a in ("x", "y", "z", "qx", "qy", "qz", "qw"))
+                    or math.dist([settled[a] for a in ("x", "y", "z")],
+                                 [observed[a] for a in ("x", "y", "z")]) > .002
+                    or abs(sum(settled["q" + a] * observed["q" + a]
+                               for a in ("x", "y", "z", "w"))) < math.cos(.01)):
+                raise ValueError("Dropped part has no stable support after the recorded aftermath")
+        observed = support[-1]["pose"]
+        if configuration.get("require_upright"):
+            result["upright_angle_rad"] = _upright_angle(observed)
+            if result["upright_angle_rad"] > .05:
+                raise ValueError("Dropped gear is not upright after the recorded aftermath")
+        result["observed_pose_after_aftermath"] = observed
+        synced = controller._sync_part_collision(model)
+        result["settled_collision_scene"] = deepcopy(controller._last_command_evidence)
+        payload = result["settled_collision_scene"].get("payload_collision", {})
+        if (not synced or payload.get("collision_scene_acknowledged") is not True
+                or payload.get("model_name") != model or payload.get("attached_link") is not None):
+            raise ValueError("Settled gear collision geometry could not be acknowledged")
+        joints, missing = controller._get_arm_joint_positions(timeout_sec=2.)
+        if joints is None or missing:
+            raise ValueError("Pickup planning has no observed robot joint state")
+        scene_client = controller._payload_scene_clients["get"]
+
+        def read_scene():
+            response = controller._wait_future(scene_client.call_async(GetPlanningScene.Request(
+                components=PlanningSceneComponents(components=(
+                    PlanningSceneComponents.ROBOT_STATE | PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
+                    | PlanningSceneComponents.WORLD_OBJECT_GEOMETRY)))),
+                timeout_sec=5., label="recording pickup scene")
+            if response is None:
+                raise ValueError("Pickup collision scene observation timed out")
+            return response.scene
+
+        scene = read_scene()
+        attached_ids = [row.object.id for row in scene.robot_state.attached_collision_objects]
+        gear_ids = [row.id for row in scene.world.collision_objects if row.id.startswith(model + "/")]
+        result["world_gear_geometry"] = [message_to_ordereddict(row)
+                                         for row in scene.world.collision_objects if row.id in gear_ids]
+        if set(gear_ids) != {row["id"] for row in payload.get("collision_objects", [])}:
+            raise ValueError("Planning scene differs from acknowledged settled gear geometry")
+        projected = deepcopy(scene.robot_state)
+        joint_indices = {name: index for index, name in enumerate(projected.joint_state.name)}
+        if any(not math.isfinite(position)
+               or abs(position - projected.joint_state.position[joint_indices[name]]) > .02
+               for name, position in zip(controller.arm_joint_names, joints, strict=True)):
+            raise ValueError("Pickup planning scene differs from fresh joint observations")
+        removed = []
+        for attachment in projected.attached_collision_objects:
+            if attachment.object.id.startswith(retained_model + "/"):
+                attachment.object.operation = CollisionObject.REMOVE
+                removed.append(attachment.object.id)
+        if not removed or not gear_ids:
+            raise ValueError("Pickup planning lacks retained-part or dropped-part collision geometry")
+        # Let the running URDF derive mimic joints from the projected opening.
+        # Supplying their old closed positions would override that projection.
+        projected.joint_state.name = [*controller.arm_joint_names, controller.gripper_joint]
+        projected.joint_state.position = [
+            *[scene.robot_state.joint_state.position[joint_indices[name]] for name in controller.arm_joint_names],
+            float(controller.gripper_open),
+        ]
+        projected.joint_state.velocity = []
+        projected.joint_state.effort = []
+        joint_indices = {name: index for index, name in enumerate(projected.joint_state.name)}
+        projected.is_diff = True
+        geometry = _pick_geometry(context, configuration["part_name"], "", receiver)
+        targets = controller.compute_pick_targets(
+            part_name=configuration["part_name"], product_geometry=geometry,
+            target_pose={**observed, "model_name": model}, target_pose_source="observed slippage pose",
+            use_global_min_pick_tcp_z=False)
+        result["pick_targets"] = targets
+        if targets.get("success") is not True:
+            raise ValueError("Dropped-part pick targets could not be computed")
+        part_pose = Pose(position=Point(**{a: observed[a] for a in ("x", "y", "z")}),
+                         orientation=Quaternion(**{a: observed["q" + a] for a in ("x", "y", "z", "w")}))
+        result["grasp_geometry"] = grasp_point_evidence(
+            observed_part_boxes(model, part_pose),
+            [targets["tx"], targets["ty"], targets["pick_tcp_z"]],
+            controller.cartesian_position_tolerance_m)
+        if not result["grasp_geometry"]["payload_at_gripper"]:
+            raise ValueError("Future pickup TCP does not reach the observed gear geometry")
+        current = controller._get_ee_pose()
+        orientation = current.orientation
+        if "approach_pose" in targets:
+            orientation = Quaternion(**{a: targets["approach_pose"]["q" + a] for a in ("x", "y", "z", "w")})
+        request = controller._GetCartesianPath.Request()
+        request.header.frame_id = controller.frame_id
+        request.group_name, request.link_name = controller.group_name, controller.ee_link
+        request.start_state = projected
+        settings = controller.controller_config["cartesian_motion"]
+        request.max_step = float(settings["linear_step_m"])
+        request.revolute_jump_threshold = float(settings["max_joint_step_rad"])
+        request.avoid_collisions = True
+        request.waypoints = [
+            controller._make_pose(current.position.x, current.position.y, targets["travel_z"], orientation),
+            controller._make_pose(targets["tx"], targets["ty"], targets["travel_z"], orientation),
+            controller._make_pose(targets["tx"], targets["ty"], targets["pick_z"], orientation),
+        ]
+        if configuration.get("require_upright") and receiver == "ur5e-3":
+            # Approach the supported gear from the buffer side, below the
+            # interrupted robot's wrist, rather than sweeping through that wrist.
+            request.waypoints = [
+                controller._make_pose(current.position.x, current.position.y, targets["travel_z"], orientation),
+                controller._make_pose(targets["tx"] - .15, targets["ty"], targets["travel_z"], orientation),
+                controller._make_pose(targets["tx"] - .15, targets["ty"], targets["pick_z"], orientation),
+                controller._make_pose(targets["tx"], targets["ty"], targets["pick_z"], orientation),
+            ]
+            result["pickup_approach"] = "lateral from buffer side"
+        response = controller._wait_future(controller._cart_client.call_async(request),
+                                           timeout_sec=30., label="recording future pickup plan only")
+        result.update(request=message_to_ordereddict(request), removed_only_in_request=removed,
+                      world_gear_collision_ids=gear_ids, actual_attachment_ids_before=attached_ids)
+        if response is None:
+            raise ValueError("Collision-aware future pickup planning timed out")
+        result.update(error_code=response.error_code.val, fraction=response.fraction,
+                      solution=message_to_ordereddict(response.solution))
+        points = response.solution.joint_trajectory.points
+        if (response.error_code.val != 1 or not math.isfinite(response.fraction)
+                or response.fraction < .999999 or not points
+                or response.solution.joint_trajectory.joint_names != list(controller.arm_joint_names)
+                or any(any(len(values) != len(joints) or any(not math.isfinite(value) for value in values)
+                               for values in (point.positions, point.velocities, point.accelerations))
+                       for point in points)
+                or any(abs(b - a) > request.revolute_jump_threshold
+                       for left, right in zip(points, points[1:])
+                       for a, b in zip(left.positions, right.positions, strict=True))):
+            raise ValueError("No complete collision-aware Cartesian pickup at the observed drop pose")
+        if any(abs(a - b) > .02 for a, b in zip(points[0].positions, joints, strict=True)):
+            raise ValueError("Pickup trajectory starts from another robot state")
+        returned = dict(zip(response.start_state.joint_state.name,
+                            response.start_state.joint_state.position, strict=True))
+        # MoveIt 2.5.9 serializes the state after Cartesian interpolation.
+        # The first trajectory point above establishes the fresh starting arm state.
+        result["planner_projected_state"] = message_to_ordereddict(response.start_state)
+        if (not math.isfinite(returned[controller.gripper_joint])
+                or abs(returned[controller.gripper_joint] - controller.gripper_open) > .005
+                or any(row.object.id in removed for row in response.start_state.attached_collision_objects)):
+            raise ValueError("Pickup planner did not use the projected empty, open gripper state")
+        trajectory = response.solution.joint_trajectory
+        # Use the planner's complete projected state so derived open-gripper
+        # mimic joints and the removed attachment are identical in every check.
+        projected = deepcopy(response.start_state)
+        projected.is_diff = False
+        joint_indices = {name: index for index, name in enumerate(projected.joint_state.name)}
+        result["collision_projected_state"] = message_to_ordereddict(projected)
+        checked_states = 0
+        previous_time = None
+        for point in points:
+            stamp = point.time_from_start.sec + point.time_from_start.nanosec / 1e9
+            if not math.isfinite(stamp) or (previous_time is not None and stamp <= previous_time):
+                raise ValueError("Pickup trajectory has invalid timing")
+            previous_time = stamp
+
+        def projected_at(positions):
+            state = deepcopy(projected)
+            for name, value in zip(trajectory.joint_names, positions, strict=True):
+                state.joint_state.position[joint_indices[name]] = float(value)
+            return state
+
+        for positions in trajectory_samples(trajectory):
+            answer = controller._wait_future(controller._state_validity_client.call_async(
+                GetStateValidity.Request(robot_state=projected_at(positions), group_name=controller.group_name)),
+                timeout_sec=5., label="recording projected pickup collision sample")
+            if answer is None or not answer.valid:
+                result["failed_collision_sample"] = {
+                    "index": checked_states, "joint_positions": list(positions),
+                    "response": None if answer is None else message_to_ordereddict(answer),
+                }
+                raise ValueError("Projected pickup interpolation is in collision or unobserved")
+            checked_states += 1
+        fk_client = controller._node.create_client(GetPositionFK, "/compute_fk",
+                                                   callback_group=controller._cb_group)
+        try:
+            query = GetPositionFK.Request(robot_state=projected_at(points[-1].positions),
+                                          fk_link_names=[controller.ee_link])
+            query.header.frame_id = controller.frame_id
+            fk = controller._wait_future(fk_client.call_async(query), timeout_sec=5.,
+                                         label="recording projected pickup endpoint FK")
+            if fk is None or fk.error_code.val != 1 or len(fk.pose_stamped) != 1:
+                raise ValueError("Pickup endpoint FK is unavailable")
+            endpoint, target = fk.pose_stamped[0].pose, request.waypoints[-1]
+            position_error = math.dist([getattr(endpoint.position, a) for a in ("x", "y", "z")],
+                                       [getattr(target.position, a) for a in ("x", "y", "z")])
+            dot = abs(sum(getattr(endpoint.orientation, a) * getattr(target.orientation, a)
+                          for a in ("x", "y", "z", "w")))
+            orientation_error = 2 * math.acos(min(1., dot))
+            result.update(checked_states=checked_states, endpoint_position_error_m=position_error,
+                          endpoint_orientation_error_rad=orientation_error)
+            if (not math.isfinite(position_error) or not math.isfinite(orientation_error)
+                    or position_error > controller.cartesian_position_tolerance_m
+                    or orientation_error > controller.cartesian_orientation_tolerance_rad):
+                raise ValueError("Pickup trajectory endpoint misses the computed grasp")
+        finally:
+            controller._node.destroy_client(fk_client)
+        final_scene = read_scene()
+        final_joints, missing = controller._get_arm_joint_positions(timeout_sec=2.)
+        final_pose = _observe_part(controller, model)
+        if (any(not math.isfinite(final_pose[a]) for a in ("x", "y", "z", "qx", "qy", "qz", "qw"))
+                or abs(sum(final_pose["q" + a] * observed["q" + a]
+                           for a in ("x", "y", "z", "w"))) < math.cos(.05)):
+            raise ValueError("Dropped-part orientation changed during pickup planning")
+        result.update(actual_attachment_ids_after=[
+            row.object.id for row in final_scene.robot_state.attached_collision_objects],
+            observed_pose_after_planning=final_pose, joints_before=joints, joints_after=final_joints)
+        if (result["actual_attachment_ids_after"] != attached_ids
+                or controller._attached_model != retained_model
+                or context.resources[receiver].valuation.get("held_part") != retained
+                or final_joints is None or missing
+                or any(abs(a - b) > .01 for a, b in zip(joints, final_joints, strict=True))
+                or math.dist([observed[a] for a in ("x", "y", "z")],
+                             [final_pose[a] for a in ("x", "y", "z")]) > .005):
+            raise ValueError("Physical state changed during the planning-only pickup check")
+        result.update(validated=True, stable_support=True, checked_at_unix=time.time())
+        return result
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError, TimeoutError) as exc:
+        result["error"] = str(exc)
+        raise
+    finally:
+        _write_json(directory / "slippage_pickup_check.json", result)
 
 
 def _held_entry(hold: dict) -> dict:
@@ -410,6 +762,11 @@ async def _observe(bridge, negotiation_cursor: int = 0) -> dict:
                 "pending_tasks": deepcopy(list(runtime.context.pending_tasks.values())),
                 "unavailable_resources": sorted(runtime.context.unavailable_resources),
                 "negotiations": deepcopy(runtime.context.negotiations[negotiation_cursor:]),
+                "slippage_initialization": deepcopy(getattr(runtime, "slippage_initialization_evidence", None)),
+                "physical_motions": [
+                    deepcopy(row) for resource in runtime.resource_agents
+                    for row in getattr(getattr(resource, "_controller", None), "_simulation_motion_intervals", [])
+                ],
                 "run_file": str(runtime.path)}
 
 
@@ -433,6 +790,7 @@ async def _retry_marker(bridge) -> dict:
 
 def _read_render_observation() -> dict:
     import ctypes
+
     import numpy as np
 
     camera = X11Capture()
@@ -536,9 +894,72 @@ async def _wait_for_navigation(directory: Path) -> None:
     raise RuntimeError("Nav2 did not provide active controllers and one received navigation map before capture")
 
 
+def _failure_camera_profile(number: int, scene: dict) -> dict:
+    """Translate the accepted slippage camera angle to each failure area."""
+    if number not in {1, 2, 3}:
+        raise ValueError("Close failure cameras require scenario 1, 2 or 3")
+    machine = next(row for row in scene["machines"] if row["resource_id"] == "M1")
+    robot = next(row for row in scene["robots"] if row["resource_id"] == "ur5e-1")
+    work = machine["workholding_pose"]
+    if number == 1:
+        belt = scene["Conveyor"]
+        loading = machine["conveyor_loading_pose"]
+        target = [(loading[0] + belt["world_pose"][0]) / 2,
+                  (loading[1] + work[1]) / 2, belt["surface_height"] + .25]
+        sign_yaw, distance = belt["world_pose"][5], 3.7
+        subjects = ["Conveyor", "ur5e-1", "M1", "conveyor_loading_pose"]
+    elif number == 2:
+        target = [work[0] - .25, (work[1] + robot["base_xyz"][1]) / 2, work[2] + .20]
+        sign_yaw, distance = robot["base_rpy"][2], 3.0
+        subjects = ["ur5e-1", "M1", "conveyor_loading_pose"]
+    else:
+        storage = scene["Storage"]["world_pose"]
+        target = [.55 * work[0] + .45 * storage[0], work[1], work[2] + .20]
+        sign_yaw, distance = machine["world_pose"][5], 4.3
+        subjects = ["M1", "ur5e-1", "KMR", "Storage", "KMR_docking_pose"]
+    pitch = math.atan2(1.65, math.hypot(1.4, 2.8))
+    yaw = math.atan2(2.8, 1.4)
+    position = [target[0] - distance * math.cos(yaw),
+                target[1] - distance * math.sin(yaw),
+                target[2] + distance * math.tan(pitch)]
+    half_yaw = yaw / 2
+    orientation = [-math.sin(pitch / 2) * math.sin(half_yaw),
+                   math.sin(pitch / 2) * math.cos(half_yaw),
+                   math.cos(pitch / 2) * math.sin(half_yaw),
+                   math.cos(pitch / 2) * math.cos(half_yaw)]
+    normal = [-math.sin(sign_yaw), math.cos(sign_yaw), 0.]
+    if normal[0] * math.cos(yaw) + normal[1] * math.sin(yaw) > 0:
+        normal = [-value for value in normal]
+    return {"scenario": number, "position": position, "look_at": target,
+            "orientation_xyzw": orientation, "sign_normal": normal, "subjects": subjects,
+            "angle_reference": "Part slippage"}
+
+
+def _set_failure_camera(number: int, scene: dict, directory: Path) -> None:
+    """Apply a fixed close view without changing any failure or motion settings."""
+    if number in {4, 5}:
+        _set_assembly_camera(directory)
+        return
+    profile = _failure_camera_profile(number, scene)
+    x, y, z = profile["position"]
+    qx, qy, qz, qw = profile["orientation_xyzw"]
+    message = (f"position {{ x: {x} y: {y} z: {z} }} "
+               f"orientation {{ x: {qx} y: {qy} z: {qz} w: {qw} }}")
+    result = subprocess.run(["gz", "topic", "-p", "/gazebo/default/user_camera/joy_pose", "-m", message],
+                            capture_output=True, text=True, check=True, timeout=10)
+    _write_json(directory / "camera.json", {**profile, "requested_gui_message": message,
+                                          "stdout": result.stdout, "stderr": result.stderr})
+
+
 def _set_assembly_camera(directory: Path) -> None:
-    message = ('position { x: 1.8 y: -0.6 z: 3.8 } '
-               'orientation { x: -0.4624753906 y: 0.0750494243 z: 0.8720425231 w: 0.1415130202 }')
+    pitch = math.atan2(1.65, math.hypot(1.4, 2.8))
+    half_yaw = math.atan2(2.8, 1.4) / 2
+    qx = -math.sin(pitch / 2) * math.sin(half_yaw)
+    qy = math.sin(pitch / 2) * math.cos(half_yaw)
+    qz = math.cos(pitch / 2) * math.sin(half_yaw)
+    qw = math.cos(pitch / 2) * math.cos(half_yaw)
+    message = ('position { x: -1.4 y: -2.7 z: 3.1 } '
+               f'orientation {{ x: {qx} y: {qy} z: {qz} w: {qw} }}')
     result = subprocess.run(["gz", "topic", "-p", "/gazebo/default/user_camera/joy_pose", "-m", message],
                             capture_output=True, text=True, check=True, timeout=10)
     _write_json(directory / "camera.json", {"requested_gui_message": message,
@@ -581,11 +1002,33 @@ def _install_safety(directory: Path, *, mutex: bool) -> Path:
     return path
 
 
+async def _check_slippage_capture_ready(bridge) -> None:
+    for product in bridge.product_agents:
+        runtime = getattr(product, "environment_runtime", None)
+        if runtime is None:
+            continue
+        initial = getattr(runtime, "slippage_initialization_evidence", {}) or {}
+        if (initial.get("run_id") != runtime.context.run_id
+                or initial.get("status") != "completed" or runtime.stopped):
+            raise ValueError("Slippage capture requires physically confirmed buffer starting state")
+        return
+    raise ValueError("Slippage capture has no owning environment runtime")
+
+
+async def _release_slippage_capture(bridge) -> None:
+    await _check_slippage_capture_ready(bridge)
+    for product in bridge.product_agents:
+        runtime = getattr(product, "environment_runtime", None)
+        if runtime is not None:
+            runtime.slippage_recording_ready.set()
+
+
 async def record_one(number: int, directory: Path, output: Path, timeout: float) -> dict:
     """Own one fresh simulation and publish it only after observed acceptance."""
     from cais_spade_llm.recovery_framework.delivery import prepare_start, reset_stop
     from cais_spade_llm.recovery_framework.environment_runtime import (
-        prepare_environment_start, record_environment_startup_ready,
+        prepare_environment_start,
+        record_environment_startup_ready,
     )
     from cais_spade_llm.ui.bridge import SystemBridge
 
@@ -634,8 +1077,10 @@ async def record_one(number: int, directory: Path, output: Path, timeout: float)
             runtime = getattr(product, "environment_runtime", None)
             if runtime is None:
                 continue
-            runtime.composition_budget = {"max_states": 200_000, "seconds": 300.0 if number == 5 else 10.0}
-            if number == 5:
+            # The conveyor checkpoint also needs CCA approval for the M1 pickup.
+            # Allow that composition to finish before treating a time limit as a hold.
+            runtime.composition_budget = {"max_states": 200_000, "seconds": 300.0 if number in {1, 4, 5} else 10.0}
+            if number in {1, 4, 5}:
                 runtime.composition_timeout_s = 900.0
             with runtime.context.admission_lock:
                 for rid, observation in observations.items():
@@ -656,6 +1101,8 @@ async def record_one(number: int, directory: Path, output: Path, timeout: float)
                     for resource in resources if resource.agent_name in observations
                 },
             })
+            if number == 4:
+                runtime.slippage_recording_ready = asyncio.Event()
             if number == 5:
                 runtime._recording_entry_release = asyncio.Event()
                 runtime._recording_mutex_release = asyncio.Event()
@@ -718,17 +1165,22 @@ async def record_one(number: int, directory: Path, output: Path, timeout: float)
         await asyncio.to_thread(prepare_environment_start, setup, prewarm_controllers=True,
                                 launch_identity=bridge._simulation_launch_key(),
                                 requested_at_unix=time.time())
-        if number in {4, 5}:
-            await asyncio.to_thread(_set_assembly_camera, directory)
-            await asyncio.sleep(1)
+        await asyncio.to_thread(_set_failure_camera, number, validate_setup(setup)["scene"], directory)
+        await asyncio.sleep(1)
         await _wait_for_rendering(directory)
-        attempt = RecordingAttempt(directory)
-        await asyncio.to_thread(attempt.start)
+        if number != 4:
+            attempt = RecordingAttempt(directory)
+            await asyncio.to_thread(attempt.start)
         logger.info("Recording %s", TITLES[number - 1])
         await bridge.start_system()
         if not bridge.system_running:
             raise RuntimeError(bridge.last_error or "Start System failed")
         record_environment_startup_ready(bridge)
+        if number == 4:
+            await bridge._run_on_agent_runtime(_check_slippage_capture_ready(bridge))
+            attempt = RecordingAttempt(directory)
+            await asyncio.to_thread(attempt.start)
+            await bridge._run_on_agent_runtime(_release_slippage_capture(bridge))
         deadline = time.monotonic() + timeout
         samples, negotiations, validation, observed_failure, observed_completion = [], [], None, None, None
         marker_retries = []
@@ -770,6 +1222,10 @@ async def record_one(number: int, directory: Path, output: Path, timeout: float)
                         observed_failure = time.monotonic()
                         logger.info("Observed %s; capturing 60-second aftermath", TITLES[number - 1])
                     if time.monotonic() - observed_failure >= 60:
+                        if number == 4:
+                            validation["pickup_check"] = await asyncio.to_thread(
+                                _slippage_pickup_check, bridge, setup["failure_scenario"],
+                                validation["failure"]["evidence"], directory)
                         break
                 elif number == 5:
                     if observed_completion is None:
@@ -799,10 +1255,25 @@ async def record_one(number: int, directory: Path, output: Path, timeout: float)
         metadata = json.loads((attempt.directory / "capture.json").read_text())
         frames = [json.loads(line) for line in (attempt.directory / "frames.jsonl").read_text().splitlines()]
         if number < 5:
+            failure_time = _caption_elapsed(validation["failure"]["evidence"]["triggered_at_unix"],
+                                            frames, metadata["fps"])
             captions = [{"text": "Failure observed | " + TITLES[number - 1],
-                         "start": _caption_elapsed(validation["failure"]["evidence"]["triggered_at_unix"],
-                                                   frames, metadata["fps"]),
-                         "end": metadata["wall_duration_sec"]}]
+                         "start": failure_time, "end": metadata["wall_duration_sec"]}]
+            if number == 4:
+                placement_start = next(
+                    row["timestamp"] for row in negotiations
+                    if row.get("kind") == "execution_started"
+                    and row.get("resource_id") == setup["failure_scenario"]["resource_id"]
+                    and row.get("event_name") == "place_approach")
+                placement_time = _caption_elapsed(placement_start, frames, metadata["fps"])
+                captions = [
+                    {"text": "Concurrent pickups: ur5e-3 square peg from buffer | ur5e-4 gear_small",
+                     "start": 0, "end": placement_time},
+                    {"text": "ur5e-4 carries gear to assembly board and lowers | ur5e-3 holds square peg",
+                     "start": placement_time, "end": failure_time},
+                    {"text": "Gear slips during lowering into ur5e-3 region | square peg remains held",
+                     "start": failure_time, "end": metadata["wall_duration_sec"]},
+                ]
         else:
             captions = [
                 {"text": validation["waiting_robot"] + " waits | " + validation["first_robot"] + " occupies assembly_board-v1",
@@ -886,6 +1357,13 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=2400)
     args = parser.parse_args()
     os.chdir(ROOT)
+    args.output, args.evidence = args.output.resolve(), args.evidence.resolve()
+    package_directory = str(ROOT / "cais_spade_llm")
+    if package_directory not in sys.path:
+        sys.path.insert(0, package_directory)
+    from cais_spade_llm.utils.xmpp_runtime import install_xmpp_runtime_patches
+
+    install_xmpp_runtime_patches()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logger.setLevel(logging.INFO)
     result = asyncio.run(record_videos(args.scenario or list(range(1, 6)), args.output, args.evidence, args.timeout))

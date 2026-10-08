@@ -1,6 +1,6 @@
-"""Persistent ROS worker owned by one recovery resource."""
-
 from __future__ import annotations
+
+"""Persistent ROS worker owned by one recovery resource."""
 
 import asyncio
 import json
@@ -56,6 +56,9 @@ class GazeboWorker:
     async def run(self, request: dict) -> dict:
         """Execute an explicit probe or task and read its acknowledged evidence."""
         check_stopped()
+        guard = getattr(self, "physical_request_guard", None)
+        if callable(guard):
+            guard(request)
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError(f'{self.label} already has an active operation')
         try:

@@ -60,14 +60,15 @@ class ConveyorFault:
 
     def __init__(self, runtime, setup: dict) -> None:
         """Create a fresh once-per-run latch for an explicitly configured checkpoint."""
-        from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS
+        from cais_spade_llm.recovery_framework.failure_checkpoints import SUPPORTED_CHECKPOINTS
 
         self.runtime = runtime
         self.configuration = deepcopy(setup.get("failure_scenario"))
         self.enabled = self.configuration is not None
         if self.enabled and (
             setup.get("execution_mode") != "simulation"
-            or CHECKPOINTS.get(self.configuration.get("scenario")) != self.configuration.get("checkpoint")
+            or self.configuration.get("checkpoint") not in SUPPORTED_CHECKPOINTS.get(
+                self.configuration.get("scenario"), ())
         ):
             raise ValueError("Only configured observed failure checkpoints are integrated in simulation")
         self.status = "armed" if self.enabled else "disabled"
@@ -76,6 +77,9 @@ class ConveyorFault:
         self.visual: dict = {}
         self._machine_evidence: dict | None = None
         self._machine_task: dict | None = None
+        self._robot_task: dict | None = None
+        self._robot_evidence: dict | None = None
+        self._robot_pickups: dict | None = None
         self._control_directory = None
         self._lock = asyncio.Lock()
         self._injection_task: asyncio.Task | None = None
@@ -108,10 +112,16 @@ class ConveyorFault:
             return None
         if self.configuration["scenario"] == "Machining breakdown during part processing":
             return deepcopy(self._machine_evidence)
+        if (self.configuration["scenario"] == "Part slippage"
+                and self.configuration["checkpoint"] == "during_place_lowering"):
+            if self._robot_evidence is None:
+                return None
+            return {**deepcopy(self._robot_evidence), **deepcopy(self._robot_pickups),
+                    "placement_motion": deepcopy(self._robot_evidence)}
         return checkpoint(self.runtime.context, self.configuration)
 
     def holds_task(self, task: dict) -> bool:
-        """Retain each selected part after pickup until both robots hold their parts."""
+        """Gate selected placement while retaining the other acknowledged pickup."""
         from cais_spade_llm.recovery_framework.failure_checkpoints import holds_task
 
         return self.status == "armed" and holds_task(
@@ -186,9 +196,141 @@ class ConveyorFault:
         await self.trigger()
         return True
 
+    def _placement_progress(self) -> float:
+        progress = self.configuration.get("placement_progress", .5)
+        if (type(progress) not in (int, float) or not math.isfinite(progress)
+                or not .5 <= progress < 1.):
+            raise ValueError("Placement interruption progress must be at least halfway and before completion")
+        return float(progress)
+
+    def robot_request(self, task: dict) -> dict:
+        """Bind the selected lowering executor to observed custody in this run.
+
+        Args:
+            task: The pending, normally approved place_approach task.
+
+        Returns:
+            Controller fault binding, or an empty request when the gate is inactive.
+        """
+        from cais_spade_llm.recovery_framework.failure_checkpoints import placement_checkpoint
+
+        if (not self.enabled or self.status != "armed" or self.runtime.stopped
+                or self.configuration["scenario"] != "Part slippage"
+                or self.configuration["checkpoint"] != "during_place_lowering"):
+            return {}
+        context = self.runtime.context
+        with context.admission_lock:
+            if (not task.get("task_id") or context.pending_for(task["task_id"]) != task
+                    or placement_checkpoint(context, self.configuration, task) is None):
+                return {}
+            progress = self._placement_progress()
+            self._robot_task = deepcopy(task)
+            return {"run_id": context.run_id, "task_id": task["task_id"],
+                    "resource_id": task["resource_id"], "part_name": self.configuration["part_name"],
+                    "checkpoint": self.configuration["checkpoint"], "placement_progress": progress}
+
+    def _robot_capture_matches(self, task: dict, evidence: dict) -> bool:
+        return (isinstance(evidence, dict)
+                and task.get("run_id") == self.runtime.context.run_id
+                and task.get("resource_id") == self.configuration["resource_id"]
+                and task.get("event_name") == "place_approach"
+                and task.get("parameters", {}).get("part_name") == self.configuration["part_name"]
+                and all(evidence.get(key) == task.get(key) for key in ("run_id", "task_id", "resource_id"))
+                and evidence.get("part_name") == self.configuration["part_name"]
+                and evidence.get("checkpoint") == self.configuration["checkpoint"]
+                and evidence.get("source") == "gazebo_placement_motion"
+                and evidence.get("function_name") == "place_approach"
+                and evidence.get("step_id") == "descend")
+
+    def _validate_robot_observation(self, evidence: dict) -> None:
+        poses = [evidence.get(name) for name in ("started_pose", "target_pose", "observed_pose")]
+        if any(not isinstance(pose, dict) or any(
+            type(pose.get(axis)) not in (int, float) or not math.isfinite(pose[axis])
+            for axis in ("x", "y", "z")
+        ) for pose in poses):
+            raise ValueError("Invalid placement interruption poses")
+        started, target, observed = poses
+        descent = started["z"] - target["z"]
+        progress, stamp = evidence.get("progress"), evidence.get("observed_at_unix")
+        if (descent <= 0 or type(progress) not in (int, float) or not math.isfinite(progress)
+                or not self._placement_progress() <= progress < 1.
+                or type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp <= 0
+                or not isinstance(evidence.get("controller_goal_id"), list)
+                or len(evidence["controller_goal_id"]) != 16
+                or any(type(value) is not int or not 0 <= value <= 255
+                       for value in evidence["controller_goal_id"])
+                or any(evidence.get(key) is not True for key in
+                       ("goal_active", "goal_cancelled", "motion_stopped"))):
+            raise ValueError("Invalid or unconfirmed placement interruption")
+        actual_progress = (started["z"] - observed["z"]) / descent
+        if (not self._placement_progress() <= actual_progress < 1.
+                or not math.isclose(progress, actual_progress, rel_tol=0., abs_tol=1e-6)):
+            raise ValueError("Placement interruption lacks observed downward progress")
+
+    async def accept_robot_failure(self, task: dict, result: dict) -> bool:
+        """Latch a confirmed lowering interruption before normal completion validation.
+
+        Args:
+            task: Pending placement task, or the same task retained after Stop.
+            result: Owning executor result containing captured failure_injection.
+
+        Returns:
+            Whether this result was consumed as a physical failure interruption.
+        """
+        from cais_spade_llm.recovery_framework.failure_checkpoints import placement_checkpoint
+
+        evidence = result.get("failure_injection")
+        if (not evidence or not self.enabled or self.configuration["scenario"] != "Part slippage"
+                or self.configuration["checkpoint"] != "during_place_lowering"):
+            return False
+        context = self.runtime.context
+        with context.admission_lock:
+            if not self._robot_capture_matches(task, evidence):
+                raise ValueError("Stale or unrelated placement fault evidence")
+            self._validate_robot_observation(evidence)
+            if self.status == "triggered":
+                if self._robot_task == task and self._robot_evidence == evidence:
+                    return True
+                raise ValueError("Stale or unrelated placement fault evidence")
+            pending = context.pending_for(task.get("task_id"))
+            retained = (self._robot_task == task
+                        and task in self.runtime.outcome.get("cancelled_tasks", []))
+            pickups = placement_checkpoint(context, self.configuration, task)
+            if self.status == "reset" or (pending != task and not retained) or pickups is None:
+                raise ValueError("Stale placement task or unacknowledged pickup custody")
+            self._robot_task = deepcopy(task)
+            self._robot_pickups = pickups
+            self._robot_evidence = deepcopy(evidence)
+        # Cancellation and disarm after capture cannot undo the physical interruption.
+        await self.trigger()
+        return True
+
     async def retain_worker_interruption(self) -> None:
-        """Retain a clock-bound fault even when Stop cancelled the worker reply."""
-        if self._control_directory is None or self._machine_task is None or self.status == "triggered":
+        """Retain confirmed worker or controller evidence after Stop cancels its reply."""
+        if self.status in {"triggered", "reset"}:
+            return
+        if self._robot_task is not None:
+            agent = next((agent for agent in self.runtime.resource_agents
+                          if agent.agent_name == self.configuration["resource_id"]), None)
+            evidence = deepcopy(getattr(getattr(agent, "_controller", None),
+                                        "_simulation_fault_evidence", None))
+            if evidence and self._robot_capture_matches(self._robot_task, evidence):
+                try:
+                    await self.accept_robot_failure(self._robot_task, {"failure_injection": evidence})
+                except ValueError as exc:
+                    self.evidence = {
+                        **evidence, "placement_motion": deepcopy(evidence),
+                        "injection_status": "interrupted", "error": str(exc),
+                        "physical_state_reconciliation_required": True,
+                        "pending_tasks": deepcopy(self.runtime.outcome.get("cancelled_tasks", [])
+                                                  or [self._robot_task]),
+                        "continuations": deepcopy(getattr(self.runtime, "retained_paths", {})),
+                        "requirements": deepcopy(self.runtime.context.requirements),
+                    }
+                    self.runtime.outcome["failure_evidence"] = deepcopy(self.evidence)
+                    self.runtime.queue_save()
+            return
+        if self._control_directory is None or self._machine_task is None:
             return
         path = Path(self._control_directory.name) / "interruption.json"
         if path.is_file():
@@ -210,8 +352,8 @@ class ConveyorFault:
             if self.status == "triggered":
                 return self.snapshot()
             if (not self.enabled
-                    or (self.runtime.stopped and self._machine_evidence is None)
-                    or (self.status != "armed" and self._machine_evidence is None)):
+                    or (self.runtime.stopped and self._machine_evidence is None and self._robot_evidence is None)
+                    or (self.status != "armed" and self._machine_evidence is None and self._robot_evidence is None)):
                 raise ValueError("Failure injection is not armed in an active simulation")
             evidence = self.checkpoint()
             if evidence is None:
@@ -247,6 +389,7 @@ class ConveyorFault:
                 runtime.outcome.update(
                     status="blocked", reason=scenario, failed_resource=rid,
                     failure_evidence=deepcopy(self.evidence),
+                    cancelled_tasks=deepcopy(self.evidence["pending_tasks"]),
                 )
             self._injection_task = asyncio.create_task(self._finish_injection())
         # Operator cancellation must not discard evidence while a detach is in flight.
@@ -304,7 +447,7 @@ class ConveyorFault:
 
     def not_reached(self) -> None:
         """Record an armed checkpoint that nominal execution could not establish."""
-        if self.status == "armed":
+        if self.status == "armed" and not self.evidence.get("physical_state_reconciliation_required"):
             self.evidence = {"injection_status": "not_reached",
                              "reason": self.runtime.outcome.get("reason", "Checkpoint not reached")}
             self.runtime.outcome["failure_evidence"] = deepcopy(self.evidence)
@@ -346,6 +489,9 @@ def reset_fault_scene(bridge, runtime) -> tuple[bool, str]:
     runtime.conveyor_fault.status = "reset"
     runtime.conveyor_fault.revision += 1
     runtime.conveyor_fault.visual = cleared
+    runtime.conveyor_fault._robot_task = None
+    runtime.conveyor_fault._robot_evidence = None
+    runtime.conveyor_fault._robot_pickups = None
     if runtime.conveyor_fault._control_directory is not None:
         runtime.conveyor_fault._control_directory.cleanup()
         runtime.conveyor_fault._control_directory = None
