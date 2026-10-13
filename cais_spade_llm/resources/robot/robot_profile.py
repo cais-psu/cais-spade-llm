@@ -399,7 +399,7 @@ def _robot_primitive_owner(agent: Any) -> Any | None:
     return None
 
 
-def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
+def _robot_snapshot_builder(agent: Any, *, recorded_pose: dict[str, Any] | None = None) -> dict[str, Any]:
     current_pose = None
     current_pose_captured_at = None
     controller = getattr(agent, "_controller", None)
@@ -418,8 +418,12 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
         except (AttributeError, RuntimeError, TypeError, ValueError):
             controller_ready = False
     pose_feedback_ready = False
+    if recorded_pose is not None:
+        current_pose = deepcopy(recorded_pose) if all(key in recorded_pose for key in ("x", "y", "z")) else None
+        pose_feedback_ready = current_pose is not None
     if (
-        controller is not None
+        recorded_pose is None
+        and controller is not None
         and str(getattr(agent, "execution_mode", "")).strip().lower() != "dry_run"
     ):
         get_current_pose = getattr(controller, "get_current_pose", None)
@@ -442,7 +446,8 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
                     current_pose_captured_at = time.time()
                     pose_feedback_ready = True
     if (
-        current_pose is None
+        recorded_pose is None
+        and current_pose is None
         and getattr(agent, "_recovery_pose_ref", None) is None
         and getattr(agent, "context_only", False) is not True
     ):
@@ -479,9 +484,15 @@ def _robot_snapshot_builder(agent: Any) -> dict[str, Any]:
         for name, executable in dict(executables or {}).items()
         if str(name or "").strip() and callable(executable)
     )
+    environment_context = getattr(agent, "environment_context", None)
+    current_location = (
+        environment_context.valuation.get("resource_location")
+        if environment_context is not None else getattr(agent, "_current_location", None)
+    )
     return {
         "resource_type": "robot",
         "current_state": str(getattr(agent, "_current_state", "") or "").strip() or "idle",
+        "current_location": deepcopy(current_location),
         "held_part": getattr(agent, "_held_part", None),
         "gripper_state": str(getattr(agent, "_gripper_state", "") or "").strip() or "unknown",
         "current_pose": current_pose,

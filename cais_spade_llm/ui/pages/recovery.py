@@ -403,8 +403,15 @@ def _all_files(example: dict) -> None:
 
 
 def render(*, root: Path = ROOT, debug_root: Path = DEBUG_ROOT, is_active=lambda: True, bridge=None) -> None:
-    """Browse exact stage evidence and explicitly launch saved-context tests."""
+    """Show the failure, saved observations, generation, and execution workflow."""
     ui.label("recovery").classes("text-2xl font-semibold")
+    if bridge is not None:
+        from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+        render_part_slippage(bridge, is_active=is_active)
+
+
+def _saved_evidence(*, root: Path, debug_root: Path, is_active, bridge) -> None:
     if bridge is not None:
         from cais_spade_llm.ui.components.recovery_safety_preparation import render_safety_preparation
 

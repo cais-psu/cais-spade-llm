@@ -1,6 +1,6 @@
-"""Validated Gazebo program and primitive catalog stored in the scene manifest."""
-
 from __future__ import annotations
+
+"""Validated Gazebo program and primitive catalog stored in the scene manifest."""
 
 import hashlib
 import inspect
@@ -88,6 +88,12 @@ _WORKFLOW_EVENTS = {
 
 def _expected_functions(resource_id: str, scene: dict) -> dict[str, dict[str, Any]]:
     """Return immutable safety structure supplied by the bound executors."""
+    machine = next((row for row in scene["machines"] if row["resource_id"] == resource_id), {})
+    if machine.get("simulation_process", {}).get("job_control", {}).get("version") == 1:
+        from cais_spade_llm.resources.machine.machine_jobs import machine_job_functions, machine_programs
+
+        machine_programs(machine)
+        return machine_job_functions()
     if resource_id.startswith("ur5e-"):
         assembly_robots = {
             scene["Buffer For Machined parts"]["handling_robot"],
@@ -242,12 +248,17 @@ def validate_resource_programs(scene: dict) -> None:
         functions, primitives = bundle["functions"], bundle["primitives"]
         if not isinstance(functions, dict) or set(functions) != set(expected):
             raise ValueError(f"Invalid function list for {resource_id}")
-        if not isinstance(primitives, dict) or set(primitives) != _executor_names(resource_id):
+        executors = _executor_names(resource_id)
+        if "start_job" in expected:
+            from cais_spade_llm.resources.machine.machine_jobs import MACHINE_PRIMITIVES
+
+            executors = set(MACHINE_PRIMITIVES)
+        if not isinstance(primitives, dict) or set(primitives) != executors:
             raise ValueError(f"Incomplete primitive catalog for {resource_id}")
         for name, primitive in primitives.items():
             if not isinstance(primitive, dict) or primitive.get("status") not in {"executable", "planned"}:
                 raise ValueError(f"Invalid primitive catalog row {resource_id}.{name}")
-            if primitive["status"] == "executable" and name not in _executor_names(resource_id):
+            if primitive["status"] == "executable" and name not in executors:
                 raise ValueError(f"No Gazebo executor for {resource_id}.{name}")
             if type(primitive.get("recovery_selectable")) is not bool:
                 raise ValueError(f"Invalid recovery availability for {resource_id}.{name}")

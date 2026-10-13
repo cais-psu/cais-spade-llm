@@ -1,0 +1,82 @@
+# Read-only planning against this complete private scene. No live scene is consulted.
+moveit_msgs/PlanningScene planning_scene
+moveit_msgs/RobotState start_state
+string group_name
+string link_name
+string frame_id
+# Exactly one mode: cartesian, joint_target, base_trajectory, or scene_endpoint.
+string mode
+geometry_msgs/Pose[] waypoints
+sensor_msgs/JointState joint_target
+# Owner-calculated cubic base motion. Arm and peer joints remain unchanged.
+# Joint identities must be exactly the movable ancestors of base_link.
+trajectory_msgs/JointTrajectory base_trajectory
+string base_link
+float64 max_translation_step
+float64 max_rotation_step
+float64 max_joint_step
+float64 velocity_scaling
+float64 acceleration_scaling
+float64 timeout_seconds
+string resource_id
+string capture_fingerprint
+string proposal_fingerprint
+# SHA256 of ordered scene field values (excluding CDR padding) and configured model.
+string scene_fingerprint
+string model_fingerprint
+# Captured world transforms of resource kinematic roots; never live TF lookups.
+geometry_msgs/TransformStamped[] recorded_root_transforms
+# Optional exact observed support-contact departure; not an ACM exemption.
+string support_departure_json
+string support_departure_fingerprint
+# Optional captured owner policy for one aligned insertion stage; transit remains strict.
+string mating_contact_json
+string mating_contact_fingerprint
+# Optional bounded calculation of Cartesian intermediate targets; no trajectory approval.
+string route_search_json
+# Optional non-moving check of changed deposited geometry against the complete scene.
+string scene_endpoint_json
+string scene_endpoint_fingerprint
+---
+string status
+string reason
+moveit_msgs/RobotTrajectory trajectory
+moveit_msgs/RobotState end_state
+float64 fraction
+float64 elapsed_seconds
+uint32 checked_states
+bool path_complete
+# Collision sampling is not continuous geometry or CCA approval.
+bool continuous_collision_verified
+# A checked proposed motion encountered collision; not exhaustive event infeasibility.
+bool sampled_collision_rejected
+# Exact failed sample/contact inventory; never an exhaustive infeasibility proof.
+string collision_rejection_evidence_json
+string resource_id
+string capture_fingerprint
+string proposal_fingerprint
+string scene_fingerprint
+string model_fingerprint
+# Source model plus exact recorded-root transforms used by the private model.
+string derived_model_fingerprint
+# Numerical FK verification only; not controller tracking or contact tolerances.
+float64 cartesian_position_precision
+float64 cartesian_orientation_precision
+float64 cartesian_position_residual
+float64 cartesian_orientation_residual
+# Complete sampled contacts only; continuous proof remains a separate check.
+string support_departure_fingerprint
+string support_departure_evidence_json
+# Exact sampled owner mating policy checks; no continuous collision approval.
+string mating_contact_fingerprint
+string mating_contact_evidence_json
+# Diagnostic IK queries and partial states; never a usable motion trajectory.
+string cartesian_diagnostics_json
+# Candidate-only route calculation, followed by a separate ordinary strict preview.
+string route_candidate_json
+# Endpoint-only geometry inventory; never motion or execution evidence.
+string scene_endpoint_fingerprint
+string scene_endpoint_evidence_json
+---
+string phase
+uint32 checked_states

@@ -183,8 +183,20 @@ def _task_action_target(task: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(action_target) if isinstance(action_target, dict) else {}
     start_state = dict(task.get("expected_start_state") or {})
     end_state = dict(task.get("expected_end_state") or {})
-    source_ref = str(task.get("source_ref") or _state_location_token(start_state) or "").strip()
-    target_ref = str(task.get("target_ref") or _state_location_token(end_state) or "").strip()
+    part_scoped = bool(_task_part_name(task)) or any(
+        state.get("held_part")
+        or any(
+            field in state
+            for field in (
+                "part_name", "part_state", "part_location",
+                "part_holder_resource_jid", "current_holder_resource_jid",
+            )
+        )
+        for state in (start_state, end_state)
+    )
+    location_token = _state_part_location_token if part_scoped else _state_resource_location_token
+    source_ref = str(task.get("source_ref") or location_token(start_state) or "").strip()
+    target_ref = str(task.get("target_ref") or location_token(end_state) or "").strip()
     if source_ref and "source_location" not in normalized and "source_ref" not in normalized:
         normalized["source_ref"] = source_ref
         normalized["source_location"] = source_ref
@@ -209,6 +221,8 @@ def _state_location_token(state: dict[str, Any]) -> str:
 
 
 def _state_part_location_token(state: dict[str, Any]) -> str:
+    if "part_location" in state:
+        return str(state["part_location"] or "").strip()
     return str(
         _first_non_empty(
             state,
@@ -221,6 +235,8 @@ def _state_part_location_token(state: dict[str, Any]) -> str:
 
 
 def _state_resource_location_token(state: dict[str, Any]) -> str:
+    if "resource_location" in state:
+        return str(state["resource_location"] or "").strip()
     return str(
         _first_non_empty(
             state,
@@ -279,9 +295,12 @@ def _state_effect_part_state_token(state: dict[str, Any]) -> str:
 
 
 def _part_row_location_token(part_row: dict[str, Any]) -> str:
-    token = str(
-        _first_non_empty(part_row, "current_location", "location", "current_pose_ref") or ""
-    ).strip()
+    if "part_location" in part_row:
+        token = str(part_row["part_location"] or "").strip()
+    else:
+        token = str(
+            _first_non_empty(part_row, "current_location", "location", "current_pose_ref") or ""
+        ).strip()
     if token:
         return token
     if _part_row_pose_value(part_row) is not None:
@@ -290,6 +309,8 @@ def _part_row_location_token(part_row: dict[str, Any]) -> str:
 
 
 def _part_row_pose_value(part_row: dict[str, Any]) -> dict[str, Any] | None:
+    if part_row.get("observed_pose_current") is False:
+        return None
     pose = part_row.get("observed_pose") or part_row.get("pose") or part_row.get("position")
     if not isinstance(pose, dict) or "x" not in pose:
         return None
@@ -297,6 +318,8 @@ def _part_row_pose_value(part_row: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _part_row_holder_token(part_row: dict[str, Any]) -> str:
+    if "part_holder_resource_jid" in part_row:
+        return str(part_row["part_holder_resource_jid"] or "").strip()
     return str(
         _first_non_empty(part_row, "current_holder_resource_jid", "holder_resource_jid") or ""
     ).strip()
@@ -763,8 +786,8 @@ def _infer_source_ref(
     holder = _part_row_holder_token(part_row)
     current_location = _part_row_location_token(part_row)
     observed_pose = _part_row_pose_value(part_row)
-    fallback_location = _state_location_token(fallback_start_state)
-    fallback_pose = _state_pose_value(fallback_start_state)
+    fallback_location = _state_part_location_token(fallback_start_state)
+    fallback_pose = _part_row_pose_value(fallback_start_state)
 
     if requested_source_location == "observed_pose":
         if observed_pose is None and fallback_pose is not None:
@@ -816,7 +839,7 @@ def _infer_source_ref(
         elif fallback_pose is not None:
             payload["pose"] = deepcopy(fallback_pose)
         return payload
-    if current_location:
+    if current_location and current_location != "observed_pose":
         payload = {
             "kind": "location",
             "location": current_location,
@@ -873,7 +896,7 @@ def _build_preconditions_and_effects(
             ("held_part", end_state.get("held_part")),
             (
                 "location",
-                _state_location_token(end_state) or _state_pose_ref_token(end_state) or None,
+                _state_resource_location_token(end_state) or _state_pose_ref_token(end_state) or None,
             ),
         )
         if value not in (None, "", [], {})
@@ -906,10 +929,10 @@ def _build_preconditions_and_effects(
     part_state = _state_effect_part_state_token(end_state)
     if part_state:
         expected_part_effect["state"] = part_state
-    part_location = _state_location_token(end_state) or requested_target_location
+    part_location = _state_part_location_token(end_state) or requested_target_location
     if part_location:
         expected_part_effect["location"] = part_location
-    part_pose = _state_pose_value(end_state)
+    part_pose = _part_row_pose_value(end_state)
     if part_pose is not None:
         expected_part_effect["pose"] = deepcopy(part_pose)
 
@@ -922,12 +945,32 @@ def _build_preconditions_and_effects(
     part_affecting = any(
         key in expected_part_effect for key in ("state", "location", "pose", "holder")
     )
+    acquires_custody = (
+        expected_part_effect.get("holder") == resource_jid
+        or _state_part_holder_token(end_state) == resource_jid
+    )
+    relocates_part = bool(
+        (part_location and part_location != _part_row_location_token(part_row))
+        or (part_pose is not None and part_pose != _part_row_pose_value(part_row))
+    )
+    custody_declared = "held_part" in resource_row
+    explicit_acquisition = dict(
+        dict(task.get("preconditions") or {}).get("part") or {}
+    ).get("requires_acquisition") is True
     requires_acquisition = bool(
         part_affecting
         and part_name
         and task_kind != "continuation_resume"
         and not resource_holds_part
         and current_part_holder != resource_jid
+        and (
+            acquires_custody
+            or explicit_acquisition
+            or (
+                relocates_part
+                and (custody_declared or resource_row.get("supports_manipulator_pick_place") is True)
+            )
+        )
     )
     source_ref = (
         _infer_source_ref(
@@ -1021,10 +1064,14 @@ def _grounded_action(
             )
         if token:
             target[key] = token
-    pose_ref = _state_pose_ref_token(end_state) or _state_pose_ref_token(start_state)
+    pose_ref = _state_pose_ref_token(end_state)
+    if not pose_ref and task_kind == "resource_only":
+        pose_ref = _state_pose_ref_token(start_state)
     if pose_ref and "named_pose" not in target:
         target["named_pose"] = pose_ref
-    explicit_pose = _state_pose_value(end_state) or _state_pose_value(start_state)
+    explicit_pose = _state_pose_value(end_state)
+    if explicit_pose is None and task_kind == "resource_only":
+        explicit_pose = _state_pose_value(start_state)
     if explicit_pose is not None:
         target["pose"] = deepcopy(explicit_pose)
     (
@@ -1668,7 +1715,7 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    prepared_recovery_request = deepcopy(prepared_recovery_request)
+    """Return independent projected facts without copying diagnostic evidence."""
     llm_input = dict(prepared_recovery_request.get("llm_input") or {})
     observed_runtime_state = dict(llm_input.get("observed_runtime_state") or {})
 
@@ -1706,6 +1753,7 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
             "reachable_locations",
             "known_locations",
             "staging_areas",
+            "supports_manipulator_pick_place",
         ):
             if resource_row.get(key) not in (None, "", [], {}):
                 continue
@@ -1751,7 +1799,7 @@ def projected_outline_validation_context(  # noqa: C901, PLR0912
         pose = dict(entry.get("pose") or {})
         if not pose and entry.get("x") is not None:
             pose = {"x": entry.get("x"), "y": entry.get("y"), "z": entry.get("z")}
-        if pose:
+        if pose and part_row.get("observed_pose_current") is not False:
             part_row["observed_pose"] = deepcopy(pose)
         if (
             is_new_part
@@ -1778,7 +1826,6 @@ def validate_recovery_outline_task(
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Run only ProductAgent-owned syntax, binding, and routing validation."""
     del planner
-    prepared_recovery_request = deepcopy(prepared_recovery_request)
     resources_by_jid, parts_by_name = projected_outline_validation_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
@@ -1818,23 +1865,15 @@ def _part_context_for_resource_feasibility(
         "",
     ):
         part_context["part_state"] = deepcopy(part_context.get("current_state"))
-    if part_context.get("current_location") in (None, "") and part_context.get(
-        "part_location"
-    ) not in (None, ""):
+    if "current_location" not in part_context and "part_location" in part_context:
         part_context["current_location"] = deepcopy(part_context.get("part_location"))
-    if part_context.get("part_location") in (None, "") and part_context.get(
-        "current_location"
-    ) not in (None, ""):
+    if "part_location" not in part_context and "current_location" in part_context:
         part_context["part_location"] = deepcopy(part_context.get("current_location"))
-    if part_context.get("current_holder_resource_jid") in (None, "") and part_context.get(
-        "part_holder_resource_jid"
-    ) not in (None, ""):
+    if "current_holder_resource_jid" not in part_context and "part_holder_resource_jid" in part_context:
         part_context["current_holder_resource_jid"] = deepcopy(
             part_context.get("part_holder_resource_jid")
         )
-    if part_context.get("part_holder_resource_jid") in (None, "") and part_context.get(
-        "current_holder_resource_jid"
-    ) not in (None, ""):
+    if "part_holder_resource_jid" not in part_context and "current_holder_resource_jid" in part_context:
         part_context["part_holder_resource_jid"] = deepcopy(
             part_context.get("current_holder_resource_jid")
         )

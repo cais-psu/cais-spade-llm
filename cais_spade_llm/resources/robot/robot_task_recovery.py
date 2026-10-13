@@ -181,6 +181,9 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
                     if step.executor == "primitive"
                 ],
                 "composition_contract": {
+                    "params": {argument.name: {"type": argument.type, "required": argument.required,
+                        **({"default": deepcopy(argument.default)} if not argument.required else {})}
+                        for argument in task.arguments},
                     "entry_guards": [asdict(guard) for guard in program.entry_guards],
                     "required_context_keys": list(program.required_context_keys),
                     "effects": [asdict(effect) for effect in program.effects],

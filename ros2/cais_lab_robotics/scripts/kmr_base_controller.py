@@ -311,6 +311,23 @@ def cache_occupancy_map(message: Any) -> Any:
                            data=data, blocked_columns=blocked_columns)
 
 
+def recorded_occupancy_map(message: Any) -> dict | None:
+    """Record the observed map bounds and cell digest without changing its cells."""
+    if message is None:
+        return None
+    info, origin = message.info, message.info.origin
+    return {
+        "frame_id": message.header.frame_id,
+        "stamp": {"sec": message.header.stamp.sec, "nanosec": message.header.stamp.nanosec},
+        "map_load_time": {"sec": info.map_load_time.sec, "nanosec": info.map_load_time.nanosec},
+        "resolution": info.resolution, "width": info.width, "height": info.height,
+        "origin": [origin.position.x, origin.position.y, origin.position.z,
+                   origin.orientation.x, origin.orientation.y, origin.orientation.z, origin.orientation.w],
+        "cells_sha256": hashlib.sha256(json.dumps(list(message.data), separators=(",", ":")).encode()).hexdigest(),
+        "cell_count": len(message.data),
+    }
+
+
 def planar_pose(pose: Any) -> tuple[float, float, float]:
     """Read a finite planar ROS pose, rejecting invalid orientations."""
 
@@ -636,6 +653,7 @@ def main() -> None:
             self._last_output = (0.0, 0.0, 0.0)
             self._last_velocity_stamp: float | None = None
             self._last_hold_reason: str | None = None
+            self._recovery_source_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
             self._clearance_wait_started: float | None = None
             self._arm_positions: dict[str, float] = {}
             self._arm_state_monotonic: float | None = None
@@ -798,18 +816,37 @@ def main() -> None:
                                 callback_group=callback_group)
 
         def _recovery_state(self, request: Any, response: Any) -> Any:
-            """Read owned base activity without commanding or cancelling motion."""
+            """Read owned activity and its velocity gate without commanding motion."""
             with self._lock:
                 response.success = True
                 response.message = json.dumps({
                     "version": 1, "instance_id": self.get_parameter("launch_id").value,
                     "simulation_time": self.get_clock().now().nanoseconds / 1e9,
                     "navigation_enabled": self.get_parameter("navigation_enabled").value,
-                    "has_active_goal": bool(self._active_goal or self._follow_path_active
-                                            or self._nav_goal_handle is not None),
+                    "controller_node": self.get_fully_qualified_name(),
+                    "controller_source_sha256": self._recovery_source_sha256,
+                    "last_output": list(self._last_output),
+                    "inactive_goal_output": [0.0, 0.0, 0.0],
+                    "occupancy_map": recorded_occupancy_map(self._occupancy_map),
+                    "has_active_goal": bool(self._active_goal or self._follow_path_active or self._nav_goal_handle is not None),
                     "has_pending_goal": bool(self._arm_parking_in_progress),
                     "holding": bool(self._initial_arm_parked and not self._active_goal
                                     and not self._follow_path_active and self._nav_goal_handle is None),
+                    "owned_activity": {
+                        "has_active_goal": bool(self._active_goal or self._nav_goal_handle is not None),
+                        "has_pending_goal": bool(self._arm_parking_in_progress),
+                        "holding": bool(self._initial_arm_parked and not self._active_goal
+                                        and self._nav_goal_handle is None),
+                    },
+                    "nav2_follow_path_active": bool(self._follow_path_active),
+                    "command_gate": {
+                        "version": 1, "closed": not self._active_goal,
+                        "input_topic": "/KMR/nav_cmd_vel", "output_topic": "/KMR/cmd_vel",
+                        "owned_status_topics": ["/KMR/dock/_action/status", "/KMR/move_base/_action/status",
+                            "/KMR/validated_navigate_to_pose/_action/status", "/navigate_to_pose/_action/status",
+                            "/KMR/validated_follow_path/_action/status"],
+                        "gated_status_topics": ["/KMR/navigate_to_pose/_action/status", "/KMR/follow_path/_action/status"],
+                    },
                 }, allow_nan=False)
             return response
 

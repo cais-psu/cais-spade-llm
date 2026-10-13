@@ -41,3 +41,9 @@ mutex/precedence trials: `NEEDS_CONTEXT` is not a safety-specification violation
 No requested MP4 is published until its trial outcome and the existing exporter's
 complete decoding, silent stream and 20× duration checks pass. Keep logs/AP evidence
 outside the run-specific `videos-20x/` folder and preserve historical recordings.
+
+The combined current source has moved to
+[`../predefined_safety/specifications.txt`](../predefined_safety/specifications.txt),
+outside the selectable Safety inputs. These archived companions retain their
+original source hashes and still reject current-schema replay until reviewed;
+relocating their source does not certify the archived evidence.

@@ -891,13 +891,13 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
         line
         for line in outline_message_text.splitlines()
         if 'recovery-resource-4@localhost' in line
-        and ("reachability=" in line or "grounded_target_refs=" in line)
+        and line.startswith('"recovery-resource-4@localhost" | ')
     ]
     xarm6_capability_lines = [
         line
         for line in outline_message_text.splitlines()
         if 'recovery-resource-3@localhost' in line
-        and ("reachability=" in line or "grounded_target_refs=" in line)
+        and line.startswith('"recovery-resource-3@localhost" | ')
     ]
     assert ur5e_capability_lines
     assert all('3D Printing Station' in line for line in ur5e_capability_lines)
@@ -905,9 +905,8 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert xarm6_capability_lines
     assert all('Buffer For Machined parts' in line for line in xarm6_capability_lines)
     assert all('3D Printing Station' not in line for line in xarm6_capability_lines)
-    assert 'reachability=["Buffer For Machined parts", "assembly_board-v1", "Exit"]' in (
-        outline_message_text
-    )
+    assert "reachability" in outline_message_text.split("Resource Capabilities", maxsplit=1)[1].splitlines()[1]
+    assert '["Buffer For Machined parts", "assembly_board-v1", "Exit"]' in xarm6_capability_lines[0]
     assert "Location order is lexical and does not express a preference." not in (
         outline_message_text
     )
@@ -1145,7 +1144,7 @@ def test_case3_actual_outline_uses_runtime_failure_context(tmp_path: Path) -> No
     assert "resource_validation_unavailable" in rejected_message
     assert 'recovery-resource-4@localhost/KET4_Square_4mm' in rejected_message
     assert "NEEDS_CONTEXT" in rejected_message
-    assert "Accepted Transition Prefix (already applied; do not repeat)" in post_release_message
+    assert "Accepted Transition Prefix (projected; not executed)" in post_release_message
     assert '"event_name": "stage_held_part"' in post_release_message
     assert "The only immediate blocker to recovering LG" not in post_release_message
     assert '"held_part_location": "recovery-resource-4@localhost"' not in post_release_message
@@ -1449,9 +1448,12 @@ def test_case3_recovery_context_has_no_nominal_terminal_or_stale_resource_locati
     )
     assert 'restore KET4_Square_4mm to assembly_board-v1' in outline_prompt
     assert '"origin_location"' not in outline_prompt
-    assert 'reachability=["Buffer For Machined parts", "assembly_board-v1", "Exit"]' in (
-        outline_prompt
-    )
+    capability_lines = outline_prompt.split("Resource Capabilities", maxsplit=1)[1].split(
+        "Resource States", maxsplit=1
+    )[0].strip().splitlines()
+    assert "reachability" in capability_lines[0].split(" | ")
+    resource_line = next(line for line in capability_lines if line.startswith('"recovery-resource-3@localhost" | '))
+    assert '["Buffer For Machined parts", "assembly_board-v1", "Exit"]' in resource_line
     assert "Location order is lexical and does not express a preference." not in (
         outline_prompt
     )
@@ -3074,6 +3076,7 @@ def test_llm_resource_only_candidate_omits_held_part_and_part_fields_require_par
         "resource_location",
         "resource_state",
     }
+    assert "part_name" not in validated
     resource_only_with_null = deepcopy(resource_only)
     resource_only_with_null["part_name"] = None
     validated, findings = multi_turn_mode._derive_candidate_outline_task(
@@ -3083,7 +3086,7 @@ def test_llm_resource_only_candidate_omits_held_part_and_part_fields_require_par
     )
     assert findings == []
     assert validated is not None
-    assert "part_name" not in validated
+    assert "part_name" in validated and validated["part_name"] is None
     _decision, resource_turn_entry = asyncio.run(
         multi_turn_outline_generation._handle_outline_incremental_candidates_validated(
             session_state=deepcopy(session_state),
@@ -3386,6 +3389,28 @@ def test_ra_feedback_preserves_exact_constraint_details() -> None:
     assert '"proposed_part_location": null' in prompt
     assert "resource and part custody facts disagree" not in prompt
     assert "no_progressing_candidate" not in prompt
+
+
+def test_candidate_audit_preserves_empty_and_unknown_enabledness() -> None:
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
+        _compact_artifact_candidate_evaluations,
+    )
+
+    enabledness = {
+        "symbolically_enabled_event_ids": ["recorded_event"],
+        "ra_admissible_event_ids": [],
+        "cca_admissible_event_ids": None,
+        "event_evaluations": [],
+        "ra_snapshot_fingerprints": {},
+    }
+    result = _compact_artifact_candidate_evaluations([
+        {"recovery_enabledness_validation_after": enabledness},
+    ])[0]["recovery_enabledness_validation_after"]
+
+    assert result == enabledness
+    assert "admissible_event_ids" not in result
+    result["symbolically_enabled_event_ids"].append("later_event")
+    assert enabledness["symbolically_enabled_event_ids"] == ["recorded_event"]
 
 
 def test_concise_result_hides_internal_custody_codes() -> None:
@@ -4373,3 +4398,373 @@ def test_local_independence_checks_persistent_AP_valuations() -> None:
     plant.checker = monitor
     assert monitor.transition_evidence("SPEC", "0", frozenset())["to"] == "0"
     assert not plant._unmatched_stutters("SPEC", rule, Budget())
+
+
+@pytest.mark.parametrize("phase", ["outline", "primitive_generation"])
+def test_artifact_writer_preserves_input_and_exact_artifacts(tmp_path, monkeypatch, phase):
+    """Writing through shared references must match detached input byte for byte."""
+    class RecordedTime:
+        @staticmethod
+        def now(tz):
+            return datetime(2026, 10, 10, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(recovery_artifacts, "datetime", RecordedTime)
+    response = {"thought": "Recorded response", "context_requests": ["/resources"]}
+    turn = {"turn_index": 4, "phase": phase, "decision": "need_context",
+            "prompt_text": "Exact request\nwith line breaks",
+            "llm_request": {"messages": [{"role": "user", "content": "Exact request\nwith line breaks"}],
+                            "model": "recorded-model"},
+            "llm_raw_response": response, "raw_response": response}
+    if phase == "primitive_generation":
+        turn["primitive_substream_turns"] = [{"outline_id": "RecordedEvent", "resource_jid": "owner@localhost",
+            "primitive_local_turn_index": 1, "decision": "need_context", "raw_response": response,
+            "llm_raw_response": response, "prompt_text": "Exact primitive request"}]
+    session = {"session_id": "recorded-session", "turn_index": 4, "turns": [turn]}
+    prepared = {"recovery_debug": {"multi_turn_session": session}, "multi_turn_session_state": session}
+    payload = {**prepared, "reasoning_mode": "multi_turn", "prepared_recovery_request": prepared,
+               "multi_turn_current_turn": turn, "multi_turn_session_result": session,
+               "multi_turn_llm_raw_response": response, "write_resume_checkpoints": True}
+    before = deepcopy(payload)
+    write_recovery_artifacts(deepcopy(payload), phase_label="multi_turn", debug_dir=tmp_path)
+    expected = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    write_recovery_artifacts(payload, phase_label="multi_turn", debug_dir=tmp_path)
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == expected
+    assert payload == before
+    assert "decision" not in response
+
+
+def test_per_turn_artifacts_do_not_copy_unread_physical_scene(tmp_path):
+    """A retrieval artifact does not duplicate unrelated saved physical evidence."""
+    class UnreadScene(dict):
+        def __deepcopy__(self, memo):
+            raise AssertionError("The artifact writer copied an unrelated physical scene")
+
+    turn = {"turn_index": 4, "phase": "outline", "decision": "need_context",
+            "prompt_text": "Exact request", "llm_raw_response": {"decision": "need_context"},
+            "raw_response": {"decision": "need_context"}}
+    session = {"session_id": "recorded-session", "turn_index": 4, "turns": [turn],
+               "projected_physical_evidence": UnreadScene({"resource_models": {"owner": {"source": "recorded"}}})}
+    prepared = {"recovery_debug": {"per_turn_debug_dir": str(tmp_path), "multi_turn_session": session},
+                "physical_evidence": session["projected_physical_evidence"], "multi_turn_session_state": session}
+    multi_turn_mode._write_per_turn_artifact(prepared, session, turn)
+    assert Path(turn["request_artifact_path"]).is_file()
+    assert Path(turn["outline_audit_artifact_path"]).is_file()
+    assert session["projected_physical_evidence"]["resource_models"]["owner"] == {"source": "recorded"}
+
+
+def test_per_turn_current_view_matches_published_artifacts_and_resume_checkpoint(tmp_path, monkeypatch):
+    class RecordedTime:
+        @staticmethod
+        def now(tz):
+            return datetime(2026, 10, 10, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(recovery_artifacts, "datetime", RecordedTime)
+    turn = {"turn_index": 4, "phase": "outline", "decision": "need_context",
+        "prompt_text": "Exact retrieval request", "raw_response": {"decision": "need_context"},
+        "llm_raw_response": {"decision": "need_context"},
+        "served_context": {"/recorded": {"value": None, "source": "declaration"}}}
+    session = {"session_id": "recorded-session", "turn_index": 4, "status": "running",
+        "validation_contract_version": 2, "turns": [deepcopy(turn)],
+        "accepted_outline_prefix": [{"outline_id": "recorded-event", "part_name": None}],
+        "projected_physical_evidence": {"snapshot": {"part": [1, 2, 3]}}}
+    prepared = {"recovery_debug": {"per_turn_debug_dir": str(tmp_path), "write_resume_checkpoints": True,
+        "status": "running", "multi_turn_session": deepcopy(session)},
+        "multi_turn_session_state": deepcopy(session)}
+    multi_turn_mode._write_per_turn_artifact(prepared, deepcopy(session), deepcopy(turn))
+    expected = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert any("resume_checkpoint" in str(path) for path in expected)
+    assert any("audit" in str(path) for path in expected)
+    assert any("request" in str(path) for path in expected)
+    prepared["multi_turn_session_state"] = {"turn_index": 3, "status": "running"}
+    prepared["recovery_debug"]["multi_turn_session"] = {"turn_index": 3, "status": "running"}
+    before = deepcopy(prepared)
+    actual_turn = deepcopy(turn)
+    actual_session = deepcopy(session)
+    multi_turn_mode._write_per_turn_artifact(prepared, actual_session, actual_turn)
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == expected
+    assert prepared == before
+    assert actual_session["turns"][0]["request_artifact_path"] == actual_turn["request_artifact_path"]
+    assert all(isinstance(value, str) for key, value in actual_turn.items() if key.endswith("artifact_path"))
+    actual_session["projected_physical_evidence"]["snapshot"]["part"].append("later mutation")
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == expected
+    assert prepared == before
+
+
+def test_diagnostic_record_streams_exact_bytes_and_keeps_destination_on_failure(tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import diagnostics
+
+    value = {"part_name": "KET4_Square_4mm", "unicode": "관측", "pose": [0.0, -0.0, 1.2],
+             "held_part": None, "evidence": {"passed": False, "rows": [{"recorded": True}]}}
+    expected = json.dumps(value, indent=2, ensure_ascii=False).encode("utf-8")
+    destination = tmp_path / "record.json"
+    monkeypatch.setattr(diagnostics.json, "dumps", lambda *args, **kwargs: pytest.fail("Whole-record serialization"))
+    diagnostics.write_record(destination, value)
+    assert destination.read_bytes() == expected
+    assert not destination.with_suffix(".json.tmp").exists()
+    with pytest.raises(TypeError):
+        diagnostics.write_record(destination, {"partial": [1, 2], "unsupported": object()})
+    assert destination.read_bytes() == expected
+    diagnostics.write_record(destination, value)
+    assert destination.read_bytes() == expected
+    assert not destination.with_suffix(".json.tmp").exists()
+
+
+@pytest.mark.parametrize("phase", ["grounding", "outline"])
+def test_validated_prompt_omits_internal_session_copies_without_changing_sent_text(monkeypatch, phase):
+    jid = "ur5e-3@localhost"
+    snapshot = {"resource_jid": jid, "resource_state": "picked", "held_part": "KET4_Square_4mm"}
+    part = {"part_name": "KET4_Square_4mm", "current_state": "in_gripper", "current_location": jid}
+    model = {"state_variables": {"resource_state": {"scope": "resource", "domain": ["picked", "placed"]}}}
+    prepared = {"llm_input": {"fault_event": {"resource_jid": jid, "part_name": part["part_name"]},
+        "observed_runtime_state": {"resources": [snapshot]}, "part_facts": [part], "goal_conditions": []},
+        "recovery_resources": {jid: {"recovery_snapshot": snapshot, "recovery_des_model": model,
+                                     "static_capabilities": {"resource_type": "robot"}}}}
+    session = {"current_phase": phase, "validation_contract_version": 2,
+        "outline_context_retrieval": True, "outline_mode": "incremental_validated",
+        "symbolic_resources": {jid: snapshot}, "symbolic_parts": {part["part_name"]: part},
+        "recovery_des_models": {jid: model}, "accepted_outline_prefix": [],
+        "outline_validation_findings": [{"constraint_code": "resource_validation_unavailable", "reason": "Recorded fact"}]}
+    excluded = {"turns", "projected_physical_evidence", "pending_outline_validation",
+        "nominal_continuation_evidence", "outline_monitor_context", "validation_resource_context",
+        "validation_resource_evidence_captures"}
+    for key in excluded:
+        session[key] = [{"prompt_input": {"session_state": {"recorded": key}}}] if key == "turns" else {"recorded": key}
+    original = deepcopy((prepared, session))
+    builder = multi_turn_prompts.build_multi_turn_phase_prompt_input
+    monkeypatch.setattr(multi_turn_prompts, "build_multi_turn_phase_prompt_input",
+        lambda **kwargs: builder(**{**kwargs, "session_state": session}))
+    _, expected = multi_turn_mode._build_phase_prompt(prepared, session)
+    monkeypatch.setattr(multi_turn_prompts, "build_multi_turn_phase_prompt_input", builder)
+    payload, actual = multi_turn_mode._build_phase_prompt(prepared, session)
+    assert actual == expected
+    assert not excluded.intersection(payload["session_state"])
+    assert (prepared, session) == original
+    assert payload["session_state"]["symbolic_resources"] == session["symbolic_resources"]
+    payload["session_state"]["symbolic_resources"][jid]["held_part"] = None
+    assert session["symbolic_resources"][jid]["held_part"] == "KET4_Square_4mm"
+
+    class InternalRecord(dict):
+        def __deepcopy__(self, memo):
+            raise AssertionError("Prompt copied an internal validation/session record")
+
+    for key in excluded:
+        session[key] = InternalRecord({"recorded": key})
+    _, repeated = multi_turn_mode._build_phase_prompt(prepared, session)
+    assert repeated == expected
+
+
+def _nominal_artifact_case(tmp_path):
+    proof = {"complete": False, "status": "NEEDS_CONTEXT", "reason": "Recorded missing fact",
+        "failures": [{"task": {"part_name": None}, "recovery_snapshot": {"held_part": None},
+                      "validation_stages": [{"evidence": {"missing": ["joint_positions"]}}]}]}
+    session = {"validation_contract_version": 2, "turn_index": 4, "accepted_outline_prefix": [],
+        "symbolic_resources": {"owner": {"held_part": None}}, "symbolic_parts": {},
+        "outline_monitor_context": {"SPEC": {"state": "1"}},
+        "projected_physical_evidence": {"snapshot": {"resources": {"owner": {"held_part": None}}}},
+        "pending_outline_validation": {"task": {"part_name": None},
+            "projected_physical_evidence": {"snapshot": {"resources": {"owner": {"held_part": "part"}}}}},
+        "nominal_continuation_evidence": deepcopy(proof)}
+    prepared = {"nominal_continuation_artifact_version": 1, "source_observation_fingerprint": "a" * 64,
+        "recovery_debug": {"per_turn_debug_dir": str(tmp_path)},
+        "llm_input": {"goal_conditions": [{"entity": "part", "field": "part_state", "expected": "ready"}]},
+        "saved_pending_nodes": [{"id": "pending", "status": "pending"}]}
+    turn = {"turn_index": 4, "phase": "outline", "request_sent": False,
+            "nominal_continuation_evidence": deepcopy(proof)}
+    return prepared, session, turn, proof
+
+
+def test_nominal_proof_archive_preserves_exact_proof_and_pending_state(tmp_path):
+    prepared, session, turn, proof = _nominal_artifact_case(tmp_path)
+    before = deepcopy((prepared, session, turn, proof))
+    binding = recovery_artifacts.nominal_continuation_context_binding(session, prepared)
+    path = recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    assert path == tmp_path / "recovery_outline/turns/turn_00004_validation_0001.json"
+    record = session["nominal_continuation_evidence"]
+    assert set(record) == {"complete", "status", "reason", "artifact_reference"}
+    assert recovery_artifacts.read_nominal_continuation(record, directory=tmp_path / "recovery_outline",
+        context_binding=binding) == proof
+    assert json.loads(path.read_text())["nominal_continuation_evidence"] == proof
+    assert prepared == before[0]
+    for key in set(session) - {"nominal_continuation_evidence"}:
+        assert session[key] == before[1][key]
+    assert turn["nominal_continuation_evidence"] == record
+    turn["nominal_continuation_evidence"]["reason"] = "later mutation"
+    assert record["reason"] == proof["reason"]
+    assert recovery_artifacts.nominal_continuation_context_binding(session, prepared) == binding
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_nominal_proof_archive_does_not_overwrite_prior_attempt(tmp_path):
+    prepared, session, turn, proof = _nominal_artifact_case(tmp_path)
+    first = recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    original = first.read_bytes()
+    session["nominal_continuation_evidence"] = deepcopy(proof)
+    turn["nominal_continuation_evidence"] = deepcopy(proof)
+    second = recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    assert second.name == "turn_00004_validation_0002.json"
+    assert first.read_bytes() == original == second.read_bytes()
+
+
+@pytest.mark.parametrize("failure", ["write", "link", "hash"])
+def test_nominal_archive_failure_retains_full_evidence(tmp_path, monkeypatch, failure):
+    from cais_spade_llm.recovery_framework import diagnostics
+
+    prepared, session, turn, _ = _nominal_artifact_case(tmp_path)
+    before = deepcopy((prepared, session, turn))
+
+    def fail(*args, **kwargs):
+        raise OSError("Recorded disk failure")
+
+    if failure == "write":
+        monkeypatch.setattr(diagnostics, "write_record", fail)
+    elif failure == "link":
+        monkeypatch.setattr(recovery_artifacts.os, "link", fail)
+    else:
+        monkeypatch.setattr(recovery_artifacts, "_nominal_artifact_sha256", fail)
+    assert recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context") is None
+    assert (prepared, session, turn) == before
+    assert not list((tmp_path / "recovery_outline/turns").glob("*.json"))
+
+
+@pytest.mark.parametrize("changed", ["source", "state", "model", "safety", "goal", "pending"])
+def test_nominal_archive_rejects_another_validation_context(tmp_path, changed):
+    prepared, session, turn, _ = _nominal_artifact_case(tmp_path)
+    recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    if changed == "source":
+        prepared["source_observation_fingerprint"] = "b" * 64
+    elif changed == "state":
+        session["symbolic_resources"]["owner"]["held_part"] = "part"
+    elif changed == "model":
+        prepared["recovery_resources"] = {"owner": {"recovery_des_model": {"events": [{"event_name": "declared"}]}}}
+    elif changed == "safety":
+        prepared["outline_safety_specifications"] = [{"id": "SPEC", "formula": "false"}]
+    elif changed == "goal":
+        prepared["llm_input"]["goal_conditions"][0]["expected"] = "assembled"
+    else:
+        prepared["saved_pending_nodes"][0]["status"] = "completed"
+    with pytest.raises(ValueError, match="binding"):
+        recovery_artifacts.read_nominal_continuation(session["nominal_continuation_evidence"],
+            directory=tmp_path / "recovery_outline",
+            context_binding=recovery_artifacts.nominal_continuation_context_binding(session, prepared))
+
+
+@pytest.mark.parametrize("changed", ["missing", "tampered", "summary", "null", "absolute", "parent", "symlink", "turn"])
+def test_nominal_archive_requires_exact_contained_record(tmp_path, changed):
+    prepared, session, turn, _ = _nominal_artifact_case(tmp_path)
+    path = recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    record = session["nominal_continuation_evidence"]
+    if changed == "missing":
+        path.unlink()
+    elif changed == "tampered":
+        path.write_bytes(path.read_bytes() + b" ")
+    elif changed == "summary":
+        record["complete"] = True
+    elif changed == "null":
+        record["execution_authorized"] = None
+    elif changed == "absolute":
+        record["artifact_reference"]["path"] = str(path)
+    elif changed == "parent":
+        record["artifact_reference"]["path"] = "turns/../../outside.json"
+    elif changed == "turn":
+        record["artifact_reference"]["turn_index"] += 1
+    else:
+        outside = tmp_path / "outside.json"
+        path.rename(outside)
+        path.symlink_to(outside)
+    with pytest.raises((ValueError, OSError)):
+        recovery_artifacts.read_nominal_continuation(record, directory=tmp_path / "recovery_outline")
+
+
+def test_nominal_archive_legacy_and_copied_generation_are_exact(tmp_path):
+    import shutil
+
+    prepared, session, turn, proof = _nominal_artifact_case(tmp_path / "original")
+    legacy = deepcopy(proof)
+    loaded = recovery_artifacts.read_nominal_continuation(legacy, directory=tmp_path / "absent")
+    assert loaded == legacy
+    loaded["failures"].clear()
+    assert legacy == proof
+    recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    shutil.copytree(tmp_path / "original/recovery_outline", tmp_path / "copy/recovery_outline")
+    assert recovery_artifacts.read_nominal_continuation(session["nominal_continuation_evidence"],
+        directory=tmp_path / "copy/recovery_outline",
+        context_binding=recovery_artifacts.nominal_continuation_context_binding(session, prepared)) == proof
+    prepared.pop("nominal_continuation_artifact_version")
+    session["nominal_continuation_evidence"] = deepcopy(proof)
+    turn["nominal_continuation_evidence"] = deepcopy(proof)
+    before = deepcopy((prepared, session, turn))
+    assert recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context") is None
+    assert (prepared, session, turn) == before
+
+
+def test_nominal_archive_binding_tracks_named_targets_but_not_unrelated_preview_cache(tmp_path):
+    prepared, session, _, _ = _nominal_artifact_case(tmp_path)
+    model = {"named_joint_poses": {"home": {"joint": 0.0}}}
+    session["projected_physical_evidence"]["resource_models"] = {"owner": model}
+    before = recovery_artifacts.nominal_continuation_context_binding(session, prepared)
+    model["event_projection_contracts"] = {"unrelated": {"private_preview": [1, 2, 3]}}
+    session["projected_physical_evidence"]["event_evidence"] = [{"later_calculation": True}]
+    assert recovery_artifacts.nominal_continuation_context_binding(session, prepared) == before
+    model["named_joint_poses"]["home"]["joint"] = 1.0
+    assert recovery_artifacts.nominal_continuation_context_binding(session, prepared) != before
+
+
+def test_nominal_archive_cleanup_error_does_not_mask_published_proof(tmp_path, monkeypatch):
+    prepared, session, turn, proof = _nominal_artifact_case(tmp_path)
+    original = Path.unlink
+
+    def fail_temporary(path, **kwargs):
+        if path.name.startswith(".nominal_"):
+            raise OSError("Recorded cleanup failure")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_temporary)
+    path = recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context")
+    assert path.is_file()
+    assert recovery_artifacts.read_nominal_continuation(session["nominal_continuation_evidence"],
+        directory=tmp_path / "recovery_outline") == proof
+
+
+@pytest.mark.parametrize("field", ["physical", "models", "model", "resources", "resource", "owners", "input"])
+def test_nominal_archive_malformed_context_retains_full_proof(tmp_path, field):
+    prepared, session, turn, _ = _nominal_artifact_case(tmp_path)
+    physical = session["projected_physical_evidence"]
+    if field == "physical":
+        session["projected_physical_evidence"] = None
+    elif field == "models":
+        physical["resource_models"] = None
+    elif field == "model":
+        physical["resource_models"] = {"owner": None}
+    elif field == "resources":
+        physical["resources"] = None
+    elif field == "resource":
+        physical["resources"] = {"owner": None}
+    elif field == "owners":
+        prepared["recovery_resources"] = {"owner": None}
+    else:
+        prepared["llm_input"] = None
+    before = deepcopy((prepared, session, turn))
+    assert recovery_artifacts.archive_nominal_continuation(prepared, session, turn, decision="need_context") is None
+    assert (prepared, session, turn) == before
+
+
+def test_validation_record_publication_preserves_gaps_and_rejects_target_race(tmp_path, monkeypatch):
+    directory = tmp_path / "recovery_outline"
+    turns = directory / "turns"
+    turns.mkdir(parents=True)
+    for index in (1, 3):
+        (turns / f"turn_00004_validation_{index:04d}.json").write_text(f'{{"prior":{index}}}')
+    before = {path.name: path.read_bytes() for path in turns.iterdir()}
+    path, _ = recovery_artifacts.write_recovery_validation_record(directory, {"turn_index": 4, "proof": None})
+    assert path.name == "turn_00004_validation_0004.json"
+    assert all((turns / name).read_bytes() == content for name, content in before.items())
+    original_link = recovery_artifacts.os.link
+
+    def occupied(source, destination):
+        Path(destination).write_text('{"other_attempt":true}')
+        return original_link(source, destination)
+
+    monkeypatch.setattr(recovery_artifacts.os, "link", occupied)
+    with pytest.raises(FileExistsError):
+        recovery_artifacts.write_recovery_validation_record(directory, {"turn_index": 4, "proof": "different"})
+    assert (turns / "turn_00004_validation_0005.json").read_text() == '{"other_attempt":true}'

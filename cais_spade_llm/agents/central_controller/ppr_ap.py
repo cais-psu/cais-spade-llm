@@ -126,7 +126,12 @@ def physical_ap_kind(ap: dict[str, Any] | str) -> str | None:
         ("ap_state", "processCompleted", frozenset({"result"})): "process_result_completed",
         ("ap_event", "receiving_region_entry", frozenset({"region"})): "receiving_region_entry",
         ("ap_state", "contains_other_part", frozenset()): "contains_other_part",
+        ("ap_state", "loading_reserved_by", frozenset({"receiving_resource"})): "loading_reserved_by",
+        ("ap_state", "capacity_exceeded", frozenset({"region", "capacity"})): "capacity_exceeded",
     }
+    for symbol in ("base_moving", "arm_moving", "arm_parked", "docked",
+                   "carried_part_clearance", "handoff_identity", "handoff_acknowledged", "robot_clear"):
+        registry[("ap_state", symbol, frozenset())] = symbol
     return registry.get(signature)
 
 
@@ -175,7 +180,8 @@ def physical_ap_binding(ap: dict[str, Any], binding: dict[str, Any]) -> dict[str
     kind = physical_ap_kind(definition)
     result = deepcopy(binding)
     result.update(ap_condition(definition)["arguments"])
-    if kind == "resource_region":
+    if kind in {"resource_region", "base_moving", "arm_moving", "arm_parked", "docked",
+                "carried_part_clearance", "handoff_identity", "handoff_acknowledged", "robot_clear", "loading_reserved_by"}:
         result["resource"] = definition["resource"]
     elif kind in {"part_region_entry", "process_target_completed", "process_result_completed",
                   "receiving_region_entry", "contains_other_part"}:

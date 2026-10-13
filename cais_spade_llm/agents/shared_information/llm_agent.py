@@ -439,11 +439,12 @@ class LlmAgent(Agent):
         request_summary = {
             "model": self.model,
             "messages": deepcopy(initial_messages),
-            "reasoning_effort": self.reasoning_effort,
             "response_format": deepcopy(structured_response_format),
             "response_source": "live",
             "request_sent": False,
         }
+        if self.model != "gpt-4o":
+            request_summary["reasoning_effort"] = self.reasoning_effort
         if tools:
             request_summary["tools"] = deepcopy(tools)
         self._last_structured_request = request_summary
@@ -456,9 +457,10 @@ class LlmAgent(Agent):
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": msgs,
-                    "reasoning_effort": self.reasoning_effort,
                     "response_format": deepcopy(structured_response_format),
                 }
+                if self.model != "gpt-4o":
+                    kwargs["reasoning_effort"] = self.reasoning_effort
                 if tools:
                     kwargs["tools"] = tools
 

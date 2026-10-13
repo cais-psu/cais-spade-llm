@@ -11,8 +11,8 @@
       "sha256": "31967785af2ad735dc679b468c4a30fce875425cb90429cf9cf4c02231cd4602"
     },
     "predefined_safety": {
-      "path": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
-      "sha256": "a8a79e73e18ca16a3ec28dac5a5b9a8900fe9570b7321423cdad2184aef975da"
+      "path": "test/fixtures/part_slippage/predefined_safety/specifications.txt",
+      "sha256": "5388bb83924b17825f293d2b4945219404ad9be706a0215659c2226f92d034ec"
     }
   },
   "modeling_assumptions": [
@@ -25,7 +25,7 @@
     "The mock candidates stand in for LLM outputs. No LLM was called, and executable LLM program quality is outside this demonstration."
   ],
   "fixture_sha256": {
-    "initial_context.json": "dc71ea732469c3a1dc9ce9e87b7ea9bf1e84f56d40f280c20d0dcc879d3f28cf",
+    "initial_context.json": "497486d9acac1ff06a778c49ecfe453b810f87507aab8641fb3ce33cf993c888",
     "mutex.json": "465300271566f5c78b0e996bf9ea01573ab4b1a6d74bbf4a81372d9dde4ea928",
     "precedence.json": "3d046ccf40d99e3a2b3de973877e46e82a383c15abbe2dd9443fc24898a0e31c",
     "safe.json": "7b62eb4157002c34ab7f1969d92980c8dadf0225b0a2b8291dfa3fe44425cc18"
@@ -37,13 +37,37 @@
       "aps": [
         {
           "label": "ap001",
-          "full": "ap_state/physical_observation/shared_area_first_resource",
-          "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+          "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$first_resource\",\"state\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"any\"}}",
+          "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+          "definition": {
+            "kind": "ap_state",
+            "process": "*",
+            "product": "*",
+            "resource": "$first_resource",
+            "state": {
+              "arguments": {
+                "region": "$region"
+              },
+              "symbol": "any"
+            }
+          }
         },
         {
           "label": "ap002",
-          "full": "ap_state/physical_observation/shared_area_second_resource",
-          "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
+          "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$second_resource\",\"state\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"any\"}}",
+          "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+          "definition": {
+            "kind": "ap_state",
+            "process": "*",
+            "product": "*",
+            "resource": "$second_resource",
+            "state": {
+              "arguments": {
+                "region": "$region"
+              },
+              "symbol": "any"
+            }
+          }
         }
       ],
       "ltlf": "G !(ap001 & ap002)",
@@ -61,13 +85,37 @@
       "aps": [
         {
           "label": "ap001",
-          "full": "ap_event/physical_observation/part_region_entry",
-          "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
+          "full": "{\"event\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"$part\",\"resource\":\"*\"}",
+          "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry.",
+          "definition": {
+            "event": {
+              "arguments": {
+                "region": "$region"
+              },
+              "symbol": "part_region_entry"
+            },
+            "kind": "ap_event",
+            "process": "*",
+            "product": "$part",
+            "resource": "*"
+          }
         },
         {
           "label": "ap002",
-          "full": "ap_state/processCompleted/process_target_completed",
-          "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
+          "full": "{\"kind\":\"ap_state\",\"process\":\"$process\",\"product\":\"$part\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"$target\"},\"symbol\":\"processCompleted\"}}",
+          "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record.",
+          "definition": {
+            "kind": "ap_state",
+            "process": "$process",
+            "product": "$part",
+            "resource": "*",
+            "state": {
+              "arguments": {
+                "target": "$target"
+              },
+              "symbol": "processCompleted"
+            }
+          }
         }
       ],
       "ltlf": "(!ap001 U (ap002 & !ap001)) | G !ap001",
@@ -98,9 +146,9 @@
       "evidence_origin": "synthetic",
       "status": "violated",
       "reason": "At most one resource may occupy the assembly_board-v1 destination area at any time.",
-      "trace_id": "57c27d99c41a1d46f91529285bdb4ad14611ddd70a39a966faf6fd6d42e755b4",
-      "clock_version": "grounded_primitive_observations_joint_trace_v1",
-      "input_fingerprint": "5de2ab0899bd9a9f21e413ae0bcf496d61980b30ae3101e00ec23c9df90bbdd2",
+      "trace_id": "39f190be6400d94e5893897528e44ab0bacc116a31888366ec96217d0dba86a9",
+      "clock_version": "grounded_ppr_primitive_observations_joint_trace_v2",
+      "input_fingerprint": "bbba8e0ca1c19e169bb0fc54b42f5d726524380cb936af510f0bac566f317791",
       "dispatch_authorized": false,
       "configured_resources": [
         "3D Printing Station",
@@ -203,7 +251,19 @@
                 "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
                 "descriptor": {
                   "label": "ap001",
-                  "full": "ap_state/physical_observation/shared_area_first_resource",
+                  "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-3\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}",
+                  "definition": {
+                    "kind": "ap_state",
+                    "process": "*",
+                    "product": "*",
+                    "resource": "ur5e-3",
+                    "state": {
+                      "arguments": {
+                        "region": "assembly_board-v1"
+                      },
+                      "symbol": "any"
+                    }
+                  },
                   "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
                 },
                 "binding": {
@@ -212,12 +272,13 @@
                   "resources": [
                     "ur5e-3",
                     "ur5e-4"
-                  ]
+                  ],
+                  "resource": "ur5e-3"
                 },
                 "evidence_source": {
                   "source_kind": "resource_model",
                   "observation_index": 32,
-                  "predicate": "ap_state/physical_observation/shared_area_first_resource"
+                  "predicate": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-3\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}"
                 },
                 "observation_index": 32,
                 "time": 5.287878787878788,
@@ -228,7 +289,19 @@
                 "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
                 "descriptor": {
                   "label": "ap002",
-                  "full": "ap_state/physical_observation/shared_area_second_resource",
+                  "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-4\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}",
+                  "definition": {
+                    "kind": "ap_state",
+                    "process": "*",
+                    "product": "*",
+                    "resource": "ur5e-4",
+                    "state": {
+                      "arguments": {
+                        "region": "assembly_board-v1"
+                      },
+                      "symbol": "any"
+                    }
+                  },
                   "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
                 },
                 "binding": {
@@ -237,12 +310,13 @@
                   "resources": [
                     "ur5e-3",
                     "ur5e-4"
-                  ]
+                  ],
+                  "resource": "ur5e-4"
                 },
                 "evidence_source": {
                   "source_kind": "resource_model",
                   "observation_index": 32,
-                  "predicate": "ap_state/physical_observation/shared_area_second_resource"
+                  "predicate": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-4\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}"
                 },
                 "observation_index": 32,
                 "time": 5.287878787878788,
@@ -374,7 +448,19 @@
             "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
             "descriptor": {
               "label": "ap001",
-              "full": "ap_state/physical_observation/shared_area_first_resource",
+              "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-3\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}",
+              "definition": {
+                "kind": "ap_state",
+                "process": "*",
+                "product": "*",
+                "resource": "ur5e-3",
+                "state": {
+                  "arguments": {
+                    "region": "assembly_board-v1"
+                  },
+                  "symbol": "any"
+                }
+              },
               "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
             },
             "binding": {
@@ -383,12 +469,13 @@
               "resources": [
                 "ur5e-3",
                 "ur5e-4"
-              ]
+              ],
+              "resource": "ur5e-3"
             },
             "evidence_source": {
               "source_kind": "resource_model",
               "observation_index": 32,
-              "predicate": "ap_state/physical_observation/shared_area_first_resource"
+              "predicate": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-3\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}"
             },
             "observation_index": 32,
             "time": 5.287878787878788,
@@ -399,7 +486,19 @@
             "rule_id": "SAFE_shared_area_mutex:abedaccbb1876bd1501cc308e937b6a5d1e5c32057ed9c962ad22515d054625b",
             "descriptor": {
               "label": "ap002",
-              "full": "ap_state/physical_observation/shared_area_second_resource",
+              "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-4\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}",
+              "definition": {
+                "kind": "ap_state",
+                "process": "*",
+                "product": "*",
+                "resource": "ur5e-4",
+                "state": {
+                  "arguments": {
+                    "region": "assembly_board-v1"
+                  },
+                  "symbol": "any"
+                }
+              },
               "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy."
             },
             "binding": {
@@ -408,12 +507,13 @@
               "resources": [
                 "ur5e-3",
                 "ur5e-4"
-              ]
+              ],
+              "resource": "ur5e-4"
             },
             "evidence_source": {
               "source_kind": "resource_model",
               "observation_index": 32,
-              "predicate": "ap_state/physical_observation/shared_area_second_resource"
+              "predicate": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"ur5e-4\",\"state\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"any\"}}"
             },
             "observation_index": 32,
             "time": 5.287878787878788,
@@ -1374,9 +1474,9 @@
       "evidence_origin": "synthetic",
       "status": "violated",
       "reason": "KET4_Square_4mm may enter assembly_board-v1 only after assembly of gear_small is completed.",
-      "trace_id": "22539e5fde99b90f239a7830c112799c088fa6dc36e87e9db1d7bf07a6c65f31",
-      "clock_version": "grounded_primitive_observations_joint_trace_v1",
-      "input_fingerprint": "ba81de0d959fc2e3c501b405280b1c4bcc7ff76ac9feea1aaa27b5f97869ec54",
+      "trace_id": "4fb15d163d68fda64b199a73abe10f658634dc2d12991bd8986925ab9efbe7ad",
+      "clock_version": "grounded_ppr_primitive_observations_joint_trace_v2",
+      "input_fingerprint": "b54926527888f8c019828ac77adb4ca22ba5f96acd2e654ca6d8878830f124d9",
       "dispatch_authorized": false,
       "configured_resources": [
         "3D Printing Station",
@@ -1478,7 +1578,19 @@
                 "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
                 "descriptor": {
                   "label": "ap001",
-                  "full": "ap_event/physical_observation/part_region_entry",
+                  "full": "{\"event\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"KET4_Square_4mm\",\"resource\":\"*\"}",
+                  "definition": {
+                    "event": {
+                      "arguments": {
+                        "region": "assembly_board-v1"
+                      },
+                      "symbol": "part_region_entry"
+                    },
+                    "kind": "ap_event",
+                    "process": "*",
+                    "product": "KET4_Square_4mm",
+                    "resource": "*"
+                  },
                   "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
                 },
                 "binding": {
@@ -1488,7 +1600,7 @@
                 "evidence_source": {
                   "source_kind": "resource_model",
                   "observation_index": 36,
-                  "predicate": "ap_event/physical_observation/part_region_entry"
+                  "predicate": "{\"event\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"KET4_Square_4mm\",\"resource\":\"*\"}"
                 },
                 "observation_index": 36,
                 "time": 6.287878787878788,
@@ -1499,7 +1611,19 @@
                 "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
                 "descriptor": {
                   "label": "ap002",
-                  "full": "ap_state/processCompleted/process_target_completed",
+                  "full": "{\"kind\":\"ap_state\",\"process\":\"assembly\",\"product\":\"gear_small\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"Gear_Plate/Gear_Shaft_1\"},\"symbol\":\"processCompleted\"}}",
+                  "definition": {
+                    "kind": "ap_state",
+                    "process": "assembly",
+                    "product": "gear_small",
+                    "resource": "*",
+                    "state": {
+                      "arguments": {
+                        "target": "Gear_Plate/Gear_Shaft_1"
+                      },
+                      "symbol": "processCompleted"
+                    }
+                  },
                   "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
                 },
                 "binding": {
@@ -1510,7 +1634,7 @@
                 "evidence_source": {
                   "source_kind": "resource_model",
                   "observation_index": 36,
-                  "predicate": "ap_state/processCompleted/process_target_completed",
+                  "predicate": "{\"kind\":\"ap_state\",\"process\":\"assembly\",\"product\":\"gear_small\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"Gear_Plate/Gear_Shaft_1\"},\"symbol\":\"processCompleted\"}}",
                   "checkpoint": {
                     "complete": true,
                     "source_kind": "synthetic",
@@ -1635,7 +1759,19 @@
             "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
             "descriptor": {
               "label": "ap001",
-              "full": "ap_event/physical_observation/part_region_entry",
+              "full": "{\"event\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"KET4_Square_4mm\",\"resource\":\"*\"}",
+              "definition": {
+                "event": {
+                  "arguments": {
+                    "region": "assembly_board-v1"
+                  },
+                  "symbol": "part_region_entry"
+                },
+                "kind": "ap_event",
+                "process": "*",
+                "product": "KET4_Square_4mm",
+                "resource": "*"
+              },
               "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry."
             },
             "binding": {
@@ -1645,7 +1781,7 @@
             "evidence_source": {
               "source_kind": "resource_model",
               "observation_index": 36,
-              "predicate": "ap_event/physical_observation/part_region_entry"
+              "predicate": "{\"event\":{\"arguments\":{\"region\":\"assembly_board-v1\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"KET4_Square_4mm\",\"resource\":\"*\"}"
             },
             "observation_index": 36,
             "time": 6.287878787878788,
@@ -1656,7 +1792,19 @@
             "rule_id": "SAFE_gear_small_before_KET4_Square_4mm:10ecafa2fd9ecb048cfb8d9d8b7bd77ac238fe5595e48599776dc8390e5bc766",
             "descriptor": {
               "label": "ap002",
-              "full": "ap_state/processCompleted/process_target_completed",
+              "full": "{\"kind\":\"ap_state\",\"process\":\"assembly\",\"product\":\"gear_small\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"Gear_Plate/Gear_Shaft_1\"},\"symbol\":\"processCompleted\"}}",
+              "definition": {
+                "kind": "ap_state",
+                "process": "assembly",
+                "product": "gear_small",
+                "resource": "*",
+                "state": {
+                  "arguments": {
+                    "target": "Gear_Plate/Gear_Shaft_1"
+                  },
+                  "symbol": "processCompleted"
+                }
+              },
               "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record."
             },
             "binding": {
@@ -1667,7 +1815,7 @@
             "evidence_source": {
               "source_kind": "resource_model",
               "observation_index": 36,
-              "predicate": "ap_state/processCompleted/process_target_completed",
+              "predicate": "{\"kind\":\"ap_state\",\"process\":\"assembly\",\"product\":\"gear_small\",\"resource\":\"*\",\"state\":{\"arguments\":{\"target\":\"Gear_Plate/Gear_Shaft_1\"},\"symbol\":\"processCompleted\"}}",
               "checkpoint": {
                 "complete": true,
                 "source_kind": "synthetic",
@@ -2777,9 +2925,9 @@
       "evidence_origin": "synthetic",
       "status": "satisfied",
       "reason": "",
-      "trace_id": "70cf3fb6db94aa0411f16acb6090f9c9f43304efc3e83f500f0369399325379f",
-      "clock_version": "grounded_primitive_observations_joint_trace_v1",
-      "input_fingerprint": "ca524e48a10c23483fed8a79a3e5ac09fa081e3c8487b14686cbab866c2e2a84",
+      "trace_id": "a1b110aa610d5cae5388bc22ee84294d306c4cd32414f4e8c6500b3556a441a2",
+      "clock_version": "grounded_ppr_primitive_observations_joint_trace_v2",
+      "input_fingerprint": "ff672982ace365c8ad5cc07f7026763cdf63d14f5c020f59f69dcf40cf196b88",
       "dispatch_authorized": false,
       "configured_resources": [
         "3D Printing Station",

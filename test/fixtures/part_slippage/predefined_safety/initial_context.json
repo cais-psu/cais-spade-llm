@@ -8,8 +8,8 @@
       "sha256": "31967785af2ad735dc679b468c4a30fce875425cb90429cf9cf4c02231cd4602"
     },
     "predefined_safety": {
-      "path": "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt",
-      "sha256": "a8a79e73e18ca16a3ec28dac5a5b9a8900fe9570b7321423cdad2184aef975da"
+      "path": "test/fixtures/part_slippage/predefined_safety/specifications.txt",
+      "sha256": "5388bb83924b17825f293d2b4945219404ad9be706a0215659c2226f92d034ec"
     }
   },
   "scene": {

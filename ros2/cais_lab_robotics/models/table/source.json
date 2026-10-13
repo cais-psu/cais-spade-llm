@@ -1,0 +1,5 @@
+{
+  "source": "https://github.com/osrf/gazebo_models/tree/master/table",
+  "source_model_sha256": "948d869b09b4e408682429f690dcd96365b5031aed665bc8cdc7e63242099026",
+  "change": "surface max_contacts=64; geometry, poses, friction, visuals and fixed symbols unchanged"
+}

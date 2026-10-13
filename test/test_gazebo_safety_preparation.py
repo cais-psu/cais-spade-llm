@@ -304,6 +304,56 @@ def test_future_stationary_coverage_needs_the_owner_contract_and_idle_evidence(c
         observer.stationary_coverage([[0,1]],checkpoint)
 
 
+@pytest.mark.parametrize('succeeds', [True, False])
+def test_read_only_observation_retries_lost_reply_without_changing_capture(succeeds):
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    reader = object.__new__(GazeboSafetyReader)
+    observation = SimpleNamespace(success=True, message='exact captured source', observed_monotonic=123.)
+    futures = [Mock() for _ in range(3)]
+    for index, future in enumerate(futures):
+        future.result.return_value = observation
+        future.add_done_callback.side_effect = (
+            (lambda callback: callback(None)) if succeeds and index == 2 else (lambda _: None)
+        )
+    client = Mock(srv_name='/GETRECOVERYSTATE')
+    client.wait_for_service.return_value = True
+    client.call_async.side_effect = futures
+    if succeeds:
+        assert reader._call(client, object(), timeout=.001) is observation
+        assert observation.observed_monotonic == 123.
+    else:
+        with pytest.raises(ValueError, match='after 3 attempts'):
+            reader._call(client, object(), timeout=.001)
+    assert client.call_async.call_count == 3
+    assert client.remove_pending_request.call_count == (2 if succeeds else 3)
+
+
+@pytest.mark.parametrize("paused", [True, False])
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_world_pause_requires_native_confirmation_and_no_job_command(monkeypatch, paused, confirmed):
+    import sys
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    empty = SimpleNamespace(Request=lambda: object())
+    monkeypatch.setitem(sys.modules, "std_srvs.srv", SimpleNamespace(Empty=empty))
+    reader = object.__new__(GazeboSafetyReader)
+    client = object()
+    reader._node = SimpleNamespace(create_client=Mock(return_value=client), destroy_client=Mock())
+    reader._call = Mock()
+    reader.snapshot = Mock(return_value={"world_paused": paused if confirmed else not paused,
+                                       "instance_id": "owned-world", "simulation_time": 102.})
+    if confirmed:
+        assert reader.set_world_paused(paused)["world_paused"] is paused
+    else:
+        with pytest.raises(ValueError, match="did not confirm"):
+            reader.set_world_paused(paused)
+    reader._node.create_client.assert_called_once_with(empty, "/pause_physics" if paused else "/unpause_physics")
+    reader._node.destroy_client.assert_called_once_with(client)
+    reader.snapshot.assert_called_once_with(refresh=True)
+    assert reader._call.call_count == 1
+
+
 def test_idle_observation_requires_a_record_from_the_current_publisher():
     from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
 
@@ -395,6 +445,134 @@ def test_controller_owner_query_requires_complete_fresh_idle_evidence(change):
     assert reader._node.destroy_client.call_count == reader._call.call_count
 
 
+def test_recovery_configuration_declares_every_native_controller_observation_owner():
+    path = Path(__file__).parents[1] / "cais_spade_llm/initialization/recovery_framework_gazebo.json"
+    config = json.loads(path.read_text())["safety_preparation"]
+    services = config["controller_state_services"]
+    covered = [topic for row in services.values() for topic in (
+        row["covers"] + row.get("command_gate", {}).get("status_topics", []))]
+    assert len(covered) == len(set(covered))
+    assert set(covered) == set(config["controller_status_topics"])
+    for owner in config["resources"].values():
+        if owner.get("controller_node"):
+            assert owner["controller_node"] + "/recovery_state" in services
+    kmr = services["/KMR/recovery_state"]
+    assert "required_values" not in kmr
+    assert kmr["command_gate"]["status_topics"] == [
+        "/KMR/navigate_to_pose/_action/status", "/KMR/follow_path/_action/status"]
+    assert not set(kmr["covers"]) & set(kmr["command_gate"]["status_topics"])
+
+
+def _command_gate_reader(monkeypatch, tmp_path):
+    import sys
+    import numpy as np
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    source = tmp_path / "lib/cais_lab_robotics/kmr_base_controller.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("recorded controller source")
+    monkeypatch.setitem(sys.modules, "ament_index_python.packages", SimpleNamespace(
+        get_package_prefix=lambda package: str(tmp_path)))
+    config = json.loads((Path(__file__).parents[1] /
+        "cais_spade_llm/initialization/recovery_framework_gazebo.json").read_text())["safety_preparation"]
+    declaration = config["controller_state_services"]["/KMR/recovery_state"]
+    reader = object.__new__(GazeboSafetyReader)
+    reader.configuration = {"controller_state_services": {"/KMR/recovery_state": declaration},
+        "controller_status_topics": declaration["covers"] + declaration["command_gate"]["status_topics"]}
+    reader._lock, reader._goal_status = threading.RLock(), {}
+    gate = declaration["command_gate"]
+    row = {"version": 1, "instance_id": "KMR-instance", "simulation_time": 12.,
+        "controller_node": "/KMR_base_controller", "controller_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "has_active_goal": True, "has_pending_goal": False, "holding": False,
+        "navigation_enabled": True, "nav2_follow_path_active": True,
+        "last_output": [0., 0., 0.], "owned_activity": {
+            "has_active_goal": False, "has_pending_goal": False, "holding": True},
+        "command_gate": {"version": 1, "closed": True, "input_topic": gate["input_topic"],
+            "output_topic": gate["output_topic"], "owned_status_topics": declaration["covers"],
+            "gated_status_topics": gate["status_topics"]}}
+    publisher = SimpleNamespace(endpoint_gid=[np.uint8(7)], node_namespace="/", node_name="KMR_base_controller")
+    reader._node = SimpleNamespace(create_client=Mock(return_value=object()), destroy_client=Mock(),
+        get_publishers_info_by_topic=Mock(return_value=[publisher]))
+    reader._type = SimpleNamespace(Request=lambda: object())
+    reader._call = lambda *_: SimpleNamespace(success=True, message=json.dumps(row))
+    reader.snapshot = lambda: {"simulation_time": 12.1}
+    return reader, row, publisher
+
+
+@pytest.mark.parametrize("observed", [False, True])
+def test_command_gate_keeps_external_nav2_activity_distinct(monkeypatch, tmp_path, observed):
+    reader, row, _ = _command_gate_reader(monkeypatch, tmp_path)
+    for topic in row["command_gate"]["gated_status_topics"]:
+        if observed:
+            reader._goal_status[topic] = {"publisher_gid": [7], "received_monotonic": 1.,
+                                          "goals": [{"id": [5], "status": 2}]}
+    result = reader.idle_goals()["/KMR/recovery_state"]
+    proof = result["command_gate_evidence"]
+    assert result["has_active_goal"] is True
+    assert result["holding"] is False
+    assert proof["owned_activity"]["has_active_goal"] is False
+    assert proof["all_nav2_goals_idle"] is None
+    assert {item["status"] for item in proof["nav2_goal_observations"].values()} == {
+        "observed" if observed else "unknown"}
+    if observed:
+        assert all(item["goals"][0]["status"] == 2 for item in proof["nav2_goal_observations"].values())
+    assert json.loads(json.dumps(result))["command_gate_evidence"]["output_publisher_gid"] == [7]
+    direct = reader.controller_state("/KMR")
+    assert direct["command_gate_evidence"] == proof
+    assert direct["source"] == "/KMR/recovery_state"
+
+
+@pytest.mark.parametrize("change", ["missing", "open", "active", "pending", "holding", "source", "node",
+    "input", "output", "coverage", "nonzero", "unrelated_publisher", "multiple_publishers", "missing_publisher"])
+def test_command_gate_rejects_incomplete_authority(monkeypatch, tmp_path, change):
+    reader, row, publisher = _command_gate_reader(monkeypatch, tmp_path)
+    if change == "missing":
+        row.pop("command_gate")
+    elif change == "open":
+        row["command_gate"]["closed"] = False
+    elif change in {"active", "pending"}:
+        row["owned_activity"]["has_" + change + "_goal"] = True
+    elif change == "holding":
+        row["owned_activity"]["holding"] = False
+    elif change == "source":
+        row["controller_source_sha256"] = "other"
+    elif change == "node":
+        row["controller_node"] = "/other"
+    elif change in {"input", "output"}:
+        row["command_gate"][change + "_topic"] = "/other"
+    elif change == "coverage":
+        row["command_gate"]["owned_status_topics"] = []
+    elif change == "nonzero":
+        row["last_output"] = [1., 0., 0.]
+    elif change == "unrelated_publisher":
+        publisher.node_name = "other"
+    elif change == "multiple_publishers":
+        reader._node.get_publishers_info_by_topic.return_value = [publisher, publisher]
+    elif change == "missing_publisher":
+        reader._node.get_publishers_info_by_topic.return_value = []
+    with pytest.raises(ValueError):
+        reader.idle_goals()
+    recorded = reader.controller_state("/KMR")
+    assert recorded['command_gate_evidence']['status'] == 'NEEDS_CONTEXT'
+    assert recorded['has_active_goal'] is row['has_active_goal']
+
+
+def test_command_gate_identity_retains_authority_changes_not_receipt_time(monkeypatch, tmp_path):
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import controller_goal_identity
+
+    reader, row, _ = _command_gate_reader(monkeypatch, tmp_path)
+    topic = row["command_gate"]["gated_status_topics"][0]
+    reader._goal_status[topic] = {"publisher_gid": [7], "received_monotonic": 1., "goals": []}
+    original = reader.idle_goals()
+    later = deepcopy(original)
+    observation = later['/KMR/recovery_state']['command_gate_evidence']['nav2_goal_observations'][topic]
+    observation['received_monotonic'] = 99.
+    assert controller_goal_identity(original) == controller_goal_identity(later)
+    assert original['/KMR/recovery_state']['command_gate_evidence']['nav2_goal_observations'][topic]['received_monotonic'] == 1.
+    later['/KMR/recovery_state']['command_gate_evidence']['output_publisher_gid'] = [8]
+    assert controller_goal_identity(original) != controller_goal_identity(later)
+
+
 def test_controller_goal_identity_retains_command_and_launch_changes():
     from cais_spade_llm.recovery_framework.gazebo_safety_preparation import controller_goal_identity
 
@@ -420,6 +598,71 @@ def test_controller_goal_identity_retains_command_and_launch_changes():
             original, model_execution=True)
 
 
+@pytest.mark.parametrize("active", [False, True])
+def test_controller_state_captures_actual_hold_targets_without_claiming_idle(active):
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    reader = object.__new__(GazeboSafetyReader)
+    reader.configuration = {}
+    observation = {"version": 1, "instance_id": "controller", "simulation_time": 12.,
+        "joint_names": ["joint"], "positions": [.001], "commanded_positions": [0.],
+        "commanded_positions_source": "native position command interfaces", "holding": not active,
+        "has_active_goal": active, "has_pending_goal": False, "observed_stationary": False}
+    reader._type = SimpleNamespace(Request=lambda: object())
+    reader._node = SimpleNamespace(create_client=Mock(return_value=object()), destroy_client=Mock())
+    reader._call = Mock(return_value=SimpleNamespace(success=True, message=json.dumps(observation)))
+    result = reader.controller_state("/controller")
+    assert {key: result[key] for key in observation} == observation
+    assert result["source"] == "/controller/recovery_state"
+    assert result["observed_stationary"] is False
+    reader._node.destroy_client.assert_called_once()
+
+
+@pytest.mark.parametrize('recorded', [False, True])
+def test_controller_capture_keeps_recorded_endpoint_separate_from_freshness(recorded):
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    reader = object.__new__(GazeboSafetyReader)
+    reader.configuration = {}
+    row = {'version': 1, 'instance_id': 'controller', 'simulation_time': 12.,
+           'recorded_observation': True, 'command_unchanged': True, 'observation_wall_age_sec': 30.,
+           'has_active_goal': True, 'has_pending_goal': False, 'holding': False}
+    reader._type = SimpleNamespace(Request=lambda: object())
+    reader._node = SimpleNamespace(create_client=Mock(return_value=object()), destroy_client=Mock())
+    reader._call = Mock(return_value=SimpleNamespace(success=True, message=json.dumps(row)))
+    result = reader.controller_state('/controller', recorded=recorded)
+    expected = '/controller/recovery_recorded_state' if recorded else '/controller/recovery_state'
+    assert reader._node.create_client.call_args.args[1] == expected
+    assert result['source'] == expected and result['simulation_time'] == 12.
+    assert result['has_active_goal'] is True and result['holding'] is False
+    row['command_unchanged'] = False
+    reader._call.return_value.message = json.dumps(row)
+    with pytest.raises(ValueError, match='Incomplete recorded controller state'):
+        reader.controller_state('/controller', recorded=True)
+
+
+def test_recorded_controller_activity_preserves_busy_status():
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboSafetyReader
+
+    reader = object.__new__(GazeboSafetyReader)
+    source = '/controller/recovery_state'
+    topic = '/controller/follow_joint_trajectory/_action/status'
+    reader.configuration = {'controller_state_services': {source: {'covers': [topic]}},
+                            'controller_status_topics': [topic]}
+    row = {'version': 1, 'instance_id': 'controller', 'simulation_time': 12.,
+           'recorded_observation': True, 'command_unchanged': True,
+           'has_active_goal': True, 'has_pending_goal': False, 'holding': False}
+    reader._type = SimpleNamespace(Request=lambda: object())
+    reader._node = SimpleNamespace(create_client=Mock(return_value=object()), destroy_client=Mock())
+    reader._call = Mock(return_value=SimpleNamespace(success=True, message=json.dumps(row)))
+    reader.snapshot = Mock(return_value={'simulation_time': 12.})
+    result = reader.controller_activity(recorded=True)
+    assert result[source]['has_active_goal'] is True and result[source]['holding'] is False
+    assert result[source]['source'] == '/controller/recovery_recorded_state'
+    with pytest.raises(ValueError, match='not holding'):
+        reader.idle_goals()
+
+
 def test_configured_fixed_equipment_coverage_needs_no_gripper():
     from cais_spade_llm.recovery_framework.gazebo_safety_preparation import (
         GazeboResourceObservation,
@@ -436,6 +679,464 @@ def test_configured_fixed_equipment_coverage_needs_no_gripper():
     physical['model_static'] = False
     with pytest.raises(ValueError, match='observed static'):
         observer.stationary_coverage([[0, 2]], checkpoint)
+
+
+def _held_observation_case():
+    from cais_spade_llm.recovery_framework.gazebo_safety_preparation import GazeboResourceObservation
+
+    tool = [1., 0., 1., 0., 0., 0., 1.]
+    part = [1.1, 0., 1., 0., 0., 0., 1.]
+    def body(pose, bounds):
+        return {"pose": pose, "linear_speed": 0., "angular_speed": 0.,
+                "collisions": [{"id": "body", "bounds": bounds}]}
+    record = {"attachment_complete": True, "attachment_revision": 7, "instance_id": "physics",
+        "observed_monotonic": time.monotonic(), "simulation_time": 5.,
+        "attachments": [{"model1": "robot", "link1": "tool", "model2": "gear_model", "link2": "link"}],
+        "models": {
+            "robot": {"static": False, "pose": tool, "links": {"tool": body(tool, [[.9, 1.1], [-.1, .1], [.9, 1.1]])},
+                      "joints": {"finger": {"position": .02}}},
+            "gear_model": {"pose": part, "links": {"link": body(part, [[1.05, 1.15], [-.02, .02], [.98, 1.02]])}},
+        }}
+    context = SimpleNamespace(snapshot=lambda: {"ur5e-4": {"held_part": "gear_small"}},
+        part_tracker={"gear_small": {"location": "ur5e-4"}},
+        inputs={"geometry": {"parts": {"model_map": {"gear_small": "gear_model"}}}})
+    reader = SimpleNamespace(snapshot=lambda **kwargs: deepcopy(record))
+    owner = SimpleNamespace(agent_name="ur5e-4", jid="ur5e-4@localhost")
+    provider = SimpleNamespace(runtime=SimpleNamespace(context=context), reader=reader, launch_id="launch")
+    config = {"model": "robot", "reference_link": "tool", "stationary_linear_speed_max": .01,
+              "stationary_angular_speed_max": .01, "stationary_contract": {"kind": "idle_commanded_hold"},
+              "gripper": {"joint": "finger", "open": .1, "closed": .02, "tolerance": .001}}
+    observer = GazeboResourceObservation(provider, owner, config)
+    return observer, record
+
+
+def test_attached_part_capture_retains_measured_transform_and_geometry():
+    observer, record = _held_observation_case()
+    before = deepcopy(record)
+    captured = observer.capture()
+    assert captured["observation_state"]["held_part"] == "gear_small"
+    assert captured["observation_state"]["grasp_transform"] == pytest.approx([.1, 0., 0., 0., 0., 0., 1.])
+    assert captured["attachment"]["part_name"] == "gear_small"
+    assert captured["attachment"]["records"] == record["attachments"]
+    assert captured["attachment"]["part_local_bounds"][0] == pytest.approx([-.05, .05])
+    assert captured["link_states"] == record["models"]["robot"]["links"]
+    assert record == before
+
+
+def test_owner_kinematics_and_collisions_keep_one_physics_snapshot():
+    observer, record = _held_observation_case()
+    observer.provider.reader.snapshot = Mock(side_effect=AssertionError("must retain acquired physics snapshot"))
+    source = {key: record[key] for key in ("instance_id", "simulation_time", "observed_monotonic")}
+    native = {"current_pose": deepcopy(record["models"]["robot"]["pose"]), "native_physics_source": source,
+              "joint_names": ["finger"], "joint_positions": [.02]}
+    captured = observer.capture(native=native, record=record)
+    assert captured["native_physics_source"] == source
+    assert captured["simulation_time"] == record["simulation_time"]
+    assert captured["link_states"] == record["models"]["robot"]["links"]
+    observer.provider.reader.snapshot.assert_not_called()
+    changed = deepcopy(record)
+    changed["simulation_time"] += .001
+    with pytest.raises(ValueError, match="different physics snapshots"):
+        observer.capture(native=native, record=changed)
+    changed = deepcopy(record)
+    changed["observed_monotonic"] -= 100
+    with pytest.raises(ValueError, match="Stale resource observation"):
+        observer.capture(native=native, record=changed)
+
+
+def test_resource_observation_without_kinematics_retains_native_source():
+    observer, record = _held_observation_case()
+    record["models"]["robot"]["static"] = True
+    record["attachments"] = []
+    observer.provider.runtime.context.snapshot = lambda: {"ur5e-4": {"resource_state": "idle"}}
+    observer.provider.runtime.context.part_tracker = {}
+    observer.provider.reader.snapshot = Mock(side_effect=AssertionError("use the recorded checkpoint"))
+    captured = observer.capture(record=record)
+    assert captured["model_static"] is True
+    assert captured["native_physics_source"] == {
+        key: record[key] for key in ("instance_id", "simulation_time", "observed_monotonic")
+    }
+    assert captured["link_states"] == record["models"]["robot"]["links"]
+    assert "joint_positions" not in captured
+    observer.provider.reader.snapshot.assert_not_called()
+
+
+@pytest.mark.parametrize("change", [None, "joint", "time", "instance", "not_paused", "not_capturing"])
+def test_frozen_resource_observation_requires_exact_native_checkpoint(change):
+    observer, record = _held_observation_case()
+    record["world_paused"] = True
+    record["observed_monotonic"] -= 100
+    observer.provider.runtime.recovery_capture_frozen = True
+    observer.provider.runtime.recovery_capture_native = deepcopy(record)
+    if change == "joint":
+        record["models"]["robot"]["joints"]["finger"]["position"] += .001
+    elif change == "time":
+        record["simulation_time"] += .001
+    elif change == "instance":
+        record["instance_id"] = "different"
+    elif change == "not_paused":
+        record["world_paused"] = False
+    elif change == "not_capturing":
+        observer.provider.runtime.recovery_capture_frozen = False
+    if change is not None:
+        with pytest.raises(ValueError, match="Stale resource observation"):
+            observer.capture(record=record)
+    else:
+        captured = observer.capture(record=record)
+        assert captured["frozen_native_fingerprint"]
+        assert captured["observed_monotonic"] == record["observed_monotonic"]
+        assert captured["simulation_time"] == record["simulation_time"]
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_physical_capture_retains_verified_frozen_export_after_calculation(frozen):
+    from cais_spade_llm.recovery_framework.recovery_observations import capture_recovery_physical_evidence
+
+    observer, record = _held_observation_case()
+    record.update(world_paused=True, observed_monotonic=time.monotonic() - 100)
+    record["attachments"] = []
+    runtime = observer.provider.runtime
+    runtime.recovery_capture_frozen = True
+    runtime.recovery_capture_native = deepcopy(record)
+    context = runtime.context
+    state = {"held_part": None, "resource_state": "idle"}
+    context.snapshot = lambda: {"ur5e-4": deepcopy(state)}
+    context.part_tracker = {}
+    context.revision, context.run_id = 3, "captured"
+    context.resources = {"ur5e-4": SimpleNamespace(valuation=deepcopy(state))}
+    physical = observer.capture(record=record)
+    owner = SimpleNamespace(agent_name="ur5e-4", recovery_safety_observer=observer,
+        capture_recovery_safety_state=Mock(return_value=physical))
+    runtime.resource_agents = [owner]
+    runtime.jids = {"ur5e-4": "ur5e-4@localhost"}
+    runtime.recovery_capture_frozen = frozen
+    result = capture_recovery_physical_evidence(runtime)
+    failures = [row for row in result["unresolved"] if row.get("resource_id") == "ur5e-4"]
+    if frozen:
+        assert not failures
+        assert result["snapshot"]["resources"]["ur5e-4"]["held_part"] is None
+        owner.capture_recovery_safety_state.assert_called_once()
+    else:
+        assert failures == [{"resource_id": "ur5e-4", "reason": "Stale resource observation"}]
+        assert "ur5e-4" not in result["snapshot"]["resources"]
+
+
+def test_observed_configuration_retains_current_passive_joints_and_root():
+    from cais_spade_llm.resources.continuous_geometry import observed_joint_configuration
+
+    model = {"joint_names": ["arm"], "joints": [
+        {"name": "arm", "type": "revolute"},
+        {"name": "finger", "type": "prismatic", "frozen_position": .11},
+        {"name": "mount", "type": "fixed"}],
+        "fixed_joint_positions": {"finger": .11}, "root_xyz": [0., 0., 0.]}
+    original = deepcopy(model)
+    result = observed_joint_configuration(model, {"finger": {"position": .02}}, [1., 2., 3., 0., 0., 0., 1.])
+    assert result["joints"][1]["frozen_position"] == .02
+    assert result["fixed_joint_positions"] == {"finger": .02}
+    assert result["root_xyz"] == [1., 2., 3.]
+    assert model == original
+    with pytest.raises(ValueError, match="missing or invalid"):
+        observed_joint_configuration(model, {}, [1., 2., 3., 0., 0., 0., 1.])
+
+
+def test_continuous_geometry_excludes_peer_joint_observations():
+    from cais_spade_llm.resources.continuous_geometry import (
+        load_continuous_geometry, observed_joint_configuration,
+    )
+    from cais_spade_llm.resources.recovery_geometry import _configuration_after
+
+    description = """<robot name="combined">
+      <link name="base"/><link name="arm"/><link name="finger"/>
+      <link name="peer_base"/><link name="peer_arm"/>
+      <joint name="arm_joint" type="revolute">
+        <parent link="base"/><child link="arm"/><axis xyz="0 0 1"/>
+      </joint>
+      <joint name="finger_joint" type="prismatic">
+        <parent link="arm"/><child link="finger"/><axis xyz="0 1 0"/>
+      </joint>
+      <joint name="peer_joint" type="revolute">
+        <parent link="peer_base"/><child link="peer_arm"/><axis xyz="0 0 1"/>
+      </joint>
+    </robot>"""
+    observed = {"arm_joint": {"position": 0.}, "finger_joint": {"position": .1},
+                "peer_joint": {"position": 1.}}
+    model = load_continuous_geometry(description, root="base", reference_link="arm",
+        joint_names=["arm_joint"], observed_joints=observed,
+        root_pose=[0., 0., 0., 0., 0., 0., 1.], interpolation="linear")
+    assert model["fixed_joint_positions"] == {"finger_joint": .1}
+    changed = deepcopy(observed)
+    changed["peer_joint"]["position"] = 2.
+    changed["finger_joint"]["position"] = .02
+    after = observed_joint_configuration(model, changed, [0., 0., 0., 0., 0., 0., 1.])
+    records = {"owner": {"configuration": model}}
+    _configuration_after(records, "owner", {"configuration_after": after})
+    assert records["owner"]["configuration"]["fixed_joint_positions"] == {"finger_joint": .02}
+    invalid = deepcopy(after)
+    invalid["fixed_joint_positions"]["peer_joint"] = 2.
+    with pytest.raises(ValueError, match="fixed joint identities"):
+        _configuration_after(records, "owner", {"configuration_after": invalid})
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("empty", "empty attachment"), ("wrong_part", "configured held_part"),
+    ("duplicate", "ambiguous"), ("missing_geometry", "geometry is missing"),
+])
+def test_attached_part_capture_rejects_missing_or_conflicting_evidence(change, reason):
+    observer, record = _held_observation_case()
+    if change == "empty":
+        record["attachments"] = []
+    elif change == "wrong_part":
+        record["attachments"][0]["model2"] = "invented_part"
+    elif change == "duplicate":
+        record["attachments"] *= 2
+    else:
+        record["models"]["gear_model"]["links"]["link"]["collisions"] = []
+    with pytest.raises(ValueError, match=reason):
+        observer.capture()
+
+
+@pytest.mark.parametrize("initialize_reader", [False, True])
+def test_new_failure_capture_retains_offline_physical_facts_without_cca(monkeypatch, initialize_reader):
+    from cais_spade_llm.recovery_framework.recovery_observations import capture_observations
+    from cais_spade_llm.resources.resource_safety_preparation import PrimitiveModel
+    from test_continuous_motion import configuration
+
+    observer, record = _held_observation_case()
+    owner, runtime = observer.owner, observer.provider.runtime
+    context = runtime.context
+    context.run_id, context.revision = "capture", 4
+    context.resources = {"ur5e-4": SimpleNamespace(valuation={"held_part": "gear_small"})}
+    context.part_tracker["gear_small"]["processCompleted"] = []
+    context.initial_product_states = deepcopy(context.part_tracker)
+    context.requirements = {"gear_small": {"assembly": "assembly_board-v1"}}
+    context.acknowledgements = {"pickup": {"task_id": "pickup", "status": "completed"}}
+    context.transitions = [{"acknowledgement": deepcopy(context.acknowledgements["pickup"]),
+                           "product_before": deepcopy(context.part_tracker), "product_after": deepcopy(context.part_tracker)}]
+    context.inputs["geometry"]["parts"]["assembly_target_map"] = {"gear_small": "Gear_Plate/Gear_Shaft_1"}
+    context.inputs["scene"] = {"safety_preparation": {"regions": {"assembly_board-v1": {"bounds": [[0., 1.]] * 3}}}}
+    runtime.resource_agents, runtime.jids = [owner], {"ur5e-4": owner.jid}
+    runtime.setup = {"execution_mode": "simulation",
+                     "failure_scenario": {"scenario": "Part slippage", "resource_id": "ur5e-4"}}
+    owner.recovery_safety_observer = observer
+    owner.capture_recovery_safety_state = lambda **kwargs: observer.capture(native={
+        "current_pose": record["models"]["robot"]["pose"], "joint_names": ["slide"], "joint_positions": [1.]})
+    owner.get_recovery_safety_primitive_model = lambda: PrimitiveModel("captured", 2, {
+        "continuous_motion": configuration(), "named_joint_poses": {"home": {"joint_names": ["slide"], "positions": [0.]}}}, lambda **kwargs: {})
+    def entity(name, **kwargs):
+        return {"name": name, "frame": "world", "pose": record["models"][name]["pose"],
+                "instance_id": "physics", "simulation_time": 5., "simulation_stamp": 5.,
+                "observed_monotonic": record["observed_monotonic"]}
+    observer.provider.reader.entity = entity
+    owner.get_recovery_entity_reader = lambda: entity
+    initialize = Mock()
+    if initialize_reader:
+        del owner.recovery_safety_observer
+        context.inputs["scene"]["safety_preparation"]["provider"] = "gazebo_idle_continuous_v1"
+        def install(provider, *, model_execution):
+            initialize(model_execution=model_execution, cca=provider.cca)
+            owner.recovery_safety_observer = observer
+        monkeypatch.setattr(LiveSafetyPreparation, "initialize", install)
+    result = capture_observations(runtime, {"injection_status": "completed"})
+    physical = result["physical_evidence"]
+    assert physical["unresolved"] == []
+    assert physical["snapshot"]["frame"] == "world"
+    assert physical["snapshot"]["parts"]["gear_small"]["contained_by"] is None
+    assert physical["snapshot"]["resources"]["ur5e-4"]["joint_positions"] == [1.]
+    assert physical["resource_models"]["ur5e-4"]["named_joint_poses"]["home"]["positions"] == [0.]
+    assert physical["geometry"]["parts"]["gear_small"]["local_bounds"]
+    assert physical["geometry"]["parts"]["gear_small"]["target"] == "Gear_Plate/Gear_Shaft_1"
+    assert physical["snapshot"]["parts"]["gear_small"]["processCompleted_complete"] is True
+    assert result["acknowledgements"] == context.acknowledgements
+    assert result["requirements"] == context.requirements
+    assert not physical["dispatch_authorized"] and not physical["command_sent"]
+    if initialize_reader:
+        initialize.assert_called_once_with(model_execution=False, cca=None)
+        assert runtime.recovery_observation_preparation.runtime is runtime
+    context.acknowledgements.clear()
+    record["attachments"].clear()
+    assert result["acknowledgements"] and physical["resources"]["ur5e-4"]["attachment"]["records"]
+
+
+def test_offline_physical_capture_cannot_initialize_live_readers():
+    from cais_spade_llm.recovery_framework.recovery_observations import capture_recovery_physical_evidence
+
+    runtime = SimpleNamespace(part_slippage_recovery=SimpleNamespace(offline=True))
+    with pytest.raises(ValueError, match="Offline recovery cannot"):
+        capture_recovery_physical_evidence(runtime)
+
+
+@pytest.mark.parametrize("change", ["missing_initial", "missing_transition", "altered_completion", "missing_ack"])
+def test_completion_capture_never_derives_assembly_from_a_state_label(change):
+    from cais_spade_llm.recovery_framework.recovery_observations import _completion_ledger_evidence
+
+    initial = {"gear_small": {"processCompleted": []}}
+    ledger = {"processCompleted": [], "state": "assembled"}
+    ack = {"pickup": {"task_id": "pickup", "status": "completed"}}
+    transitions = [{"acknowledgement": ack["pickup"], "product_before": deepcopy(initial), "product_after": deepcopy(initial)}]
+    if change == "missing_initial":
+        initial.clear()
+    elif change == "missing_transition":
+        transitions.clear()
+    elif change == "altered_completion":
+        ledger["processCompleted"] = [{"process": "assembly"}]
+    else:
+        ack.clear()
+    result = _completion_ledger_evidence("gear_small", ledger, initial, ack, transitions, run_id="run", revision=1)
+    assert result["complete"] is False
+    assert result["reason"]
+
+
+def test_outline_named_pose_preview_is_isolated_and_has_no_interval_proof():
+    from test_continuous_motion import configuration
+    from cais_spade_llm.resources.resource_safety_preparation import PrimitiveModel
+
+    model = configuration()
+    named = {"home": {"joint_names": ["slide"], "positions": [2.]}}
+    controller = SimpleNamespace(get_recovery_safety_primitive_model=lambda: PrimitiveModel(
+        "joint_trajectory_continuous", 2, {"continuous_motion": model, "named_joint_poses": named}, lambda **kwargs: {}))
+    for name in ("capture_recovery_safety_state", "_prepare_cartesian_motion", "_execute_simulation_motion_plan",
+                 "move_to_named_pose", "attach_part", "detach_part"):
+        setattr(controller, name, Mock(side_effect=AssertionError("Preview contacted a live interface")))
+    start = {"joint_names": ["slide"], "joint_positions": [0.], "held_part": None,
+             "current_pose": [0., 0., 0., 0., 0., 0., 1.]}
+    scene = {"snapshot": {"frame": "world", "resources": {"ur5e-4": start}, "parts": {}},
+             "geometry": {"frame": "world", "resources": {"ur5e-4": {}}, "parts": {},
+                          "regions": {"assembly_board-v1": {"bounds": [[-.1, .1]] * 3}}},
+             "resource_models": {"ur5e-4": {"configuration": model, "named_joint_poses": named}}}
+    command = {"primitive": "move_to_named_pose", "params": {"pose_name": "home"}}
+    support = {"semantics": "primitive_transition", "primitives": [command], "trace": [command]}
+    before = deepcopy(scene)
+    result = GazeboPickPlaceController.prepare_recovery_outline_preview(controller, resource_id="ur5e-4",
+        primitive_support=support, projected_start=start, isolated_scene=scene)
+    assert result["status"] == "projected", result
+    assert result["projected_snapshot"]["resources"]["ur5e-4"]["joint_positions"] == [2.]
+    assert result["interval_complete"] is False
+    assert not result["command_sent"] and not result["dispatch_authorized"]
+    assert scene == before
+    scene["resource_models"]["ur5e-4"]["configuration"] = {**model, "root_xyz": [100, 0, 0]}
+    blocked = GazeboPickPlaceController.prepare_recovery_outline_preview(controller, resource_id="ur5e-4",
+        primitive_support=support, projected_start=start, isolated_scene=scene)
+    assert blocked["feasibility_status"] == "NEEDS_CONTEXT"
+
+
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("change", [None, "unknown_model", "assembly_slot", "missing_contract"])
+def test_outline_custody_preview_uses_declared_geometry_without_attachment_calls(change, offline):
+    from test_continuous_motion import configuration
+    from cais_spade_llm.resources.resource_safety_preparation import PrimitiveModel
+
+    model = configuration()
+    model["joints"].append({"name": "finger", "parent": "body", "child": "finger_link",
+        "type": "prismatic", "axis": [0, 1, 0], "xyz": [0, 0, 0], "rpy": [0, 0, 0], "frozen_position": .1})
+    model["components"].append({"id": "finger", "link": "finger_link", "bounds": [[-.01, .01]] * 3})
+    contract = {"kind": "gazebo_link_attacher", "gripper": {"joint": "finger", "open": .1, "closed": .02},
+                "joint_positions": {"open": {"finger": .1}, "closed": {"finger": .02}},
+                "preserves_part_pose_on_attachment": True, "release_settling_modeled": False}
+    own = {"continuous_motion": model, "named_joint_poses": {}, "custody": contract}
+    if change == "missing_contract":
+        own["custody"] = None
+    controller = SimpleNamespace(get_recovery_safety_primitive_model=lambda: PrimitiveModel(
+        "joint_trajectory_continuous", 2, own, lambda **kwargs: {}))
+    for name in ("capture_recovery_safety_state", "attach_part", "detach_part", "open_gripper", "close_gripper"):
+        setattr(controller, name, Mock(side_effect=AssertionError("Custody preview dispatched")))
+    start = {"joint_names": ["slide"], "joint_positions": [0.], "held_part": None,
+             "gripper_state": "open", "current_pose": [0., 0., 0., 0., 0., 0., 1.]}
+    part = {"model_name": "gear_model", "current_pose": [.1, 0., 0., 0., 0., 0., 1.], "contained_by": None}
+    scene = {"snapshot": {"frame": "world", "resources": {"ur5e-4": start}, "parts": {"gear_small": part}},
+             "geometry": {"frame": "world", "resources": {"ur5e-4": {}},
+                          "parts": {"gear_small": {"local_bounds": [[-.01, .01]] * 3}}, "regions": {}},
+             "resource_models": {"ur5e-4": {"configuration": model, "named_joint_poses": {}}}}
+    commands = [{"primitive": name, "params": {"model_name": "gear_model", "part_name": "gear_small"}}
+                for name in ("grasp_part", "release_part")]
+    if change == "unknown_model":
+        commands[0]["params"]["model_name"] = "unknown"
+    elif change == "assembly_slot":
+        commands[1]["params"]["assembly_slot"] = {"destination_location": "assembly_board-v1"}
+    support = {"semantics": "primitive_transition", "primitives": commands, "trace": deepcopy(commands)}
+    support["trace"].insert(1, {"primitive": None, "task_contract": "pick_approach",
+                                 "declared_effects": {"resource_state": {"set": "picked"}}})
+    before = deepcopy(scene)
+    if offline:
+        from cais_spade_llm.resources.resource_safety_preparation import prepare_recovery_outline_preview
+
+        descriptor = json.loads(json.dumps(controller.get_recovery_safety_primitive_model().descriptor()))
+        result = prepare_recovery_outline_preview(resource_id="ur5e-4", primitive_support=support,
+            projected_start=start, isolated_scene=scene, primitive_model=descriptor)
+    else:
+        result = GazeboPickPlaceController.prepare_recovery_outline_preview(controller, resource_id="ur5e-4",
+            primitive_support=support, projected_start=start, isolated_scene=scene)
+    assert not result["command_sent"] and not result["dispatch_authorized"]
+    assert scene == before
+    if change:
+        assert result["feasibility_status"] == "NEEDS_CONTEXT", result
+    else:
+        assert result["status"] == "projected", result.get("unresolved")
+        assert result["interval_complete"] is False
+        assert result["projected_snapshot"]["resources"]["ur5e-4"]["held_part"] is None
+        assert result["step_evidence"][0]["custody_effects"][0]["grasp_transform"] == pytest.approx(
+            [.1, 0., 0., 0., 0., 0., 1.])
+        assert result["step_evidence"][0]["configuration_after"]["joints"][-1]["frozen_position"] == .02
+        assert result["resource_models"]["ur5e-4"]["configuration"]["joints"][-1]["frozen_position"] == .1
+        if offline:
+            first = prepare_recovery_outline_preview(resource_id="ur5e-4",
+                primitive_support={**support, "primitives": commands[:1], "trace": support["trace"][:1]},
+                projected_start=start, isolated_scene=scene, primitive_model=descriptor)
+            following = {**deepcopy(scene), "snapshot": first["projected_snapshot"],
+                         "resource_models": first["resource_models"]}
+            second = prepare_recovery_outline_preview(resource_id="ur5e-4",
+                primitive_support={**support, "primitives": commands[1:], "trace": [commands[1]]},
+                projected_start=following["snapshot"]["resources"]["ur5e-4"],
+                isolated_scene=following, primitive_model=descriptor)
+            assert second["status"] == "projected", second.get("unresolved")
+            assert second["projected_snapshot"]["resources"]["ur5e-4"]["held_part"] is None
+
+
+def test_outline_custody_configuration_retains_declared_mimic_joint_values():
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import _outline_custody_configuration
+
+    description = '<robot><joint name="finger"/><joint name="other"><mimic joint="finger" multiplier="-1" offset=".02"/></joint></robot>'
+    result = _outline_custody_configuration(description, {"joint": "finger", "open": .1, "closed": .02},
+        {"joint_names": ["slide"], "joints": [{"name": "finger"}, {"name": "other"}]}, enabled=True)
+    assert result["joint_positions"]["open"]["other"] == pytest.approx(-.08)
+    assert result["joint_positions"]["closed"]["other"] == pytest.approx(0.)
+    assert result["joint_bounds"] == {}
+
+
+def test_outline_custody_configuration_retains_full_urdf_bounds():
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import _outline_custody_configuration
+
+    description = ('<robot><joint name="finger"><limit lower="0" upper=".12"/></joint>'
+                   '<joint name="other"><mimic joint="finger" multiplier="-1" offset=".02"/></joint></robot>')
+    result = _outline_custody_configuration(description, {"joint": "finger", "open": .1, "closed": .02},
+        {"joint_names": ["slide"], "joints": [{"name": "finger"}, {"name": "other"}]}, enabled=True)
+    assert result["joint_bounds"]["finger"] == [0., .12]
+    assert result["joint_bounds"]["other"] == pytest.approx([-.1, .02])
+    assert result["release_settling_modeled"] is False
+
+
+def test_outline_state_only_effect_does_not_require_invented_motion():
+    from cais_spade_llm.resources.resource_safety_preparation import prepare_recovery_outline_preview
+
+    start = {"resource_state": "failed", "contained_parts": []}
+    scene = {"snapshot": {"frame": "world", "resources": {"M1": start}, "parts": {}},
+             "geometry": {"frame": "world", "resources": {"M1": {"stationary_only": True,
+                 "component_bounds": [{"id": "machine", "bounds": [[0., 1.]] * 3}]}},
+                 "parts": {}, "regions": {}}, "resource_models": {}}
+    command = {"primitive": "reset_fault", "params": {}}
+    support = {"semantics": "primitive_transition", "primitives": [command], "trace": [{**command,
+        "declaration_fingerprint": "owner-declaration", "declared_effects": {"resource_state": {"set": "idle"}}}]}
+    descriptor = {"configuration": {"geometry_unchanged": [deepcopy(command)]}}
+    result = prepare_recovery_outline_preview(resource_id="M1", primitive_support=support,
+        projected_start=start, isolated_scene=scene, primitive_model=descriptor)
+    assert result["status"] == "projected", result.get("unresolved")
+    assert result["step_evidence"][0]["geometry_unchanged"] is True
+    unavailable = prepare_recovery_outline_preview(resource_id="M1", primitive_support=support,
+        projected_start=start, isolated_scene=scene, primitive_model={"configuration": {}})
+    assert unavailable["feasibility_status"] == "NEEDS_CONTEXT"
+    support["trace"][0]["declared_effects"]["current_pose"] = {"set": [0., 0., 0.]}
+    result = prepare_recovery_outline_preview(resource_id="M1", primitive_support=support,
+        projected_start=start, isolated_scene=scene, primitive_model=descriptor)
+    assert result["feasibility_status"] == "NEEDS_CONTEXT"
 
 
 def _static_part_geometry_case():

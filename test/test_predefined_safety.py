@@ -1,10 +1,11 @@
-"""Given safety definitions reach existing artifacts without an LLM call."""
-
 from __future__ import annotations
+
+"""Given safety definitions reach existing artifacts without an LLM call."""
 
 import asyncio
 import json
 import logging
+from collections import deque
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from cais_spade_llm.agents.central_controller.base_safety_checker import BaseSafetyChecker
+from cais_spade_llm.agents.central_controller.online_safety_monitor import LivePhysicalMonitor
 from cais_spade_llm.agents.central_controller.predefined_safety import (
     compile_predefined_safety,
     parse_predefined_safety,
@@ -21,7 +24,12 @@ from cais_spade_llm.agents.central_controller.safety_logic import SafetyLogic
 from cais_spade_llm.bundles.bundle_compiler import BundleCompiler
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SOURCE = _ROOT / "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt"
+_SOURCE = _ROOT / "test/fixtures/part_slippage/predefined_safety/specifications.txt"
+_SAFETY_DIR = _ROOT / "cais_spade_llm/specification/safety"
+_STANDALONE_FILES = {
+    "mutex": "safety_assembly_board-v1_mutex.txt",
+    "precedence": "safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt",
+}
 
 
 def _document() -> dict:
@@ -388,3 +396,170 @@ def test_legacy_safety_versions_explicitly_require_recompilation(kind):
         operation = lambda: validate_predefined_safety_artifact(payload)
     with pytest.raises(ValueError, match="recompile required"):
         operation()
+
+
+@pytest.fixture(params=tuple(_STANDALONE_FILES), ids=tuple(_STANDALONE_FILES))
+def standalone_safety(
+    request: pytest.FixtureRequest, tmp_path: Path,
+) -> tuple[str, dict, SafetyLogic, Path, str]:
+    """Compile and persist each selectable constraint through SafetyLogic."""
+    kind = request.param
+    document = json.loads((_SAFETY_DIR / _STANDALONE_FILES[kind]).read_text(encoding="utf-8"))
+    logic, artifact, source_text = _saved(tmp_path, document)
+    return kind, document, logic, artifact, source_text
+
+
+def test_three_selectable_safety_inputs_and_saved_defaults() -> None:
+    """The public selector includes each case while saved global defaults use none."""
+    from cais_spade_llm.ui.bridge import SystemBridge
+
+    expected = {"safety_none.txt", *_STANDALONE_FILES.values(),
+        "safety_Conveyor_breakdown.txt", "safety_ur5e-1_breakdown.txt",
+        "safety_Machining_breakdown_during_part_processing.txt",
+        "safety_M2_mutex.txt",
+        "safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt"}
+    assert {path.name for path in _SAFETY_DIR.glob("*.txt")} == expected
+    bridge = SystemBridge.__new__(SystemBridge)
+    assert {Path(path).name for path in bridge.list_safety_requirement_files()} == expected
+    setup = json.loads((_ROOT / "cais_spade_llm/initialization/recovery_framework_setup.json").read_text())
+    cca = json.loads((_ROOT / "cais_spade_llm/initialization/cca.json").read_text())
+    none = "cais_spade_llm/specification/safety/safety_none.txt"
+    assert setup["selected_safety_file"] == cca["cca"]["safety_file"] == none
+
+
+def test_mutex_preserves_supplied_geometry_ap_records() -> None:
+    """Geometry AP identities and supplied meanings are fixed source inputs."""
+    document = json.loads((_SAFETY_DIR / _STANDALONE_FILES["mutex"]).read_text())
+    rule, = document["catalog"]["specifications"]
+    assert rule["id"] == "SAFE_shared_area_mutex"
+    assert rule["formula"] == "G !(ap001 & ap002)"
+    for ap, slot, label in zip(rule["aps"], ("first", "second"), ("ap001", "ap002"), strict=True):
+        full = ('{"kind":"ap_state","process":"*","product":"*","resource":"$RESOURCE",'
+                '"state":{"arguments":{"region":"$region"},"symbol":"any"}}').replace(
+                    "$RESOURCE", "$" + slot + "_resource")
+        assert ap == {
+            "label": label,
+            "full": full,
+            "meaning": (f"The {slot} bound resource's configured robot/tool geometry, including any "
+                        "carried part, touches or overlaps the bound shared area. A deposited part "
+                        "does not retain the resource's occupancy."),
+            "definition": json.loads(full),
+        }
+    assert document["requirement_scopes"] == [
+        {"specification": "SAFE_shared_area_mutex", "region": "assembly_board-v1"}]
+
+
+def test_precedence_preserves_exact_entry_and_completion_bindings() -> None:
+    """Part entry requires an earlier acknowledged completion at the given target."""
+    document = json.loads((_SAFETY_DIR / _STANDALONE_FILES["precedence"]).read_text())
+    rule, = document["catalog"]["specifications"]
+    assert rule["id"] == "SAFE_gear_small_before_KET4_Square_4mm"
+    assert rule["formula"] == "(!ap001 U (ap002 & !ap001)) | G !ap001"
+    assert [ap["label"] for ap in rule["aps"]] == ["ap001", "ap002"]
+    assert rule["aps"][0]["definition"]["event"]["symbol"] == "part_region_entry"
+    assert rule["aps"][1]["definition"]["state"]["symbol"] == "processCompleted"
+    assert document["requirement_scopes"] == [{
+        "specification": "SAFE_gear_small_before_KET4_Square_4mm",
+        "physical_ap_bindings": {
+            "ap001": {"part": "KET4_Square_4mm", "region": "assembly_board-v1"},
+            "ap002": {"part": "gear_small", "process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"},
+        },
+    }]
+
+
+def test_saved_standalone_dfa_matches_complete_reference_language(standalone_safety) -> None:
+    """Explore every reachable state pair, rather than sampling finite traces."""
+    kind, document, logic, artifact, source_text = standalone_safety
+    payload = json.loads(artifact.read_text())
+    assert validate_predefined_safety_artifact(payload, source_text=source_text) == document
+    restored = _logic(logic.safety_file)
+    restored.load(artifact)
+    assert restored.rules == logic.rules
+    rule, = restored.rules
+    supplied, = document["catalog"]["specifications"]
+    assert (rule["ltlf"], rule["aps"]) == (supplied["formula"], supplied["aps"])
+    dot = (artifact.parent / f"{rule['id']}_dfa.dot").read_text()
+    assert (artifact.parent / f"{rule['id']}_dfa.png").stat().st_size > 0
+    checker = BaseSafetyChecker({rule["id"]: dot}, [rule])
+    dfa = checker.dfas[rule["id"]]
+    pending = deque([(dfa["initial"], 0)])
+    visited = set()
+    alphabet = (frozenset(), frozenset({"ap001"}), frozenset({"ap002"}), frozenset({"ap001", "ap002"}))
+    while pending:
+        compiled, reference = pending.popleft()
+        if (compiled, reference) in visited:
+            continue
+        visited.add((compiled, reference))
+        assert (compiled in dfa["accepting_states"]) == (reference != 2)
+        for values in alphabet:
+            if kind == "mutex":
+                target = 2 if reference == 2 or {"ap001", "ap002"} <= values else 0
+            elif reference != 0:
+                target = reference
+            else:
+                target = 2 if "ap001" in values else 1 if "ap002" in values else 0
+            transition = checker.transition_evidence(rule["id"], compiled, values)
+            pending.append((transition["to"], target))
+    assert len(visited) == (2 if kind == "mutex" else 3)
+    restored.controller_agent.ask_llm.assert_not_called()
+
+
+def test_cca_reloads_each_saved_standalone_without_native_ap_fallback(standalone_safety) -> None:
+    """The actual startup gate accepts each independently saved physical rule."""
+    from cais_spade_llm.agents.central_controller.predefined_safety_runtime import (
+        initialize_predefined_safety,
+    )
+
+    _, document, logic, artifact, _ = standalone_safety
+    agent = _startup_agent(logic.safety_file, artifact)
+    assert initialize_predefined_safety(agent)
+    assert agent.predefined_safety_error == ""
+    assert agent.predefined_safety == document
+    assert agent.safety_logic.rule_dfas == logic.rule_dfas
+    assert agent.safety_monitor.safety_rules == []
+    assert agent.safety_monitor.dfas == {}
+    agent.safety_logic.controller_agent.ask_llm.assert_not_called()
+
+
+def test_generated_standalone_dfas_drive_retained_physical_monitors(standalone_safety) -> None:
+    """Use persisted compiler output, including precedence memory across checks."""
+    kind, _, logic, artifact, _ = standalone_safety
+    rule, = logic.rules
+    identifier = rule["id"]
+    records = [{"rule_id": identifier, "formula": rule["ltlf"], "aps": rule["aps"],
+                "dfa_dot": (artifact.parent / f"{identifier}_dfa.dot").read_text()}]
+
+    def observed(first: bool, second: bool) -> dict:
+        values = {identifier: {"ap001": first, "ap002": second}}
+        return {"rules": records, "observations": [{"time_exact": "0", "phase": "point",
+                "rule_cells": [values]}], "valuations": [values]}
+
+    assert LivePhysicalMonitor().check(observed(False, False))["status"] == "allowed"
+    assert LivePhysicalMonitor().check(observed(True, True))["status"] == "held"
+    if kind == "mutex":
+        assert LivePhysicalMonitor().check(observed(True, False))["status"] == "allowed"
+        assert LivePhysicalMonitor().check(observed(False, True))["status"] == "allowed"
+    else:
+        monitor = LivePhysicalMonitor()
+        assert monitor.check(observed(True, False))["status"] == "held"
+        completion = monitor.check(observed(False, True))
+        monitor.commit(completion, success=True, execution_evidence={"source_kind": "synthetic"})
+        assert monitor.revision == 1
+        assert monitor.check(observed(True, False))["status"] == "allowed"
+        assert monitor.revision == 1
+
+
+def test_safety_none_saves_and_reloads_zero_constraints_without_llm(tmp_path: Path) -> None:
+    """An empty requirement set needs neither a fabricated AP nor a constraint DFA."""
+    logic = _logic(_SAFETY_DIR / "safety_none.txt")
+    asyncio.run(logic.build_safety_rules_and_logic(logic.safety_file.read_text()))
+    asyncio.run(logic.build_preview_interpretations())
+    artifact = tmp_path / "cca_safety_logic.json"
+    logic.save(artifact)
+    assert logic.build_dfas_per_rule(tmp_path) == {}
+    restored = _logic(logic.safety_file)
+    restored.load(artifact)
+    assert restored.rules == []
+    assert list(tmp_path.glob("*_dfa.*")) == []
+    assert LivePhysicalMonitor().check({"rules": [], "observations": [], "valuations": []})["status"] == "allowed"
+    logic.controller_agent.ask_llm.assert_not_called()

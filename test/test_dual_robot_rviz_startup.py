@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
+import os
+import shlex
 import socket
 import sys
 import threading
@@ -710,7 +713,7 @@ def test_readiness_retains_missing_service_and_timeout_reasons() -> None:
     assert bridge.simulation_start_ready() == (ready, reason)
     bridge._ros2_command_output = lambda *args, **kwargs: (False, "timeout")
     ready, reason = bridge.simulation_start_ready(force=True)
-    assert not ready and "timed out after 10 seconds" in reason
+    assert not ready and reason == "Simulation readiness query failed: timeout"
     assert bridge.simulation_start_ready() == (ready, reason)
 
 
@@ -732,3 +735,60 @@ def test_legacy_prewarm_authority_is_scoped_to_its_launch() -> None:
     assert bridge.simulation_start_ready(force=True)[0] is True
     bridge._ros2_procs = {"gazebo_dual": SimpleNamespace(pid=101, poll=lambda: None)}
     assert bridge.simulation_start_ready(force=True) == (False, "shell discovery failed")
+
+
+@pytest.mark.parametrize("exit_status", [0, 7])
+def test_readiness_command_retains_exact_output_and_metadata(tmp_path, monkeypatch, exit_status):
+    monkeypatch.setenv("ROS_DOMAIN_ID", "89")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-be-recorded")
+    source = "import sys; sys.stdout.write('/ATTACHLINK\\n'); sys.stderr.write('discovery detail'); sys.exit(%d)" % exit_status
+    path = tmp_path / "readiness_probes.jsonl"
+    ok, reason = ros2_processes.run_sim_readiness_command(
+        shlex.join([sys.executable, "-c", source]), timeout_sec=3,
+        launch=(("gazebo_dual", 123, 456),), startup_phase="simulation_readiness",
+        diagnostic_path=path, cancelled=lambda: False,
+    )
+    record = json.loads(path.read_text())
+    assert ok is (exit_status == 0)
+    assert record["stdout"] == "/ATTACHLINK\n"
+    assert record["stderr"] == "discovery detail"
+    assert record["exit_status"] == exit_status
+    assert record["ROS_DOMAIN_ID"] == 89
+    assert record["launch_identity"] == [["gazebo_dual", 123, 456]]
+    assert record["startup_phase"] == "simulation_readiness"
+    assert record["elapsed_seconds"] > 0
+    assert "must-not-be-recorded" not in path.read_text()
+    if exit_status:
+        assert "exit 7" in reason and "discovery detail" in reason
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_readiness_timeout_and_stop_reap_owned_process(tmp_path, cancel):
+    pid_path = tmp_path / "pid"
+    source = ("import os, pathlib, sys, time; "
+              f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+              "sys.stderr.write('partial discovery output\\n'); sys.stderr.flush(); time.sleep(30)")
+    path = tmp_path / "readiness_probes.jsonl"
+    ok, reason = ros2_processes.run_sim_readiness_command(
+        shlex.join([sys.executable, "-c", source]), timeout_sec=0.5,
+        launch=(), startup_phase="simulation_readiness", diagnostic_path=path,
+        cancelled=lambda: cancel and pid_path.exists(),
+    )
+    record = json.loads(path.read_text())
+    assert not ok
+    assert record["status"] == ("cancelled" if cancel else "timeout")
+    assert "partial discovery output" in record["stderr"]
+    assert "cancelled" in reason if cancel else "timed out after 0.5s" in reason
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)
+
+
+def test_second_readiness_failure_is_not_hidden_by_initial_success():
+    bridge = _readiness_bridge()
+    bridge._ros2_command_output = lambda *args, **kwargs: (True, "\n".join(bridge._SIM_CORE_SERVICES))
+    assert bridge.simulation_start_ready(force=True)[0] is True
+    bridge._ros2_command_output = lambda *args, **kwargs: (False, "command failed (exit 7): discovery detail")
+    ready, reason = bridge.simulation_start_ready(force=True)
+    assert not ready
+    assert "exit 7" in reason and "discovery detail" in reason
+    assert bridge.simulation_start_ready() == (ready, reason)

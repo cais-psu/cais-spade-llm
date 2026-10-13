@@ -1,6 +1,6 @@
-"""Once-per-run simulation faults using the existing Conveyor bridge routes."""
-
 from __future__ import annotations
+
+"""Once-per-run simulation faults using the existing Conveyor bridge routes."""
 
 import asyncio
 import json
@@ -161,8 +161,17 @@ class ConveyorFault:
         self._machine_task = deepcopy(task)
         return {"run_id": self.runtime.context.run_id, "task_id": task["task_id"],
                 "resource_id": task["resource_id"], "checkpoint": self.configuration["checkpoint"],
+                "seed": self.configuration.get("seed"),
+                "processing_paths": {row["resource_id"]: self.processing_path(row["resource_id"])
+                    for row in self.runtime.context.inputs["scene"]["machines"]},
                 "control_path": str(Path(self._control_directory.name) / "fault.json"),
                 "evidence_path": str(Path(self._control_directory.name) / "interruption.json")}
+
+    def processing_path(self, resource_id: str) -> str:
+        """Provide run-owned atomic observation records to the processing checkpoint."""
+        if self._control_directory is None:
+            self._control_directory = tempfile.TemporaryDirectory(prefix="cais_machine_fault_")
+        return str(Path(self._control_directory.name) / (resource_id + "_jobs.json"))
 
     async def accept_machine_failure(self, task: dict, result: dict) -> bool:
         """Latch worker evidence bound to this run, including a cancelled reply."""
@@ -185,7 +194,8 @@ class ConveyorFault:
                               and evidence.get("observation_status") in {"failed", "pending"})
         if (not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0
                 or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed)
-                or elapsed < duration * 0.5 or evidence.get("process_completed") is not False
+                or elapsed < (duration * .5 if self.configuration["checkpoint"] == "during_processing_halfway" else 0.)
+                or elapsed >= duration or evidence.get("process_completed") is not False
                 or evidence.get("part_name") != task["parameters"].get("part_name")
                 or (not observation_failed and any(
                     not isinstance(observed.get(axis), (int, float)) or not math.isfinite(observed[axis])
@@ -377,15 +387,30 @@ class ConveyorFault:
                     "resource_revisions": context.revisions(),
                     "injection_status": "pending",
                 }
+                processing = deepcopy(evidence.get("processing_observations", {}))
+                if configuration["scenario"] == "Machining breakdown during part processing":
+                    for owner in runtime.resource_agents:
+                        worker = getattr(owner, "workflow_worker", None)
+                        if worker is not None and hasattr(worker, "read_machine_jobs"):
+                            record = worker.read_machine_jobs()
+                            if record and owner.agent_name not in processing:
+                                processing[owner.agent_name] = record
+                    self.evidence["processing_observations"] = processing
                 actor = context.resources[rid]
-                actor.executors.clear()
+                if scenario != "Part slippage":
+                    actor.executors.clear()
+                    context.unavailable_resources.add(rid)
                 actor.revision += 1
-                actor.evidence = scenario + "; execution unavailable"
-                context.unavailable_resources.add(rid)
+                actor.evidence = scenario + ("; awaiting observed recovery" if scenario == "Part slippage" else "; unavailable")
                 context.revision += 1
                 if scenario == "Conveyor breakdown":
                     context.inputs["scene"]["Conveyor"]["transport_enabled"] = False
-                runtime.stop(scenario)
+                if scenario == "Machining breakdown during part processing" and configuration["checkpoint"] == "during_processing":
+                    # Stop dispatch first; worker cancellation follows the frozen observation.
+                    runtime.stopped = True
+                    runtime.recovery_checkpoint_capturing = True
+                else:
+                    runtime.stop(scenario, preserve_recovery=True)
                 runtime.outcome.update(
                     status="blocked", reason=scenario, failed_resource=rid,
                     failure_evidence=deepcopy(self.evidence),
@@ -400,7 +425,31 @@ class ConveyorFault:
         context = runtime.context
         rid, scenario = configuration["resource_id"], configuration["scenario"]
         try:
-            await runtime.cancel_owned()
+            if getattr(runtime, "recovery_checkpoint_capturing", False):
+                from cais_spade_llm.recovery_framework.recovery_observations import capture_machine_checkpoint
+
+                try:
+                    await capture_machine_checkpoint(runtime, self.evidence)
+                finally:
+                    runtime.recovery_checkpoint_capturing = False
+                    runtime.stop(scenario, preserve_recovery=True)
+                    try:
+                        await runtime.cancel_owned()
+                    finally:
+                        preparation = getattr(runtime, "recovery_observation_preparation", None)
+                        if getattr(runtime, "recovery_capture_frozen", False) and preparation is not None:
+                            await asyncio.to_thread(preparation.reader.set_world_paused, False)
+                            runtime.recovery_capture_frozen = False
+                        if preparation is not None and getattr(runtime.part_slippage_recovery, "_stopped", False):
+                            await asyncio.to_thread(preparation.reader.close)
+                            runtime.recovery_observation_preparation = None
+            else:
+                await runtime.cancel_owned()
+            if scenario == "Machining breakdown during part processing":
+                self.evidence["processing_shutdown"] = {
+                    owner.agent_name: deepcopy(owner.workflow_worker.processing_shutdown)
+                    for owner in runtime.resource_agents
+                    if getattr(getattr(owner, "workflow_worker", None), "processing_shutdown", None)}
             if scenario == "Part slippage":
                 from cais_spade_llm.recovery_framework.failure_effects import slip_part
 
@@ -421,6 +470,10 @@ class ConveyorFault:
                                  physical_state_reconciliation_required=True)
             raise
         finally:
+            if scenario == "Part slippage" and self.evidence.get("injection_status") != "completed":
+                with context.admission_lock:
+                    context.unavailable_resources.add(rid)
+                    context.revision += 1
             agent = getattr(runtime, "agent", None)
             if agent is not None:
                 agent.part_tracker = deepcopy(context.part_tracker)
@@ -436,6 +489,9 @@ class ConveyorFault:
         if self.visual.get("status") != "completed":
             logger.warning("%s is latched but Gazebo marker failed: %s", scenario, self.visual)
         runtime.queue_save()
+        recovery = getattr(runtime, "part_slippage_recovery", None)
+        if recovery is not None:
+            recovery.begin(self.evidence)
         return self.snapshot()
 
     async def after_acknowledgement(self) -> bool:

@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 """Printing resource agent with recovery-capable job control primitives.
 
 This module keeps the agent thin and defers general behavior to
 ResourceAgent. Printer-specific recovery primitives (pause/resume/cancel)
 are defined here with YAML frontmatter for catalog introspection.
 """
-
-from __future__ import annotations
 
 import logging
 from copy import deepcopy
@@ -182,9 +182,11 @@ class PrintingAgent(ResourceAgent):
         recovery_snapshot: dict[str, Any],
         part_context: dict[str, Any],
         grounded_action: dict[str, Any],
+        resource_evidence: dict[str, Any] | None = None,
+        physical_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Evaluate a printer primitive without dispatching a print command."""
-        del params, task
+        del params, task, resource_evidence, physical_evidence
         missing = [
             field
             for field in ("current_state", "material_state", "bed_state")

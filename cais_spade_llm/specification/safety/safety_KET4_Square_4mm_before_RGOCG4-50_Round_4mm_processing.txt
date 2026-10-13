@@ -1,0 +1,65 @@
+{
+  "mode": "predefined",
+  "version": 2,
+  "catalog": {
+    "version": 2,
+    "specifications": [
+      {
+        "id": "SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing",
+        "requirement": "RGOCG4-50_Round_4mm must not complete trim with result circle until KET4_Square_4mm has completed trim with result square.",
+        "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"$process\",\"product\":\"RGOCG4-50_Round_4mm\",\"resource\":\"*\",\"state\":{\"arguments\":{\"result\":\"$result\"},\"symbol\":\"processCompleted\"}}",
+            "definition": {
+              "kind": "ap_state",
+              "product": "RGOCG4-50_Round_4mm",
+              "process": "$process",
+              "resource": "*",
+              "state": {
+                "symbol": "processCompleted",
+                "arguments": {
+                  "result": "$result"
+                }
+              }
+            },
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and result record."
+          },
+          {
+            "label": "ap002",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"$process\",\"product\":\"KET4_Square_4mm\",\"resource\":\"*\",\"state\":{\"arguments\":{\"result\":\"$result\"},\"symbol\":\"processCompleted\"}}",
+            "definition": {
+              "kind": "ap_state",
+              "product": "KET4_Square_4mm",
+              "process": "$process",
+              "resource": "*",
+              "state": {
+                "symbol": "processCompleted",
+                "arguments": {
+                  "result": "$result"
+                }
+              }
+            },
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and result record."
+          }
+        ]
+      }
+    ]
+  },
+  "requirement_scopes": [
+    {
+      "specification": "SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing",
+      "physical_ap_bindings": {
+        "ap001": {
+          "process": "trim",
+          "result": "circle"
+        },
+        "ap002": {
+          "process": "trim",
+          "result": "square"
+        }
+      }
+    }
+  ]
+}

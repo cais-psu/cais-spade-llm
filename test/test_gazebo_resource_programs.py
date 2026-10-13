@@ -53,7 +53,8 @@ def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):
     assert not resources["KMR"]["primitives"]["move_joints"]["recovery_selectable"]
     assert not resources["KMR"]["primitives"]["rotate_joint"]["recovery_selectable"]
     assert {name: set(resources[name]["primitives"]) for name in ("M1", "M2", "Conveyor", "Buffer For Machined parts")} == {
-        "M1": {"dwell"}, "M2": {"dwell"},
+        "M1": {"select_program", "start_job", "pause_job", "resume_job", "stop_job"},
+        "M2": {"select_program", "start_job", "pause_job", "resume_job", "stop_job"},
         "Conveyor": {"move_relative"}, "Buffer For Machined parts": {"move_relative"},
     }
     assert resources["3D Printing Station"]["primitives"] == {}
@@ -61,7 +62,7 @@ def test_saved_catalog_covers_exact_resources_and_unused_executors(scene):
     assert not resources["Storage"]["primitives"] and not resources["Exit"]["primitives"]
     assert not primitive_available(scene, "KMR", "dock", recovery=True)
     assert not primitive_available(scene, "ur5e-1", "snap_part_to_slot", recovery=True)
-    assert saved_workflow_program(scene, "M1", "machine_part")["steps"][0]["op"] == "dwell"
+    assert saved_workflow_program(scene, "M1", "machine_part")["steps"][0]["op"] == "start_job"
     assert saved_workflow_program(scene, "Conveyor", "advance_conveyor")["steps"][0]["op"] == "move_relative"
 
 
@@ -80,6 +81,22 @@ def test_place_insert_seats_assembly_part_before_release(scene):
         release = program.steps[1]
         assert ("assembly_slot" in release.params) == (resource_id in {"ur5e-3", "ur5e-4"})
         assert "move_insert" not in scene["resource_programs"]["resources"][resource_id]["primitives"]
+
+
+def test_robot_recovery_support_uses_the_saved_simulation_program(scene, monkeypatch):
+    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
+
+    monkeypatch.setattr("cais_spade_llm.resources.resource_primitives.build_recovery_des_model",
+                        lambda agent, *, snapshot, descriptor: descriptor)
+    owner = SimpleNamespace(
+        execution_mode="simulation", gazebo_program_scene=scene, agent_name="ur5e-3",
+        jid="recovery-resource-3@localhost", static_capabilities={}, named_positions={},
+        controller_config={}, resolve_registered_function_names=lambda **_: ["place_insert"],
+    )
+    model = RobotAgent.recovery_des_model(owner, snapshot={"current_state": "picked"})
+    support = model["events"][0]["primitive_support"]
+    assert [step["primitive"] for step in support] == ["move_cartesian", "release_part", "move_relative"]
+    assert support[1]["params"]["assembly_slot"]["destination_location"] == {"$arg": "destination_location"}
 
 
 def test_ui_save_changes_the_same_robot_program_used_by_runtime(scene, tmp_path):
@@ -392,6 +409,13 @@ def test_kmr_recovery_uses_its_own_probe_and_measured_hold_after_an_unrelated_ev
 def test_machine_fault_uses_simulation_clock_and_preserves_WIP(scene, tmp_path, ticks, armed, observation_fails):
     from cais_spade_llm.recovery_framework.workflow_gazebo import WorkflowPrimitiveRunner
 
+    scene = deepcopy(scene)
+    from cais_spade_llm.resources.gazebo_programs import _expected_functions
+    next(row for row in scene["machines"] if row["resource_id"] == "M1")["simulation_process"].pop("job_control")
+    scene["resource_programs"]["resources"]["M1"] = {
+        "functions": _expected_functions("M1", scene),
+        "primitives": {"dwell": {"status": "executable", "recovery_selectable": True}},
+    }
     path = tmp_path / "fault.json"
     path.write_text(json.dumps({"run_id": "run", "resource_id": "M1",
                                 "status": "armed" if armed else "disarmed"}))

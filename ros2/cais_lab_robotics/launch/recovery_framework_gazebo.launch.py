@@ -434,15 +434,25 @@ def _runtime_world_without_static_kmr(
     if len(matches) != 1:
         raise ValueError('Recovery source world must contain exactly one static KMR include.')
     world.remove(matches[0])
+    for include in world.findall('include'):
+        uri = include.find('uri')
+        if uri is not None and uri.text == 'model://table':
+            table = world_path.parent.parent / 'models' / 'table'
+            if not (table / 'model.sdf').is_file():
+                raise ValueError(f'Recovery table model is unavailable: {table}')
+            # Gazebo's user model cache can take precedence over GAZEBO_MODEL_PATH.
+            uri.text = table.resolve().as_uri()
     physics = world.find('physics')
-    if physics is None or float(physics.findtext('max_step_size', '0')) != .001:
-        raise ValueError('Recovery simulation requires the configured 0.001-second timestep')
+    step = float(physics.findtext('max_step_size', '0')) if physics is not None else 0.
+    if not math.isfinite(step) or step <= 0:
+        raise ValueError('Recovery simulation requires a positive finite configured timestep')
     for tag, value in (('real_time_factor', simulation_speed),
-                       ('real_time_update_rate', simulation_speed * 1000)):
+                       ('real_time_update_rate', simulation_speed / step)):
         element = physics.find(tag)
         if element is None:
             element = ET.SubElement(physics, tag)
-        element.text = str(value)
+        if element.text is None or float(element.text) != value:
+            element.text = str(value)
     if ode_island_threads:
         ode = physics.find('ode')
         if ode is None:
@@ -533,6 +543,17 @@ def _write_kmr_runtime_sdf(urdf_path: Path) -> Path:
         return Path(file.name)
 
 
+def _after_controllers_started(actions: list[Any]) -> Any:
+    """Start dependent processes only after controller readiness is confirmed."""
+    def on_exit(event: Any, context: Any) -> list[Any]:
+        if event.returncode == 0:
+            return actions
+        from launch.actions import LogInfo
+
+        return [LogInfo(msg='Recovery controllers did not become active; dependent startup stopped.')]
+    return on_exit
+
+
 def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     """Create the recovery world with four UR5e arms and articulated KMR."""
     from ament_index_python import get_package_prefix, get_package_share_directory
@@ -564,7 +585,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
     controller_rate = int(LaunchConfiguration('ur_controller_rate_hz').perform(context))
     gui_rate = int(LaunchConfiguration('gazebo_gui_rate_hz', default='30').perform(context))
     ode_island_threads = int(LaunchConfiguration('ode_island_threads', default='0').perform(context))
-    recovery_observations = LaunchConfiguration('recovery_observations', default='false').perform(context) == 'true'
+    recovery_observations = LaunchConfiguration('recovery_observations', default='true').perform(context) == 'true'
     controllers = _controller_config(robots, controller_rate, recovery_observations)
     performance = {
         'speed': speed, 'ur_controller_rate_hz': controller_rate,
@@ -622,7 +643,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             arguments=['-file', str(ur_urdf_path), '-entity', 'dual_robot', '-timeout', '120'],
         )
         ur_spawner = Node(
-            package='controller_manager', executable='spawner', output='screen',
+            package='cais_lab_robotics', executable='recovery_controller_spawner.py', output='screen',
             arguments=[
                 *[name for name in controllers if name != 'controller_manager'],
                 '--controller-manager', '/controller_manager', '--controller-manager-timeout', '60.0',
@@ -639,7 +660,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             ],
         )
         kmr_spawner = Node(
-            package='controller_manager', executable='spawner', output='screen',
+            package='cais_lab_robotics', executable='recovery_controller_spawner.py', output='screen',
             arguments=[
                 'joint_state_broadcaster',
                 'KMR_iiwa_joint_trajectory_controller',
@@ -712,10 +733,15 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                     name=name,
                     output='screen',
                     parameters=[configured_nav2],
-                    remappings=remappings,
+                    remappings=[*remappings, (f'{name}/change_state', f'{name}/change_state_unreconciled')],
                 )
                 for package, executable, name, remappings in nav2_node_specs
             )
+            nav2_actions.append(Node(
+                package='cais_lab_robotics', executable='recovery_nav2_lifecycle.py',
+                namespace='KMR', name='recovery_nav2_lifecycle', output='screen',
+                parameters=[{'node_names': [name for _, _, name, _ in nav2_node_specs]}],
+            ))
             nav2_actions.append(Node(
                 package='nav2_lifecycle_manager',
                 executable='lifecycle_manager',
@@ -784,24 +810,24 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
                 # Serialize Gazebo factory requests without waiting for the UR
                 # spawn client response: active UR controllers prove that the
                 # first model is inserted and the KMR request can start safely.
-                target_action=ur_spawner, on_exit=[kmr_spawn, kmr_spawner],
+                target_action=ur_spawner, on_exit=_after_controllers_started([kmr_spawn, kmr_spawner]),
             )),
             *(
                 [RegisterEventHandler(OnProcessExit(
                     # Gazebo clients started before both models are inserted can
                     # miss their visual updates even when links exist in Gazebo.
                     target_action=kmr_spawner,
-                    on_exit=[ExecuteProcess(
+                    on_exit=_after_controllers_started([ExecuteProcess(
                         cmd=['gzclient', '--gui-client-plugin=libgazebo_ros_eol_gui.so'],
                         output='screen',
-                    )],
+                    )]),
                 ))]
                 if enabled('launch_gazebo_gui') else []
             ),
             *(
                 [RegisterEventHandler(OnProcessExit(
                     target_action=kmr_spawner,
-                    on_exit=nav2_actions,
+                    on_exit=_after_controllers_started(nav2_actions),
                 ))]
                 if nav2_actions else []
             ),
@@ -837,6 +863,16 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
         ]
     recovery_markers = None
     if enabled('launch_moveit'):
+        preview_parameters = {
+            key: moveit[key] for key in (
+                'robot_description', 'robot_description_semantic',
+                'robot_description_kinematics', 'robot_description_planning',
+            )
+        }
+        actions.append(Node(
+            package='cais_lab_robotics', executable='preview_recovery_motion',
+            parameters=[preview_parameters], output='screen',
+        ))
         move_group = Node(
             package='moveit_ros_move_group', executable='move_group',
             parameters=[moveit], output='screen',
@@ -846,7 +882,7 @@ def launch_setup(context: Any, *args: Any, **kwargs: Any) -> list[Any]:
             # UR controller group is ready while KMR/Nav2 scene loading continues.
             actions.append(RegisterEventHandler(OnProcessExit(
                 target_action=ur_spawner,
-                on_exit=[move_group],
+                on_exit=_after_controllers_started([move_group]),
             )))
         else:
             actions.append(move_group)
@@ -952,7 +988,7 @@ def generate_launch_description() -> Any:
         'launch_moveit': 'true', 'launch_rviz': 'false',
         'rviz_software_rendering': 'true' if os.environ.get('WSL_DISTRO_NAME') else 'false',
         'launch_nav2': 'true',
-        'recovery_observations': 'false',
+        'recovery_observations': 'true',
     }
     return LaunchDescription([
         *[DeclareLaunchArgument(name, default_value=value) for name, value in defaults.items()],

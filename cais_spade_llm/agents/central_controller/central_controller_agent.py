@@ -2282,6 +2282,24 @@ class CentralControllerAgent(LlmAgent):
                 )
                 return
 
+            from cais_spade_llm.recovery_framework.outline_validation import uses_outline_evidence, validate_safety_outline_payload
+
+            if uses_outline_evidence(payload):
+                try:
+                    validation = await asyncio.to_thread(validate_safety_outline_payload, payload, validator_jid=str(agent.jid))
+                except (ValueError, KeyError, TypeError, RuntimeError, OSError) as exc:
+                    validation = {"validator_jid": str(agent.jid), "results": [],
+                                  "validation_status": "NEEDS_CONTEXT", "reason": str(exc),
+                                  "execution_authorized": False}
+                response = {**validation, **{key: payload.get(key) for key in (
+                    "request_id", "recovery_session_id", "turn_index", "state_fingerprint")}}
+                reply = Message(to=str(msg.sender))
+                reply.set_metadata("type", RECOVERY_OUTLINE_SAFETY_VALIDATED)
+                reply.body = json.dumps(response, default=str)
+                await send_agent_message(agent, reply, trace_category=RECOVERY_OUTLINE_SAFETY_VALIDATED,
+                                         transport_label=RECOVERY_OUTLINE_SAFETY_VALIDATED)
+                return
+
             monitor_ready = await agent._wait_for_safety_monitor_ready(timeout_s=9.0)
             validation_unavailable_reason = (
                 "CCA safety monitor is unavailable"

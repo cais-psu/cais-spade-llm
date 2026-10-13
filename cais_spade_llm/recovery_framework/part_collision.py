@@ -3,11 +3,78 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import xml.etree.ElementTree as ET
 from typing import Any
 from copy import deepcopy
+from pathlib import Path
 
 from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.geometry import collision_boxes, rotate
+
+
+def observed_collision_identities(model_name: str, observation: dict, *,
+                                 world_path: Path | None = None, models_path: Path | None = None) -> dict:
+    """Bind a measured model to the collision IDs declared by its SDF producer.
+
+    This reads local declarations only. It does not assert that those objects
+    are present in MoveIt; the complete scene must confirm every exact identity.
+    No collision geometry or part pose is inferred from the identifier.
+    """
+    world_path = world_path or ROOT / 'ros2/cais_lab_robotics/worlds/table_recovery_framework.world'
+    models_path = models_path or ROOT / 'ros2/cais_lab_robotics/models'
+    pose = observation.get('pose')
+    if (observation.get('name') != model_name or observation.get('frame') != 'world'
+            or not isinstance(pose, list) or len(pose) != 7
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in pose)
+            or not math.isclose(sum(value * value for value in pose[3:]), 1., abs_tol=1e-5)):
+        raise ValueError('Collision identities require the measured model identity and world pose')
+    world_bytes = world_path.read_bytes()
+    world = ET.fromstring(world_bytes).find('world')
+    if world is None:
+        raise ValueError('The selected collision producer world has no world declaration')
+    matches = [(model, world_path, world_bytes) for model in world.findall('model')
+               if model.get('name') == model_name]
+    for include in world.findall('include'):
+        uri = include.findtext('uri', '')
+        path = models_path / uri.removeprefix('model://') / 'model.sdf'
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        model = ET.fromstring(data).find('model')
+        if model is not None and include.findtext('name', model.get('name')) == model_name:
+            matches.append((model, path, data))
+    if len(matches) != 1:
+        raise ValueError(f'One exact collision producer model declaration is required for {model_name}')
+    model, model_path, model_bytes = matches[0]
+    objects = []
+    sources = {str(world_path): hashlib.sha256(world_bytes).hexdigest(),
+               str(model_path): hashlib.sha256(model_bytes).hexdigest()}
+    for link in model.findall('link'):
+        for collision in link.findall('collision'):
+            geometry = collision.find('geometry')
+            if geometry is None:
+                continue
+            if not link.get('name') or not collision.get('name'):
+                raise ValueError('Collision producer has an unnamed link or collision')
+            if all(geometry.find(shape) is None for shape in ('box', 'cylinder', 'mesh')):
+                raise ValueError('Collision producer geometry is unsupported')
+            mesh = geometry.find('mesh')
+            if mesh is not None:
+                relative = mesh.findtext('uri', '').removeprefix('model://')
+                path = models_path / relative
+                if not path.is_file():
+                    path = models_path.parent / relative
+                sources[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+            objects.append({'id': f'{model_name}/{link.get("name")}/{collision.get("name")}',
+                            'model': model_name, 'link': link.get('name'), 'collision': collision.get('name')})
+    if not objects or len({row['id'] for row in objects}) != len(objects):
+        raise ValueError('Collision producer identities are missing or duplicated')
+    return {'status': 'recorded', 'model_name': model_name, 'collision_objects': objects,
+            'observation': deepcopy(observation), 'collision_scene_acknowledged': False,
+            'source': 'SDF declarations used by collision_boxes and part_scene_update',
+            'source_files': sources,
+            'producer_sha256': hashlib.sha256((Path(__file__).with_name('geometry.py')).read_bytes()).hexdigest()}
 
 
 def observed_part_boxes(model_name: str, pose: Any, *, support_allowance: float = 0.0) -> list[dict]:

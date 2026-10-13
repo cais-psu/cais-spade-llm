@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Ground reviewed safety APs against a complete frozen offline scene.
 
 Task and state descriptors retain their declared meaning. Their evidence is
@@ -5,8 +7,6 @@ never inferred from a destination name or substituted for geometric occupancy.
 The result is conditional on the supplied models, complete ledgers, and scope;
 it is neither an execution grant nor an observation of physical execution.
 """
-
-from __future__ import annotations
 
 from copy import deepcopy
 from fractions import Fraction
@@ -66,12 +66,12 @@ def _time(value: Any, name: str) -> Fraction:
     return Fraction(str(value))
 
 
-def _horizon(value: Any, name: str) -> tuple[Fraction, Fraction]:
+def _horizon(value: Any, name: str, *, instantaneous: bool = False) -> tuple[Fraction, Fraction]:
     interval = _list(value, name)
     if len(interval) != 2:
         raise ValueError(f"{name} requires start and end times")
     start, end = (_time(item, name) for item in interval)
-    if start >= end:
+    if start > end or start == end and not instantaneous:
         raise ValueError(f"{name} requires a positive duration")
     return start, end
 
@@ -170,6 +170,32 @@ def _groundings(
     return deepcopy(mappings)
 
 
+def _accessing_resources(models: dict[str, Any], geometry: dict[str, Any]) -> tuple[list[str], list[dict]]:
+    """Retain possible accessing resources and exclude only declared fixed geometry."""
+    shapes = _object(geometry.get("resources"), "geometry.resources")
+    if set(shapes) != set(models):
+        raise ValueError("Mutex participant geometry must cover the complete recorded resource population")
+    participants, excluded = [], []
+    for resource in sorted(models):
+        shape = _object(shapes[resource], f"geometry.resources[{resource!r}]")
+        model = _object(models[resource], f"resource model[{resource!r}]")
+        custody = "held_part" in _object(model.get("state_variables", {}), "state_variables")
+        stationary = shape.get("stationary_only")
+        if "stationary_only" in shape and type(stationary) is not bool:
+            raise ValueError(f"{resource}: stationary_only requires an explicit Boolean declaration")
+        if stationary is True:
+            if custody or model.get("configuration"):
+                raise ValueError(f"{resource}: stationary_only conflicts with custody or motion declarations")
+            excluded.append({"resource_id": resource,
+                             "reason": "Recorded geometry declares stationary_only=true"})
+        elif stationary is False or custody or model.get("configuration"):
+            participants.append(resource)
+        else:
+            raise ValueError(f"{resource}: mutex participant declaration is missing; "
+                             "record stationary_only or resource-owned custody/motion declarations")
+    return participants, excluded
+
+
 def _rules(
     definitions: dict[str, Any],
     requirement_scopes: Any,
@@ -178,6 +204,7 @@ def _rules(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     population = sorted(models)
     rules, used, seen = [], set(), set()
+    scope_populations = []
     resource_associations: dict[str, str] = {}
     regions = _object(geometry.get("regions"), "geometry.regions")
     for scope in _list(requirement_scopes, "requirement_scopes"):
@@ -198,6 +225,14 @@ def _rules(
             required = set()
         required.discard("resources")
         expected_fields = required | {"specification"}
+        participants = population
+        if "stationary_only" in scope:
+            if scope["stationary_only"] is not False or not paired or physical_bindings is not None:
+                raise ValueError("stationary_only=false requires a resource-pair specification")
+            expected_fields.add("stationary_only")
+            participants, excluded = _accessing_resources(models, geometry)
+            scope_populations.append({"specification": identifier, "resources": participants,
+                                      "excluded_resources": excluded})
         if physical_bindings is not None:
             expected_fields.add("physical_ap_bindings")
         has_structured = any(physical_ap_kind(ap) is None for ap in definition["aps"])
@@ -218,7 +253,7 @@ def _rules(
             _object(geometry.get("parts"), "geometry.parts"),
             resource_associations,
         )
-        pairs = list(combinations(population, 2)) if paired else [None]
+        pairs = list(combinations(participants, 2)) if paired else [None]
         if not pairs:
             raise ValueError("Pairwise requirements need two configured scene resources")
         for pair in pairs:
@@ -255,6 +290,7 @@ def _rules(
     rules.sort(key=lambda row: row["rule_id"])
     return rules, {
         "population": population,
+        "scope_populations": scope_populations,
         "requirement_scopes": deepcopy(requirement_scopes),
         "rule_ids": [row["rule_id"] for row in rules],
         "complete_relative_to": "build_environment_models(scene)",
@@ -262,7 +298,7 @@ def _rules(
 
 
 def _ledger(
-    raw: Any, name: str, horizon: tuple[Fraction, Fraction], fields: set[str]
+    raw: Any, name: str, horizon: tuple[Fraction, Fraction], fields: set[str], *, instantaneous: bool = False,
 ) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -273,13 +309,14 @@ def _ledger(
     ):
         raise ValueError(f"{name} requires complete, explicit evidence for the full horizon")
     _symbol(ledger["source_kind"], f"{name}.source_kind")
-    if _horizon(ledger["horizon"], f"{name}.horizon") != horizon:
+    if _horizon(ledger["horizon"], f"{name}.horizon", instantaneous=instantaneous) != horizon:
         raise ValueError(f"{name} does not cover the physical observation horizon")
     return ledger
 
 
 def _tasks(
-    ledger: dict[str, Any] | None, models: dict[str, Any], horizon: tuple[Fraction, Fraction]
+    ledger: dict[str, Any] | None, models: dict[str, Any], horizon: tuple[Fraction, Fraction],
+    *, instantaneous: bool = False,
 ) -> tuple[dict[str, Any], list[float]]:
     tasks, boundaries = {}, []
     if ledger is None:
@@ -295,7 +332,8 @@ def _tasks(
         if row["task_id"] in tasks or row["resource_id"] not in models:
             raise ValueError("Task evidence has a duplicate task or unknown resource")
         start, end = _time(row["start_time"], "task start"), _time(row["end_time"], "task end")
-        if not horizon[0] <= start < end <= horizon[1]:
+        if not (horizon[0] <= start < end <= horizon[1]
+                or instantaneous and horizon[0] == start == end == horizon[1]):
             raise ValueError("Task intervals must have positive duration inside the frozen horizon")
         if any(
             row["resource_id"] == other["resource_id"]
@@ -467,7 +505,8 @@ def _structured_value(
             for row in tasks.values()
             if _matches(binding, row, ("process", "product", "function"))
             and _arguments_match(binding, row)
-            and _time(row["start_time"], "task start") <= time < _time(row["end_time"], "task end")
+            and (_time(row["start_time"], "task start") <= time < _time(row["end_time"], "task end")
+                 or _time(row["start_time"], "task start") == time == _time(row["end_time"], "task end"))
         ]
         return bool(matching), {
             "source_kind": task_ledger["source_kind"],

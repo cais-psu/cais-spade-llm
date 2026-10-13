@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
@@ -51,6 +52,9 @@ class GazeboWorker:
         self._log = None
         self._log_reader = None
         self._operation_lock = threading.Lock()
+        self._control_lock = asyncio.Lock()
+        self.machine_jobs = None
+        self.processing_shutdown = None
         register_worker(self)
 
     async def run(self, request: dict) -> dict:
@@ -88,8 +92,13 @@ class GazeboWorker:
     async def _exchange(self, request: dict) -> dict:
         """Exchange one request with the owned process; probe callers may restart it."""
         self.last_result = None
-        self.task_id = request.get('pending', {}).get('task_id')
+        self.task_id = request.get('pending', request.get('task', {})).get('task_id')
         if self.process is None or self.process.poll() is not None:
+            if self.machine_jobs and self.machine_jobs.get('active_job'):
+                identity = self.machine_jobs['active_job']
+                self.machine_jobs['jobs'][identity].update(job_state='interrupted',
+                    interruption='Worker exited without acknowledged completion')
+                self.machine_jobs.update(active_job=None, revision=self.machine_jobs['revision'] + 1)
             self._cleanup()
             self._directory = tempfile.TemporaryDirectory(prefix='cais_gazebo_worker_')
             directory = Path(self._directory.name)
@@ -116,12 +125,17 @@ class GazeboWorker:
         temporary = directory / 'request.tmp'
         temporary.write_text(json.dumps({
             'id': identifier,
-            'request': {**request, '_progress_path': str(progress_path)},
+            'request': {**request, '_progress_path': str(progress_path),
+                        '_jobs_path': request.get('_jobs_path', str(directory / 'jobs.json')),
+                        '_control_path': str(directory / 'control.json'),
+                        'machine_jobs': deepcopy(self.machine_jobs)},
         }))
         temporary.replace(directory / 'request.json')
+        self._jobs_path = Path(request.get('_jobs_path', str(directory / 'jobs.json')))
         deadline = time.monotonic() + self.timeout_sec
         while True:
             self._relay_log()
+            self.read_machine_jobs()
             if self._directory is None:
                 return self.last_result or {
                     'status': 'failed', 'error': f'{self.label} worker cancelled'
@@ -152,6 +166,50 @@ class GazeboWorker:
                 raise TimeoutError(f'{self.label} ROS worker exceeded its wall-clock watchdog')
             await asyncio.sleep(.02)
 
+    def read_machine_jobs(self) -> dict | None:
+        """Read the owner's latest atomic record without commanding the worker."""
+        if self._directory is not None:
+            path = getattr(self, '_jobs_path', Path(self._directory.name) / 'jobs.json')
+            if path.is_file():
+                self.machine_jobs = json.loads(path.read_text())
+        return deepcopy(self.machine_jobs)
+
+    async def machine_control(self, request: dict, *, command_id: str) -> dict:
+        """Service job controls while the machine_part request is still running."""
+        check_stopped()
+        guard = getattr(self, 'physical_request_guard', None)
+        if callable(guard):
+            guard(request)
+        return await self._machine_control_exchange(request, command_id=command_id)
+
+    async def observe_machine_checkpoint(self, *, run_id: str, resource_id: str, checkpoint_id: str) -> dict:
+        """Ask the owner to observe a frozen checkpoint without a job command."""
+        return await self._machine_control_exchange({"run_id": run_id, "resource_id": resource_id,
+            "observation_only": True, "checkpoint_id": checkpoint_id}, command_id=checkpoint_id)
+
+    async def _machine_control_exchange(self, request: dict, *, command_id: str) -> dict:
+        async with self._control_lock:
+            if self._directory is None or self.process is None or self.process.poll() is not None:
+                raise RuntimeError('Machine worker is not running; no job was resumed')
+            directory = Path(self._directory.name)
+            temporary = directory / 'control.tmp'
+            temporary.write_text(json.dumps({'id': command_id, 'request': request}))
+            temporary.replace(directory / 'control.json')
+            deadline = time.monotonic() + 30.
+            while self._directory is not None and self.process.poll() is None:
+                path = directory / 'control_result.json'
+                if path.is_file():
+                    envelope = json.loads(path.read_text())
+                    if envelope['id'] == command_id:
+                        self.read_machine_jobs()
+                        return envelope['result']
+                if time.monotonic() >= deadline:
+                    # Expired commands must not execute after the caller abandons them.
+                    await self.cancel()
+                    raise TimeoutError('Machine control acknowledgement timed out')
+                await asyncio.sleep(.02)
+            raise RuntimeError('Machine worker stopped before acknowledging control')
+
     def _relay_log(self) -> None:
         """Tee the KMR worker's existing ROS logs to the operator console."""
         if self._log_reader is not None:
@@ -178,6 +236,7 @@ class GazeboWorker:
     async def cancel(self) -> None:
         """Cancel controller goals before terminating the owned ROS process."""
         process = self.process
+        self.read_machine_jobs()
         if process is None or process.poll() is not None:
             self._cleanup()
             return
@@ -192,4 +251,5 @@ class GazeboWorker:
             await asyncio.to_thread(process.wait, timeout=5)
         if self._result_path is not None and self._result_path.is_file():
             self.last_result = json.loads(self._result_path.read_text())['result']
+        self.processing_shutdown = self.read_machine_jobs()
         self._cleanup()

@@ -1,6 +1,6 @@
-"""Saved recovery-framework experiment settings, without runtime side effects."""
-
 from __future__ import annotations
+
+"""Saved recovery-framework experiment settings, without runtime side effects."""
 
 import json
 import math
@@ -34,6 +34,7 @@ CHECKPOINTS = {
     "during_place_lowering": "During observed downward placement motion",
     "after_M1_processing_before_pick": "After M1 finishes processing, before ur5e-1 pickup",
     "during_processing_halfway": "At 50% of the configured machining duration",
+    "during_processing": "At a seeded nonterminal point during overlapping machining",
     "after_both_pickups_before_place": "After both robots acquire their parts, before placement",
     "after_M1_pick_before_release": "After ur5e-1 acquires the completed M1 part, before release",
     "before_execute": "Before executing the selected task",
@@ -109,6 +110,7 @@ def default_setup(root: Path = ROOT) -> dict[str, Any]:
         "diagnostic_cca_bypass": False,
         "simulation": DEFAULT_SETTINGS.copy(),
         "runtime_recovery_mode": "pre_ran",
+        "runtime_recovery_primitive_mode": "auto",
         "runtime_recovery_validation_policy": "validated",
         "runtime_recovery_archive_path": "",
         "runtime_recovery_archive_label": "",
@@ -262,6 +264,8 @@ def _validate_failure(failure: Any, models: dict, parts: list[str], permitted: l
     if failure.get("checkpoint") not in CHECKPOINTS:
         raise ValueError("Unknown failure checkpoint")
     scenario = failure["scenario"]
+    if failure.get("checkpoint") == "during_processing" and type(failure.get("seed")) is not int:
+        raise ValueError("during_processing requires a recorded integer seed")
     if scenario == "Conveyor breakdown" and rid != "Conveyor":
         raise ValueError("Conveyor breakdown requires Conveyor")
     if scenario == "ur5e-1 breakdown" and rid != "ur5e-1":
@@ -368,6 +372,8 @@ def validate_setup(setup: dict, *, root: Path = ROOT) -> dict[str, Any]:
     ):
         if setup.get(field) not in options:
             raise ValueError(f"Unsupported {field}")
+    if setup.get("runtime_recovery_primitive_mode", "auto") not in {"auto", "manual"}:
+        raise ValueError("Unsupported runtime_recovery_primitive_mode")
     archive = setup.get("runtime_recovery_archive_path")
     if not isinstance(archive, str) or not isinstance(
         setup.get("runtime_recovery_archive_label"), str
@@ -451,12 +457,30 @@ def startup_block_reason(setup: dict, *, root: Path = ROOT) -> str:
     excluded = [rid for rid in inputs["models"] if rid not in setup["permitted_resources"]]
     if excluded and "completion_conditions" in inputs["product_order"]:
         reasons.append("Resource restrictions are not integrated: " + ", ".join(excluded))
-    if (
-        reference_path(setup["scene_file"], root).resolve()
-        != (root / SCENE_PATH.relative_to(ROOT)).resolve()
-    ):
-        reasons.append("Alternative plant configuration execution is not integrated")
+    if reference_path(setup["scene_file"], root).resolve() != (root / SCENE_PATH.relative_to(ROOT)).resolve():
+        original = read_json(root / SCENE_PATH.relative_to(ROOT))
+        selected = read_json(reference_path(setup["scene_file"], root))
+        if not _declared_program_subset(original, selected):
+            reasons.append("Alternative plant configuration execution is not integrated")
     return "; ".join(reasons)
+
+
+def _declared_program_subset(original: dict, selected: dict) -> bool:
+    """Allow unavailable declared programs without changing physical configuration."""
+    expected, actual = deepcopy(original), deepcopy(selected)
+    original_machines = {row["resource_id"]: row for row in expected.get("machines", [])}
+    selected_machines = {row["resource_id"]: row for row in actual.get("machines", [])}
+    if original_machines.keys() != selected_machines.keys():
+        return False
+    for rid, machine in selected_machines.items():
+        source = original_machines[rid]
+        options, declared = machine.get("program_options", {}), source.get("program_options", {})
+        if (not isinstance(options, dict) or not isinstance(declared, dict)
+                or any(name not in declared or program != declared[name] for name, program in options.items())):
+            return False
+        machine.pop("program_options", None)
+        source.pop("program_options", None)
+    return actual == expected
 
 
 class StartupValidation:

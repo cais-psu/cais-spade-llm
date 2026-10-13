@@ -3,12 +3,92 @@
 from __future__ import annotations
 
 import os
+import json
+import logging
 import re
 import shlex
+import signal
+import subprocess
+import time
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 _CAIS_ROS_LOG_DIR = Path(__file__).resolve().parents[1] / "log" / "ros"
+logger = logging.getLogger(__name__)
+
+
+def run_sim_readiness_command(
+    command: str, *, timeout_sec: float, launch: tuple, startup_phase: str,
+    diagnostic_path: Path, cancelled: Callable[[], bool],
+) -> tuple[bool, str]:
+    """Run owned ROS discovery and retain its result without logging environment data."""
+    started = time.monotonic()
+    record = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "startup_phase": startup_phase, "launch_identity": launch,
+        "ROS_DOMAIN_ID": default_ros_domain_id(),
+        "command": "ros2 service list --no-daemon --spin-time 2.0",
+        "timeout_seconds": timeout_sec, "exit_status": None,
+        "stdout": "", "stderr": "",
+    }
+    proc = None
+    status = "failed"
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        while True:
+            if cancelled():
+                status = "cancelled"
+                break
+            remaining = timeout_sec - (time.monotonic() - started)
+            if remaining <= 0:
+                status = "timeout"
+                break
+            try:
+                record["stdout"], record["stderr"] = proc.communicate(timeout=min(0.2, remaining))
+                status = "completed" if proc.returncode == 0 else "failed"
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except OSError as exc:
+        record["stderr"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if proc is not None:
+            if status in {"timeout", "cancelled"}:
+                # Kill only the session created for this probe, including shell children.
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    record["stdout"], record["stderr"] = proc.communicate(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    record["stdout"], record["stderr"] = proc.communicate()
+            record["exit_status"] = proc.returncode
+        record.update(status=status, elapsed_seconds=time.monotonic() - started)
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        with diagnostic_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    if status == "completed":
+        return True, record["stdout"]
+    detail = str(record["stderr"] or record["stdout"]).strip()
+    if status == "timeout":
+        reason = f"command timed out after {timeout_sec:g}s"
+    elif status == "cancelled":
+        reason = "readiness command cancelled because its launch stopped or changed"
+    else:
+        reason = f"command failed (exit {record['exit_status']})"
+    reason += f": {detail}" if detail else ""
+    logger.warning("Simulation readiness %s; diagnostics: %s", reason, diagnostic_path)
+    return False, reason
 
 # The non-headless OpenCV wheel points Qt at its bundled plugins when imported.
 # ROS GUI clients use the system Qt installation and abort if they inherit those paths.

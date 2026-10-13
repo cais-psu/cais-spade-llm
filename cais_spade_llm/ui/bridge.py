@@ -7825,8 +7825,7 @@ class SystemBridge:
         if not ok:
             return (
                 False,
-                "Simulation readiness query failed or timed out after "
-                f"{timeout_sec:g} seconds. Retrying ROS service discovery.",
+                f"Simulation readiness query failed: {out}",
             )
 
         services = [line.strip() for line in out.splitlines() if line.strip()]
@@ -7922,6 +7921,16 @@ class SystemBridge:
         emit_timeout_diag: bool = True,
     ) -> tuple[bool, str]:
         full_cmd = self._ROS2_ENV + self._ros2_domain_export(ros_domain_id) + command
+        if command == "ros2 service list --no-daemon --spin-time 2.0":
+            launch = self._simulation_launch_key()
+            return ros2_processes.run_sim_readiness_command(
+                full_cmd, timeout_sec=timeout_sec, launch=launch,
+                startup_phase=getattr(self, "_startup_phase", "simulation_readiness"),
+                diagnostic_path=Path(getattr(self, "_sim_readiness_diagnostic_path",
+                                            _LOG_DIR / f"simulation_readiness_{os.getpid()}.jsonl")),
+                cancelled=lambda: (bool(getattr(self, "_stopping", False))
+                                   or launch != self._simulation_launch_key()),
+            )
         t0 = time.monotonic()
         try:
             cp = subprocess.run(
@@ -39135,6 +39144,66 @@ class SystemBridge:
         """Read the current simulation fault without dispatching work."""
         runtime = self._conveyor_fault_owner()
         return runtime.conveyor_fault.snapshot() if runtime is not None else {"status": "disabled", "ready": False}
+
+    def get_part_slippage_example(self) -> dict[str, Any]:
+        """Read the functional recovery example without starting a simulation."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).snapshot()
+
+    def set_part_slippage_modes(self, outline_mode: str, primitive_mode: str) -> dict[str, Any]:
+        """Set independent generation modes before the example starts."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).set_modes(outline_mode, primitive_mode)
+
+    async def start_part_slippage_example(self) -> dict[str, Any]:
+        """Queue the simulation-only Part slippage example once."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).start()
+
+    def set_failure_example_options(self, *, source: str, scenario: str,
+                                    safety_files: list[str], observation_path: str = "") -> dict[str, Any]:
+        """Select example inputs while preserving runtime ownership."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).set_options(source=source, scenario=scenario,
+                                                    safety_files=safety_files, observation_path=observation_path)
+
+    async def start_failure_example(self) -> dict[str, Any]:
+        """Start the selected simulation failure through the existing coordinator."""
+        return await self.start_part_slippage_example()
+
+    def list_recovery_observations(self) -> list[dict[str, Any]]:
+        """List recorded failure inputs without starting any runtime work."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).saved_observations()
+
+    async def start_offline_recovery(self) -> dict[str, Any]:
+        """Generate recovery from the selected saved observations."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).start_offline()
+
+    def prepare_offline_recovery(self) -> dict[str, Any]:
+        """Prepare the selected saved input without starting LLM generation."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).prepare_offline()
+
+    def load_offline_recovery(self) -> dict[str, Any]:
+        """Load a completed saved composition for review without generating again."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return example_for_bridge(self).load_offline_result()
+
+    async def part_slippage_action(self, action: str, *, feedback: str = "") -> dict[str, Any]:
+        """Continue, regenerate, execute, stop or reset the current example."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
+
+        return await example_for_bridge(self).action(action, feedback=feedback)
 
     async def arm_conveyor_fault(self, armed: bool = True) -> dict[str, Any]:
         """Arm or disarm the once-per-run observed simulation fault."""

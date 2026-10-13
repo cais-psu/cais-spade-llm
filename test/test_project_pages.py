@@ -1,6 +1,6 @@
-"""Project navigation and read-only recovery evidence contracts."""
-
 from __future__ import annotations
+
+"""Project navigation and read-only recovery evidence contracts."""
 
 import asyncio
 import csv
@@ -43,6 +43,154 @@ def _write(root: Path, name: str, payload: object) -> Path:
     return path
 
 
+def _nominal_proof_ui_case(directory: Path) -> tuple[Path, dict, dict]:
+    import hashlib
+
+    proof = {"complete": False, "status": "NEEDS_CONTEXT", "reason": "Recorded missing fact",
+             "execution_authorized": False, "tasks": [{"task_id": "environment_8", "validation_stages": []}]}
+    path = _write(directory, "turns/turn_00004_validation_0001.json", {
+        "turn_index": 4, "phase": "outline", "decision": "need_context",
+        "nominal_continuation_evidence": proof,
+        "nominal_continuation_artifact_version": 1, "nominal_continuation_context_binding": "a" * 64,
+    })
+    summary = {key: proof[key] for key in ("complete", "status", "reason", "execution_authorized")}
+    summary["artifact_reference"] = {"version": 1, "path": "turns/turn_00004_validation_0001.json",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "turn_index": 4, "phase": "outline",
+        "context_binding": "a" * 64}
+    return path, summary, proof
+
+
+def test_nominal_proof_expanded_turn_loads_once_and_keeps_original_records(tmp_path, monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_artifacts
+    from cais_spade_llm.ui import recovery_evidence
+
+    directory = tmp_path / "recovery_outline"
+    full, summary, proof = _nominal_proof_ui_case(directory)
+    first = _write(directory, "turns/turn_00004_outline.json", {
+        "turn_index": 4, "phase": "outline", "nominal_continuation_evidence": summary})
+    second = _write(directory, "multi_turn_turn04_outline_audit.json", {
+        "turn_index": 4, "phase": "outline", "validation_evidence": {"nominal_continuation_evidence": summary}})
+    original = {path: path.read_bytes() for path in (full, first, second)}
+    load = recovery_artifacts.json.load
+    reads = []
+
+    def count(stream, *args, **kwargs):
+        reads.append(Path(stream.name))
+        return load(stream, *args, **kwargs)
+
+    monkeypatch.setattr(recovery_artifacts.json, "load", count)
+    indexed = recovery_evidence.recovery_turns(directory, "recovery_outline")
+    assert reads == []
+    data = recovery_evidence.read_recovery_turn(directory, {"files": [str(full), str(first), str(second)]})
+    assert reads == [full]
+    displayed = [row["nominal_continuation_artifact"] for row in data["results"]]
+    assert all(row is displayed[0] for row in displayed)
+    assert displayed[0]["status"] == "verified" and displayed[0]["proof"] == proof
+    assert all("tasks" not in row["payload"].get("nominal_continuation_evidence", {}) for row in data["results"])
+    assert all(path.read_bytes() == contents for path, contents in original.items())
+    assert indexed
+
+
+@pytest.mark.parametrize("failure", ["missing", "tampered", "escape", "conflicting_summary", "null_reference"])
+def test_nominal_proof_ui_reports_unavailable_instead_of_trusting_summary(tmp_path, failure):
+    from cais_spade_llm.ui.recovery_evidence import read_recovery_turn
+
+    directory = tmp_path / "recovery_outline"
+    path, summary, _ = _nominal_proof_ui_case(directory)
+    if failure == "missing":
+        path.unlink()
+    elif failure == "tampered":
+        path.write_text(path.read_text().replace("Recorded missing fact", "Changed evidence"))
+    elif failure == "escape":
+        summary["artifact_reference"]["path"] = "../outside.json"
+    elif failure == "conflicting_summary":
+        summary["complete"] = True
+    else:
+        summary["artifact_reference"] = None
+    saved = _write(directory, "turns/turn_00004_outline.json", {"nominal_continuation_evidence": summary})
+    data = read_recovery_turn(directory, {"files": [str(saved)]})
+    display = data["results"][0]["nominal_continuation_artifact"]
+    assert display["status"] == "unavailable" and display["reason"]
+    assert "proof" not in display
+
+
+def test_nominal_proof_ui_reads_copied_generation_without_original_root(tmp_path):
+    import shutil
+    from cais_spade_llm.ui.recovery_evidence import read_stage_record
+
+    directory = tmp_path / "generation_0001/recovery_outline"
+    _, summary, proof = _nominal_proof_ui_case(directory)
+    _write(directory, "turns/turn_00004_outline.json", {"nominal_continuation_evidence": summary})
+    copied = tmp_path / "generation_0002/recovery_outline"
+    shutil.copytree(directory, copied)
+    shutil.rmtree(directory)
+    data = read_stage_record(copied, copied / "turns/turn_00004_outline.json")
+    assert data["nominal_continuation_artifact"]["proof"] == proof
+    assert Path(data["nominal_continuation_artifact"]["path"]).is_relative_to(copied)
+
+
+def test_nominal_proof_renders_once_with_download_and_remains_collapsed(tmp_path, monkeypatch, recovery_browser):
+    from cais_spade_llm.ui import recovery_evidence
+    from cais_spade_llm.ui.components import recovery_turns
+
+    directory = tmp_path / "recovery_outline"
+    full, summary, proof = _nominal_proof_ui_case(directory)
+    saved = _write(directory, "turns/turn_00004_outline.json", {"nominal_continuation_evidence": summary})
+    data = recovery_evidence.read_recovery_turn(directory, {"files": [str(full), str(saved)]})
+    client = Client(context.client.page)
+    downloads = []
+    monkeypatch.setattr(recovery_turns, "_download", lambda path, label: downloads.append((path, label)))
+    with client:
+        recovery_turns.render_turn_content(data, "output")
+    sections = [row for row in client.elements.values() if isinstance(row, ui.expansion)
+                and row.text == "Nominal continuation proof"]
+    assert len(sections) == 1 and not sections[0].value
+    assert sum(label == "Download full nominal continuation proof" for _, label in downloads) == 1
+    assert not any(isinstance(row, ui.label) and row.text == json.dumps(proof, indent=2)
+                   for row in client.elements.values())
+    with client:
+        sections[0].value = True
+    _finish_reads(client)
+    assert sum(isinstance(row, ui.label) and row.text == json.dumps(proof, indent=2)
+               for row in client.elements.values()) == 1
+    client.delete()
+
+
+def test_nominal_proof_ui_renders_missing_error_without_download(tmp_path, monkeypatch):
+    from cais_spade_llm.ui import recovery_evidence
+    from cais_spade_llm.ui.components import recovery_turns
+
+    directory = tmp_path / "recovery_outline"
+    full, summary, _ = _nominal_proof_ui_case(directory)
+    full.unlink()
+    saved = _write(directory, "turns/turn_00004_outline.json", {"nominal_continuation_evidence": summary})
+    data = recovery_evidence.read_recovery_turn(directory, {"files": [str(saved)]})
+    downloads = []
+    monkeypatch.setattr(recovery_turns, "_download", lambda path, label: downloads.append((path, label)))
+    client = Client(context.client.page)
+    with client:
+        recovery_turns.render_turn_content(data, "output")
+    assert any(isinstance(row, ui.label) and row.text.startswith("Nominal continuation proof unavailable:")
+               for row in client.elements.values())
+    assert not any(label == "Download full nominal continuation proof" for _, label in downloads)
+    client.delete()
+
+
+def test_tampered_nominal_proof_cannot_reappear_through_its_indexed_file(tmp_path):
+    from cais_spade_llm.ui.recovery_evidence import read_recovery_turn
+
+    directory = tmp_path / "recovery_outline"
+    full, summary, _ = _nominal_proof_ui_case(directory)
+    full.write_text(full.read_text().replace("Recorded missing fact", "Changed evidence"))
+    saved = _write(directory, "turns/turn_00004_outline.json", {"nominal_continuation_evidence": summary})
+    data = read_recovery_turn(directory, {"files": [str(full), str(saved)]})
+    assert len(data["results"]) == 2
+    for result in data["results"]:
+        assert result["nominal_continuation_artifact"]["status"] == "unavailable"
+        assert "proof" not in result["nominal_continuation_artifact"]
+        assert result["payload"]["nominal_continuation_evidence"]["status"] == "unavailable"
+
+
 def _bridge() -> SimpleNamespace:
     return SimpleNamespace(
         system_running=False,
@@ -62,6 +210,674 @@ def _bridge() -> SimpleNamespace:
         get_safety_state=Mock(return_value={"blocked_tasks": {"task_1": "unavailable"}}),
         get_execution_timeline=Mock(return_value=[{"task_id": "task_1", "status": "failed"}]),
     )
+
+
+def test_manual_recovery_shows_observations_before_a_request_is_sent(tmp_path):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    directory = tmp_path / "generation_0001"
+    _write(directory, "input_preview.json", {"request_sent": False, "prompt": "Observed failure"})
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state.update(status="outline_ready", outline_status="ready", outline_mode="manual", primitive_mode="manual",
+                 artifact_directory=str(directory), outline_artifact_directory=str(directory / "recovery_outline"))
+    bridge.get_part_slippage_example.return_value = state
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    labels = [element.text for element in client.elements.values() if isinstance(element, ui.expansion)]
+    assert "Prepared input — not sent" in labels
+    bridge.start_part_slippage_example.assert_not_called()
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+@pytest.mark.parametrize("source", ["gazebo", "offline"])
+def test_one_recovery_mode_controls_both_stages_and_restores_without_starting_work(source):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    example = PartSlippageExample(bridge)
+    example.source = source
+    bridge.get_part_slippage_example.side_effect = example.snapshot
+    bridge.set_part_slippage_modes.side_effect = example.set_modes
+    bridge.list_safety_requirement_files.return_value = example.safety_files
+    bridge.list_recovery_observations.return_value = []
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+        modes = [element for element in client.elements.values()
+                 if isinstance(element, ui.toggle) and element.options == {"auto": "Auto", "manual": "Manual"}]
+        assert len(modes) == 1 and modes[0].value == ("manual" if source == "offline" else "auto")
+        bridge.set_part_slippage_modes.assert_not_called()
+        if source == "offline":
+            assert not modes[0].enabled
+        else:
+            assert modes[0].enabled
+            modes[0].value = "manual"
+            bridge.set_part_slippage_modes.assert_called_once_with("manual", "manual")
+            assert example.snapshot()["outline_mode"] == example.snapshot()["primitive_mode"] == "manual"
+            modes[0].value = "auto"
+            bridge.set_part_slippage_modes.assert_called_with("auto", "auto")
+            assert example.snapshot()["outline_mode"] == example.snapshot()["primitive_mode"] == "auto"
+            modes[0].value = "manual"
+    client.delete()
+    bridge.set_part_slippage_modes.reset_mock()
+    restored = Client(context.client.page)
+    with restored:
+        render_part_slippage(bridge)
+        mode = next(element for element in restored.elements.values()
+                    if isinstance(element, ui.toggle) and element.options == {"auto": "Auto", "manual": "Manual"})
+        assert mode.value == "manual"
+    bridge.set_part_slippage_modes.assert_not_called()
+    bridge.start_failure_example.assert_not_called()
+    bridge.start_offline_recovery.assert_not_called()
+    bridge.part_slippage_action.assert_not_called()
+    restored.delete()
+
+
+def test_shared_mode_does_not_change_an_existing_run_with_different_stage_modes():
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state.update(status="outline_ready", outline_mode="manual", primitive_mode="auto")
+    bridge.get_part_slippage_example.return_value = state
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    modes = [element for element in client.elements.values()
+             if isinstance(element, ui.toggle) and element.options == {"auto": "Auto", "manual": "Manual"}]
+    assert len(modes) == 1 and modes[0].value is None and not modes[0].enabled
+    assert any(isinstance(element, ui.label) and element.text ==
+               "Recorded modes: Recovery outline — manual; Primitive composition — auto."
+               for element in client.elements.values())
+    bridge.set_part_slippage_modes.assert_not_called()
+    client.delete()
+
+
+@pytest.mark.parametrize("mode", ["auto", "manual"])
+def test_offline_generate_visible_in_both_modes_and_reconnection_does_not_start_work(mode):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state.update(source="offline", status="outline_ready", can_generate_outline=True, outline_generate_reason="",
+                 outline_mode=mode, primitive_mode=mode)
+    bridge.get_part_slippage_example.return_value = state
+    for _ in range(2):
+        client = Client(context.client.page)
+        with client:
+            render_part_slippage(bridge)
+        buttons = [element for element in client.elements.values() if isinstance(element, ui.button)]
+        assert "Start offline test" not in [element.text for element in buttons]
+        outline_generate = next(element for element in buttons if element.text == "Generate")
+        assert outline_generate.visible and outline_generate.enabled
+        assert all(element.visible for element in buttons if element.text in {"Generate", "Continue"})
+        toggle = next(element for element in client.elements.values()
+                      if isinstance(element, ui.toggle) and element.options == {"auto": "Auto", "manual": "Manual"})
+        assert not toggle.enabled and toggle.value == "manual"
+        client.delete()
+    bridge.prepare_offline_recovery.assert_not_called()
+    bridge.start_offline_recovery.assert_not_called()
+    bridge.part_slippage_action.assert_not_called()
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("idle", "Select saved observations to prepare the recovery input."),
+    ("preparing_outline", "Preparing input from saved observations."),
+    ("blocked", "NEEDS_CONTEXT: prepared_recovery_request"),
+    ("generating_outline", "Generation already running."),
+])
+def test_offline_disabled_generate_shows_the_actual_reason(status, reason):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state.update(source="offline", status=status, can_generate_outline=False, outline_generate_reason=reason,
+                 busy=status in {"preparing_outline", "generating_outline"})
+    bridge.get_part_slippage_example.return_value = state
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    generate = next(element for element in client.elements.values() if isinstance(element, ui.button) and element.text == "Generate")
+    assert generate.visible and not generate.enabled
+    assert any(isinstance(element, ui.label) and element.text == reason for element in client.elements.values())
+    client.delete()
+
+
+def test_selecting_saved_observations_only_prepares_the_input():
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state["source"] = "offline"
+    bridge.get_part_slippage_example.return_value = state
+    bridge.set_failure_example_options.return_value = {**state, "selected_observation_path": "capture"}
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+        selected = next(element for element in client.elements.values()
+                        if isinstance(element, ui.select) and element._props.get("label") == "Saved observations")
+        selected.set_options({"capture": "Part slippage · source · captured time · Ready to prepare"}, value="capture")
+    bridge.prepare_offline_recovery.assert_called_once_with()
+    bridge.start_offline_recovery.assert_not_called()
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+def test_saved_observation_selection_survives_an_older_poll(monkeypatch):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    bridge.get_part_slippage_example.side_effect = lambda: dict(state)
+    bridge.list_recovery_observations.return_value = [{
+        "source_path": "capture", "scenario": "Part slippage", "run_id": "source",
+        "captured_at": "2026-10-08T20:46:46+00:00", "offline_ready": True,
+    }]
+    bridge.list_safety_requirement_files.return_value = []
+
+    def select(**options):
+        state.update(source=options["source"], selected_observation_path=options["observation_path"])
+        return dict(state)
+
+    def prepare():
+        state.update(status="outline_ready", can_generate_outline=True, outline_generate_reason="",
+                     observation_path="attempt/observations.json")
+
+    bridge.set_failure_example_options.side_effect = select
+    bridge.prepare_offline_recovery.side_effect = prepare
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def read_files(reader):
+            started.set()
+            await release.wait()
+            return reader()
+
+        monkeypatch.setattr(asyncio, "to_thread", read_files)
+        with client:
+            source = next(item for item in client.elements.values()
+                          if isinstance(item, ui.toggle) and "offline" in item.options)
+            selected = next(item for item in client.elements.values()
+                            if isinstance(item, ui.select) and item._props.get("label") == "Saved observations")
+            timer = next(item for item in client.elements.values() if isinstance(item, ui.timer)
+                         and item.callback.__qualname__.startswith("PageRefresh.timer."))
+            pending = asyncio.create_task(timer.callback())
+            await started.wait()
+            source.value = "offline"
+            selected.value = "capture"
+            release.set()
+            await pending
+            assert source.value == "offline"
+            assert selected.visible and selected.value == "capture"
+            assert next(item for item in client.elements.values()
+                        if isinstance(item, ui.button) and item.text == "Generate").enabled
+
+    asyncio.run(exercise())
+    bridge.prepare_offline_recovery.assert_called_once_with()
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+def test_saved_observation_refresh_restores_current_selection_without_preparing(monkeypatch):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components import part_slippage_recovery
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state["source"] = "offline"
+    bridge.get_part_slippage_example.side_effect = lambda: dict(state)
+    reader = Mock()
+    monkeypatch.setattr(part_slippage_recovery, "BackgroundSection", lambda: reader)
+    captures = [{"source_path": "capture", "scenario": "Part slippage", "run_id": "source",
+                 "related_observation_paths": ["capture", "attempt/observations.json"],
+                 "offline_ready": True}]
+    client = Client(context.client.page)
+    with client:
+        part_slippage_recovery.render_part_slippage(bridge)
+        selected = next(item for item in client.elements.values()
+                        if isinstance(item, ui.select) and item._props.get("label") == "Saved observations")
+        state["selected_observation_path"] = "attempt/observations.json"
+        show_options = reader.load.call_args.args[1]
+        show_options((captures, []))
+        assert selected.value == "capture"
+        assert len(selected.options) == 1
+        unchanged = Mock(wraps=selected.set_options)
+        monkeypatch.setattr(selected, "set_options", unchanged)
+        show_options((captures, []))
+        unchanged.assert_not_called()
+    bridge.set_failure_example_options.assert_not_called()
+    bridge.prepare_offline_recovery.assert_not_called()
+    client.delete()
+
+
+def test_recovery_page_orders_main_panels_and_restores_safety_selection(tmp_path):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.pages import recovery
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    safety = "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt"
+    state["selected_safety_files"] = [safety]
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_safety_requirement_files.return_value = [safety]
+    bridge.list_recovery_observations.return_value = []
+    client = Client(context.client.page)
+    with client:
+        recovery.render(bridge=bridge, root=tmp_path, debug_root=tmp_path)
+    _finish_reads(client)
+    names = ["Example", "Safety", "Recovery outline", "Primitive composition", "Execution"]
+    labels = [element.text for element in client.elements.values() if isinstance(element, ui.label)]
+    assert "Current observations" not in labels
+    assert [labels.index(name) for name in names] == sorted(labels.index(name) for name in names)
+    assert not any(isinstance(element, ui.expansion) and element.text == "Details" for element in client.elements.values())
+    assert any(isinstance(element, ui.button) and element.text == "Start failure" for element in client.elements.values())
+    selected = next(element for element in client.elements.values()
+                    if isinstance(element, ui.select) and element._props.get("label") == "Safety specifications")
+    assert selected.value == [safety]
+    bridge.set_failure_example_options.assert_not_called()
+    bridge.start_failure_example.assert_not_called()
+    bridge.start_offline_recovery.assert_not_called()
+    client.delete()
+
+
+def test_selecting_part_slippage_updates_safety_defaults_without_starting_work():
+    from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
+    from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock(system_running=False)
+    example = PartSlippageExample(bridge)
+    expected = example.snapshot()["selected_safety_files"]
+    example.set_options(source="gazebo", scenario="Conveyor breakdown", safety_files=[])
+    bridge.get_part_slippage_example.side_effect = example.snapshot
+    bridge.set_failure_example_options.side_effect = example.set_options
+    bridge.list_safety_requirement_files.return_value = [str(ROOT / path) for path in expected]
+    bridge.list_recovery_observations.return_value = []
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    with client:
+        scenario = next(element for element in client.elements.values()
+                        if isinstance(element, ui.select) and element._props.get("label") == "Failure scenario")
+        safety = next(element for element in client.elements.values()
+                      if isinstance(element, ui.select) and element._props.get("label") == "Safety specifications")
+        assert safety.value == default_safety_files("Conveyor breakdown")
+        scenario.value = "Part slippage"
+        assert safety.value == expected
+        assert set(safety.options) == set(expected)
+        safety.value = []
+        assert example.snapshot()["selected_safety_files"] == []
+    bridge.start_failure_example.assert_not_called()
+    bridge.start_offline_recovery.assert_not_called()
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+@pytest.mark.parametrize("scenario", ["Conveyor breakdown", "ur5e-1 breakdown", "Machining breakdown during part processing"])
+def test_offline_case_selection_filters_captures_and_stops_at_outline_review(scenario):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock(system_running=False)
+    example = PartSlippageExample(bridge)
+    example.set_options(source="offline", scenario=scenario, safety_files=[])
+    state = example.snapshot()
+    state.update(status="outline_review", validation_contract_version=2, outline_status="completed", outline=[{"outline_id": "retained"}])
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_safety_requirement_files.return_value = []
+    bridge.list_recovery_observations.return_value = [
+        {"source_path": "selected", "scenario": scenario, "run_id": "case-run", "offline_ready": True},
+        {"source_path": "other", "scenario": "Part slippage", "run_id": "other-run", "offline_ready": True},
+    ]
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    selected = next(item for item in client.elements.values() if isinstance(item, ui.select)
+                    and item._props.get("label") == "Saved observations")
+    scenario_select = next(item for item in client.elements.values() if isinstance(item, ui.select)
+                           and item._props.get("label") == "Failure scenario")
+    assert set(selected.options) == {"selected"}
+    assert scenario_select.visible
+    for item in client.elements.values():
+        if isinstance(item, ui.button) and item.text in {"Continue", "Execute recovery", "Test in Gazebo"}:
+            assert not item.enabled
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    assert "Start failure → Capture observations → Recovery outline → Review" in labels
+    assert f"Primitive composition is not supported for {scenario} yet. This case stops at outline review." in labels
+    assert f"Recovery execution is not supported for {scenario} yet. This case stops at outline review." in labels
+    for item in client.elements.values():
+        if isinstance(item, ui.button) and item.text == "Test in Gazebo":
+            assert item.visible and item.parent_slot.parent.visible
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+def test_safety_panel_marks_relative_defaults_selected_with_absolute_bridge_options():
+    from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    selected = state["selected_safety_files"]
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_safety_requirement_files.return_value = [str(ROOT / path) for path in selected]
+    bridge.list_recovery_observations.return_value = []
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    safety = next(element for element in client.elements.values()
+                  if isinstance(element, ui.select) and element._props.get("label") == "Safety specifications")
+    assert safety.value == selected
+    assert set(safety.options) == set(selected)
+    assert set(safety.options.values()) == {Path(path).name for path in selected}
+    assert safety._props["use-chips"] is True
+    bridge.set_failure_example_options.assert_not_called()
+    bridge.start_failure_example.assert_not_called()
+    client.delete()
+
+
+@pytest.fixture
+def recovery_browser(monkeypatch):
+    browser = {}
+    class Reply:
+        def __init__(self, value):
+            self.value = value
+        def __await__(self):
+            async def result():
+                return self.value
+            return result().__await__()
+    def javascript(script):
+        if script.startswith("localStorage.getItem("):
+            key = json.loads(script[len("localStorage.getItem("):-1])
+            return Reply(browser.get(key))
+        key, value = script[len("localStorage.setItem("):].split(", String(", 1)
+        browser[json.loads(key)] = value.split(")", 1)[0]
+        return Reply(None)
+    monkeypatch.setattr(ui, "run_javascript", javascript)
+    return browser
+
+
+def test_recovery_turn_expansions_are_independent_lazy_and_survive_updates(tmp_path, monkeypatch, recovery_browser):
+    from cais_spade_llm.ui.components import recovery_turns
+
+    reader = Mock(return_value={"captures": [], "results": [], "prompts": []})
+    monkeypatch.setattr(recovery_turns, "read_recovery_turn", reader)
+    state = {"run_id": "run-one", "artifact_directory": str(tmp_path / "generation_0001")}
+    turn = {"turn": 1, "phase": "outline", "status": "need_context", "files": [], "signature": [1]}
+    client = Client(context.client.page)
+    with client:
+        view = recovery_turns.RecoveryTurns(ui.column())
+        view.update(state, "outline", [turn])
+        expansions = [row for row in client.elements.values() if isinstance(row, ui.expansion)]
+        assert [row.text for row in expansions] == ["Input", "Output"]
+        assert all(row.value is False for row in expansions)
+        reader.assert_not_called()
+        expansions[0].value = True
+    _finish_reads(client)
+    reader.assert_called_once()
+    with client:
+        view.update(state, "outline", [turn, {**turn, "turn": 2}])
+    assert expansions[0].value is True and expansions[1].value is False
+    assert view.rows[(1, "outline")]["label"].text.startswith("Turn 1")
+    assert len(view.rows) == 2
+    client.delete()
+
+    restored_client = Client(context.client.page)
+    with restored_client:
+        restored = recovery_turns.RecoveryTurns(ui.column())
+        restored.update(state, "outline", [turn])
+    async def reconnect():
+        for timer in list(restored_client.elements.values()):
+            if isinstance(timer, ui.timer) and timer.callback.__qualname__.endswith(".restore"):
+                timer.cancel()
+                await timer.callback()
+    asyncio.run(reconnect())
+    restored_expansions = [row for row in restored_client.elements.values() if isinstance(row, ui.expansion)]
+    assert restored_expansions[0].value is True
+    assert restored_expansions[1].value is False
+    restored_client.delete()
+
+
+def test_output_separates_ra_physical_and_cca_evidence(recovery_browser):
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    evidence = {"captures": [], "prompts": [], "results": [{"path": "/tmp/turn.json", "payload": {
+        "validation_stages": [
+            {"validator_role": "ResourceAgent", "evidence": {"allowed": True, "feasibility_status": "FEASIBLE",
+                "geometry_evidence": {"status": "needs_context", "unresolved": ["Missing interval"]}}},
+            {"validator_role": "CentralControllerAgent", "evidence": {"is_safe": False, "validation_status": "NEEDS_CONTEXT"}},
+        ]}}]}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(evidence, "output", state_key="run:attempt:turn")
+        validation = next(item for item in client.elements.values()
+                          if isinstance(item, ui.expansion) and item.text == "Validation records")
+        validation.value = True
+    _finish_reads(client)
+    sections = [item for item in client.elements.values()
+                if isinstance(item, ui.expansion) and item is not validation]
+    assert [item.text for item in sections] == ["RA feasibility", "Physical evidence", "CCA safety"]
+    assert all(item.value is False for item in sections)
+    client.delete()
+
+
+def test_output_lists_exact_proposals_before_responses_and_keeps_attempts(tmp_path, recovery_browser):
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    events = [
+        {"event_name": "recover_pick_gear_small", "resource_jid": "recovery-resource-4@localhost", "part_name": "gear_small"},
+        {"event_name": "recover_to_idle", "resource_jid": "recovery-resource-4@localhost", "part_name": None},
+    ]
+    captures = []
+    originals = {}
+    for attempt, proposed in ((1, events), (2, list(reversed(events)))):
+        content = json.dumps({"thought": "Recorded proposal", "candidate_events": proposed}, separators=(",", ":"))
+        record = {"kind": "provider_response", "tool_round": 0, "attempt": attempt,
+                  "raw_response": {"choices": [{"message": {"content": content}}]}}
+        path = _write(tmp_path, f"attempt{attempt}_response.json", record)
+        originals[path] = path.read_bytes()
+        captures.append({"path": str(path), "status": "captured", "record": record})
+    result = {"path": str(tmp_path / "audit.json"), "response": {"event_name": "not_an_llm_proposal"},
+              "payload": {"selected_transition": {"event_name": "runtime_selected"},
+                          "candidate_evaluation_summary": [{"status": "rejected", "task": events[0]}],
+                          "served_context": {"/parts/gear_small/observed_pose": {"value": {"x": 0.3}}}}}
+    summary = {"path": str(tmp_path / "turn.json"), "response": {}, "payload": {"decision": "outline_ready"}}
+    data = {"captures": captures, "results": [result, summary], "prompts": []}
+    before = json.dumps(data)
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output", state_key="run:generation:turn:output")
+    tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
+    assert len(tables) == 2
+    assert tables[0].rows == [{"row": index, **event} for index, event in enumerate(events)]
+    assert tables[1].rows == [{"row": index, **event} for index, event in enumerate(reversed(events))]
+    labels = [item for item in client.elements.values() if isinstance(item, ui.label)]
+    response_title = next(item for item in labels if item.text == "LLM response")
+    assert all(item.id < response_title.id for item in tables)
+    assert any('\n  "thought": "Recorded proposal"' in item.text for item in labels)
+    assert not any("runtime_selected" in item.text for item in labels)
+    details = [item for item in client.elements.values() if isinstance(item, ui.expansion)]
+    assert [item.text for item in details] == ["Validation records", "Returned context"]
+    assert all(item.value is False for item in details)
+    with client:
+        details[0].value = True
+    _finish_reads(client)
+    assert details[1].value is False
+    assert any(isinstance(item, ui.label) and "runtime_selected" in item.text for item in client.elements.values())
+    assert len([item for item in client.elements.values() if isinstance(item, ui.button) and item.text == "Download original"]) == 2
+    assert json.dumps(data) == before
+    assert all(path.read_bytes() == content for path, content in originals.items())
+    client.delete()
+
+
+@pytest.mark.parametrize("response", [
+    {"thought": "Saved pose available", "decision": "grounded", "observe_requests": []},
+    {"thought": "Read recorded facts", "decision": "need_context", "context_requests": ["/parts"]},
+])
+def test_output_grounding_and_retrieval_never_show_runtime_events(response):
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    data = {"captures": [{"path": "response.json", "status": "captured", "record": {
+        "kind": "provider_response", "raw_response": {"choices": [{"message": {"content": json.dumps(response)}}]},
+    }}], "results": [{"path": "audit.json", "response": {}, "payload": {
+        "selected_transition": {"event_name": "runtime_only"}, "transition_trace": [{"event_name": "runtime_only"}],
+    }}], "prompts": []}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output")
+    assert not any(isinstance(item, ui.table) for item in client.elements.values())
+    assert any(isinstance(item, ui.label) and item.text == "No events proposed in this turn" for item in client.elements.values())
+    client.delete()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_missing_raw_output_does_not_present_selected_transition_as_llm_proposal(legacy):
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    payload = {"selected_transition": {"event_name": "runtime_only"}}
+    if legacy:
+        payload["llm_response"] = {"candidate_events": [{"event_name": "original_event", "resource_jid": "ur5e@localhost"}]}
+    data = {"captures": [{"path": "missing.json", "status": "not captured", "record": {}}],
+            "results": [{"path": "audit.json", "payload": payload, "response": payload["selected_transition"]}], "prompts": []}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output")
+    tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    assert "Raw LLM response capture missing." in labels
+    if legacy:
+        assert tables[0].rows[0]["event_name"] == "original_event"
+        assert "Legacy parsed LLM response — raw capture unavailable" in labels
+    else:
+        assert not tables
+        assert "Proposed events unavailable: LLM response capture missing." in labels
+    client.delete()
+
+
+@pytest.mark.parametrize("field", ["candidate_traces", "next_transition", "transition_trace"])
+def test_output_preserves_legacy_llm_event_formats_and_order(field):
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    events = [{"event_name": name, "resource_jid": "ur5e@localhost", "part_name": "LG"} for name in ("first", "second")]
+    response = ({field: [{"events": events}]} if field == "candidate_traces" else
+                {field: events[0], "transition_suffix": events[1:]} if field == "next_transition" else {field: events})
+    data = {"captures": [{"path": "response.json", "status": "captured", "record": {
+        "kind": "provider_response", "raw_response": {"choices": [{"message": {"content": json.dumps(response)}}]},
+    }}], "results": [], "prompts": []}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output")
+    table = next(item for item in client.elements.values() if isinstance(item, ui.table))
+    assert table.rows == [{"row": index, **event} for index, event in enumerate(events)]
+    client.delete()
+
+
+def test_invalid_llm_json_remains_visible_without_invented_events():
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    content = '{"candidate_events": [unfinished'
+    data = {"captures": [{"path": "response.json", "status": "captured", "record": {
+        "kind": "provider_response", "raw_response": {"choices": [{"message": {"content": content}}]},
+    }}], "results": [], "prompts": []}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output")
+    assert not any(isinstance(item, ui.table) for item in client.elements.values())
+    assert any(isinstance(item, ui.label) and item.text == content for item in client.elements.values())
+    client.delete()
+
+
+def test_legacy_primitive_output_keeps_its_parsed_response():
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    response = {"decision": "need_context", "context_requests": ["/parts/gear_small/observed_pose"]}
+    data = {"captures": [], "prompts": [], "results": [{
+        "path": "multi_turn_RECOVERY_SEQ1_primitive_generation_turn01_response_20261008T100001.txt",
+        "payload": {"response": response}, "response": response,
+    }]}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output")
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    assert "Legacy parsed response — raw capture unavailable" in labels
+    assert json.dumps(response, indent=2) in labels
+    assert not any(isinstance(item, ui.table) for item in client.elements.values())
+    client.delete()
+
+
+def test_turn_validation_and_context_expansions_survive_refresh_and_reconnection(tmp_path, monkeypatch, recovery_browser):
+    from cais_spade_llm.ui.components import recovery_turns
+
+    data = {"captures": [], "prompts": [], "results": [{"path": "audit.json", "response": {}, "payload": {
+        "selected_transition": {"event_name": "runtime_selected"},
+        "served_context": {"/parts": [{"part_name": "gear_small"}]},
+    }}]}
+    monkeypatch.setattr(recovery_turns, "read_recovery_turn", lambda *_: data)
+    state = {"run_id": "run-one", "artifact_directory": str(tmp_path / "generation_0001")}
+    turn = {"turn": 1, "phase": "outline", "status": "recorded", "files": [], "signature": [1]}
+
+    def restore(client):
+        async def finish():
+            for timer in list(client.elements.values()):
+                if isinstance(timer, ui.timer) and not timer._is_canceled and timer.callback.__qualname__.endswith(".restore"):
+                    timer.cancel()
+                    await timer.callback()
+        asyncio.run(finish())
+        _finish_reads(client)
+
+    client = Client(context.client.page)
+    with client:
+        view = recovery_turns.RecoveryTurns(ui.column())
+        view.update(state, "outline", [turn])
+        output = next(item for item in client.elements.values() if isinstance(item, ui.expansion) and item.text == "Output")
+        output.value = True
+    _finish_reads(client)
+    with client:
+        validation = next(item for item in client.elements.values() if isinstance(item, ui.expansion) and item.text == "Validation records")
+        validation.value = True
+    _finish_reads(client)
+    with client:
+        view.update(state, "outline", [{**turn, "signature": [2]}, {**turn, "turn": 2}])
+    _finish_reads(client)
+    restore(client)
+    expanded = [item.text for item in client.elements.values() if isinstance(item, ui.expansion) and item.value]
+    assert expanded == ["Output", "Validation records"]
+    assert any(isinstance(item, ui.label) and "runtime_selected" in item.text for item in client.elements.values())
+    client.delete()
+
+    client = Client(context.client.page)
+    with client:
+        view = recovery_turns.RecoveryTurns(ui.column())
+        view.update(state, "outline", [turn])
+    restore(client)
+    restore(client)
+    assert [item.text for item in client.elements.values() if isinstance(item, ui.expansion) and item.value] == ["Output", "Validation records"]
+    with client:
+        view.update({**state, "artifact_directory": str(tmp_path / "generation_0002")}, "outline", [turn])
+    restore(client)
+    assert all(not item.value for item in client.elements.values() if isinstance(item, ui.expansion))
+    client.delete()
 
 
 def test_sidebar_project_folders_expose_existing_views_and_recovery_placeholder():
@@ -263,8 +1079,11 @@ def test_header_deletion_cancels_actual_nicegui_timers_without_callback_error(mo
     (b"tab=", "run"), (b"tab=unknown", "run"),
 ])
 def test_recovery_direct_links_build_only_the_selected_view(query, expected, monkeypatch):
-    """Direct links select one view; the recovery viewer invokes no runtime."""
+    """Direct links select one view; recovery reads progress without starting work."""
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+
     bridge = MagicMock(spec=SystemBridge)
+    bridge.get_part_slippage_example.return_value = PartSlippageExample(bridge).snapshot()
     render_run, render_setup, render_results, render_delivery = (Mock() for _ in range(4))
     monkeypatch.setattr(recovery_run, "render", render_run)
     monkeypatch.setattr(recovery_framework, "_render_setup", render_setup)
@@ -284,12 +1103,14 @@ def test_recovery_direct_links_build_only_the_selected_view(query, expected, mon
         assert render_delivery.call_count == (2 if expected == "results" else 0)
         if expected == "recovery":
             assert any(
-                isinstance(element, ui.select) and element._props.get("label") == "Saved example / test"
+                isinstance(element, ui.select) and element._props.get("label") == "Saved observations"
                 for element in client.elements.values()
             )
             assert not any(isinstance(element, ui.badge) and element.text == "Placeholder"
                            for element in client.elements.values())
-        assert bridge.mock_calls == []
+            assert not any(isinstance(element, ui.expansion) and element.text == "Details"
+                           for element in client.elements.values())
+        assert all(call[0] == "get_part_slippage_example" for call in bridge.mock_calls)
     client.delete()
 
 
@@ -496,7 +1317,9 @@ def test_recovery_run_polling_does_not_write_mode_and_pauses_when_hidden(monkeyp
     monkeypatch.setattr(
         ui, "timer", lambda interval, callback, **kwargs: callbacks.append(callback) or Mock()
     )
-    client = Client(context.client.page)
+    client = Client(context.client.page, request=Request({
+        "type": "http", "path": "/recovery-framework", "headers": [], "query_string": b"",
+    }))
     async def check_page():
         with client:
             recovery_run.render(bridge, is_active=lambda: active["value"])
@@ -718,3 +1541,37 @@ def test_request_only_failure_is_indexed_once_with_exact_attempts(tmp_path):
     assert set(examples[0]["stages"]) == {"recovery_outline"}
     assert stage_records(directory, "recovery_outline") == [request]
     assert read_stage_record(directory, request)["captures"][0]["record"]["payload"]["messages"][0]["content"] == "real request"
+
+
+@pytest.mark.parametrize('recorded', [False, True])
+def test_recovery_panel_shows_only_recorded_attempt_provenance(recorded):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock(system_running=False)
+    state = PartSlippageExample(bridge).snapshot()
+    if recorded:
+        state.update(provenance_path='/recorded/attempt_provenance.json', attempt_provenance={
+            'capture': {'run_id': 'captured-run', 'captured_at': 'captured-time', 'source_sha256': 'capturehash'},
+            'configuration_fingerprint': 'configurationhash', 'model_fingerprint': 'modelhash',
+            'implementation_fingerprint': 'implementationhash',
+            'safety_specifications': [{'path': 'recorded-safety.txt', 'sha256': 'safetyhash'}], 'unassisted': True})
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_safety_requirement_files.return_value = []
+    bridge.list_recovery_observations.return_value = []
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    button = next(item for item in client.elements.values() if isinstance(item, ui.button)
+                  and item.text == 'Download attempt provenance')
+    if recorded:
+        assert any('captured-run' in text and 'capturehash' in text and 'recorded-safety.txt safetyhash' in text
+                   and 'Implementation implementati' in text and 'unassisted' in text for text in labels)
+        assert button.visible
+    else:
+        assert 'Attempt provenance not recorded.' in labels
+        assert not button.visible
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()

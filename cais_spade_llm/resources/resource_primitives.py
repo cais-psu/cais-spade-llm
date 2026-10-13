@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from copy import deepcopy
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
@@ -81,6 +82,12 @@ def _schema_properties_for_function(fn: Any) -> tuple[dict[str, Any], list[str],
             continue
         if parameter.default is inspect._empty:
             required.append(str(param_name))
+        elif parameter.default is None and param_name in properties:
+            schema = properties[param_name]
+            if isinstance(schema.get("type"), str):
+                schema["type"] = [schema["type"], "null"]
+            elif isinstance(schema.get("type"), list) and "null" not in schema["type"]:
+                schema["type"].append("null")
     description = str(analyzed.get("description") or "").strip()
     return properties, required, description
 
@@ -229,7 +236,8 @@ def build_recovery_des_model(
     The base resource never derives a DES alphabet from execution primitives.
     Resource subclasses may pass a task-level descriptor, while simpler
     resources may declare one under ``static_capabilities.recovery_des_model``.
-    Missing or malformed descriptors fail closed.
+    Explicit state and primitive declarations may have no predefined events.
+    Missing or malformed state declarations fail closed.
     """
     if resource_agent is None:
         return {}
@@ -247,8 +255,8 @@ def build_recovery_des_model(
         else static_capabilities.get("recovery_des_model") or {}
     )
     raw_state_variables = raw_descriptor.get("state_variables")
-    raw_events = raw_descriptor.get("events")
-    if not isinstance(raw_state_variables, dict) or not isinstance(raw_events, list):
+    raw_events = raw_descriptor.get("events", [])
+    if not isinstance(raw_state_variables, dict) or not raw_state_variables or not isinstance(raw_events, list):
         return {}
 
     state_variables: dict[str, dict[str, Any]] = {}
@@ -319,10 +327,23 @@ def build_recovery_des_model(
         ):
             if key in raw_event:
                 event[key] = deepcopy(raw_event.get(key))
+        task_definition = getattr(getattr(resource_agent, event_name, None), "__tool_spec__", None)
+        program = getattr(task_definition, "program", None)
+        if program is not None and is_dataclass(program):
+            contract = deepcopy(event.get("composition_contract") or {})
+            contract.update({
+                "steps": [asdict(step) for step in program.steps],
+                "entry_state": program.entry_state,
+                "part_in_state": program.part_in_state,
+                "entry_guards": [asdict(guard) for guard in program.entry_guards],
+                "required_context_keys": list(program.required_context_keys),
+                "effects": [asdict(effect) for effect in program.effects],
+                "part_transition": deepcopy(program.part_transition),
+                "params": task_definition.argument_properties(),
+                "required_params": task_definition.required_argument_names(),
+            })
+            event["composition_contract"] = contract
         events.append(event)
-    if not events:
-        return {}
-
     resource_jid = str(
         getattr(resource_agent, "jid", "")
         or live_snapshot.get("resource_jid")

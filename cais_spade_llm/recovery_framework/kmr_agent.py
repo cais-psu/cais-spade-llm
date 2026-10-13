@@ -323,18 +323,52 @@ class KMRResourceAgent(ResourceAgent):
         self._primitive_state['last_execution_evidence'] = deepcopy(result)
 
     def _snapshot_state(self) -> dict:
-        snapshot = super()._snapshot_state()
-        snapshot.update(resource_type='kmr', **self._primitive_state)
-        runtime = getattr(self, 'delivery_runtime', None)
-        if runtime is not None:
-            snapshot['execution_outcome'] = deepcopy(runtime.outcome)
-            if runtime.context.transitions:
-                ack = runtime.context.transitions[-1]['acknowledgement']
-                snapshot['state_evidence'] = (
-                    f"Last Gazebo acknowledgement: {ack['event_name']}; "
-                    f"revision {runtime.context.revision}; launch {runtime.prepared['probe']['launch_id']}."
-                )
-        return snapshot
+        """Return only retained values declared by this environment owner."""
+        from cais_spade_llm.resources.environment_recovery import environment_owner_snapshot
+
+        return environment_owner_snapshot(self)
+
+    def get_recovery_snapshot(self) -> dict:
+        """Export flat resource fields without profile defaults."""
+        return self._snapshot_state()
+
+    def get_recovery_resource_evidence(self) -> dict:
+        """Keep captured declarations and observations available to detached RAs."""
+        from cais_spade_llm.resources.environment_recovery import environment_owner_evidence
+
+        return environment_owner_evidence(self)
+
+    def recovery_des_model(self, *, snapshot: dict | None = None) -> dict:
+        """Expose exact owner successors and their unordered primitive support."""
+        from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor
+
+        return environment_recovery_descriptor(self.get_recovery_resource_evidence(),
+            self.get_recovery_snapshot() if snapshot is None else snapshot, resource_jid=str(self.jid))
+
+    def prepare_recovery_primitive_parameters(self, *, task: dict, recovery_des_model: dict,
+                                              recovery_snapshot: dict, physical_input: dict) -> dict:
+        """Calculate KMR parameters without executing or composing primitives."""
+        from cais_spade_llm.recovery_framework.kmr_recovery import prepare_kmr_primitive_parameters
+        from cais_spade_llm.resources.environment_recovery import kmr_validation_evidence
+
+        return prepare_kmr_primitive_parameters(task=task, recovery_des_model=recovery_des_model,
+            recovery_snapshot=recovery_snapshot, resource_evidence=kmr_validation_evidence(
+                physical_input.get('resource_evidence') or {}, recovery_snapshot, physical_input.get('physical_evidence')),
+            resource_jid=str(self.jid))
+
+    def check_recovery_primitive_feasibility(self, **kwargs) -> dict:
+        """Use the same pure capability calculation as a detached owner."""
+        from cais_spade_llm.resources.environment_recovery import check_environment_primitive_capability
+
+        if kwargs.get('resource_evidence') is None:
+            kwargs['resource_evidence'] = self.get_recovery_resource_evidence()
+        return check_environment_primitive_capability(**kwargs)
+
+    def project_recovery_outline_event(self, **kwargs) -> dict:
+        """Keep declared symbolic effects separate from physical interval evidence."""
+        from cais_spade_llm.resources.environment_recovery import project_environment_event
+
+        return project_environment_event(**kwargs)
 
     def get_recovery_physical_snapshot(self) -> dict:
         """Export retained KMR observations without filling missing poses or custody.

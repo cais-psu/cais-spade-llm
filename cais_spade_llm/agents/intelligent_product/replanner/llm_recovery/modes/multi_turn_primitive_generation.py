@@ -2115,6 +2115,10 @@ async def generate_primitive_batch_with_llm_agent(
             )
         )
         prompt_text = render_multi_turn_phase_prompt(prompt_input)
+        feedback = prepared_recovery_request.get("recovery_feedback")
+        if feedback:
+            prompt_input["recovery_feedback"] = feedback
+            prompt_text += "\n\nOperator feedback:\n" + str(feedback)
         raw_response = await recorded_structured_call(
             ask_llm_structured,
             directory=recovery_request_directory(prepared_recovery_request, "primitive_generation"),

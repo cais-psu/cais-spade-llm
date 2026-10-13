@@ -1,6 +1,6 @@
-"""Experiment setting persistence, exact NIST bindings, and UI-only behavior."""
-
 from __future__ import annotations
+
+"""Experiment setting persistence, exact NIST bindings, and UI-only behavior."""
 
 import asyncio
 import json
@@ -25,9 +25,20 @@ from cais_spade_llm.ui.pages import recovery_framework, recovery_run, safety
 
 
 @pytest.fixture(autouse=True)
-def isolated_controller_preparation(monkeypatch):
-    """Keep UI Start/Stop tests independent of live ROS service discovery."""
+def isolated_controller_preparation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply HTTP requests and keep Start/Stop independent of ROS discovery."""
     monkeypatch.setattr(recovery_run, "prepare_environment_start", Mock())
+    original_init = Client.__init__
+
+    def initialize_client(
+        client: Client, page: ui.page, *, request: Request | None = None,
+    ) -> None:
+        if request is None:
+            request = Request({"type": "http", "path": "/recovery-framework", "headers": [],
+                               "query_string": b"", "client": ("127.0.0.1", 50000)})
+        original_init(client, page, request=request)
+
+    monkeypatch.setattr(Client, "__init__", initialize_client)
 
 
 @pytest.fixture
@@ -938,6 +949,11 @@ def test_setup_tab_direct_link_keeps_one_draft_and_no_polling(project, monkeypat
 
 
 def test_complete_safety_page_keeps_its_editors_and_verification_controls(project, monkeypatch):
+    """Display all three selectable inputs without mutating or activating them."""
+    safety_dir = project / "cais_spade_llm/specification/safety"
+    for filename in ("safety_assembly_board-v1_mutex.txt",
+                     "safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt"):
+        shutil.copyfile(ROOT / "cais_spade_llm/specification/safety" / filename, safety_dir / filename)
     bridge = _run_bridge()
     bridge.evaluate_safety_intent_approval.return_value = {"approved": False}
     bridge.get_safety_rule_preview.return_value = {"available": False, "rules": []}
@@ -958,6 +974,12 @@ def test_complete_safety_page_keeps_its_editors_and_verification_controls(projec
         assert "Safety Requirements" in texts
         assert "Verify Safety" in texts
         assert "Generated Rule Interpretation" in texts
+        selector = _element(client, ui.select, "Safety File")
+        assert set(selector.options.values()) == {
+            "safety_none", "safety_assembly_board-v1_mutex",
+            "safety_assembly_board-v1_gear_small_before_KET4_Square_4mm",
+        }
+        assert selector.value == str(safety_dir / "safety_none.txt")
         assert [interval for interval, _ in polls] == [0.1, 2.0]
         bridge.generate_safety_rule_preview.assert_not_called()
         bridge.approve_safety_intent.assert_not_called()

@@ -22,7 +22,7 @@ from cais_spade_llm.recovery_framework import PRODUCT_PATH, ROOT, SCENE_PATH, re
 
 logger = logging.getLogger(__name__)
 CANDIDATE_ID = "GAZEBO_MOTION_SAFE"
-SAFETY_PATH = ROOT / "cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt"
+SAFETY_PATH = ROOT / "test/fixtures/part_slippage/predefined_safety/specifications.txt"
 SPECIFICATIONS = {"SAFE_shared_area_mutex", "SAFE_gear_small_before_KET4_Square_4mm"}
 
 

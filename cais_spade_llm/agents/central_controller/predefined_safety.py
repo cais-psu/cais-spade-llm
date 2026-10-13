@@ -1,6 +1,6 @@
-"""Validate and compile given safety definitions without interpreting their text."""
-
 from __future__ import annotations
+
+"""Validate and compile given safety definitions without interpreting their text."""
 
 import hashlib
 import json
@@ -84,6 +84,12 @@ def _validate_scopes(document: dict[str, Any], definitions: dict[str, Any]) -> N
         physical = [ap for ap in definition["aps"] if physical_ap_kind(ap) is not None]
         structured = [ap for ap in definition["aps"] if physical_ap_kind(ap) is None]
         expected = {"specification"}
+        if "stationary_only" in scope:
+            if scope["stationary_only"] is not False or not any(
+                "resources" in physical_binding_fields(ap) for ap in physical
+            ):
+                raise ValueError("stationary_only=false requires a resource-pair specification")
+            expected.add("stationary_only")
         if "physical_ap_bindings" in scope:
             bindings = _physical_bindings(definition, scope["physical_ap_bindings"])
             expected.add("physical_ap_bindings")

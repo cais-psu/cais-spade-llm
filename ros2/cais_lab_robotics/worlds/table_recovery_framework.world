@@ -1401,11 +1401,11 @@
           </inertia>
         </inertial>
         <collision name="collision">
-          <max_contacts>256</max_contacts>
+          <max_contacts>64</max_contacts>
           <pose>-0.21316049955 0.1518883057 0.0697159157 3.141592653589793 0 0</pose>
           <geometry>
             <mesh>
-              <uri>model://gear_small/meshes/Gear_Small.STL</uri>
+              <uri>model://gear_small/meshes/Gear_Small_contact.STL</uri>
               <scale>0.001 0.001 0.001</scale>
             </mesh>
           </geometry>
@@ -1461,11 +1461,11 @@
           </inertia>
         </inertial>
         <collision name="collision">
-          <max_contacts>256</max_contacts>
+          <max_contacts>64</max_contacts>
           <pose>-0.21316049955 0.18188829805 0.0697159157 3.141592653589793 0 0</pose>
           <geometry>
             <mesh>
-              <uri>model://gear_medium/meshes/Gear_Medium.STL</uri>
+              <uri>model://gear_medium/meshes/Gear_Medium_contact.STL</uri>
               <scale>0.001 0.001 0.001</scale>
             </mesh>
           </geometry>
@@ -1521,11 +1521,11 @@
           </inertia>
         </inertial>
         <collision name="collision">
-          <max_contacts>256</max_contacts>
+          <max_contacts>64</max_contacts>
           <pose>-0.2131604996 0.231888298 0.0697159157 3.141592653589793 0 0</pose>
           <geometry>
             <mesh>
-              <uri>model://gear_large/meshes/Gear_Large.STL</uri>
+              <uri>model://gear_large/meshes/Gear_Large_contact.STL</uri>
               <scale>0.001 0.001 0.001</scale>
             </mesh>
           </geometry>
@@ -1636,9 +1636,16 @@
     </model>
 
     <physics type="ode">
-      <max_step_size>0.001</max_step_size>
+      <max_contacts>64</max_contacts>
+      <max_step_size>0.0005</max_step_size>
       <real_time_factor>1</real_time_factor>
-      <real_time_update_rate>1000</real_time_update_rate>
+      <real_time_update_rate>2000</real_time_update_rate>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>200</iters>
+        </solver>
+      </ode>
       <!-- Re-enabling gravity to 9.81 so the objects can sit on the tables instead of flying -->
       <gravity>0 0 -9.81</gravity>
     </physics>

@@ -2469,7 +2469,9 @@ def _footprint_width_from_xml(root: ET.Element) -> float | None:
     return None
 
 
-def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
+def _model_footprint_width_from_gazebo_world(
+    model_name: str, *, source_record: dict[str, Any] | None = None,
+) -> float | None:
     target_model = str(model_name or "").strip()
     if not target_model:
         return None
@@ -2477,7 +2479,8 @@ def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
         if not world_path.is_file():
             continue
         try:
-            root = ET.parse(world_path).getroot()
+            world_bytes = world_path.read_bytes()
+            root = ET.fromstring(world_bytes)
         except Exception:
             continue
         for model in root.iter("model"):
@@ -2485,22 +2488,36 @@ def _model_footprint_width_from_gazebo_world(model_name: str) -> float | None:
                 continue
             width = _footprint_width_from_xml(model)
             if width is not None:
+                if source_record is not None:
+                    source_record.update(model_name=target_model, source_files={
+                        str(world_path): hashlib.sha256(world_bytes).hexdigest()},
+                        calculation="_footprint_width_from_xml", width_m=width)
                 return width
-        included_names = {
-            str(include.findtext("name") or "").strip()
-            for include in root.iter("include")
-        }
-        if target_model not in included_names:
-            continue
-        for model_path in _gazebo_model_file_candidates(target_model):
-            if not model_path.is_file():
+        for include in root.iter("include"):
+            declared_name = include.findtext("name")
+            if declared_name is not None and declared_name != target_model:
                 continue
-            try:
-                width = _footprint_width_from_xml(ET.parse(model_path).getroot())
-            except (ET.ParseError, OSError):
+            uri = include.findtext("uri", "")
+            if not uri.startswith("model://"):
                 continue
-            if width is not None:
-                return width
+            for model_path in _gazebo_model_file_candidates(uri.removeprefix("model://")):
+                if not model_path.is_file():
+                    continue
+                try:
+                    model_bytes = model_path.read_bytes()
+                    model = ET.fromstring(model_bytes).find("model")
+                    if model is None or (declared_name or model.get("name")) != target_model:
+                        continue
+                    width = _footprint_width_from_xml(model)
+                except (ET.ParseError, OSError):
+                    continue
+                if width is not None:
+                    if source_record is not None:
+                        source_record.update(model_name=target_model, source_files={
+                            str(world_path): hashlib.sha256(world_bytes).hexdigest(),
+                            str(model_path): hashlib.sha256(model_bytes).hexdigest()},
+                            calculation="_footprint_width_from_xml", width_m=width)
+                    return width
     return None
 
 
@@ -5022,6 +5039,61 @@ class GazeboPickPlaceController:
     # ------------------------------------------------------------------ #
     # Geometry helpers (agent calls these to compute targets, then moves)
     # ------------------------------------------------------------------ #
+    def recovery_pick_policy(self, part_name: str) -> dict[str, Any]:
+        """Expose the existing default vertical-pick policy without observation."""
+        return {
+            "surface_clearance_override_m": 0.0,
+            "use_global_min_pick_tcp_z": True,
+            "pick_z_adjustment_m": self.pick_z_adjustments_m.get(part_name.upper(), 0.0),
+            "source": "GazeboPickPlaceController.compute_pick_targets default parameter policy",
+        }
+
+    def recovery_grasp_geometry(self, *, model_name: str, product_geometry: dict[str, Any]) -> dict[str, Any]:
+        """Record the existing gripper width calculation without moving or sensing."""
+        geometry = deepcopy(product_geometry)
+        fields = ("grasp_width_m", "part_width_m", "part_diameter_m", "diameter_m", "width_m")
+        declared = [key for key in fields if key in geometry]
+        if declared:
+            return {"geometry": geometry, "source": {
+                "kind": "recorded_product_geometry", "fields": declared,
+                "model_name": model_name}}
+        source = {"kind": "local_owner_calculation", "model_name": model_name}
+        width = _model_footprint_width_from_gazebo_world(model_name, source_record=source)
+        if width is None:
+            from itertools import product
+            from types import SimpleNamespace
+
+            from cais_spade_llm.recovery_framework import ROOT
+            from cais_spade_llm.recovery_framework.geometry import compose
+            from cais_spade_llm.recovery_framework.part_collision import (
+                collision_geometry_evidence, observed_part_boxes,
+            )
+
+            # Identity is a model-local coordinate frame, not a measured pose.
+            model_frame = SimpleNamespace(position=SimpleNamespace(x=0., y=0., z=0.),
+                orientation=SimpleNamespace(x=0., y=0., z=0., w=1.))
+            try:
+                rows = observed_part_boxes(model_name, model_frame)
+                corners = [compose(row["pose"], [*point, 0., 0., 0., 1.])[:3]
+                           for row in rows for point in product(*[(-size / 2, size / 2) for size in row["size"]])]
+                width = max(max(point[axis] for point in corners) - min(point[axis] for point in corners)
+                            for axis in (0, 1))
+                world = ROOT / "ros2/cais_lab_robotics/worlds/table_recovery_framework.world"
+                source.update(calculation="model-local collision footprint width", frame="part",
+                    collision_objects=collision_geometry_evidence(rows),
+                    source_files={str(world): hashlib.sha256(world.read_bytes()).hexdigest()}, width_m=width)
+                for row in rows:
+                    if row.get("mesh", {}).get("source"):
+                        source["source_files"][row["mesh"]["source"]] = row["mesh"]["source_sha256"]
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                source.update(status="NEEDS_CONTEXT", reason=str(exc))
+        if width is not None and math.isfinite(width) and width > 0:
+            geometry["width_m"] = width
+            source["owner_model_fingerprint"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        else:
+            source.update(status="NEEDS_CONTEXT", reason="Owner model has no supported recorded grasp width")
+        return {"geometry": geometry, "source": source}
+
     def compute_pick_targets(
         self,
         part_name: str = "",
@@ -5357,7 +5429,7 @@ class GazeboPickPlaceController:
             effective_min_tcp_z = None
             pick_tcp_z = pick_tcp_z_raw
         pick_z_adjustment_m = (
-            self.pick_z_adjustments_m.get(target_part_name.upper(), 0.0)
+            self.recovery_pick_policy(target_part_name)["pick_z_adjustment_m"]
             if bool(apply_pick_z_adjustments)
             else 0.0
         )
@@ -8838,9 +8910,10 @@ class GazeboPickPlaceController:
             raise ValueError('Controller interpolation or configured geometry changed during preparation')
         record = observer.provider.reader.snapshot(max_age=max_age)
         model = record['models'][observer.configuration['model']]
-        configuration = deepcopy(observer.motion_configuration)
-        root_pose = model['links'][configuration['root']]['pose']
-        configuration.update(root_xyz=root_pose[:3], root_quaternion=root_pose[3:])
+        from cais_spade_llm.resources.continuous_geometry import observed_joint_configuration
+
+        configuration = observed_joint_configuration(observer.motion_configuration, model['joints'],
+            model['links'][observer.motion_configuration['root']]['pose'])
         positions = {name: interval(row['position']) for name, row in model['joints'].items()}
         matrices = kinematic_transforms(configuration, positions)
         result = {'joint_names':list(self.arm_joint_names),
@@ -8849,7 +8922,15 @@ class GazeboPickPlaceController:
                   'tool_pose_source':'GETRECOVERYSTATE joints and configured FK',
                   'joint_stamps':{name:record['simulation_time'] for name in self.arm_joint_names},
                   'joint_received_monotonic':{name:record['observed_monotonic'] for name in self.arm_joint_names}}
-        return observer.capture(max_age=max_age, native=result)
+        result['native_physics_source'] = {key: record[key] for key in
+                                          ('instance_id', 'simulation_time', 'observed_monotonic')}
+        result['continuous_motion_configuration'] = deepcopy(configuration)
+        if self.tcp_link in matrices:
+            tcp_pose = representative_pose(matrices[self.tcp_link])
+            result.update(tcp_pose=tcp_pose, tcp_link=self.tcp_link, controlled_link=self.ee_link,
+                          tcp_offset_z=tcp_pose[2] - result['current_pose'][2],
+                          tcp_transform_source='GETRECOVERYSTATE joints and configured FK')
+        return observer.capture(max_age=max_age, native=result, record=record)
 
     def configure_recovery_safety_observer(self, observer, record: dict) -> None:
         """Bind live kinematics to this controller's exact configured identities."""
@@ -8865,6 +8946,9 @@ class GazeboPickPlaceController:
             description,root=configuration['root_link'],reference_link=self.ee_link,
             joint_names=list(self.arm_joint_names),observed_joints=model['joints'],
             root_pose=model['links'][configuration['root_link']]['pose'],interpolation=interpolation)
+        observer.custody_configuration = _outline_custody_configuration(
+            description, configuration.get('gripper'), observer.motion_configuration,
+            enabled=getattr(self, '_link_attacher_enabled', False) is True)
         if getattr(observer.provider, 'model_execution', False) is True:
             from rcl_interfaces.srv import GetParameters
 
@@ -8903,10 +8987,26 @@ class GazeboPickPlaceController:
             return PrimitiveModel('joint_trajectory_continuous', 2,
                 {'joint_names':list(self.arm_joint_names),
                  'controller_configuration':deepcopy(self.controller_config),
+                 'named_joint_poses': {
+                     name: {'joint_names': list(self.arm_joint_names), 'positions': list(positions)}
+                     for name, positions in getattr(self, 'named_positions', {}).items()},
+                 'custody': deepcopy(getattr(observer, 'custody_configuration', None)),
                  'continuous_motion':deepcopy(observer.motion_configuration)}, _continuous_motion_effects)
         return PrimitiveModel("ur5e", 1, {"joint_names": list(self.arm_joint_names),
-                              "controller_configuration": deepcopy(self.controller_config)},
+                              "controller_configuration": deepcopy(self.controller_config),
+                              "named_joint_poses": {
+                                  name: {"joint_names": list(self.arm_joint_names), "positions": list(positions)}
+                                  for name, positions in getattr(self, "named_positions", {}).items()}},
                               _ur5e_motion_effects)
+
+    def prepare_recovery_outline_preview(self, *, resource_id: str, primitive_support: dict,
+                                        projected_start: dict, isolated_scene: dict) -> dict:
+        """Project declared owner evidence without querying or changing the live scene."""
+        from cais_spade_llm.resources.resource_safety_preparation import prepare_recovery_outline_preview
+
+        return prepare_recovery_outline_preview(resource_id=resource_id,
+            primitive_support=primitive_support, projected_start=projected_start,
+            isolated_scene=isolated_scene, primitive_model=self.get_recovery_safety_primitive_model())
 
     def read_recovery_entity_state(self, name: str, *, max_age: float = 2.) -> dict:
         """Read a stamped Gazebo entity using this owner's initialized client."""
@@ -9774,6 +9874,13 @@ def capture_ur5e_state(controller, *, max_age: float = 2.) -> dict:
     if not math.isfinite(gazebo_stamp) or not 0 <= sim_time - gazebo_stamp <= max_age:
         raise ValueError("Stale Gazebo tool observation")
     gazebo_tool_pose = pose_values(gazebo[controller.ee_link])
+    tcp_evidence = {}
+    if getattr(controller, "tcp_link", None) in gazebo:
+        tcp_pose = pose_values(gazebo[controller.tcp_link])
+        tcp_evidence = {"tcp_pose": tcp_pose, "tcp_link": controller.tcp_link,
+                        "controlled_link": controller.ee_link,
+                        "tcp_offset_z": tcp_pose[2] - gazebo_tool_pose[2],
+                        "tcp_transform_source": "same Gazebo link observation and fixed tool transforms"}
     if (math.dist(gazebo_tool_pose[:3], tool_tf_pose[:3]) > .001
             or abs(sum(a * b for a, b in zip(gazebo_tool_pose[3:], tool_tf_pose[3:], strict=True))) < math.cos(.001 / 2)):
         raise ValueError("Gazebo and joint-derived tool TF disagree")
@@ -9793,7 +9900,7 @@ def capture_ur5e_state(controller, *, max_age: float = 2.) -> dict:
             raise ValueError("Gazebo launch identity unavailable")
     finally:
         controller._node.destroy_client(client)
-    return {"source": "registered UR5e controller / joint_states / TF",
+    return {**tcp_evidence, "source": "registered UR5e controller / joint_states / TF",
             "observed_monotonic": now, "simulation_time": sim_time, "launch_id": launch_id,
             "frame": controller.frame_id, "current_pose": gazebo_tool_pose,
             "tool_tf_pose": tool_tf_pose, "gazebo_observation": gazebo_observation,
@@ -9833,6 +9940,57 @@ def validate_ur5e_observation_contract(primitive: str, params: dict, evidence: d
             or coverage.get("trajectory_fingerprint") != cartesian_coverage_fingerprint(evidence["trajectory"], start_time)):
         raise ValueError("UR5e joint interpolation or complete resource coverage is unresolved")
     return [*xyz, *orientation]
+
+
+def _outline_custody_configuration(description: str, gripper: dict | None,
+                                   configuration: dict, *, enabled: bool) -> dict | None:
+    """Record configured gripper and URDF mimic effects for attach/detach previews."""
+    import xml.etree.ElementTree as ET
+
+    if not enabled or not isinstance(gripper, dict):
+        return None
+    joint = gripper.get("joint")
+    declared = {row["name"]: row for row in configuration["joints"]}
+    if joint not in declared or joint in configuration["joint_names"]:
+        return None
+    positions = {name: {joint: gripper[name]} for name in ("open", "closed")}
+    xml_joints = {row.get("name"): row for row in ET.fromstring(description).findall("joint")}
+    mimics = {row.get("name"): row.find("mimic") for row in xml_joints.values()
+              if row.find("mimic") is not None and row.get("name") in declared}
+    for values in positions.values():
+        for _ in range(len(mimics)):
+            for name, row in mimics.items():
+                source = row.get("joint")
+                if source in values:
+                    values[name] = values[source] * float(row.get("multiplier", "1")) + float(row.get("offset", "0"))
+        if any(not math.isfinite(value) for value in values.values()):
+            raise ValueError("Configured gripper joint targets are not finite")
+    joint_bounds = {}
+    for name in set().union(*(values.keys() for values in positions.values())):
+        limit = xml_joints[name].find("limit") if name in xml_joints else None
+        if limit is not None and limit.get("lower") is not None and limit.get("upper") is not None:
+            bounds = [float(limit.get("lower")), float(limit.get("upper"))]
+            if not all(math.isfinite(value) for value in bounds) or bounds[0] > bounds[1]:
+                raise ValueError("URDF gripper joint bounds are invalid")
+            joint_bounds[name] = bounds
+    for _ in range(len(mimics)):
+        for name, mimic in mimics.items():
+            parent = joint_bounds.get(mimic.get("joint"))
+            if parent is None:
+                continue
+            values = sorted(value * float(mimic.get("multiplier", "1")) + float(mimic.get("offset", "0"))
+                            for value in parent)
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("URDF mimic joint bounds are invalid")
+            if name in joint_bounds:
+                values = [max(values[0], joint_bounds[name][0]), min(values[1], joint_bounds[name][1])]
+            if values[0] > values[1]:
+                raise ValueError("URDF mimic joint limits conflict")
+            joint_bounds[name] = values
+    return {"kind": "gazebo_link_attacher", "gripper": deepcopy(gripper),
+            "joint_positions": positions, "preserves_part_pose_on_attachment": True,
+            "joint_bounds": joint_bounds,
+            "release_settling_modeled": False}
 
 
 def prepare_ur5e_motion(controller, *, primitive: str, params: dict,

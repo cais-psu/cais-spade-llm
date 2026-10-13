@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from pathlib import Path
 from copy import deepcopy
 
 from cais_spade_llm.recovery_framework.kmr_safety_execution import kmr_motion_effects
@@ -29,6 +30,7 @@ def configure_observer(owner, observer, record: dict) -> None:
         joint_names=scene["arm_joint_names"], observed_joints=model["joints"],
         root_pose=model["links"][config["root_link"]]["pose"], interpolation=interpolation)
     owner.recovery_safety_observer = observer
+    owner.recovery_safety_description = description
 
 
 def capture_state(owner, *, max_age: float = 2.) -> dict:
@@ -46,17 +48,55 @@ def capture_state(owner, *, max_age: float = 2.) -> dict:
         raise ValueError("KMR geometry or controller interpolation changed")
     record = reader.snapshot(max_age=max_age)
     model = record["models"][observer.configuration["model"]]
-    config = deepcopy(observer.motion_configuration)
-    root = model["links"][config["root"]]["pose"]
-    config.update(root_xyz=root[:3], root_quaternion=root[3:])
+    from cais_spade_llm.resources.continuous_geometry import observed_joint_configuration
+
+    config = observed_joint_configuration(observer.motion_configuration, model["joints"],
+        model["links"][observer.motion_configuration["root"]]["pose"])
     matrices = kinematic_transforms(config, {name: interval(value["position"])
                                            for name, value in model["joints"].items()})
     names = config["joint_names"]
     native = {"joint_names": list(names), "joint_positions": [model["joints"][name]["position"] for name in names],
-              "base_pose": deepcopy(model["pose"]),
+              "base_pose": deepcopy(model["links"][config["root"]]["pose"]),
               "current_pose": representative_pose(matrices[config["reference_link"]]),
               "tool_pose_source": "GETRECOVERYSTATE joints and configured FK"}
-    return observer.capture(max_age=max_age, native=native)
+    native["native_physics_source"] = {key: record[key] for key in
+                                       ("instance_id", "simulation_time", "observed_monotonic")}
+    native["continuous_motion_configuration"] = deepcopy(config)
+    # The base service records its own command state; zero measured velocity
+    # alone cannot establish a future fixed-base interval.
+    hold = {"version": 2, "status": "NEEDS_CONTEXT"}
+    try:
+        from ament_index_python.packages import get_package_prefix
+
+        base = reader.controller_state("/KMR")
+        hold["controller_observation"] = deepcopy(base)
+        installed = Path(get_package_prefix("cais_lab_robotics")) / "lib/cais_lab_robotics/kmr_base_controller.py"
+        code_sha = hashlib.sha256(installed.read_bytes()).hexdigest()
+        hold["controller_source_sha256"] = code_sha
+        if base.get("controller_source_sha256") != code_sha:
+            raise ValueError("KMR base controller code differs from its captured source identity")
+        link = model["links"][config["root"]]
+        physics_node = observer.configuration["physics_description_node"]
+        physics_description = reader.parameter(physics_node, "robot_description")
+        hold.update({
+            "robot_description": description, "root_link": config["root"], "root_pose": deepcopy(link["pose"]),
+            "physics_robot_description": physics_description, "physics_description_node": physics_node,
+            "physics_description_sha256": hashlib.sha256(physics_description.encode()).hexdigest(),
+            "linear_velocity": deepcopy(link["linear_velocity"]), "angular_velocity": deepcopy(link["angular_velocity"]),
+            "physics_source": deepcopy(native["native_physics_source"]), "max_age": max_age,
+            "launch_id": observer.provider.launch_id})
+        from cais_spade_llm.agents.central_controller.recovery_case_evidence import recorded_base_hold
+
+        recorded_base_hold(resource_id="KMR", physical_evidence={"resources":{"KMR":{"base_hold_evidence":hold}}}, model=config)
+        hold["status"] = "supported"
+    except (ImportError, OSError, KeyError, TypeError, ValueError) as exc:
+        # Failed hold validation does not erase the captured moving controller
+        # state. Later calculations still need its exact command and identity.
+        hold.update(status="NEEDS_CONTEXT", reason=str(exc))
+    native["base_hold_evidence"] = hold
+    captured = observer.capture(max_age=max_age, native=native, record=record)
+    captured["observation_state"]["base_pose"] = deepcopy(native["base_pose"])
+    return captured
 
 
 def primitive_model(owner):
@@ -64,8 +104,28 @@ def primitive_model(owner):
     observer = getattr(owner, "recovery_safety_observer", None)
     if observer is None or observer.motion_configuration is None:
         return None
-    return PrimitiveModel("kmr_joint_trajectory_continuous", 1,
-                          {"continuous_motion": deepcopy(observer.motion_configuration)}, kmr_motion_effects)
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import _outline_custody_configuration
+
+    configuration = {"continuous_motion": deepcopy(observer.motion_configuration)}
+    scene = owner.environment_runtime.context.inputs["scene"]["KMR"]
+    execution = scene["task_execution"]
+    description = getattr(owner, "recovery_safety_description", None)
+    if description is not None:
+        widths = {"default": execution["closed_gripper_width_m"],
+                  **execution.get("closed_gripper_width_m_by_part", {})}
+        contracts = {}
+        for part, width in widths.items():
+            contract = _outline_custody_configuration(description,
+                {"joint": scene["gripper_joint"], "open": scene["gripper_stroke_m"], "closed": width},
+                observer.motion_configuration, enabled=True)
+            if contract is not None:
+                contract.update(model_name="KMR", attachment_link=execution["attach_link"],
+                    reference_link=execution["tcp_link"], part_link="link",
+                    source="KMR.task_execution and captured robot_description",
+                    simulation_assumptions=execution["simulation_assumptions"])
+                contracts[part] = contract
+        configuration["custody_by_part"] = contracts
+    return PrimitiveModel("kmr_joint_trajectory_continuous", 2, configuration, kmr_motion_effects)
 
 
 def _worker_request(owner) -> dict:

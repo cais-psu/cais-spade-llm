@@ -1823,7 +1823,20 @@ async def _agent_filtered_recovery_enabledness(
                 for item in (row.get("findings") or [])
                 if isinstance(item, dict)
             ]
-            evaluation["ra_status"] = "passed" if bool(row.get("allowed")) else "rejected"
+            for finding in dict(row.get("physical_feasibility") or {}).get("findings") or []:
+                if isinstance(finding, dict) and finding not in findings:
+                    findings.append(dict(finding))
+            offline_deferred = bool(
+                prepared_recovery_request.get("offline_recovery") is True
+                and reply.get("evidence_source") == "saved_observations"
+                and row.get("planning_only") is True
+                and dict(row.get("transition_feasibility") or {}).get("allowed") is True
+                and dict(row.get("physical_feasibility") or {}).get("status") == "deferred"
+                and not dict(row.get("physical_feasibility") or {}).get("findings")
+                and not findings
+            )
+            evaluation["ra_status"] = ("rejected" if findings else "deferred" if offline_deferred
+                                       else "passed" if bool(row.get("allowed")) else "rejected")
             evaluation["ra_mocked"] = bool(reply.get("mocked"))
             evaluation["constraint_codes"] = sorted(
                 {
@@ -1872,7 +1885,7 @@ async def _agent_filtered_recovery_enabledness(
                     )
                     for finding in findings
                 ]
-            if bool(row.get("allowed")):
+            if not findings and (bool(row.get("allowed")) or offline_deferred):
                 ra_admissible_instances.append(instance)
 
     result["ra_admissible_event_ids"] = sorted(
@@ -1883,6 +1896,20 @@ async def _agent_filtered_recovery_enabledness(
             evaluations_by_event_id[event_id]
             for event_id in sorted(evaluations_by_event_id)
         ]
+        return result
+
+    runtime = getattr(product_agent, "environment_runtime", None)
+    if (runtime is not None and runtime.diagnostic_cca_bypass
+            and getattr(runtime, "part_slippage_recovery", None) is not None):
+        result["safety_status"] = "skipped"
+        result["admissible_event_ids"] = sorted(result["ra_admissible_event_ids"])
+        result["planning_expandable_event_ids"] = list(result["admissible_event_ids"])
+        for instance in ra_admissible_instances:
+            evaluation = evaluations_by_event_id[str(instance.get("event_id") or "")]
+            evaluation.update(cca_status="skipped", execution_authorized=False,
+                              reason="diagnostic_cca_bypass")
+        result["event_evaluations"] = [evaluations_by_event_id[event_id]
+                                      for event_id in sorted(evaluations_by_event_id)]
         return result
 
     nominal_reentry_events = _nominal_reentry_event_rows(
@@ -3398,6 +3425,15 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             return evaluation
 
         primitive_support = physical_result.get("primitive_support")
+        offline_deferred = bool(
+            prepared_recovery_request.get("offline_recovery") is True
+            and ra_reply.get("evidence_source") == "saved_observations"
+            and physical_result.get("planning_only") is True
+            and physical_result.get("status") == "deferred"
+            and physical_result.get("allowed") is False
+            and not physical_result.get("findings")
+            and not ra_result.get("findings")
+        )
         primitive_support = primitive_support if isinstance(primitive_support, dict) else {}
         expected_support = derive_primitive_union(
             task=validated_task, recovery_des_model=recovery_des_model,
@@ -3436,13 +3472,18 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
             for row in (physical_result.get("findings") or [])
             if isinstance(row, dict)
         ]
+        for finding in ra_result.get("findings") or []:
+            if isinstance(finding, dict):
+                finding = _shared.annotate_validation_finding(finding)
+                if finding not in physical_findings:
+                    physical_findings.append(finding)
         validation_stages.append(
             recovery_validation_stage(
                 validation_category=PHYSICAL_FEASIBILITY,
                 validator_role="RA",
                 validator_jid=str(ra_reply.get("validator_jid") or resource_jid),
                 status=(
-                    "passed"
+                    "rejected" if physical_findings else "deferred" if offline_deferred else "passed"
                     if bool(physical_result.get("allowed"))
                     else "rejected"
                 ),
@@ -3457,7 +3498,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 evidence=physical_result,
             )
         )
-        if physical_findings or not bool(physical_result.get("allowed")):
+        if physical_findings or not (bool(physical_result.get("allowed")) or offline_deferred):
             validation_stages.append(
                 _skipped_validation_stage(
                     category=SAFETY,
@@ -3568,75 +3609,86 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 }
             ],
         }
-        cca_started_at = time.perf_counter()
-        try:
-            if not callable(
-                getattr(product_agent, "request_recovery_outline_safety_validation", None)
-            ):
-                raise RuntimeError(
-                    "ProductAgent safety-validation message transport is unavailable"
+        runtime = getattr(product_agent, "environment_runtime", None)
+        safety_skipped = bool(
+            runtime is not None and runtime.diagnostic_cca_bypass
+            and getattr(runtime, "part_slippage_recovery", None) is not None
+        )
+        if safety_skipped:
+            cca_reply = {}
+            cca_result = {"status": "skipped", "is_safe": None,
+                          "reason": "diagnostic_cca_bypass", "findings": []}
+            evaluation["safety_status"] = "skipped"
+        else:
+            cca_started_at = time.perf_counter()
+            try:
+                if not callable(
+                    getattr(product_agent, "request_recovery_outline_safety_validation", None)
+                ):
+                    raise RuntimeError(
+                        "ProductAgent safety-validation message transport is unavailable"
+                    )
+                cca_reply = await product_agent.request_recovery_outline_safety_validation(
+                    payload=safety_request,
+                    timeout_s=10.0,
                 )
-            cca_reply = await product_agent.request_recovery_outline_safety_validation(
-                payload=safety_request,
-                timeout_s=10.0,
-            )
-            cca_result = next(
-                (
-                    dict(row)
-                    for row in (cca_reply.get("results") or [])
-                    if isinstance(row, dict)
-                    and int(row.get("candidate_index") or 0) == candidate_index
-                ),
-                None,
-            )
-            if cca_result is None:
-                raise RuntimeError("CCA reply omitted the candidate result")
-            reply_rule_fingerprint = str(
-                cca_reply.get("safety_rule_fingerprint") or ""
-            ).strip()
-            expected_rule_fingerprint = str(
-                working_session_state.get("projected_safety_rule_fingerprint") or ""
-            ).strip()
-            if (
-                expected_rule_fingerprint
-                and reply_rule_fingerprint != expected_rule_fingerprint
-            ):
-                raise RuntimeError("CCA safety-rule fingerprint changed")
-            reply_live_state_fingerprint = str(
-                cca_reply.get("live_safety_dfa_state_fingerprint") or ""
-            ).strip()
-            expected_live_state_fingerprint = str(
-                working_session_state.get("live_safety_dfa_state_fingerprint") or ""
-            ).strip()
-            if (
-                expected_live_state_fingerprint
-                and reply_live_state_fingerprint != expected_live_state_fingerprint
-            ):
-                raise RuntimeError("CCA live safety DFA state changed")
-        except Exception as exc:  # noqa: BLE001 - validator transport must fail closed
-            cca_finding = _unavailable_validation_finding(
-                task=validated_task,
-                validation_category=SAFETY,
-                validator_role="CCA",
-                constraint_code="safety_validation_unavailable",
-                reason=str(exc),
-            )
-            validation_stages.append(
-                recovery_validation_stage(
+                cca_result = next(
+                    (
+                        dict(row)
+                        for row in (cca_reply.get("results") or [])
+                        if isinstance(row, dict)
+                        and int(row.get("candidate_index") or 0) == candidate_index
+                    ),
+                    None,
+                )
+                if cca_result is None:
+                    raise RuntimeError("CCA reply omitted the candidate result")
+                reply_rule_fingerprint = str(
+                    cca_reply.get("safety_rule_fingerprint") or ""
+                ).strip()
+                expected_rule_fingerprint = str(
+                    working_session_state.get("projected_safety_rule_fingerprint") or ""
+                ).strip()
+                if (
+                    expected_rule_fingerprint
+                    and reply_rule_fingerprint != expected_rule_fingerprint
+                ):
+                    raise RuntimeError("CCA safety-rule fingerprint changed")
+                reply_live_state_fingerprint = str(
+                    cca_reply.get("live_safety_dfa_state_fingerprint") or ""
+                ).strip()
+                expected_live_state_fingerprint = str(
+                    working_session_state.get("live_safety_dfa_state_fingerprint") or ""
+                ).strip()
+                if (
+                    expected_live_state_fingerprint
+                    and reply_live_state_fingerprint != expected_live_state_fingerprint
+                ):
+                    raise RuntimeError("CCA live safety DFA state changed")
+            except Exception as exc:  # noqa: BLE001 - validator transport must fail closed
+                cca_finding = _unavailable_validation_finding(
+                    task=validated_task,
                     validation_category=SAFETY,
                     validator_role="CCA",
-                    validator_jid=cca_jid,
-                    status="unavailable",
-                    findings=[cca_finding],
-                    latency_ms=(time.perf_counter() - cca_started_at) * 1000.0,
-                    state_fingerprint=state_fingerprint,
+                    constraint_code="safety_validation_unavailable",
+                    reason=str(exc),
                 )
-            )
-            evaluation["valid"] = False
-            evaluation["validation_findings"] = [cca_finding]
-            evaluation["validation_stages"] = deepcopy(validation_stages)
-            evaluation["failed_event_index"] = event_index
-            return evaluation
+                validation_stages.append(
+                    recovery_validation_stage(
+                        validation_category=SAFETY,
+                        validator_role="CCA",
+                        validator_jid=cca_jid,
+                        status="unavailable",
+                        findings=[cca_finding],
+                        latency_ms=(time.perf_counter() - cca_started_at) * 1000.0,
+                        state_fingerprint=state_fingerprint,
+                    )
+                )
+                evaluation["valid"] = False
+                evaluation["validation_findings"] = [cca_finding]
+                evaluation["validation_stages"] = deepcopy(validation_stages)
+                evaluation["failed_event_index"] = event_index
+                return evaluation
 
         cca_findings = [
             _shared.annotate_validation_finding(row)
@@ -3653,7 +3705,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 validation_category=SAFETY,
                 validator_role="CCA",
                 validator_jid=str(cca_reply.get("validator_jid") or cca_jid),
-                status=("deferred" if physical_deferred else
+                status=("skipped" if safety_skipped else "deferred" if physical_deferred else
                         "passed" if bool(cca_result.get("is_safe")) else "rejected"),
                 findings=cca_findings,
                 request_id=str(cca_reply.get("request_id") or ""),
@@ -3666,7 +3718,7 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
                 evidence=cca_result,
             )
         )
-        if cca_findings or not (bool(cca_result.get("is_safe")) or physical_deferred):
+        if cca_findings or not (safety_skipped or bool(cca_result.get("is_safe")) or physical_deferred):
             evaluation["valid"] = False
             evaluation["validation_findings"] = deepcopy(cca_findings)
             evaluation["validation_stages"] = deepcopy(validation_stages)
@@ -3760,6 +3812,9 @@ async def _validate_candidate_sequence(  # noqa: C901, PLR0912, PLR0915
         committed_event["primitive_support"] = deepcopy(
             physical_result.get("primitive_support") or {}
         )
+        if offline_deferred:
+            committed_event["physical_validation_status"] = "deferred"
+            committed_event["execution_authorized"] = False
         accepted_prefix = list(working_session_state.get("accepted_outline_prefix") or [])
         accepted_prefix.append(deepcopy(committed_event))
         working_session_state["accepted_outline_prefix"] = accepted_prefix
@@ -4556,6 +4611,33 @@ async def _handle_outline_phase(
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Dispatch outline handling according to configured outline mode."""
+    if session_state.get("validation_contract_version") == 2:
+        from .multi_turn_validated_event import handle_validated_event
+
+        return await handle_validated_event(session=session_state, prepared=prepared_recovery_request,
+                                            response=parsed_response, planner=planner)
+    if session_state.get("outline_context_retrieval") and parsed_response.get("decision") == "need_context":
+        from .multi_turn_context import handle_outline_context
+
+        return await handle_outline_context(prepared=prepared_recovery_request, session=session_state,
+                                            response=parsed_response, planner=planner)
+    if session_state.get("outline_context_retrieval"):
+        # The provider disallows a union at the schema root. Keep candidate
+        # requirements local, before any candidate validation or commitment.
+        schema = _shared._get_response_schema("outline", {**session_state, "outline_context_retrieval": False})["schema"]
+        missing = [key for key in schema["required"] if key not in parsed_response]
+        error = ""
+        if parsed_response.get("decision") is not None or parsed_response.get("context_requests", []) != []:
+            error = "Candidate responses require decision=null and context_requests=[], or omitted fields; use need_context without candidate fields for retrieval"
+        elif missing:
+            error = "Missing required outline response fields: " + ", ".join(missing)
+        elif not isinstance(parsed_response.get("thought"), str):
+            error = "thought must be a string"
+        if error:
+            findings = [_shared._candidate_schema_finding(task={}, reason=error,
+                                                          evidence={"required": schema["required"]})]
+            session_state["outline_validation_findings"] = deepcopy(findings)
+            return "need_revision", {"error": error, "validation_findings": findings}
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
     decision: str
     turn_entry: dict[str, Any]

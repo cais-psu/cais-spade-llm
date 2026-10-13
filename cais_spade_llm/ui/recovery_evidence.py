@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,114 @@ STAGES = {
     "recovery_primitves": "primitive composition",
     "recovery_safety": "recovery safety",
 }
+
+
+def _turn_header(path: Path) -> dict:
+    with path.open("rb") as stream:
+        head = stream.read(4096).decode("utf-8", errors="replace")
+        stream.seek(max(0, path.stat().st_size - 4096))
+        tail = stream.read(4096).decode("utf-8", errors="replace")
+    fields = {}
+    for name in ("turn", "turn_index", "phase", "stage", "decision", "status", "call_id", "outline_id", "resource_jid"):
+        match = re.search(r'"' + name + r'"\s*:\s*("[^"\n]*"|\d+)', head)
+        if match:
+            fields[name] = json.loads(match[1])
+    if not fields.get("call_id"):
+        # Legacy primitive summaries place explicit capture references last.
+        # Read only the bounded tail until the user expands this turn.
+        references = re.findall(r'"request_record_paths"\s*:\s*(\[[^\]]*\])', tail)
+        if references:
+            paths = json.loads(references[-1])
+            if paths:
+                fields["call_id"] = Path(paths[0]).parent.name
+    if re.search(r'"nominal_continuation_artifact_version"\s*:\s*1\b', tail):
+        fields["nominal_continuation_artifact_version"] = 1
+    return fields
+
+
+def recovery_turns(directory: Path, stage: str) -> list[dict[str, Any]]:
+    """Index turn headers without loading large provider or audit payloads."""
+    records = set(stage_records(directory, stage))
+    records.update(directory.glob("turns/turn_*.json"))
+    records.update(directory.glob("multi_turn_turn*_request_*.txt"))
+    grouped: dict[tuple, dict] = {}
+    for raw_path in sorted(records):
+        path = contained_path(directory, raw_path)
+        fields = _turn_header(path)
+        match = re.search(r"turn_?(\d+)", path.name)
+        number = fields.get("turn", int(match[1]) if match else fields.get("turn_index"))
+        if number is None:
+            continue
+        phase = fields.get("phase", fields.get("stage"))
+        if phase is None:
+            phase = "grounding" if "grounding" in path.name else "primitive_generation" if stage == "recovery_primitves" else "outline"
+        owner = fields.get("call_id") or fields.get("outline_id", "")
+        key = (number, phase)
+        if phase == "primitive_generation" and owner:
+            key = (phase, owner) if fields.get("call_id") else (number, phase, owner)
+        row = grouped.setdefault(key, {"turn": number, "phase": phase, "status": "waiting for response", "files": [],
+                                       "owner": owner if phase == "primitive_generation" else "",
+                                       "call_id": fields.get("call_id") if phase == "primitive_generation" else None,
+                                       "recorded_order": path.stat().st_mtime_ns})
+        row["recorded_order"] = min(row["recorded_order"], path.stat().st_mtime_ns)
+        if path.name.endswith("_request.json"):
+            row["turn"] = number
+        if fields.get("resource_jid"):
+            row["resource_jid"] = fields["resource_jid"]
+        row["files"].append(str(path))
+        if fields.get("decision"):
+            row["status"] = fields["decision"]
+        elif row["status"] == "waiting for response" and path.name.endswith("_request.json"):
+            response = path.with_name(path.name.replace("_request.json", "_response.json"))
+            error = path.with_name(path.name.replace("_request.json", "_error.json"))
+            if response.exists():
+                row["status"] = "response received"
+            elif error.exists():
+                row["status"] = "request failed"
+        elif row["status"] == "waiting for response" and any(value in path.name for value in ("_result_", "_audit_", "_response_")):
+            row["status"] = "recorded"
+    for row in grouped.values():
+        related = {Path(name) for name in row["files"]}
+        for path in list(related):
+            if path.name.endswith("_request.json"):
+                related.update(path.parent.glob("*.json"))
+        row["signature"] = [(str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(related)]
+    return sorted(grouped.values(), key=lambda row: (row["recorded_order"], row["turn"]))
+
+
+def read_recovery_turn(directory: Path, turn: dict) -> dict:
+    """Read an expanded turn, preserving exact attempts and legacy provenance."""
+    captures, results, prompts = {}, [], []
+    nominal_proofs: dict[tuple[str, str], dict] = {}
+    artifact_records: dict[Path, dict] = {}
+    paths = [contained_path(directory, name) for name in turn["files"]]
+    # Summaries verify and load their full records once before indexed copies
+    # are displayed. Header inspection remains bounded for collapsed turns.
+    paths.sort(key=lambda path: bool(_turn_header(path).get("nominal_continuation_artifact_version")))
+    for path in paths:
+        if path.suffix == ".txt" and any(token in path.name for token in ("_request_", "_prompt_")):
+            prompts.append({"path": str(path), "text": path.read_text(encoding="utf-8")})
+            continue
+        if path.name.endswith("_request.json"):
+            for raw_path in sorted(path.parent.glob("*.json")):
+                capture = contained_path(directory, raw_path)
+                captures[str(capture)] = {"path": str(capture), "record": read_json_cached(capture), "status": "captured"}
+        else:
+            payload = artifact_records.get(path)
+            if payload is None:
+                payload = read_json_cached(path)
+            result = _stage_record(directory, path, payload)
+            _nominal_continuation_record(directory, result, nominal_proofs, artifact_records)
+            results.append({"path": str(path), **result})
+            for _, prompt in result["prompts"]:
+                if prompt and not any(row["path"] == str(prompt) for row in prompts):
+                    prompts.append({"path": str(prompt), "text": prompt.read_text(encoding="utf-8")})
+            for capture in result["captures"]:
+                captures[capture["path"]] = capture
+    ordered = sorted(captures.values(), key=lambda row: (
+        row["record"].get("recorded_at", ""), row["record"].get("call_id", ""),
+        row["record"].get("tool_round", 0), row["record"].get("attempt", 0), row["path"]))
+    return {"captures": ordered, "results": results, "prompts": prompts}
 
 
 def list_examples(root: Path = DEBUG_ROOT) -> list[dict[str, Any]]:
@@ -72,6 +181,20 @@ def list_examples(root: Path = DEBUG_ROOT) -> list[dict[str, Any]]:
                     "status": str(exc),
                 }
             )
+    runtime_root = root.parent / "environment_runs"
+    metadata_paths = [*runtime_root.glob("recovery/*/run.json"), *runtime_root.glob("*/recovery/run.json")]
+    for metadata_path in sorted(metadata_paths, reverse=True):
+        metadata = read_json_cached(metadata_path)
+        for generation in sorted(metadata_path.parent.glob("generation_*"), reverse=True):
+            identifier = str(generation.relative_to(root.parent))
+            examples.append({
+                "id": identifier, "path": generation,
+                "stages": {stage: generation / stage for stage in STAGES if (generation / stage).is_dir()},
+                "label": f"{metadata.get('run_id', metadata_path.parent.parent.name)} · {generation.name} · Part slippage",
+                "scenario": "Part slippage", "status": metadata.get("status", "not recorded"),
+                "response_source": "live LLM captures", "assisted": None,
+                "evidence_source": "Gazebo — safety checks deferred",
+            })
     return examples
 
 
@@ -157,7 +280,12 @@ def read_stage_record(  # noqa: C901 - retain legacy and exact evidence with sep
 ) -> dict[str, Any]:
     """Read a record, exact prompt references, and recorded validation rows."""
     path = contained_path(directory, path)
-    payload = read_json_cached(path)
+    result = _stage_record(directory, path, read_json_cached(path))
+    _nominal_continuation_record(directory, result, {}, {})
+    return result
+
+
+def _stage_record(directory: Path, path: Path, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Expected a JSON object")
     if path.name == "outline_checkpoint.json" and isinstance(
@@ -233,6 +361,7 @@ def read_stage_record(  # noqa: C901 - retain legacy and exact evidence with sep
             continue
         captures.append({"path": str(recorded_path), "status": "captured", "record": record})
     return {
+        "path": str(path),
         "payload": payload,
         "response": response,
         "prompts": prompts,
@@ -244,3 +373,63 @@ def read_stage_record(  # noqa: C901 - retain legacy and exact evidence with sep
         "rules": rules,
         "dfa": linked,
     }
+
+
+def _nominal_continuation_record(directory: Path, result: dict,
+                                 proofs: dict[tuple[str, str], dict],
+                                 artifact_records: dict[Path, dict]) -> None:
+    """Resolve archived nominal evidence for display without changing saved data."""
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
+        read_nominal_continuation,
+    )
+
+    payload = result["payload"]
+    nested = payload.get("validation_evidence")
+    owner = nested if isinstance(nested, dict) and "nominal_continuation_evidence" in nested else payload
+    nominal = owner.get("nominal_continuation_evidence")
+    if not isinstance(nominal, dict):
+        return
+    reference = nominal.get("artifact_reference")
+    if "artifact_reference" in nominal:
+        key, identity = None, None
+        try:
+            if not isinstance(reference, dict):
+                raise ValueError("Nominal continuation artifact reference must be an object")
+            path = contained_path(directory, reference.get("path", ""))
+            key = (str(path), str(reference.get("sha256", "")))
+            identity = json.dumps(nominal, sort_keys=True, ensure_ascii=False)
+            cached = proofs.get(key)
+            if cached is not None:
+                if cached["summary_identity"] != identity:
+                    raise ValueError("Nominal continuation references disagree within this turn")
+                display = cached
+            else:
+                proof = read_nominal_continuation(nominal, directory=directory,
+                                                  artifact_records=artifact_records)
+                display = {"path": str(path), "sha256": reference["sha256"], "status": "verified",
+                           "proof": proof, "summary_identity": identity}
+                proofs[key] = display
+        except (OSError, ValueError, TypeError) as exc:
+            display = {"path": str(reference.get("path", "")) if isinstance(reference, dict) else "",
+                       "status": "unavailable", "reason": str(exc)}
+            if key is not None and identity is not None:
+                display.update(path=key[0], sha256=key[1], summary_identity=identity)
+                proofs[key] = display
+        result["nominal_continuation_artifact"] = display
+    elif payload.get("nominal_continuation_artifact_version") == 1:
+        path = str(Path(result["path"]).resolve())
+        display = next((value for key, value in proofs.items() if key[0] == path), None)
+        result["nominal_continuation_artifact"] = display or {
+            "path": path, "status": "recorded", "proof": nominal,
+        }
+    else:
+        return
+    # Keep full records in the per-expansion result, but render a large proof
+    # only through its dedicated expansion rather than every summary copy.
+    summary = {key: nominal[key] for key in ("complete", "status", "reason", "execution_authorized") if key in nominal}
+    if result["nominal_continuation_artifact"]["status"] == "unavailable":
+        summary = {"status": "unavailable", "reason": result["nominal_continuation_artifact"]["reason"]}
+    if owner is nested:
+        result["payload"] = {**payload, "validation_evidence": {**nested, "nominal_continuation_evidence": summary}}
+    else:
+        result["payload"] = {**payload, "nominal_continuation_evidence": summary}

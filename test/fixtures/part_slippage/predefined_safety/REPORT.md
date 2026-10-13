@@ -27,8 +27,8 @@ The initial checkpoint has `gear_small` displaced near `ur5e-3`, and `KET4_Squar
 AP values: `{"ap001": true, "ap002": true}`.
 
 - Event `PART_SLIPPAGE_MUTEX_return_gear_small_to_assembly_board-v1`, primitive index `1` (zero-based): `move_cartesian` on `ur5e-4`.
-- `ap001`: `ap_state/physical_observation/shared_area_first_resource`, binding `{"region": "assembly_board-v1", "resources": ["ur5e-3", "ur5e-4"], "specification": "SAFE_shared_area_mutex"}`, value `True`.
-- `ap002`: `ap_state/physical_observation/shared_area_second_resource`, binding `{"region": "assembly_board-v1", "resources": ["ur5e-3", "ur5e-4"], "specification": "SAFE_shared_area_mutex"}`, value `True`.
+- `ap001`: `{"kind":"ap_state","process":"*","product":"*","resource":"ur5e-3","state":{"arguments":{"region":"assembly_board-v1"},"symbol":"any"}}`, binding `{"region": "assembly_board-v1", "resource": "ur5e-3", "resources": ["ur5e-3", "ur5e-4"], "specification": "SAFE_shared_area_mutex"}`, value `True`.
+- `ap002`: `{"kind":"ap_state","process":"*","product":"*","resource":"ur5e-4","state":{"arguments":{"region":"assembly_board-v1"},"symbol":"any"}}`, binding `{"region": "assembly_board-v1", "resource": "ur5e-4", "resources": ["ur5e-3", "ur5e-4"], "specification": "SAFE_shared_area_mutex"}`, value `True`.
 
 ## PART_SLIPPAGE_PRECEDENCE
 
@@ -44,8 +44,8 @@ AP values: `{"ap001": true, "ap002": true}`.
 AP values: `{"ap001": true, "ap002": false}`.
 
 - Event `PART_SLIPPAGE_PRECEDENCE_return_KET4_Square_4mm_to_assembly_board-v1`, primitive index `1` (zero-based): `move_cartesian` on `ur5e-3`.
-- `ap001`: `ap_event/physical_observation/part_region_entry`, binding `{"part": "KET4_Square_4mm", "region": "assembly_board-v1"}`, value `True`.
-- `ap002`: `ap_state/processCompleted/process_target_completed`, binding `{"part": "gear_small", "process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"}`, value `False`.
+- `ap001`: `{"event":{"arguments":{"region":"assembly_board-v1"},"symbol":"part_region_entry"},"kind":"ap_event","process":"*","product":"KET4_Square_4mm","resource":"*"}`, binding `{"part": "KET4_Square_4mm", "region": "assembly_board-v1"}`, value `True`.
+- `ap002`: `{"kind":"ap_state","process":"assembly","product":"gear_small","resource":"*","state":{"arguments":{"target":"Gear_Plate/Gear_Shaft_1"},"symbol":"processCompleted"}}`, binding `{"part": "gear_small", "process": "assembly", "target": "Gear_Plate/Gear_Shaft_1"}`, value `False`.
 
 ## PART_SLIPPAGE_SAFE
 

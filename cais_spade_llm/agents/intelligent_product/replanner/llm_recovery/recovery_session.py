@@ -1,6 +1,6 @@
-"""Recovery session — prepare-trace slice."""
-
 from __future__ import annotations
+
+"""Recovery session — prepare-trace slice."""
 
 import asyncio
 import json
@@ -28,6 +28,7 @@ from cais_spade_llm.resources.resource_profile import (
     resource_snapshot_carried_entity,
     resource_snapshot_carried_entity_location,
     resource_snapshot_fields_map,
+    resource_snapshot_declared_fields,
 )
 
 
@@ -740,6 +741,7 @@ class RecoverySessionMixin:
             return flat
 
         snapshot = dict(recovery_snapshot or {})
+        focused_variables = ((recovery_resources or {}).get(focused_resource_jid, {}).get("recovery_des_model") or {}).get("state_variables", {})
         focused_snapshot = adapt_recovery_resource_snapshot(
             resource_jid=str(focused_resource_jid or "").strip(),
             resource_type=resolve_recovery_resource_type(
@@ -749,6 +751,7 @@ class RecoverySessionMixin:
             ),
             snapshot=snapshot,
             modeled_state={},
+            state_variables=focused_variables,
         )
         context: dict[str, Any] = {
             "resource": {
@@ -781,6 +784,10 @@ class RecoverySessionMixin:
             )
         )
         context["resource"].update(_flat_facet_fields(focused_snapshot))
+        for name, declaration in focused_variables.items():
+            if declaration.get("scope", "resource") == "resource":
+                context["resource"].pop(name, None)
+        context["resource"].update(resource_snapshot_declared_fields(focused_snapshot, focused_variables))
 
         for resource_jid, raw_entry in (recovery_resources or {}).items():
             if not isinstance(raw_entry, dict):
@@ -798,6 +805,7 @@ class RecoverySessionMixin:
                 resource_type=resource_type,
                 snapshot=resource_snapshot,
                 modeled_state=dict(raw_entry.get("modeled_state") or {}),
+                state_variables=(raw_entry.get("recovery_des_model") or {}).get("state_variables", {}),
             )
             profile = get_resource_profile(str(adapted_entry.get("resource_type") or "resource"))
             context["resources"][str(resource_jid)] = {
@@ -820,6 +828,11 @@ class RecoverySessionMixin:
                 )
             )
             context["resources"][str(resource_jid)].update(_flat_facet_fields(adapted_entry))
+            variables = (raw_entry.get("recovery_des_model") or {}).get("state_variables", {})
+            for name, declaration in variables.items():
+                if declaration.get("scope", "resource") == "resource":
+                    context["resources"][str(resource_jid)].pop(name, None)
+            context["resources"][str(resource_jid)].update(resource_snapshot_declared_fields(adapted_entry, variables))
 
         geometry_lookup = getattr(self.product_agent, "_geometry_for_part", None)
         for part_name, raw_info in (part_tracker or {}).items():
@@ -886,6 +899,7 @@ class RecoverySessionMixin:
         default_resource_state: str,
         part_states: dict[str, Any],
         part_locations: dict[str, Any],
+        recorded_resource_snapshots: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None, dict[str, dict[str, Any]]]:
         focused_resource = self._resource_by_jid(target_jid)
         if focused_resource is None:
@@ -910,7 +924,9 @@ class RecoverySessionMixin:
                 if not resource_jid:
                     continue
                 raw_recovery_snapshot: dict[str, Any] = {}
-                if hasattr(resource, "get_recovery_snapshot"):
+                if recorded_resource_snapshots is not None and resource_jid in recorded_resource_snapshots:
+                    raw_recovery_snapshot = deepcopy(recorded_resource_snapshots[resource_jid])
+                elif hasattr(resource, "get_recovery_snapshot"):
                     recovery_snapshot_value = await asyncio.to_thread(resource.get_recovery_snapshot)
                     if isinstance(recovery_snapshot_value, dict):
                         raw_recovery_snapshot = deepcopy(recovery_snapshot_value)
@@ -933,12 +949,7 @@ class RecoverySessionMixin:
                     modeled_state=modeled_state,
                     static_capabilities=static_capabilities,
                 )
-                recovery_snapshot = adapt_recovery_resource_snapshot(
-                    resource_jid=resource_jid,
-                    resource_type=resource_type,
-                    snapshot=raw_recovery_snapshot,
-                    modeled_state=modeled_state,
-                )
+
                 execution_catalog_method = getattr(
                     resource,
                     "recovery_execution_primitive_catalog",
@@ -982,13 +993,20 @@ class RecoverySessionMixin:
                 if callable(recovery_des_model_method):
                     recovery_des_model = await asyncio.to_thread(
                         recovery_des_model_method,
-                        snapshot=recovery_snapshot,
+                        snapshot=raw_recovery_snapshot,
                     )
                 else:
                     recovery_des_model = build_recovery_des_model(
                         resource,
-                        snapshot=recovery_snapshot,
+                        snapshot=raw_recovery_snapshot,
                     )
+                recovery_snapshot = adapt_recovery_resource_snapshot(
+                    resource_jid=resource_jid,
+                    resource_type=resource_type,
+                    snapshot=raw_recovery_snapshot,
+                    modeled_state=modeled_state,
+                    state_variables=recovery_des_model.get("state_variables", {}),
+                )
                 recovery_resources[resource_jid] = {
                     "resource_jid": resource_jid,
                     "resource_type": resource_type,
@@ -1070,9 +1088,11 @@ class RecoverySessionMixin:
                 continue
             entry = raw_entry if isinstance(raw_entry, dict) else {}
             modeled_state = dict(entry.get("modeled_state") or {})
-            snapshot = dict(
-                (projected_resource_snapshots or {}).get(jid) or entry.get("recovery_snapshot") or {}
-            )
+            snapshot = ((projected_resource_snapshots or {})[jid]
+                        if jid in (projected_resource_snapshots or {}) else entry.get("recovery_snapshot", {}))
+            if not isinstance(snapshot, dict):
+                raise ValueError(f"Recorded resource snapshot is not a mapping: {jid}")
+            snapshot = dict(snapshot)
             normalized_snapshot = adapt_recovery_resource_snapshot(
                 resource_jid=jid,
                 resource_type=str(
@@ -1085,6 +1105,7 @@ class RecoverySessionMixin:
                 ),
                 snapshot=snapshot,
                 modeled_state=modeled_state,
+                state_variables=(entry.get("recovery_des_model") or {}).get("state_variables", {}),
             )
             resource_core = dict(
                 normalized_snapshot.get("resource_core") or entry.get("resource_core") or {}
@@ -1146,6 +1167,11 @@ class RecoverySessionMixin:
                     profile=profile,
                 ),
             }
+            variables = (entry.get("recovery_des_model") or {}).get("state_variables", {})
+            for name, declaration in variables.items():
+                if declaration.get("scope", "resource") == "resource":
+                    effective[jid].pop(name, None)
+            effective[jid].update(resource_snapshot_declared_fields(normalized_snapshot, variables))
         return effective
 
     def _recovery_select_resumable_entry_task(
@@ -1873,6 +1899,8 @@ class RecoverySessionMixin:
 
         return {
             "failed_task_id": str(raw.get("failed_task_id") or raw.get("task_id") or "").strip(),
+            "failure_type": deepcopy(details.get("failure_mode")),
+            "checkpoint": deepcopy(observations.get("checkpoint_context") or {}),
             "failed_function_name": str(
                 raw.get("failed_function_name") or observations.get("function_name") or ""
             ).strip(),
@@ -2102,6 +2130,8 @@ class RecoverySessionMixin:
         return {
             "fault_event": {
                 "focused_resource_jid": focused_resource_jid,
+                "failure_type": deepcopy(failure_anchor.get("failure_type")),
+                "checkpoint": deepcopy(failure_anchor.get("checkpoint") or {}),
                 "blocked_at_task_id": blocked_task_id,
                 "blocked_at_function": blocked_function_name,
                 "resource_state": deepcopy(
@@ -2249,6 +2279,11 @@ class RecoverySessionMixin:
                 optional_value = deepcopy(recovery_snapshot.get(optional_field))
                 if optional_value not in (None, "", [], {}):
                     observed_resource[optional_field] = optional_value
+            variables = (recovery_entry.get("recovery_des_model") or {}).get("state_variables", {})
+            for name, declaration in variables.items():
+                if declaration.get("scope", "resource") == "resource":
+                    observed_resource.pop(name, None)
+            observed_resource.update(resource_snapshot_declared_fields(recovery_snapshot, variables))
             observed_resources.append(observed_resource)
             held_part = str(observed_resource.get("held_part") or "").strip()
             if held_part:
@@ -2346,6 +2381,8 @@ class RecoverySessionMixin:
         return {
             "fault_event": {
                 "focused_resource_jid": deepcopy(fault_event.get("focused_resource_jid")),
+                "failure_type": deepcopy(fault_event.get("failure_type")),
+                "checkpoint": deepcopy(fault_event.get("checkpoint") or {}),
                 "blocked_at_task_id": deepcopy(fault_event.get("blocked_at_task_id")),
                 "blocked_at_function": deepcopy(fault_event.get("blocked_at_function")),
                 "resource_state": deepcopy(fault_event.get("resource_state")),
@@ -2450,9 +2487,17 @@ class RecoverySessionMixin:
                 else manipulator.get("named_poses")
             ),
         }
-        return {
+        result = {
             key: value for key, value in prompt_snapshot.items() if value not in (None, "", [], {})
         }
+        variables = (resource_entry.get("recovery_des_model") or {}).get("state_variables", {})
+        public_variables = {name: row for name, row in variables.items()
+                            if not row.get("private") and not name.startswith(("task_ctx.", "_"))}
+        for name, declaration in variables.items():
+            if declaration.get("scope", "resource") == "resource":
+                result.pop(name, None)
+        result.update(resource_snapshot_declared_fields(recovery_snapshot, public_variables))
+        return result
 
     @staticmethod
     def _build_prompt_allowed_primitives(
@@ -2593,6 +2638,7 @@ class RecoverySessionMixin:
         part_locations: dict[str, Any],
         recovery_safety_context: dict[str, Any] | None = None,
         failure_context: dict[str, Any] | None = None,
+        recorded_resource_snapshots: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         input_recovery_safety_context = deepcopy(recovery_safety_context or {})
         input_failure_context = deepcopy(failure_context or {})
@@ -2602,6 +2648,8 @@ class RecoverySessionMixin:
             default_resource_state=str(default_resource_state or "").strip(),
             part_states=deepcopy(part_states),
             part_locations=deepcopy(part_locations),
+            **({"recorded_resource_snapshots": deepcopy(recorded_resource_snapshots)}
+               if recorded_resource_snapshots is not None else {}),
         )
         recovery_resources = self._trim_pending_tasks(
             recovery_resources=deepcopy(recovery_resources or {}),
@@ -2612,6 +2660,7 @@ class RecoverySessionMixin:
         outline_settings = self._recovery_outline_experiment_settings()
         recovery_session = {
             "phase": "prepare_trace",
+            "outline_context_retrieval": True,
             "llm_enabled": False,
             "reasoning_mode": reasoning_mode,
             "session_id": session_id,

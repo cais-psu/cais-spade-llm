@@ -1,6 +1,6 @@
-"""Execution adapters for the full recovery-framework manufacturing order."""
-
 from __future__ import annotations
+
+"""Execution adapters for the full recovery-framework manufacturing order."""
 
 import asyncio
 import json
@@ -37,6 +37,61 @@ class WorkflowResourceAgent(ResourceAgent):
     def __init__(self, jid: str, password: str, *, name: str, worker: GazeboWorker | None, **kwargs):
         super().__init__(jid, password, name=name, **kwargs)
         self.workflow_worker = worker
+
+    def _snapshot_state(self) -> dict:
+        """Return only retained values declared by this environment owner."""
+        from cais_spade_llm.resources.environment_recovery import environment_owner_snapshot
+
+        return environment_owner_snapshot(self)
+
+    def get_recovery_snapshot(self) -> dict:
+        """Export flat resource fields without profile defaults."""
+        return self._snapshot_state()
+
+    async def control_machine_job(self, primitive: str, parameters: dict, *, command_id: str) -> dict:
+        """Send an explicitly admitted job command through the responsive owner channel."""
+        if self.workflow_worker is None:
+            raise ValueError("Machine worker is unavailable")
+        runtime = self.environment_runtime
+        if runtime.stopped:
+            raise ValueError("Stopped experiments cannot accept machine job commands")
+        return await self.workflow_worker.machine_control({
+            "run_id": runtime.context.run_id, "resource_id": self.agent_name,
+            "primitive": primitive, "parameters": deepcopy(parameters)}, command_id=command_id)
+
+    def get_recovery_resource_evidence(self) -> dict:
+        """Keep captured declarations and observations available to detached RAs."""
+        from cais_spade_llm.resources.environment_recovery import environment_owner_evidence
+
+        return environment_owner_evidence(self)
+
+    def recovery_des_model(self, *, snapshot: dict | None = None) -> dict:
+        """Expose exact owner successors and their unordered primitive support."""
+        from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor
+
+        return environment_recovery_descriptor(self.get_recovery_resource_evidence(),
+            self.get_recovery_snapshot() if snapshot is None else snapshot, resource_jid=str(self.jid))
+
+    def recovery_execution_primitive_catalog(self) -> list[dict]:
+        """Retain declared selection flags independently of outline capabilities."""
+        from cais_spade_llm.resources.environment_recovery import environment_primitive_catalog
+
+        return [row for row in environment_primitive_catalog(self.get_recovery_resource_evidence())
+                if row.get('status') == 'executable' and row.get('recovery_selectable') is True]
+
+    def check_recovery_primitive_feasibility(self, **kwargs) -> dict:
+        """Use the same pure capability calculation as a detached owner."""
+        from cais_spade_llm.resources.environment_recovery import check_environment_primitive_capability
+
+        if kwargs.get('resource_evidence') is None:
+            kwargs['resource_evidence'] = self.get_recovery_resource_evidence()
+        return check_environment_primitive_capability(**kwargs)
+
+    def project_recovery_outline_event(self, **kwargs) -> dict:
+        """Keep declared symbolic effects separate from physical interval evidence."""
+        from cais_spade_llm.resources.environment_recovery import project_environment_event
+
+        return project_environment_event(**kwargs)
 
     async def teardown(self) -> None:
         """Cancel owned Gazebo execution before the agent is removed."""
@@ -150,6 +205,10 @@ def create_environment_resource_agents(
             continue
         if rid in robot_rows:
             controller, named_positions, static = _robot_configuration(scene, robot_rows[rid])
+            static["reachability"] = [
+                location for location in models[rid]["state_variables"]["resource_location"]["domain"]
+                if location is not None and location != "home"
+            ]
             names = sorted(
                 set(models[rid]["local_event_alphabet"]) & set(robot_task_registry())
             )
@@ -192,9 +251,14 @@ def create_environment_resource_agents(
                 label=rid,
                 timeout_sec=600,
             )
+        from cais_spade_llm.resources.environment_recovery import environment_declared_capabilities
+
+        static = environment_declared_capabilities({'resource_id': rid, 'environment_models': models,
+                                                    'inputs': {'scene': scene}})
         resources.append(
             WorkflowResourceAgent(
-                jid, "none", name=rid, cca_jid=cca_jid, tool_timeout_s=600, worker=worker
+                jid, "none", name=rid, cca_jid=cca_jid, tool_timeout_s=600, worker=worker,
+                static_capabilities=static,
             )
         )
     for controller in prewarmed.values():
@@ -262,6 +326,8 @@ def _destination_geometry(context, part_name: str, destination: str, robot_id: s
         pose = next(row["staging_pose"] for row in scene["machines"] if row["resource_id"] == machine_id)
     elif destination == "Exit":
         pose = scene["Exit"]["completed_product_pose"]
+    elif destination == "Buffer For Machined parts":
+        pose = scene["Buffer For Machined parts"]["pickup_pose"]
     else:
         machine = next(row for row in scene["machines"] if row["resource_id"] == destination)
         pose = machine["workholding_pose"]
@@ -417,6 +483,9 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                     _validate_machine_completion,
                     validate_start=_validate_start,
                 )
+            elif event_name in {"select_program", "start_job", "pause_job", "resume_job", "stop_job"} and getattr(agent, "workflow_worker", None):
+                actor.bind_executor(event_name, _machine_control_executor(runtime, agent),
+                    _validate_machine_command, validate_start=_validate_start)
             elif event_name in {"advance_conveyor", "advance_part"} and getattr(
                 agent, "workflow_worker", None
             ):
@@ -457,12 +526,35 @@ def _worker_executor(runtime, agent: WorkflowResourceAgent):
         fault = getattr(runtime, "conveyor_fault", None)
         if fault is not None:
             request["failure_injection"] = fault.worker_request(task)
+            if (fault.enabled and fault.configuration["scenario"] == "Machining breakdown during part processing"
+                    and task["resource_id"] in {row["resource_id"] for row in request["scene"]["machines"]}):
+                request["_jobs_path"] = fault.processing_path(task["resource_id"])
         try:
             return await agent.workflow_worker.run(request)
         except GazeboExecutionError as exc:
             return exc.result
 
     return execute
+
+
+def _machine_control_executor(runtime, agent: WorkflowResourceAgent):
+    async def execute(task: dict) -> dict:
+        worker = agent.workflow_worker
+        if not worker._operation_lock.locked():
+            return await _worker_executor(runtime, agent)(task)
+        reply = await agent.control_machine_job(task['event_name'], task['parameters'], command_id=task['task_id'])
+        return {'status': reply['status'], 'task_id': task['task_id'], 'resource_id': task['resource_id'],
+                'event_name': task['event_name'], 'observations': {'command': reply},
+                'error': reply.get('error')}
+    return execute
+
+
+def _validate_machine_command(task: dict, evidence: dict) -> bool:
+    command = evidence.get('observations', {}).get('command', {})
+    return (_identity_matches(task, evidence) and command.get('status') == 'completed'
+            and command.get('primitive') == task['event_name'] and command.get('command_id') == task['task_id']
+            and command.get('run_id') == task['run_id'] and command.get('resource_id') == task['resource_id']
+            and command.get('process_completed') is False)
 
 
 def _kmr_executor(runtime, agent: KMRResourceAgent):
@@ -621,6 +713,17 @@ def _validate_robot_completion(task: dict, evidence: dict) -> bool:
 
 def _validate_machine_completion(task: dict, evidence: dict) -> bool:
     observations = evidence.get("observations", {})
+    record = observations.get("processing_observations")
+    if record is not None:
+        completed = [job for job in record.get("jobs", {}).values()
+                     if job.get("task_id") == task["task_id"]]
+        if len(completed) != 1:
+            return False
+        job = completed[0]
+        if (job.get("job_state") != "completed" or job.get("process_completed") is not True
+                or job.get("part_name") != task["parameters"].get("part_name")
+                or job.get("processing_active_sec", -1) < job.get("processing_time_sec", float('inf'))):
+            return False
     return (
         _identity_matches(task, evidence)
         and observations.get("correct_part_present") is True

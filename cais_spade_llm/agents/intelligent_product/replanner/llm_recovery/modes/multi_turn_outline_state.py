@@ -897,6 +897,7 @@ def _apply_outline_task_effects(
         return
 
     resource_row = dict(resources_by_jid.get(resource_jid) or {})
+    previous_resource_row = deepcopy(resource_row)
     end_state = dict(task.get("expected_end_state") or {})
     declared_scopes = {
         str(field_name): str(scope or "resource")
@@ -927,12 +928,34 @@ def _apply_outline_task_effects(
             resource_row["current_pose"] = deepcopy(end_pose)
     resources_by_jid[resource_jid] = deepcopy(resource_row)
 
+    resource_moved = (
+        resource_row.get("resource_location", resource_row.get("current_location"))
+        != previous_resource_row.get("resource_location", previous_resource_row.get("current_location"))
+        or resource_row.get("current_pose") != previous_resource_row.get("current_pose")
+    )
+    if resource_moved:
+        for part_name, carried_part in parts_by_name.items():
+            if task_type == "part_handling" and part_name == task_part_name:
+                continue
+            holder = carried_part.get("part_holder_resource_jid", carried_part.get("current_holder_resource_jid"))
+            if holder != resource_jid and previous_resource_row.get("held_part") != part_name:
+                continue
+            carried_part = dict(carried_part)
+            if isinstance(carried_part.get("observed_pose"), dict):
+                carried_part["last_observed_pose"] = deepcopy(carried_part["observed_pose"])
+            carried_part["observed_pose"] = None
+            carried_part["observed_pose_current"] = False
+            carried_part["projected_pose"] = None
+            parts_by_name[part_name] = deepcopy(carried_part)
+
     if task_type != "part_handling" or not task_part_name:
         return
 
     part_row = dict(parts_by_name.get(task_part_name) or {})
     if not part_row:
         return
+    previous_location = part_row.get("part_location", part_row.get("current_location", part_row.get("location")))
+    previous_holder = part_row.get("part_holder_resource_jid", part_row.get("current_holder_resource_jid"))
     for field_name, value in end_state.items():
         if declared_scopes.get(str(field_name)) == "part":
             part_row[str(field_name)] = deepcopy(value)
@@ -957,6 +980,14 @@ def _apply_outline_task_effects(
         part_row["part_holder_resource_jid"] = candidate_holder
         part_row["current_holder_resource_jid"] = candidate_holder
     part_end_pose = end_state.get("position") or end_state.get("pose")
-    if isinstance(part_end_pose, dict) and "x" in part_end_pose:
-        part_row["observed_pose"] = deepcopy(part_end_pose)
+    explicit_pose = isinstance(part_end_pose, dict) and "x" in part_end_pose
+    location = part_row.get("part_location", part_row.get("current_location", part_row.get("location")))
+    holder = part_row.get("part_holder_resource_jid", part_row.get("current_holder_resource_jid"))
+    carried_part_moved = resource_moved and resource_jid in (previous_holder, holder)
+    if explicit_pose or location != previous_location or holder != previous_holder or carried_part_moved:
+        if isinstance(part_row.get("observed_pose"), dict):
+            part_row["last_observed_pose"] = deepcopy(part_row["observed_pose"])
+        part_row["observed_pose"] = None
+        part_row["observed_pose_current"] = False
+        part_row["projected_pose"] = deepcopy(part_end_pose) if explicit_pose else None
     parts_by_name[task_part_name] = deepcopy(part_row)

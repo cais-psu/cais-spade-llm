@@ -347,6 +347,25 @@
           },
           "parameters": {},
           "evidence": "Validated nominal Gazebo demonstration program"
+        },
+        "square": {
+          "tool": "simulation_trim_tool",
+          "workholding": "simulation_peg_fixture",
+          "program": {
+            "validated": true,
+            "effects": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ],
+            "required_configuration": {
+              "tool": "simulation_trim_tool",
+              "workholding": "simulation_peg_fixture"
+            }
+          },
+          "parameters": {},
+          "evidence": "Validated nominal Gazebo demonstration program"
         }
       },
       "simulation_process": {
@@ -357,13 +376,20 @@
           "correct part remains at workholding",
           "handling robot access is clear",
           "configured simulation time has elapsed"
-        ]
+        ],
+        "job_control": {
+          "version": 1,
+          "resume_after_reload": true,
+          "restart_stopped_jobs": false,
+          "semantics": "active simulation time; no material removal model"
+        }
       },
       "physical_process": {
         "configured": false,
         "processing_time_sec": null
       },
-      "KMR_process_clearance_m": 0.12
+      "KMR_process_clearance_m": 0.12,
+      "selected_program": "square"
     },
     {
       "resource_id": "M2",
@@ -516,13 +542,60 @@
           "correct part remains at workholding",
           "handling robot access is clear",
           "configured simulation time has elapsed"
-        ]
+        ],
+        "job_control": {
+          "version": 1,
+          "resume_after_reload": true,
+          "restart_stopped_jobs": false,
+          "semantics": "active simulation time; no material removal model"
+        }
       },
       "physical_process": {
         "configured": false,
         "processing_time_sec": null
       },
-      "KMR_process_clearance_m": 0.12
+      "KMR_process_clearance_m": 0.12,
+      "program_options": {
+        "square": {
+          "tool": "simulation_trim_tool",
+          "workholding": "simulation_peg_fixture",
+          "program": {
+            "validated": true,
+            "effects": [
+              {
+                "process": "trim",
+                "result": "square"
+              }
+            ],
+            "required_configuration": {
+              "tool": "simulation_trim_tool",
+              "workholding": "simulation_peg_fixture"
+            }
+          },
+          "parameters": {},
+          "evidence": "Validated nominal Gazebo demonstration program"
+        },
+        "circle": {
+          "tool": "simulation_trim_tool",
+          "workholding": "simulation_peg_fixture",
+          "program": {
+            "validated": true,
+            "effects": [
+              {
+                "process": "trim",
+                "result": "circle"
+              }
+            ],
+            "required_configuration": {
+              "tool": "simulation_trim_tool",
+              "workholding": "simulation_peg_fixture"
+            }
+          },
+          "parameters": {},
+          "evidence": "Validated nominal Gazebo demonstration program"
+        }
+      },
+      "selected_program": "circle"
     }
   ],
   "minimum_station_gap": 1.0,
@@ -1663,7 +1736,7 @@
     }
   },
   "resource_programs": {
-    "revision": 4,
+    "revision": 5,
     "resources": {
       "ur5e-1": {
         "functions": {
@@ -10025,6 +10098,67 @@
       },
       "M1": {
         "functions": {
+          "select_program": {
+            "function_name": "select_program",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "select_program",
+                  "op": "select_program"
+                }
+              ]
+            }
+          },
+          "start_job": {
+            "function_name": "start_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "start_job",
+                  "op": "start_job"
+                }
+              ],
+              "entry_state": "loaded"
+            }
+          },
+          "pause_job": {
+            "function_name": "pause_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "pause_job",
+                  "op": "pause_job"
+                }
+              ]
+            }
+          },
+          "resume_job": {
+            "function_name": "resume_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "resume_job",
+                  "op": "resume_job"
+                }
+              ]
+            }
+          },
+          "stop_job": {
+            "function_name": "stop_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "stop_job",
+                  "op": "stop_job"
+                }
+              ]
+            }
+          },
           "machine_part": {
             "function_name": "trim_part",
             "status": "implemented",
@@ -10034,24 +10168,98 @@
               "steps": [
                 {
                   "id": "process",
-                  "op": "dwell",
-                  "params": {
-                    "duration_sec": 5.0
-                  }
+                  "op": "start_job"
                 }
               ]
             }
           }
         },
         "primitives": {
-          "dwell": {
+          "select_program": {
             "status": "executable",
-            "recovery_selectable": false
+            "recovery_selectable": true
+          },
+          "start_job": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "pause_job": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "resume_job": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "stop_job": {
+            "status": "executable",
+            "recovery_selectable": true
           }
         }
       },
       "M2": {
         "functions": {
+          "select_program": {
+            "function_name": "select_program",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "select_program",
+                  "op": "select_program"
+                }
+              ]
+            }
+          },
+          "start_job": {
+            "function_name": "start_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "start_job",
+                  "op": "start_job"
+                }
+              ],
+              "entry_state": "loaded"
+            }
+          },
+          "pause_job": {
+            "function_name": "pause_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "pause_job",
+                  "op": "pause_job"
+                }
+              ]
+            }
+          },
+          "resume_job": {
+            "function_name": "resume_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "resume_job",
+                  "op": "resume_job"
+                }
+              ]
+            }
+          },
+          "stop_job": {
+            "function_name": "stop_job",
+            "status": "implemented",
+            "program": {
+              "steps": [
+                {
+                  "id": "stop_job",
+                  "op": "stop_job"
+                }
+              ]
+            }
+          },
           "machine_part": {
             "function_name": "trim_part",
             "status": "implemented",
@@ -10061,19 +10269,32 @@
               "steps": [
                 {
                   "id": "process",
-                  "op": "dwell",
-                  "params": {
-                    "duration_sec": 5.0
-                  }
+                  "op": "start_job"
                 }
               ]
             }
           }
         },
         "primitives": {
-          "dwell": {
+          "select_program": {
             "status": "executable",
-            "recovery_selectable": false
+            "recovery_selectable": true
+          },
+          "start_job": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "pause_job": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "resume_job": {
+            "status": "executable",
+            "recovery_selectable": true
+          },
+          "stop_job": {
+            "status": "executable",
+            "recovery_selectable": true
           }
         }
       },
@@ -11110,6 +11331,17 @@
     }
   },
   "safety_preparation": {
+    "outline_preview": {
+      "action_name": "/preview_recovery_motion",
+      "planning_scene_service": "/get_planning_scene",
+      "preview_parameter_service": "/preview_recovery_motion/get_parameters",
+      "timeout_seconds": 60.0,
+      "max_translation_step": 0.01,
+      "max_rotation_step": 0.05,
+      "max_joint_step": 0.35,
+      "velocity_scaling": 1.0,
+      "acceleration_scaling": 1.0
+    },
     "provider": "gazebo_idle_continuous_v1",
     "observation_service": "/GETRECOVERYSTATE",
     "launch_parameter_node": "/KMR_base_controller",
@@ -11130,6 +11362,452 @@
             1.4
           ]
         ]
+      },
+      "M1.front_access": {
+        "frame": "world",
+        "bounds": [
+          [
+            -4.25,
+            -4.01
+          ],
+          [
+            1.38,
+            1.62
+          ],
+          [
+            1.13,
+            1.37
+          ]
+        ],
+        "source": {
+          "kind": "declared safety region",
+          "model_path": "ros2/cais_lab_robotics/models/bantam_tools_desktop_cnc/model.sdf",
+          "model_sha256": "d6250910feb0f41e397f8d505797f030efe68f66290ece76bc540463c8053842",
+          "link": "front_access",
+          "world_pose": [
+            -4.05,
+            1.9,
+            0.0,
+            0.0,
+            0.0,
+            -1.5707963267948966
+          ],
+          "clearance_field": "KMR_process_clearance_m",
+          "clearance_m": 0.12
+        }
+      },
+      "M1.side_access": {
+        "frame": "world",
+        "bounds": [
+          [
+            -4.57,
+            -4.33
+          ],
+          [
+            1.6999999999999997,
+            1.94
+          ],
+          [
+            1.13,
+            1.37
+          ]
+        ],
+        "source": {
+          "kind": "declared safety region",
+          "model_path": "ros2/cais_lab_robotics/models/bantam_tools_desktop_cnc/model.sdf",
+          "model_sha256": "d6250910feb0f41e397f8d505797f030efe68f66290ece76bc540463c8053842",
+          "link": "side_access",
+          "world_pose": [
+            -4.05,
+            1.9,
+            0.0,
+            0.0,
+            0.0,
+            -1.5707963267948966
+          ],
+          "clearance_field": "KMR_process_clearance_m",
+          "clearance_m": 0.12
+        }
+      },
+      "M1.workholding": {
+        "frame": "world",
+        "bounds": [
+          [
+            -4.25,
+            -4.01
+          ],
+          [
+            1.6999999999999997,
+            1.94
+          ],
+          [
+            0.9400000000000001,
+            1.1800000000000002
+          ]
+        ],
+        "source": {
+          "kind": "declared safety region",
+          "model_path": "ros2/cais_lab_robotics/models/bantam_tools_desktop_cnc/model.sdf",
+          "model_sha256": "d6250910feb0f41e397f8d505797f030efe68f66290ece76bc540463c8053842",
+          "link": "workholding",
+          "world_pose": [
+            -4.05,
+            1.9,
+            0.0,
+            0.0,
+            0.0,
+            -1.5707963267948966
+          ],
+          "clearance_field": "KMR_process_clearance_m",
+          "clearance_m": 0.12
+        }
+      },
+      "M1.staging": {
+        "frame": "world",
+        "bounds": [
+          [
+            -4.71,
+            -4.489999999999999
+          ],
+          [
+            0.9900000000000001,
+            1.2100000000000002
+          ],
+          [
+            1.0,
+            1.12
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "surface_collision": "M1 staging tray::link::surface",
+          "surface_size": [
+            0.22,
+            0.22,
+            0.04
+          ],
+          "height_field": "KMR_process_clearance_m",
+          "height_m": 0.12
+        }
+      },
+      "M2.front_access": {
+        "frame": "world",
+        "bounds": [
+          [
+            -2.25,
+            -2.01
+          ],
+          [
+            1.38,
+            1.62
+          ],
+          [
+            1.13,
+            1.37
+          ]
+        ],
+        "source": {
+          "kind": "declared safety region",
+          "model_path": "ros2/cais_lab_robotics/models/bantam_tools_desktop_cnc/model.sdf",
+          "model_sha256": "d6250910feb0f41e397f8d505797f030efe68f66290ece76bc540463c8053842",
+          "link": "front_access",
+          "world_pose": [
+            -2.05,
+            1.9,
+            0.0,
+            0.0,
+            0.0,
+            -1.5707963267948966
+          ],
+          "clearance_field": "KMR_process_clearance_m",
+          "clearance_m": 0.12
+        }
+      },
+      "M2.side_access": {
+        "frame": "world",
+        "bounds": [
+          [
+            -2.57,
+            -2.3299999999999996
+          ],
+          [
+            1.6999999999999997,
+            1.94
+          ],
+          [
+            1.13,
+            1.37
+          ]
+        ],
+        "source": {
+          "kind": "declared safety region",
+          "model_path": "ros2/cais_lab_robotics/models/bantam_tools_desktop_cnc/model.sdf",
+          "model_sha256": "d6250910feb0f41e397f8d505797f030efe68f66290ece76bc540463c8053842",
+          "link": "side_access",
+          "world_pose": [
+            -2.05,
+            1.9,
+            0.0,
+            0.0,
+            0.0,
+            -1.5707963267948966
+          ],
+          "clearance_field": "KMR_process_clearance_m",
+          "clearance_m": 0.12
+        }
+      },
+      "M2.workholding": {
+        "frame": "world",
+        "bounds": [
+          [
+            -2.25,
+            -2.01
+          ],
+          [
+            1.6999999999999997,
+            1.94
+          ],
+          [
+            0.9400000000000001,
+            1.1800000000000002
+          ]
+        ],
+        "source": {
+          "kind": "declared safety region",
+          "model_path": "ros2/cais_lab_robotics/models/bantam_tools_desktop_cnc/model.sdf",
+          "model_sha256": "d6250910feb0f41e397f8d505797f030efe68f66290ece76bc540463c8053842",
+          "link": "workholding",
+          "world_pose": [
+            -2.05,
+            1.9,
+            0.0,
+            0.0,
+            0.0,
+            -1.5707963267948966
+          ],
+          "clearance_field": "KMR_process_clearance_m",
+          "clearance_m": 0.12
+        }
+      },
+      "M2.staging": {
+        "frame": "world",
+        "bounds": [
+          [
+            -2.71,
+            -2.49
+          ],
+          [
+            0.9900000000000001,
+            1.2100000000000002
+          ],
+          [
+            1.0,
+            1.12
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "surface_collision": "M2 staging tray::link::surface",
+          "surface_size": [
+            0.22,
+            0.22,
+            0.04
+          ],
+          "height_field": "KMR_process_clearance_m",
+          "height_m": 0.12
+        }
+      },
+      "Buffer For Machined parts.zone_1": {
+        "frame": "world",
+        "bounds": [
+          [
+            -0.74,
+            -0.6200000000000001
+          ],
+          [
+            0.38,
+            0.62
+          ],
+          [
+            1.017,
+            1.067
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "pose": [
+            -0.68,
+            0.5,
+            1.017,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "zone_pitch": 0.12,
+          "width": 0.24,
+          "part_length_m": 0.05
+        }
+      },
+      "Buffer For Machined parts.zone_2": {
+        "frame": "world",
+        "bounds": [
+          [
+            -0.6200000000000001,
+            -0.5
+          ],
+          [
+            0.38,
+            0.62
+          ],
+          [
+            1.017,
+            1.067
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "pose": [
+            -0.56,
+            0.5,
+            1.017,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "zone_pitch": 0.12,
+          "width": 0.24,
+          "part_length_m": 0.05
+        }
+      },
+      "Buffer For Machined parts.zone_3": {
+        "frame": "world",
+        "bounds": [
+          [
+            -0.5,
+            -0.38
+          ],
+          [
+            0.38,
+            0.62
+          ],
+          [
+            1.017,
+            1.067
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "pose": [
+            -0.44,
+            0.5,
+            1.017,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "zone_pitch": 0.12,
+          "width": 0.24,
+          "part_length_m": 0.05
+        }
+      },
+      "Buffer For Machined parts.zone_4": {
+        "frame": "world",
+        "bounds": [
+          [
+            -0.38,
+            -0.26
+          ],
+          [
+            0.38,
+            0.62
+          ],
+          [
+            1.017,
+            1.067
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "pose": [
+            -0.32,
+            0.5,
+            1.017,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "zone_pitch": 0.12,
+          "width": 0.24,
+          "part_length_m": 0.05
+        }
+      },
+      "Conveyor.loading_position_1": {
+        "frame": "world",
+        "bounds": [
+          [
+            -4.2,
+            -3.9
+          ],
+          [
+            0.35,
+            0.65
+          ],
+          [
+            1.015,
+            1.065
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "conveyor_loading_pose": [
+            -4.05,
+            0.5,
+            1.015,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "width": 0.3,
+          "part_length_m": 0.05
+        }
+      },
+      "Conveyor.loading_position_2": {
+        "frame": "world",
+        "bounds": [
+          [
+            -2.1999999999999997,
+            -1.9
+          ],
+          [
+            0.35,
+            0.65
+          ],
+          [
+            1.015,
+            1.065
+          ]
+        ],
+        "capacity": 1,
+        "source": {
+          "kind": "declared safety region",
+          "conveyor_loading_pose": [
+            -2.05,
+            0.5,
+            1.015,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "width": 0.3,
+          "part_length_m": 0.05
+        }
       }
     },
     "resources": {
@@ -11302,6 +11980,7 @@
         "root_link": "KMR_base_link",
         "reference_link": "rg2_gripper_tcp",
         "description_node": "/robot_state_publisher",
+        "physics_description_node": "/KMR/robot_state_publisher",
         "controller_node": "/KMR/KMR_iiwa_joint_trajectory_controller",
         "stationary_linear_speed_max": 0.001,
         "stationary_angular_speed_max": 0.001,
@@ -11402,6 +12081,140 @@
       "/KMR/validated_follow_path/_action/status",
       "/KMR/navigate_to_pose/_action/status",
       "/KMR/follow_path/_action/status"
+    ],
+    "controller_state_services": {
+      "/ur5e_1_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_1_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_1_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_1_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_2_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_2_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_2_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_2_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_3_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_3_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_3_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_3_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_4_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/ur5e_4_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/ur5e_4_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/ur5e_4_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/KMR/KMR_iiwa_joint_trajectory_controller/recovery_state": {
+        "covers": [
+          "/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/KMR/KMR_rg2_gripper_traj_controller/recovery_state": {
+        "covers": [
+          "/KMR/KMR_rg2_gripper_traj_controller/follow_joint_trajectory/_action/status"
+        ]
+      },
+      "/KMR/recovery_state": {
+        "covers": [
+          "/KMR/dock/_action/status",
+          "/KMR/move_base/_action/status",
+          "/KMR/validated_navigate_to_pose/_action/status",
+          "/navigate_to_pose/_action/status",
+          "/KMR/validated_follow_path/_action/status"
+        ],
+        "command_gate": {
+          "input_topic": "/KMR/nav_cmd_vel",
+          "output_topic": "/KMR/cmd_vel",
+          "status_topics": [
+            "/KMR/navigate_to_pose/_action/status",
+            "/KMR/follow_path/_action/status"
+          ],
+          "controller_node": "/KMR_base_controller",
+          "source_package": "cais_lab_robotics",
+          "source_executable": "kmr_base_controller.py"
+        }
+      }
+    },
+    "part_support": {
+      "kind": "gravity_supported_rest",
+      "stationary_linear_speed_max": 0.001,
+      "stationary_angular_speed_max": 0.001,
+      "requires_no_active_goals": true,
+      "future_execution_tracking": "not_established"
+    }
+  },
+  "planning_scene_mounting_contacts": {
+    "fixed_joints": [
+      "iiwa_root_joint"
+    ],
+    "world_contacts": [
+      {
+        "resource_id": "ur5e-1",
+        "robot_collision_link": "ur5e_1_base_link_inertia",
+        "mounting_frame": "ur5e_1_base_link",
+        "world_collision_object_id": "ur5e-1 pedestal/link/mounting_plate",
+        "physics_collision_id": "ur5e-1 pedestal::link::mounting_plate",
+        "geometry": {
+          "type": "box",
+          "size": [
+            0.4,
+            0.4,
+            0.04
+          ]
+        },
+        "pose": [
+          -4.05,
+          1.1,
+          0.78,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      {
+        "resource_id": "ur5e-2",
+        "robot_collision_link": "ur5e_2_base_link_inertia",
+        "mounting_frame": "ur5e_2_base_link",
+        "world_collision_object_id": "ur5e-2 pedestal/link/mounting_plate",
+        "physics_collision_id": "ur5e-2 pedestal::link::mounting_plate",
+        "geometry": {
+          "type": "box",
+          "size": [
+            0.4,
+            0.4,
+            0.04
+          ]
+        },
+        "pose": [
+          -2.05,
+          1.1,
+          0.78,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
     ]
   }
 }

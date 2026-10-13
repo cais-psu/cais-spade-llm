@@ -1,13 +1,16 @@
-"""Configuration and model checks for the recovery framework Gazebo scene."""
-
 from __future__ import annotations
 
+"""Configuration and model checks for the recovery framework Gazebo scene."""
+
 import importlib.util
+import hashlib
 import json
 import math
 import os
 import sys
+import struct
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +18,31 @@ import pytest
 import yaml
 
 from cais_spade_llm.ui import ros2_processes
+
+
+def test_kmr_base_recovery_state_reports_actual_output_without_changing_it():
+    import ast
+    import threading
+
+    tree = ast.parse(KMR_BASE_CONTROLLER_PATH.read_text())
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == '_recovery_state')
+    namespace = {'Any': object, 'json': json, 'recorded_occupancy_map': kmr_base.recorded_occupancy_map}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    node = SimpleNamespace(_lock=threading.RLock(), _active_goal=None, _follow_path_active=False,
+        _nav_goal_handle=None, _arm_parking_in_progress=False, _initial_arm_parked=True,
+        _last_output=(.2, 0., -.1), _recovery_source_sha256='a'*64, _occupancy_map=None,
+        get_parameter=lambda name:SimpleNamespace(value={'launch_id':'launch','navigation_enabled':True}[name]),
+        get_clock=lambda:SimpleNamespace(now=lambda:SimpleNamespace(nanoseconds=1_000_000_000)),
+        get_fully_qualified_name=lambda:'/KMR_base_controller')
+    response = namespace['_recovery_state'](node, None, SimpleNamespace())
+    record = json.loads(response.message)
+    assert record['last_output'] == [.2,0.,-.1]
+    assert record['inactive_goal_output'] == [0.,0.,0.]
+    assert record['controller_source_sha256'] == 'a'*64
+    assert record['controller_node'] == '/KMR_base_controller'
+    assert record['has_active_goal'] is False and record['has_pending_goal'] is False
+    assert node._last_output == (.2,0.,-.1)
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH_PATH = ROOT / 'ros2/cais_lab_robotics/launch/recovery_framework_gazebo.launch.py'
@@ -90,6 +118,40 @@ def test_robot_bindings_match_machine_and_preserved_assembly_positions() -> None
     ])
 
 
+def test_physics_observation_captures_mesh_import_scale_and_disabled_body_state() -> None:
+    source = LINK_ATTACHER_PATH.read_text()
+    mesh_observation = source.split('boost::dynamic_pointer_cast<gazebo::physics::MeshShape>', 1)[1]
+    mesh_observation = mesh_observation.split('const bool finite', 1)[0]
+    assert 'mesh_sdf->Get<ignition::math::Vector3d>("scale")' in mesh_observation
+    assert 'JsonVector(out, shape->Scale())' not in mesh_observation
+    assert 'world_->Physics()->GetType()' in source
+    assert 'model->GetJointCount()' in source
+    assert 'link->GetEnabled()' in source
+    assert 'world_->Physics()->GetSDF()->ToString("")' in source
+    assert 'collision->GetMaxContacts()' in source
+    observation = source.split('void GazeboLinkAttacherPrivate::Observe(', 1)[1].split(
+        'bool GazeboLinkAttacherPrivate::RunOnPhysicsThread(', 1)[0]
+    for method in ('dBodyGetAutoDisableFlag', 'dBodyGetAutoDisableLinearThreshold',
+                   'dBodyGetAutoDisableAngularThreshold', 'dBodyGetAutoDisableAverageSamplesCount',
+                   'dBodyGetAutoDisableSteps', 'dBodyGetAutoDisableTime'):
+        assert method + '(body)' in observation
+    for mutation in ('dBodySet', 'dBodyEnable(', 'dBodyDisable(', '->SetEnabled(',
+                     '->SetAutoDisable(', '->SetWorldPose(', '->SetLinearVel(', '->SetAngularVel('):
+        assert mutation not in observation
+    assert 'joint.joint->HasType(gazebo::physics::Base::FIXED_JOINT)' in observation
+    assert 'joint.joint->GetParent()' in observation and 'joint.joint->GetChild()' in observation
+    assert 'parent == joint.l1 && child == joint.l2' in observation
+    assert 'world_->ModelByName(joint.model1) == joint.m1' in observation
+    assert 'world_->ModelByName(joint.model2) == joint.m2' in observation
+    assert 'joint.m1->GetLink(joint.link1) == parent' in observation
+    assert 'joint.m2->GetLink(joint.link2) == child' in observation
+    assert 'JsonPose(out, parent_pose.Inverse() * child_pose)' in observation
+    assert 'Recorded attachment has no matching live joint endpoints' in observation
+    world = ET.parse(WORLD_PATH).getroot().find('world')
+    declared = world.find("model[@name='gear_small']/link/collision/geometry/mesh/scale")
+    assert declared is not None and [float(value) for value in declared.text.split()] == [.001, .001, .001]
+
+
 def test_m1_and_m2_use_the_same_machine_with_separate_assignments() -> None:
     payload = json.loads(ROBOTS_PATH.read_text())
     machines = payload['machines']
@@ -156,6 +218,107 @@ def test_assembly_fixture_models_are_stationary_with_one_component_carrier() -> 
     assert 'link2->SetCollideMode("none")' in attacher_source
     assert "link2->SetGravityMode(false)" in attacher_source
     assert 'relative_pose' not in attacher_source
+
+
+def test_square_inserted_origin_rests_on_table_through_the_actual_plate_aperture() -> None:
+    from cais_spade_llm.product.profile import ProductProfile
+    from cais_spade_llm.recovery_framework.geometry import compose, quaternion
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+
+    geometry_path = ROOT / (
+        'cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json'
+    )
+    geometry = json.loads(geometry_path.read_text())['gazebo']
+    part_name = 'KET4_Square_4mm'
+    target = ProductProfile.geometry_for_part_from_geometry(part_name, geometry)
+    world = ET.parse(WORLD_PATH).find('./world')
+    table_include = next(item for item in world.findall('include')
+                         if item.findtext('name') == 'table_ur5e')
+    table_origin = list(map(float, table_include.findtext('pose').split()))
+    table = ET.parse(ROOT / 'ros2/cais_lab_robotics/models/table/model.sdf').find('./model')
+    surface = table.find("link/collision[@name='surface']")
+    surface_pose = list(map(float, surface.findtext('pose').split()))
+    surface_size = list(map(float, surface.findtext('geometry/box/size').split()))
+    assert table_origin[3:] == surface_pose[3:] == [0.0, 0.0, 0.0]
+    table_top = table_origin[2] + surface_pose[2] + surface_size[2] / 2
+
+    part = world.find(f"model[@name='{part_name}']/link/collision")
+    part_offset = list(map(float, part.findtext('pose').split()))
+    part_size = list(map(float, part.findtext('geometry/box/size').split()))
+    assert part_offset[3:] == [0.0, 0.0, 0.0]
+    origin = target['target_origin_pose']
+    assert target['slot_floor_z_m'] == pytest.approx(table_top, abs=1e-12)
+    assert origin['z'] + part_offset[2] - part_size[2] / 2 == pytest.approx(table_top, abs=1e-12)
+    footprint = [(origin[axis] + part_offset[index] - part_size[index] / 2,
+                  origin[axis] + part_offset[index] + part_size[index] / 2)
+                 for index, axis in enumerate(('x', 'y'))]
+    for index, bounds in enumerate(footprint):
+        center = table_origin[index] + surface_pose[index]
+        assert center - surface_size[index] / 2 < bounds[0] < bounds[1] < center + surface_size[index] / 2
+
+    plate = world.find("model[@name='GMC_Laser_Plate_Virtual']")
+    plate_pose = list(map(float, plate.findtext('pose').split()))
+    collision = plate.find('link/collision')
+    collision_pose = list(map(float, collision.findtext('pose').split()))
+    transform = compose([*plate_pose[:3], *quaternion(plate_pose[3:])],
+                        [*collision_pose[:3], *quaternion(collision_pose[3:])])
+    mesh = collision.find('geometry/mesh')
+    scale = list(map(float, mesh.findtext('scale').split()))
+    mesh_path = ROOT / 'ros2/cais_lab_robotics' / mesh.findtext('uri').removeprefix('model://')
+    data = mesh_path.read_bytes()
+    count = struct.unpack_from('<I', data, 80)[0]
+    assert len(data) == 84 + count * 50 and count > 0
+
+    def clip(polygon, axis, bound, sign):
+        clipped = []
+        for a, b in zip(polygon, polygon[1:] + polygon[:1]):
+            inside_a, inside_b = sign * (a[axis] - bound) >= 0, sign * (b[axis] - bound) >= 0
+            if inside_a:
+                clipped.append(a)
+            if inside_a != inside_b:
+                fraction = (bound - a[axis]) / (b[axis] - a[axis])
+                clipped.append([a[k] + fraction * (b[k] - a[k]) for k in range(2)])
+        return clipped
+
+    # Check the actual triangles: a mesh bounding box would fill the through-hole.
+    for index in range(count):
+        triangle = [struct.unpack_from('<3f', data, 84 + index * 50 + 12 + vertex * 12)
+                    for vertex in range(3)]
+        polygon = [compose(transform, [*(v[k] * scale[k] for k in range(3)), 0, 0, 0, 1])[:2]
+                   for v in triangle]
+        for axis, bounds in enumerate(footprint):
+            for bound, sign in zip(bounds, (1, -1)):
+                polygon = clip(polygon, axis, bound, sign)
+        area = abs(sum(a[0] * b[1] - b[0] * a[1]
+                       for a, b in zip(polygon, polygon[1:] + polygon[:1]))) / 2
+        assert area == 0, f'Plate triangle {index} intersects the inserted Square footprint'
+
+    def forbidden_feedback():
+        pytest.fail('Explicit pick geometry must not query live TCP feedback')
+
+    controller = SimpleNamespace(
+        wait_for_services=lambda: True,
+        execution_mode='simulation', robot_name='ur5e', controller_config={},
+        insertion_depth_m=0.012, place_surface_gap_m=0.0,
+        _get_ee_tcp_world_z_offset=forbidden_feedback,
+    )
+    pick_ctx = {'part_name': part_name, 'model_name': part_name, 'tz': 1.02,
+                'pick_tcp_z': 1.07, 'tcp_offset_z': -0.218, 'part_height': part_size[2]}
+    result = GazeboPickPlaceController.compute_place_targets(
+        controller, pick_ctx=pick_ctx, product_geometry=target,
+        part_name=part_name, destination_location='assembly_board-v1',
+    )
+    assert result['success'] is True
+    assert result['board_top_z'] == target['slot_floor_z_m']
+    assert result['place_part_origin_z_source'] == 'target_origin_pose'
+    assert result['place_part_origin_z'] == origin['z']
+    assert result['insert_pose']['z'] + pick_ctx['tcp_offset_z'] - (
+        pick_ctx['pick_tcp_z'] - pick_ctx['tz']
+    ) + part_offset[2] - part_size[2] / 2 == pytest.approx(table_top, abs=1e-12)
+    assert result['pre_insert_pose']['z'] == pytest.approx(
+        result['insert_pose']['z'] + controller.insertion_depth_m
+    )
+    assert 'simulation_mating_contact' not in result
 
 
 def test_machining_station_matches_the_side_by_side_material_flow() -> None:
@@ -496,7 +659,7 @@ def test_three_gears_rest_on_print_area_without_overlapping_printer_or_each_othe
     world = ET.parse(WORLD_PATH).find("world")
     for name in printer["output_poses"]:
         collision = world.find(f"model[@name='{name}']/link/collision")
-        assert int(collision.findtext("max_contacts")) == 256
+        assert int(collision.findtext("max_contacts")) == 64
         assert float(collision.findtext("surface/contact/ode/min_depth")) == 0.0
         category = int(collision.findtext("surface/contact/category_bitmask"))
         mask = int(collision.findtext("surface/contact/collide_bitmask"))
@@ -539,6 +702,59 @@ def test_three_gears_rest_on_print_area_without_overlapping_printer_or_each_othe
         for other_x, other_y, other_radius in placed:
             assert math.hypot(x - other_x, y - other_y) > radius + other_radius + 0.02
         placed.append((x, y, radius))
+
+
+@pytest.mark.parametrize('name', ['gear_small', 'gear_medium', 'gear_large'])
+def test_gear_contact_mesh_preserves_every_cad_triangle_record(name: str) -> None:
+    models = PRINTER_MODEL_PATH.parent.parent
+    manifest = json.loads((models / 'contact_meshes.json').read_text())
+    record = manifest['models'][name]
+    source = (models / record['source_mesh']).read_bytes()
+    reordered = (models / record['output_mesh']).read_bytes()
+    assert hashlib.sha256(source).hexdigest() == record['source_mesh_sha256']
+    assert hashlib.sha256(reordered).hexdigest() == record['output_mesh_sha256']
+    assert source[:84] == reordered[:84] and source != reordered
+    count = struct.unpack_from('<I', source, 80)[0]
+    assert count == record['triangle_count']
+    assert len(source) == len(reordered) == 84 + count * 50
+    before = [source[offset:offset + 50] for offset in range(84, len(source), 50)]
+    after = [reordered[offset:offset + 50] for offset in range(84, len(reordered), 50)]
+    # A binary STL record contains its normal, all three vertices and attributes.
+    # Equality preserves central holes as well as the outside surface.
+    assert Counter(before) == Counter(after)
+    assert hashlib.sha256(b''.join(sorted(after))).hexdigest() == record['triangle_record_multiset_sha256']
+    assert record['triangle_record_multiset_unchanged'] is True
+    assert manifest['ordering'] == 'Original triangle indices sorted by their bit-reversed index'
+    indices = sorted(range(count), key=lambda index: int(f'{index:0{record["index_bit_width"]}b}'[::-1], 2))
+    assert after == [before[index] for index in indices]
+    assert hashlib.sha256(struct.pack(f'<{count}I', *indices)).hexdigest() == record['index_order_sha256']
+    model = ET.parse(WORLD_PATH).find(f"./world/model[@name='{name}']/link")
+    collision, = model.findall('collision')
+    assert collision.get('name') == 'collision'
+    assert collision.findtext('geometry/mesh/uri') == 'model://' + record['output_mesh']
+    assert model.findtext('visual/geometry/mesh/uri') == 'model://' + record['source_mesh']
+    assert collision.findtext('pose') == model.findtext('visual/pose')
+    assert collision.findtext('geometry/mesh/scale') == model.findtext('visual/geometry/mesh/scale')
+
+
+def test_gear_contact_limits_include_world_and_each_support_surface() -> None:
+    models = PRINTER_MODEL_PATH.parent.parent
+    world = ET.parse(WORLD_PATH).find('./world')
+    global_limit = int(world.findtext('physics/max_contacts'))
+    table_path = models / 'table/model.sdf'
+    table = ET.parse(table_path).find('./model')
+    assert table.get('name') == 'table' and table.findtext('static') == 'true'
+    table_limit = int(table.findtext("link/collision[@name='surface']/max_contacts"))
+    printer_limit = int(ET.parse(PRINTER_MODEL_PATH).findtext("./model/link/collision[@name='bed']/max_contacts"))
+    assert global_limit == table_limit == 64 and printer_limit == 256
+    for name in ('gear_small', 'gear_medium', 'gear_large'):
+        gear_limit = int(world.findtext(f"model[@name='{name}']/link/collision/max_contacts"))
+        assert gear_limit == 64
+        assert min(global_limit, gear_limit, table_limit) == 64
+        assert min(global_limit, gear_limit, printer_limit) == 64
+    source = json.loads((models / 'table/source.json').read_text())
+    original_table = table_path.read_bytes().replace(b'        <max_contacts>64</max_contacts>\n', b'')
+    assert hashlib.sha256(original_table).hexdigest() == source['source_model_sha256']
 
 
 def test_kmr_source_layout_stays_at_storage_and_runtime_control_is_configured() -> None:
@@ -1605,6 +1821,15 @@ def test_runtime_world_replaces_static_kmr_once(tmp_path: Path, monkeypatch: pyt
     assert set(runtime_names) == set(source_names) - {'KMR'}
     original = ET.parse(WORLD_PATH)
     filtered = ET.parse(runtime_world)
+    table_uri = (ROOT / 'ros2/cais_lab_robotics/models/table').resolve().as_uri()
+    for original_include in original.findall('./world/include'):
+        if original_include.findtext('uri') != 'model://table':
+            continue
+        name = original_include.findtext('name')
+        runtime_include = next(item for item in filtered.findall('./world/include') if item.findtext('name') == name)
+        assert runtime_include.findtext('uri') == table_uri
+        assert runtime_include.findtext('pose') == original_include.findtext('pose')
+        assert runtime_include.findtext('static') == original_include.findtext('static')
     assert len(original.findall('.//sensor')) == 3
     assert filtered.findall('.//sensor') == []
     for selector in ('.//collision', './/visual', './world/physics', './world/gui/camera'):
@@ -2187,7 +2412,208 @@ def test_recovery_controller_startup_does_not_wait_for_spawn_client_response() -
     assert 'target_action=ur_spawn, on_exit=[ur_spawner]' not in launch_source
     assert 'ur_spawn,\n            # Gazebo can finish inserting' in launch_source
     assert 'ur_spawner,\n            RegisterEventHandler' in launch_source
-    assert 'target_action=ur_spawner, on_exit=[kmr_spawn, kmr_spawner]' in launch_source
+    assert 'target_action=ur_spawner, on_exit=_after_controllers_started([kmr_spawn, kmr_spawner])' in launch_source
+    assert "executable='recovery_controller_spawner.py'" in launch_source
+
+
+@pytest.mark.parametrize('lost_reply', [None, 'load_controller', 'configure_controller', 'switch_controller'])
+def test_recovery_controller_startup_reconciles_lost_replies(lost_reply) -> None:
+    path = ROOT / 'ros2/cais_lab_robotics/scripts/recovery_controller_spawner.py'
+    spec = importlib.util.spec_from_file_location('recovery_controller_spawner', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    states = {'already_active': 'active', 'other_controller': 'inactive'}
+    calls = []
+
+    def change_state(operation, names):
+        calls.append((operation, list(names)))
+        for name in names:
+            if operation == 'load_controller':
+                assert name not in states
+                states[name] = 'unconfigured'
+            elif operation == 'configure_controller':
+                assert states[name] == 'unconfigured'
+                states[name] = 'inactive'
+            else:
+                assert states[name] == 'inactive'
+                states[name] = 'active'
+        if operation == lost_reply:
+            raise TimeoutError('Manager changed state but reply was lost')
+
+    module.ensure_controllers_active(['joint_state_broadcaster', 'already_active'],
+                                     lambda: dict(states), change_state)
+    assert states == {'joint_state_broadcaster': 'active', 'already_active': 'active',
+                      'other_controller': 'inactive'}
+    assert calls == [(name, ['joint_state_broadcaster']) for name in
+                     ('load_controller', 'configure_controller', 'switch_controller')]
+
+
+@pytest.mark.parametrize('state', [None, 'unconfigured', 'inactive', 'finalized'])
+def test_recovery_controller_startup_does_not_claim_unconfirmed_readiness(state) -> None:
+    path = ROOT / 'ros2/cais_lab_robotics/scripts/recovery_controller_spawner.py'
+    spec = importlib.util.spec_from_file_location('recovery_controller_spawner', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+    states = {} if state is None else {'joint_state_broadcaster': state}
+    with pytest.raises(RuntimeError):
+        module.ensure_controllers_active(['joint_state_broadcaster'], lambda: states,
+                                         lambda *args: calls.append(args))
+    assert len(calls) == (0 if state == 'finalized' else 3)
+
+
+def test_recovery_dependent_startup_requires_successful_controller_exit() -> None:
+    pytest.importorskip('launch')
+    from launch.actions import LogInfo
+
+    child = object()
+    callback = scene._after_controllers_started([child])
+    assert callback(SimpleNamespace(returncode=0), None) == [child]
+    failed = callback(SimpleNamespace(returncode=1), None)
+    assert len(failed) == 1 and isinstance(failed[0], LogInfo)
+
+
+@pytest.mark.parametrize('transition,source,target', [(1, 1, 2), (2, 2, 1), (3, 2, 3), (4, 3, 2),
+                                                     (5, 1, 4), (6, 2, 4), (7, 3, 4)])
+def test_nav2_lifecycle_reconciles_lost_reply_without_repeating_transition(transition, source, target):
+    path = ROOT / 'ros2/cais_lab_robotics/scripts/recovery_nav2_lifecycle.py'
+    spec = importlib.util.spec_from_file_location('recovery_nav2_lifecycle', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    state, calls = [source], []
+
+    def change():
+        calls.append(transition)
+        state[0] = target
+        raise TimeoutError('State changed, reply lost')
+
+    assert module.reconcile_transition(transition, lambda: state[0], change)
+    assert calls == [transition]
+    assert module.reconcile_transition(transition, lambda: state[0], change)
+    assert calls == [transition]
+
+
+@pytest.mark.parametrize('state', [0, 1, 10, 15, 99])
+def test_nav2_lifecycle_does_not_claim_or_repeat_unconfirmed_transition(state):
+    path = ROOT / 'ros2/cais_lab_robotics/scripts/recovery_nav2_lifecycle.py'
+    spec = importlib.util.spec_from_file_location('recovery_nav2_lifecycle', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    def change():
+        calls.append('configure')
+        raise TimeoutError('Reply unavailable')
+
+    assert not module.reconcile_transition(1, lambda: state, change)
+    assert calls == (['configure'] if state == 1 else [])
+
+
+def test_nav2_lifecycle_state_unavailable_cannot_dispatch_or_claim_ready():
+    path = ROOT / 'ros2/cais_lab_robotics/scripts/recovery_nav2_lifecycle.py'
+    spec = importlib.util.spec_from_file_location('recovery_nav2_lifecycle', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    def missing():
+        raise TimeoutError('State unavailable')
+
+    with pytest.raises(TimeoutError):
+        module.reconcile_transition(1, missing, lambda: calls.append('configure'))
+    assert calls == []
+    with pytest.raises(InterruptedError):
+        module.reconcile_transition(1, lambda: 1, lambda: (_ for _ in ()).throw(InterruptedError('Stop')))
+
+
+def test_nav2_launch_preserves_manager_bonds_and_routes_only_lifecycle_mutations():
+    source = LAUNCH_PATH.read_text()
+    assert "package='nav2_lifecycle_manager'" in source
+    assert "'autostart': True" in source
+    assert "executable='recovery_nav2_lifecycle.py'" in source
+    assert "(f'{name}/change_state', f'{name}/change_state_unreconciled')" in source
+    helper = (ROOT / 'ros2/cais_lab_robotics/scripts/recovery_nav2_lifecycle.py').read_text()
+    assert 'ActionClient' not in helper
+    assert 'FollowJointTrajectory' not in helper
+    assert 'cmd_vel' not in helper
+
+
+@pytest.mark.parametrize('missing', ['none', 'inactive', 'map', 'frame', 'size', 'resolution'])
+def test_kmr_probe_requires_active_lifecycle_and_observed_map(missing):
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _navigation_ready
+
+    names = ['map_server', 'controller_server', 'planner_server']
+    states = dict.fromkeys(names, 3)
+    occupancy = {'frame_id': 'world', 'width': 2, 'height': 2, 'resolution': .05, 'data': [0, 0, -1, 100]}
+    if missing == 'inactive':
+        states['map_server'] = 2
+    elif missing == 'map':
+        occupancy = {}
+    elif missing == 'frame':
+        occupancy['frame_id'] = ''
+    elif missing == 'size':
+        occupancy['data'] = []
+    elif missing == 'resolution':
+        occupancy['resolution'] = float('nan')
+    assert _navigation_ready(names, states, occupancy, True) is (missing == 'none')
+    assert not _navigation_ready([], states, occupancy, True)
+    assert not _navigation_ready(names, states, occupancy, False)
+
+
+@pytest.mark.parametrize('case', ['ready', 'read_timeout', 'startup', 'startup_reply_lost',
+    'startup_no_effect', 'partial_active', 'unknown', 'missing_map', 'cancelled'])
+def test_kmr_navigation_readiness_retries_reads_and_observes_startup(case):
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _wait_navigation_ready
+
+    clock = [0.]
+    states = {'map_server': 2, 'controller_server': 1}
+    if case in {'ready', 'read_timeout', 'missing_map'}:
+        states = dict.fromkeys(states, 3)
+    if case == 'partial_active':
+        states['map_server'] = 3
+    active = [case in {'ready', 'read_timeout', 'missing_map'}]
+    occupancy = {'frame_id':'world', 'width':1, 'height':1, 'resolution':.05, 'data':[0]}
+    records, reads, mutations = [], [], []
+
+    def read_state(name, timeout):
+        reads.append((name, timeout))
+        if case == 'unknown' or (case == 'read_timeout' and len(reads) == 1):
+            raise TimeoutError('Recorded GET_STATE response timed out')
+        return states[name]
+
+    def startup(timeout):
+        mutations.append(timeout)
+        if case != 'startup_no_effect':
+            states.update(dict.fromkeys(states, 3))
+            active[0] = True
+        if case == 'startup_reply_lost':
+            raise TimeoutError('Recorded STARTUP response timed out')
+        return True
+
+    def spin():
+        if case == 'cancelled':
+            raise InterruptedError('Stop')
+        clock[0] += 1.
+
+    call = lambda: _wait_navigation_ready(list(states), read_state=read_state,
+        read_active=lambda _: active[0], read_map=lambda: {} if case == 'missing_map' else occupancy,
+        startup=startup, spin=spin, now=lambda:clock[0], operations=records, timeout=10.)
+    if case in {'startup_no_effect','partial_active','unknown','missing_map'}:
+        with pytest.raises(TimeoutError, match='navigation/map not observed'):
+            call()
+    elif case == 'cancelled':
+        with pytest.raises(InterruptedError, match='Stop'):
+            call()
+    else:
+        result = call()
+        assert result == (dict.fromkeys(states, 3), occupancy, True)
+    assert len(mutations) == (1 if case.startswith('startup') else 0)
+    assert all(0 < timeout <= 5 for _, timeout in reads)
+    if case == 'read_timeout':
+        assert records[0]['error'] == 'Recorded GET_STATE response timed out'
+    if case == 'startup_reply_lost':
+        assert records[0]['error'] == 'Recorded STARTUP response timed out'
+        assert records[0]['response'] is None
 
 
 def test_recovery_rviz_waits_for_live_state_before_showing_goal_models() -> None:
@@ -2362,6 +2788,29 @@ def test_camera_stream_option_defaults_off_and_can_be_forwarded() -> None:
         })
         include, = dual.launch_setup(context)
         forwarded = dict(include.launch_arguments)['enable_camera_streams']
+        assert perform_substitutions(context, normalize_to_list_of_substitutions(forwarded)) == value
+
+
+@pytest.mark.parametrize('name', ['recovery_observations', 'launch_nav2', 'launch_gazebo_gui'])
+def test_recovery_observation_and_launch_options_reach_recovery_world(name: str) -> None:
+    """The dashboard launch exposes the same recovery owner services as direct launch."""
+    pytest.importorskip('launch')
+    from launch import LaunchContext
+    from launch.actions import DeclareLaunchArgument
+    from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
+
+    dual = scene._load_launch_module('dual_moveit_gazebo.launch.py')
+    for module in (scene, dual):
+        argument = next(action for action in module.generate_launch_description().entities
+                        if isinstance(action, DeclareLaunchArgument) and action.name == name)
+        assert perform_substitutions(LaunchContext(), argument.default_value) == 'true'
+    for value in ('false', 'true'):
+        context = LaunchContext()
+        context.launch_configurations.update({
+            'world_file': 'table_recovery_framework.world', name: value,
+        })
+        include, = dual.launch_setup(context)
+        forwarded = dict(include.launch_arguments)[name]
         assert perform_substitutions(context, normalize_to_list_of_substitutions(forwarded)) == value
 
 
@@ -2628,7 +3077,7 @@ def test_launch_resolves_the_nist_cad_meshes(
     assert dict(gazebo.launch_arguments)['gui'] == 'false'
     ur_spawner = next(
         action for action in actions
-        if isinstance(action, Node) and action.node_executable == 'spawner'
+        if isinstance(action, Node) and action.node_executable == 'recovery_controller_spawner.py'
     )
     handlers = [
         action.event_handler for action in actions
@@ -2655,9 +3104,11 @@ def test_launch_resolves_the_nist_cad_meshes(
     model_paths = [Path(value) for value in context.environment['GAZEBO_MODEL_PATH'].split(os.pathsep)]
     world = ET.parse(ROOT / 'ros2/cais_lab_robotics/worlds/table_recovery_framework.world')
     meshes = {item.text.removeprefix('model://') for item in world.findall('.//mesh/uri')}
-    assert len(meshes) == 14
+    assert len(meshes) == 17
     assert {'gear_small/meshes/Gear_Small.STL', 'gear_medium/meshes/Gear_Medium.STL',
             'gear_large/meshes/Gear_Large.STL'} <= meshes
+    assert {'gear_small/meshes/Gear_Small_contact.STL', 'gear_medium/meshes/Gear_Medium_contact.STL',
+            'gear_large/meshes/Gear_Large_contact.STL'} <= meshes
     for mesh in meshes:
         assert any((path / mesh).is_file() for path in model_paths), mesh
     assert any((path / 'cais_lab_robotics/models/KMR').is_dir() for path in model_paths)
@@ -2790,7 +3241,8 @@ def test_global_speed_preserves_solver_geometry_and_dynamic_objects(speed):
     try:
         runtime = ET.parse(path)
         assert runtime.findtext('./world/physics/max_step_size') == original.findtext('./world/physics/max_step_size')
-        assert float(runtime.findtext('./world/physics/real_time_update_rate')) == speed*1000
+        assert float(runtime.findtext('./world/physics/real_time_update_rate')) == speed / float(
+            original.findtext('./world/physics/max_step_size'))
         assert runtime.findtext('./world/scene/shadows') == 'false'
         assert runtime.findtext('./world/gui/plugin/render_rate') == '30'
         for selector in ('.//collision', './/visual', './/static', './world/physics/ode'):
@@ -2803,6 +3255,10 @@ def test_global_speed_preserves_solver_geometry_and_dynamic_objects(speed):
 @pytest.mark.parametrize('has_solver', [False, True])
 def test_ode_island_threads_preserve_contacts_step_and_full_scene(tmp_path, threads, has_solver):
     original = ET.parse(WORLD_PATH)
+    physics = original.find('./world/physics')
+    existing_ode = physics.find('ode')
+    if existing_ode is not None:
+        physics.remove(existing_ode)
     if has_solver:
         ode = ET.SubElement(original.find('./world/physics'), 'ode')
         solver = ET.SubElement(ode, 'solver')
@@ -2810,18 +3266,25 @@ def test_ode_island_threads_preserve_contacts_step_and_full_scene(tmp_path, thre
         constraints = ET.SubElement(ode, 'constraints')
         ET.SubElement(constraints, 'cfm').text = '0.0'
         ET.SubElement(constraints, 'erp').text = '0.2'
-    source = tmp_path / 'world.world'
+    source = tmp_path / 'worlds/world.world'
+    source.parent.mkdir()
+    table = tmp_path / 'models/table'
+    table.mkdir(parents=True)
+    (table / 'model.sdf').write_bytes((ROOT / 'ros2/cais_lab_robotics/models/table/model.sdf').read_bytes())
     original.write(source)
     path = scene._runtime_world_without_static_kmr(source, gui_rate=15, ode_island_threads=threads)
     try:
         runtime = ET.parse(path)
-        assert float(runtime.findtext('./world/physics/max_step_size')) == .001
+        assert runtime.findtext('./world/physics/max_step_size') == original.findtext('./world/physics/max_step_size')
         assert float(runtime.findtext('./world/physics/real_time_factor')) == 1
         assert runtime.findtext('./world/gui/plugin/render_rate') == '15'
         for selector in ('.//collision', './/visual', './/static', './/surface'):
             assert [ET.tostring(e) for e in runtime.findall(selector)] == [ET.tostring(e) for e in original.findall(selector)]
         assert [(e.get('name'), e.findtext('pose')) for e in runtime.findall('./world/model')] == [
             (e.get('name'), e.findtext('pose')) for e in original.findall('./world/model')]
+        for include in original.findall('./world/include'):
+            if include.findtext('uri') == 'model://table':
+                include.find('uri').text = table.resolve().as_uri()
         assert [ET.tostring(e) for e in runtime.findall('./world/include')] == [
             ET.tostring(e) for e in original.findall('./world/include') if e.findtext('name') != 'KMR']
         ode = runtime.find('./world/physics/ode')
@@ -2837,6 +3300,28 @@ def test_ode_island_threads_preserve_contacts_step_and_full_scene(tmp_path, thre
             assert ode is None
     finally:
         path.unlink()
+
+
+@pytest.mark.parametrize('step', ['0', '-0.001', 'nan', 'inf'])
+def test_recovery_world_rejects_invalid_declared_timestep(tmp_path, step):
+    original = ET.parse(WORLD_PATH)
+    original.find('./world/physics/max_step_size').text = step
+    source = tmp_path / 'worlds/world.world'
+    source.parent.mkdir()
+    table = tmp_path / 'models/table'
+    table.mkdir(parents=True)
+    (table / 'model.sdf').write_bytes((ROOT / 'ros2/cais_lab_robotics/models/table/model.sdf').read_bytes())
+    original.write(source)
+    with pytest.raises(ValueError, match='positive finite configured timestep'):
+        scene._runtime_world_without_static_kmr(source)
+
+
+def test_runtime_world_rejects_missing_owned_table_instead_of_using_cached_model(tmp_path):
+    source = tmp_path / 'worlds/world.world'
+    source.parent.mkdir()
+    source.write_bytes(WORLD_PATH.read_bytes())
+    with pytest.raises(ValueError, match='Recovery table model is unavailable'):
+        scene._runtime_world_without_static_kmr(source)
 
 
 @pytest.mark.parametrize('bypass', [False, True])
@@ -3191,6 +3676,48 @@ def test_kmr_cached_map_matches_uncached_sweeps_and_refreshes():
     original.data = data
     assert kmr_base.base_path_is_clear(cached, (point,))
     assert not kmr_base.base_path_is_clear(kmr_base.cache_occupancy_map(original), (point,))
+
+
+def test_kmr_recorded_map_retains_observed_extent_and_cell_identity():
+    import hashlib
+
+    stamp = SimpleNamespace(sec=11, nanosec=7)
+    origin = SimpleNamespace(position=SimpleNamespace(x=-10., y=-4., z=0.),
+                             orientation=SimpleNamespace(x=0., y=0., z=0., w=1.))
+    message = SimpleNamespace(header=SimpleNamespace(frame_id="world", stamp=stamp),
+        info=SimpleNamespace(map_load_time=stamp, resolution=.05, width=2, height=2, origin=origin),
+        data=[0, 100, -1, 0])
+    saved = kmr_base.recorded_occupancy_map(message)
+    assert saved == {"frame_id": "world", "stamp": {"sec":11,"nanosec":7},
+        "map_load_time": {"sec":11,"nanosec":7}, "resolution":.05,"width":2,"height":2,
+        "origin":[-10.,-4.,0.,0.,0.,0.,1.], "cell_count":4,
+        "cells_sha256":hashlib.sha256(b'[0,100,-1,0]').hexdigest()}
+    assert kmr_base.recorded_occupancy_map(None) is None
+    message.data[0] = 100
+    assert kmr_base.recorded_occupancy_map(message)["cells_sha256"] != saved["cells_sha256"]
+
+
+def test_kmr_recovery_state_retains_global_activity_with_closed_owned_gate():
+    import ast
+    import threading
+
+    method = next(node for node in ast.walk(ast.parse(KMR_BASE_CONTROLLER_PATH.read_text()))
+                  if isinstance(node, ast.FunctionDef) and node.name == '_recovery_state')
+    namespace = {'Any': object, 'json': json, 'recorded_occupancy_map': kmr_base.recorded_occupancy_map}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(KMR_BASE_CONTROLLER_PATH), 'exec'), namespace)
+    owner = SimpleNamespace(_lock=threading.RLock(), _active_goal=False, _follow_path_active=True,
+        _nav_goal_handle=None, _initial_arm_parked=True, _arm_parking_in_progress=False,
+        _last_output=(0.,0.,0.), _recovery_source_sha256='captured-code', _occupancy_map=None,
+        get_parameter=lambda name: SimpleNamespace(value='launch-1' if name == 'launch_id' else True),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=12_000_000_000)),
+        get_fully_qualified_name=lambda: '/KMR_base_controller')
+    response = namespace['_recovery_state'](owner, None, SimpleNamespace())
+    row = json.loads(response.message)
+    assert row['has_active_goal'] is True and row['holding'] is False
+    assert row['owned_activity'] == {'has_active_goal':False,'has_pending_goal':False,'holding':True}
+    assert row['command_gate']['closed'] is True
+    assert row['nav2_follow_path_active'] is True
+    assert row['occupancy_map'] is None
 
 
 @pytest.mark.parametrize('failure', [None, 'cancel_timeout', 'nav2_aborted', 'blocked_connector', 'stale'])

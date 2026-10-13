@@ -283,7 +283,7 @@ input for the test runner. Use a new output directory each time:
 
 ```bash
 poetry run python scripts/check_gazebo_safety_preparation.py \
-  --predefined-safety cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt \
+  --predefined-safety test/fixtures/part_slippage/predefined_safety/specifications.txt \
   --output-directory /tmp/recovery-safety-test
 ```
 

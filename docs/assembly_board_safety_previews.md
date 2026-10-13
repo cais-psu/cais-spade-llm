@@ -1,5 +1,25 @@
 # Separate assembly-board mutex and precedence previews
 
+## Current monitor inputs
+
+The Safety page now contains `safety_none.txt` and the separate predefined mutex
+and precedence files linked below. Their current previews are compiled by the
+strict LTLfParser/MONA path without LLM interpretation. The mutex uses the exact
+`ap001`/`ap002` geometry-occupancy records and `G !(ap001 & ap002)`; robot/tool
+geometry includes a carried part, while a deposited part does not retain resource
+occupancy. Precedence uses `(!ap001 U (ap002 & !ap001)) | G !ap001`, exact
+`part_region_entry` and `processCompleted` bindings, and the configured
+`Gear_Plate/Gear_Shaft_1` target.
+
+Current artifacts are registered in
+`cais_spade_llm/user_verified_safety/intent_previews.json`. Saved setup and CCA
+selection use `safety_none.txt`; review and activation controls remain explicit.
+The older previews below remain history for the retained files and are not the
+current monitor inputs. See [predefined safety](predefined_safety.md) for loading
+and physical-evidence requirements.
+
+## Historical generation on 2026-10-05
+
 Prepared on 2026-10-05. Both requirements now have separate **LLM-generated,
 refined Safety-page previews**, explicit AP descriptors, LTLf formulas, and
 compiled DFA DOT/PNG artifacts. The framework received the local reference drafts

@@ -5,11 +5,45 @@ scopes are supplied and reviewed. Recovery behavior may be proposed by an LLM;
 the selected safety definitions are fixed inputs. Deterministic compilation and
 complete grounding do not prove that the reviewed hazard catalog is complete.
 
-The selectable [document](../cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt)
-is JSON stored in a `.txt` file for existing Safety-page discovery. Select it and
-use **Compile DFA** to prepare its own preview. Review and activation remain
-explicit; the existing selection, approvals, and narrower historical previews
-are preserved. No safety-generation API call is needed.
+The Safety page has three separate selectable inputs:
+
+- [safety_none.txt](../cais_spade_llm/specification/safety/safety_none.txt): zero constraints and no constraint DFA.
+- [safety_assembly_board-v1_mutex.txt](../cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt): the supplied geometry-based mutex.
+- [safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt](../cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt): the supplied strict precedence.
+
+The two constrained inputs are predefined JSON documents stored as `.txt` for
+existing discovery. Fresh compiled previews are registered in
+`cais_spade_llm/user_verified_safety/intent_previews.json`, with safety-logic JSON
+and per-rule DFA DOT/PNG files under `cais_spade_llm/user_verified_safety/previews/`.
+No safety-generation API call or manual compilation is needed for these saved
+artifacts. Review and **Verify Safety** activation remain explicit. Saved setup
+and CCA selection default to `safety_none.txt`.
+
+The combined source now lives only in the nonselectable
+[regression fixture](../test/fixtures/part_slippage/predefined_safety/specifications.txt).
+It preserves joint-rule tests and validation runners; it is not a fourth Safety
+page option. Obsolete options and their saved safety histories are removed;
+history belonging to the three retained inputs is preserved.
+
+## Saved monitor artifacts
+
+Compiled and checked on 2026-10-08. These files are saved locally in this
+checkout; the existing user-local artifact directory remains outside Git.
+
+| Input | Safety logic | DFA | Validation |
+| --- | --- | --- | --- |
+| `safety_none.txt` | [JSON](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_none__3d6d69c7/cca_safety_logic.json) | Zero constraints; no DFA | [Checks](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_none__3d6d69c7/validation.json) |
+| `safety_assembly_board-v1_mutex.txt` | [JSON](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_mutex__dd52b47c/cca_safety_logic.json) | [DOT](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_mutex__dd52b47c/SAFE_shared_area_mutex_dfa.dot) / [PNG](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_mutex__dd52b47c/SAFE_shared_area_mutex_dfa.png) | [Checks](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_mutex__dd52b47c/validation.json) |
+| `safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt` | [JSON](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_gear_small_before_ket4_square_4mm__78dff3c2/cca_safety_logic.json) | [DOT](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_gear_small_before_ket4_square_4mm__78dff3c2/SAFE_gear_small_before_KET4_Square_4mm_dfa.dot) / [PNG](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_gear_small_before_ket4_square_4mm__78dff3c2/SAFE_gear_small_before_KET4_Square_4mm_dfa.png) | [Checks](../cais_spade_llm/user_verified_safety/previews/20261008T151941Z__safety_assembly_board-v1_gear_small_before_ket4_square_4mm__78dff3c2/validation.json) |
+
+Saved artifacts were reloaded through `SafetyLogic` and, for the predefined
+inputs, CCA precomputed initialization. Full reachable-state comparison
+checked 2 state pairs / 8 transitions for mutex and 3 / 12 for precedence.
+`LivePhysicalMonitor` checks use these saved DFAs, including early and
+simultaneous entry rejection, retained completion, and possible simultaneous
+occupancy. No LLM call or robot execution was performed.
+
+## Supplied specifications
 
 | Specification | Supplied LTLf | Concrete bindings |
 | --- | --- | --- |

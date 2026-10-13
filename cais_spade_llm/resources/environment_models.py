@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Resource-owned transition models for runtime environmental exploration.
 
 The existing task builders supply the configured topology and task programs.
@@ -9,8 +11,6 @@ Within one configured model, a concrete composition event is identified by its
 event_id and complete parameter binding. event_name is the task-function name;
 it is not a synchronization symbol by itself.
 """
-
-from __future__ import annotations
 
 import json
 import math
@@ -101,6 +101,7 @@ def build_environment_models(
             ):
                 domain = models[robot]["state_variables"][field]["domain"]
                 domain.extend(value for value in (source, destination) if value not in domain)
+    _declare_machine_jobs(models, scene)
     registered = list(
         dict.fromkeys(
             parts
@@ -177,6 +178,60 @@ def build_environment_models(
     validate_environment_composition(models)
     validate_function_contracts(models)
     return models
+
+
+def _declare_machine_jobs(models: dict, scene: dict) -> None:
+    """Add public job-control declarations only to versioned machine models."""
+    from cais_spade_llm.resources.machine.machine_jobs import MACHINE_PRIMITIVES
+
+    for machine in scene["machines"]:
+        if machine.get("simulation_process", {}).get("job_control", {}).get("version") != 1:
+            continue
+        rid, selected = machine["resource_id"], machine["selected_program"]
+        model = models[rid]
+        tasks._variable(model, "job_state", [None, "running", "paused", "stopped", "interrupted", "completed"], None)
+        tasks._variable(model, "selected_program", list(machine["program_options"]), selected)
+        model["state_variables"]["active_job"] = {"scope": "resource", "type": ["string", "null"]}
+        model["current_valuation"]["active_job"] = None
+        access_events = [event['event_id'] for event in model['events']
+            if event['event_name'] in {'pick_approach', 'pick_grasp', 'pick_part'}
+            and event['guards'].get('resource_state') == {'equals': 'completed'}]
+        for identifier in access_events:
+            for job_state in ('paused', 'stopped'):
+                event_id = max(event['event_id'] for peer in models.values() for event in peer['events']) + 1
+                for owner, peer in models.items():
+                    original = next((event for event in peer['events'] if event['event_id'] == identifier), None)
+                    if original is None:
+                        continue
+                    event = deepcopy(original)
+                    event['event_id'] = event_id
+                    if owner == rid:
+                        event['guards'].update(resource_state={'equals': 'loaded'},
+                                               job_state={'equals': job_state}, active_job={'equals': None})
+                    peer['events'].append(event)
+        for name in MACHINE_PRIMITIVES:
+            bindings = {"resource_id": rid}
+            parameters = {}
+            guards = {}
+            updates = {}
+            if name == "select_program":
+                parameters["program"] = {"required": True, "type": "string", "domain": list(machine["program_options"])}
+                guards["active_job"] = {"equals": None}
+                updates["selected_program"] = {"set_from_param": "program"}
+            else:
+                parameters["job_id"] = {"required": True, "type": "string"}
+                target = {"start_job": "running", "pause_job": "paused", "resume_job": "running", "stop_job": "stopped"}[name]
+                updates["job_state"] = {"set": target}
+                updates["active_job"] = {"set_from_param": "job_id"} if target == "running" else {"set": None}
+                if name in {"start_job", "resume_job"}:
+                    guards["active_job"] = {"equals": None}
+                if name == "start_job":
+                    parameters.update(part_name=deepcopy(PART_PARAMETER), process={"equals": "trim"},
+                                      result={"required": True, "type": "string"})
+                    guards["part_name"] = {"equals_from_param": "part_name"}
+                    guards["resource_state"] = {"equals": "loaded"}
+            tasks._event(models, name, bindings, {rid: guards}, {rid: updates},
+                         parameters=parameters, capability=({}, {}))
 
 
 def _append_resource_models(models: dict, scene: dict, registered: list, schema_version: int, program_revision: str) -> None:
@@ -516,6 +571,8 @@ def check_value(declaration: dict, value: Any, parts: dict) -> bool:
         return any(type(value) is type(item) and value == item for item in declaration["domain"])
     if declaration.get("reference") == "part_name":
         return value is None or isinstance(value, str) and value in parts
+    if "string" in declaration.get("type", []):
+        return isinstance(value, str) or value is None and "null" in declaration["type"]
     return value is None or type(value) is int and value >= declaration.get("minimum", 0)
 
 
@@ -936,18 +993,26 @@ def project_transition(
     for name, owner in after_owners.items():
         if predicted[name].get("state") == "assembled":
             continue
-        location = owner
-        state = "ready"
-        if after[owner].get("held_part") == name:
-            state = after[owner].get("part_state") or "in_gripper"
-        elif after[owner].get("part_name") == name:
-            state = "completed" if owner == "Exit" else after[owner]["resource_state"]
-        elif after[owner].get("staging_part") == name:
-            location = f"{owner} staging tray"
-        if name == product_name and owner == "Exit" and after["Exit"]["part_name"] is None:
-            location = product_name
-        predicted[name].update(location=location, state=state)
+        predicted[name].update(product_state_from_custody(name, owner, after[owner], product_name))
     return after, predicted
+
+
+def product_state_from_custody(part_name: str, owner: str, values: dict, product_name: str) -> dict:
+    """Apply the runtime's product-state meaning after custody is established.
+
+    This function does not establish custody, completion, or physical support.
+    Callers must supply the owning resource's validated resulting valuation.
+    """
+    location, state = owner, "ready"
+    if values.get("held_part") == part_name:
+        state = values.get("part_state") or "in_gripper"
+    elif values.get("part_name") == part_name:
+        state = "completed" if owner == "Exit" else values["resource_state"]
+    elif values.get("staging_part") == part_name:
+        location = f"{owner} staging tray"
+    if part_name == product_name and owner == "Exit" and values["part_name"] is None:
+        location = product_name
+    return {"location": location, "state": state}
 
 
 def process_json(models: dict, event_name: str) -> dict:

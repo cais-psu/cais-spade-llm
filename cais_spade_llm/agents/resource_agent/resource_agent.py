@@ -909,15 +909,121 @@ class ResourceAgent(LlmAgent):
         recovery_snapshot: dict[str, Any],
         part_context: dict[str, Any],
         grounded_action: dict[str, Any],
+        resource_evidence: dict[str, Any] | None = None,
+        physical_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Require a resource-owned evaluator for a bound primitive."""
-        del primitive, params, task, recovery_snapshot, part_context, grounded_action
+        del primitive, params, task, recovery_snapshot, part_context, grounded_action, resource_evidence, physical_evidence
         return {
             "allowed": False,
             "feasibility_status": "NEEDS_CONTEXT",
             "constraint_code": "resource_validation_unavailable",
             "reason": "ResourceAgent has no primitive capability evaluator",
         }
+
+    def get_recovery_resource_evidence(self) -> dict[str, Any]:
+        """Read existing owner values without observing equipment or applying effects."""
+        result = {"state": {}, "source": {"resource_jid": str(self.jid)}, "sources": {}}
+        for field in ("_task_ctx", "_held_part", "_position"):
+            if hasattr(self, field):
+                result["state"][field] = deepcopy(getattr(self, field))
+                result["sources"]["state/" + field] = "ResourceAgent." + field
+        for field in ("controller_config", "gripper_config", "motion_config", "execution_mode"):
+            if hasattr(self, field):
+                result[field] = deepcopy(getattr(self, field))
+                result["sources"][field] = "ResourceAgent." + field
+        result["resource_type"] = getattr(self, "static_capabilities", {}).get("resource_type")
+        return result
+
+    def prepare_recovery_primitive_parameters(
+        self, *, task: dict[str, Any], recovery_des_model: dict[str, Any],
+        recovery_snapshot: dict[str, Any], physical_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind declared expressions to recorded facts on the validating owner."""
+        from cais_spade_llm.resources.recovery_parameter_evidence import prepare_resource_primitive_parameters
+
+        return prepare_resource_primitive_parameters(
+            task=task, recovery_des_model=recovery_des_model, recovery_snapshot=recovery_snapshot,
+            resource_evidence=physical_input.get("resource_evidence") or {}, resource_jid=str(self.jid))
+
+    async def prepare_recovery_outline_event_evidence(
+        self, *, task: dict[str, Any], recovery_snapshot: dict[str, Any],
+        recovery_des_model: dict[str, Any], physical_evidence: dict[str, Any],
+        resource_evidence: dict[str, Any], observations: dict[str, Any], cancel_event=None,
+    ) -> dict[str, Any]:
+        """Prepare isolated evidence only when the explicit Gazebo action calls it."""
+        from cais_spade_llm.recovery_framework.outline_gazebo_evidence import prepare_owner_event_evidence
+
+        return await prepare_owner_event_evidence(self, task=task, recovery_snapshot=recovery_snapshot,
+            recovery_des_model=recovery_des_model, physical_evidence=physical_evidence,
+            resource_evidence=resource_evidence, observations=observations, cancel_event=cancel_event)
+
+    def project_recovery_outline_event(
+        self, *, task: dict[str, Any], recovery_snapshot: dict[str, Any],
+        recovery_des_model: dict[str, Any], physical_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Project separate event evidence without invoking an execution interface."""
+        from cais_spade_llm.resources.recovery_geometry import project_recovery_outline_event
+
+        evidence = physical_input.get("physical_evidence") or {}
+        records = physical_input.get("outline_event_evidence")
+        if records is None:
+            records = evidence.get("event_evidence", [])
+        key = recovery_validation_fingerprint({
+            "task": task, "recovery_snapshot": recovery_snapshot,
+            "recovery_des_model": recovery_des_model,
+            "physical_evidence": evidence, "outline_event_evidence": records,
+            **({"resource_evidence": physical_input["resource_evidence"]}
+               if "resource_evidence" in physical_input else {}),
+        })
+        cached = getattr(self, "_outline_event_projection_cache", None)
+        if (cached is not None and cached["key"] == key
+                and cached["projector"] is project_recovery_outline_event):
+            from cais_spade_llm.recovery_framework.recovery_motion_preview import read_cartesian_route
+
+            try:
+                for proof in cached["cartesian_routes"]:
+                    read_cartesian_route(proof)
+            except (OSError, KeyError, TypeError, ValueError):
+                # File-backed calculations must still be present and unchanged.
+                # The ordinary projector reports the precise unresolved evidence.
+                pass
+            else:
+                return deepcopy(cached["result"])
+        self._outline_event_projection_cache = None
+        result = project_recovery_outline_event(
+            task=task, recovery_snapshot=recovery_snapshot, recovery_des_model=recovery_des_model,
+            evidence=evidence, event_evidence=records,
+            resource_evidence=physical_input.get("resource_evidence"))
+        if result.get("status") == "projected" and evidence.get("environment_models"):
+            from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
+
+            try:
+                result = bind_validated_outline_projection(result, task=task, physical_evidence=evidence,
+                    scene_configuration=physical_input.get("resource_evidence", {}).get("inputs", {}).get("scene"))
+            except ValueError as exc:
+                result["owner_safety_evidence_unresolved"] = str(exc)
+        if (result.get("status") == "projected" and result.get("interval_complete") is True
+                and result.get("unresolved") == [] and result.get("execution_authorized") is False
+                and result.get("command_sent") is False):
+            provenance = result.get("provenance") or {}
+            owners = [rid for rid, jid in evidence.get("jids", {}).items() if jid == task.get("resource_jid")]
+            matching = [row for row in records if isinstance(row, dict)
+                        and row.get("contract_fingerprint") == provenance.get("contract_fingerprint")
+                        and row.get("binding") == provenance.get("binding")]
+            if len(owners) == 1 and matching:
+                contracts = evidence.get("resource_models", {}).get(owners[0], {}).get("event_projection_contracts", {})
+                routes = {}
+                for record in matching:
+                    for index, proof in contracts.get(record.get("contract_id"), {}).get("cartesian_routes", {}).items():
+                        routes[(record["contract_id"], index)] = proof
+                # This private entry is populated only by the local calculation;
+                # supplied geometry results and CCA histories are never cached.
+                self._outline_event_projection_cache = {
+                    "key": key, "projector": project_recovery_outline_event,
+                    "cartesian_routes": deepcopy(list(routes.values())), "result": deepcopy(result),
+                }
+        return result
 
     def validate_recovery_primitive_support(
         self,
@@ -929,6 +1035,44 @@ class ResourceAgent(LlmAgent):
     ) -> dict[str, Any]:
         """Derive support and evaluate primitive parameter witnesses on this RA."""
         from cais_spade_llm.resources.recovery_feasibility import validate_primitive_support
+
+        union = physical_input.get("primitive_support_semantics") == "successor_primitive_union"
+        physical_input = deepcopy(physical_input)
+        preparation = {}
+        if union:
+            if "resource_evidence" not in physical_input:
+                reader = getattr(self, "get_recovery_resource_evidence", None)
+                physical_input["resource_evidence"] = reader() if callable(reader) else {}
+            evidence = physical_input["resource_evidence"]
+            resource_id = getattr(self, "agent_name", None)
+            if (recovery_snapshot.get("availability") == "unavailable"
+                    or isinstance(evidence, dict) and resource_id in evidence.get("unavailable_resources", [])):
+                return {"allowed": False, "feasibility_status": "INFEASIBLE",
+                        "reason": "Resource is recorded unavailable", "execution_authorized": False}
+            if (isinstance(evidence, dict) and "recovery_permitted_resources" in evidence
+                    and resource_id not in evidence["recovery_permitted_resources"]):
+                return {"allowed": False, "feasibility_status": "INFEASIBLE",
+                        "reason": "Resource is not permitted for recovery", "execution_authorized": False}
+            if not isinstance(evidence, dict) or ("state" in evidence and not isinstance(evidence["state"], dict)):
+                return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+                        "reason": "Resource-owned parameter state is unavailable or malformed",
+                        "context_requests": [f"/resources/{self.jid}/resource_evidence/state"]}
+            from cais_spade_llm.resources.recovery_parameter_evidence import projected_resource_evidence
+
+            physical_input["resource_evidence"] = projected_resource_evidence(resource_jid=str(self.jid),
+                resource_evidence=evidence, physical_evidence=physical_input.get("physical_evidence") or {},
+                recovery_snapshot=recovery_snapshot)
+            prepare = getattr(self, "prepare_recovery_primitive_parameters", None)
+            if callable(prepare):
+                preparation = prepare(task=task, recovery_des_model=recovery_des_model,
+                                      recovery_snapshot=recovery_snapshot, physical_input=physical_input)
+                if preparation.get("calculated_resource_evidence") is not None:
+                    physical_input["resource_evidence"] = deepcopy(preparation["calculated_resource_evidence"])
+                if preparation.get("conflicts"):
+                    return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+                            "reason": "Resource-owned parameter sources conflict",
+                            "parameter_preparation": preparation,
+                            "context_requests": [f"/resources/{self.jid}/resource_evidence"]}
 
         def validate_primitive(*, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
             evaluator = getattr(self, "check_recovery_primitive_feasibility", None)
@@ -944,21 +1088,54 @@ class ResourceAgent(LlmAgent):
                 task=deepcopy(task),
                 recovery_snapshot=deepcopy(recovery_snapshot),
                 part_context=deepcopy(physical_input.get("part_context") or {}),
-                grounded_action=deepcopy(physical_input.get("grounded_action") or {}),
+                grounded_action=({} if physical_input.get("primitive_support_semantics") == "successor_primitive_union"
+                                 else deepcopy(physical_input.get("grounded_action") or {})),
+                **({"resource_evidence": deepcopy(physical_input.get("resource_evidence") or {}),
+                    "physical_evidence": deepcopy(physical_input.get("physical_evidence") or {})} if union else {}),
             )
 
-        return validate_primitive_support(
+        def evaluate_condition(*, step, bindings, snapshot):
+            from cais_spade_llm.resources.recovery_parameter_evidence import evaluate_resource_primitive_condition
+
+            return evaluate_resource_primitive_condition(step=step, bindings=bindings, snapshot=snapshot,
+                resource_evidence=physical_input.get("resource_evidence") or {}, resource_jid=str(self.jid))
+
+        result = validate_primitive_support(
             task=task,
             recovery_des_model=recovery_des_model,
             recovery_snapshot=recovery_snapshot,
             validate_primitive=validate_primitive,
+            **({"parameter_witnesses": [*deepcopy(physical_input.get("parameter_witnesses") or []),
+                                        *deepcopy(preparation.get("parameter_witnesses") or [])],
+                "model_complete": physical_input.get("model_complete"), "evaluate_condition": evaluate_condition}
+               if physical_input.get("primitive_support_semantics") == "successor_primitive_union" else {}),
         )
+        if preparation:
+            result["parameter_preparation"] = deepcopy(preparation)
+            if result.get("feasibility_status") == "NEEDS_CONTEXT":
+                result["missing_facts"] = deepcopy(preparation.get("missing_facts") or [])
+                specific = deepcopy(preparation.get("context_requests") or [])
+                for primitive in result.get("primitive_support", {}).get("primitives", []):
+                    for condition in primitive.get("condition_checks", []):
+                        specific.extend(condition.get("context_requests") or [])
+                    for attempt in primitive.get("parameter_attempts", []):
+                        for check in attempt.get("evidence", {}).get("parameter_checks", []):
+                            specific.extend(check.get("result", {}).get("context_requests") or [])
+                if specific:
+                    result["context_requests"] = list(dict.fromkeys([
+                        *(ref for ref in result.get("context_requests", []) if not ref.endswith("/parameter_witnesses")),
+                        *specific]))
+        return result
 
     def validate_recovery_outline_physical_candidates(  # noqa: C901
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         """Validate one same-resource candidate batch against one fresh snapshot."""
+        from cais_spade_llm.recovery_framework.outline_validation import uses_outline_evidence, validate_resource_outline_payload
+
+        if uses_outline_evidence(payload):
+            return validate_resource_outline_payload(self, payload)
         validator_jid = str(self.jid)
         snapshot: dict[str, Any] = {}
         recovery_des_model: dict[str, Any] = {}
@@ -1043,8 +1220,12 @@ class ResourceAgent(LlmAgent):
                         ),
                     }
                 if bool(transition_result.get("allowed") is True):
-                    support_result = ResourceAgent.validate_recovery_primitive_support(
-                        self, task=deepcopy(task), recovery_des_model=recovery_des_model,
+                    support_validator = getattr(
+                        self, "validate_recovery_primitive_support",
+                        ResourceAgent.validate_recovery_primitive_support.__get__(self),
+                    )
+                    support_result = support_validator(
+                        task=deepcopy(task), recovery_des_model=recovery_des_model,
                         recovery_snapshot=validation_snapshot, physical_input=physical_input,
                     )
                     physical_result = support_result
@@ -2119,7 +2300,20 @@ class ResourceAgent(LlmAgent):
                 )
                 return
 
-            validation = agent.validate_recovery_outline_physical_candidates(payload)
+            try:
+                validation = await asyncio.to_thread(agent.validate_recovery_outline_physical_candidates, payload)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                agent.logger.exception("[Resource] Recovery feasibility could not complete")
+                validation = {"results": [{
+                    "candidate_index": row.get("candidate_index", 0), "allowed": False,
+                    "candidate_fingerprint": recovery_validation_fingerprint(row.get("task") or {}),
+                    "feasibility_status": "NEEDS_CONTEXT", "reason": str(exc),
+                    "execution_authorized": False,
+                    "findings": [{"validation_category": "physical_feasibility",
+                                  "constraint_owner": "resource",
+                                  "constraint_code": "resource_validation_unavailable",
+                                  "reason": str(exc)}],
+                } for row in payload.get("candidates", [])]}
             validator_jid = str(validation.get("validator_jid") or agent.jid)
             snapshot = dict(validation.get("snapshot") or {})
             snapshot_fingerprint = str(

@@ -37,7 +37,14 @@
   <exec_depend>linkattacher_msgs</exec_depend>
   <exec_depend>message_filters</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
-  <exec_depend>moveit_msgs</exec_depend>
+  <depend>moveit_msgs</depend>
+  <depend>moveit_core</depend>
+  <depend>fcl</depend>
+  <depend>libccd-dev</depend>
+  <depend>moveit_ros_planning</depend>
+  <depend>openssl</depend>
+  <depend>nlohmann_json</depend>
+  <depend>rosidl_typesupport_introspection_cpp</depend>
   <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>onrobot_description</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
@@ -56,6 +63,7 @@
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <exec_depend>rosgraph_msgs</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
@@ -64,7 +72,7 @@
   <exec_depend>rqt_image_view</exec_depend>
   <exec_depend>ros2_linkattacher</exec_depend>
   <exec_depend>rviz2</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
+  <depend>sensor_msgs</depend>
   <exec_depend>shape_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <depend>std_srvs</depend>
@@ -80,6 +88,7 @@
   <exec_depend>xarm_gazebo</exec_depend>
   <exec_depend>xarm_moveit_config</exec_depend>
 
+  <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

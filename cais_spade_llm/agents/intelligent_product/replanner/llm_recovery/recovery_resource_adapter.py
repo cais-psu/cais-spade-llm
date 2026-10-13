@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 """Recovery runtime snapshot adapter helpers.
 
 The recovery consumes heterogeneous runtime snapshots from robots, printers, and
 other resources. This module adapts those snapshots into one stable recovery
 shape. It does not rewrite or reinterpret LLM-authored recovery proposals.
 """
-
-from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
@@ -14,6 +14,7 @@ from cais_spade_llm.resources.resource_profile import (
     all_registered_capability_flags,
     get_resource_profile,
     resource_snapshot_availability,
+    resource_snapshot_declared_fields,
     resource_type_from_value,
 )
 
@@ -100,6 +101,7 @@ def adapt_recovery_resource_snapshot(
     resource_type: str,
     snapshot: dict[str, Any] | None,
     modeled_state: dict[str, Any] | None = None,
+    state_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Adapt a raw resource snapshot into the stable recovery runtime shape."""
     raw_snapshot = dict(snapshot or {})
@@ -177,6 +179,18 @@ def adapt_recovery_resource_snapshot(
             continue
         for field, value in facet_values.items():
             adapted[field] = deepcopy(value)
+    if state_variables is not None:
+        recorded = resource_snapshot_declared_fields(raw_snapshot, state_variables)
+        for name, declaration in state_variables.items():
+            if not isinstance(declaration, dict) or declaration.get("scope", "resource") != "resource":
+                continue
+            # Profile compatibility fields must not replace a declared missing
+            # observation or an explicit null with a synthesized value.
+            for container in (adapted, resource_core, *resource_facets.values()):
+                if isinstance(container, dict) and name in container:
+                    container.pop(name)
+            if name in recorded:
+                adapted[name] = deepcopy(recorded[name])
     return adapted
 
 

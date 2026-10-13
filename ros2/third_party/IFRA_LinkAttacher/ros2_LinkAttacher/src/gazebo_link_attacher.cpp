@@ -32,6 +32,16 @@
 #include <gazebo/common/Events.hh>
 #include <gazebo/physics/Entity.hh>
 #include <gazebo/physics/Collision.hh>
+#include <gazebo/physics/BoxShape.hh>
+#include <gazebo/physics/CylinderShape.hh>
+#include <gazebo/physics/MeshShape.hh>
+#include <gazebo/physics/Contact.hh>
+#include <gazebo/physics/ContactManager.hh>
+#include <gazebo/physics/Inertial.hh>
+#include <gazebo/physics/Joint.hh>
+#include <gazebo/physics/ode/ODESurfaceParams.hh>
+#include <gazebo/physics/ode/ODELink.hh>
+#include <gazebo/ode/objects.h>
 #include <gazebo/physics/Light.hh>
 #include <gazebo/physics/Link.hh>
 #include <gazebo/physics/Model.hh>
@@ -131,6 +141,9 @@ void GazeboLinkAttacher::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr 
   
   // Gazebo WORLD:
   impl_->world_ = _world;
+  // Retain the physics engine's contact observations even without a subscriber.
+  // This changes observation retention, not collision response or body poses.
+  impl_->world_->Physics()->GetContactManager()->SetNeverDropContacts(true);
 
   // ROS2 NODE:
   impl_->ros_node_ = gazebo_ros::Node::Get(_sdf);
@@ -154,6 +167,15 @@ void GazeboLinkAttacher::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr 
   impl_->observation_service_ = impl_->ros_node_->create_service<std_srvs::srv::Trigger>(
     "GETRECOVERYSTATE", [this](std_srvs::srv::Trigger::Request::SharedPtr,
                                std_srvs::srv::Trigger::Response::SharedPtr response) {
+      // A paused world has no update callback to service the normal queue.
+      // Read under the same physics lock; attachment mutations remain queued.
+      {
+        boost::recursive_mutex::scoped_lock lock(*impl_->world_->Physics()->GetPhysicsUpdateMutex());
+        if (impl_->world_->IsPaused()) {
+          impl_->Observe(response);
+          return;
+        }
+      }
       if (!impl_->RunOnPhysicsThread([this, response]() { impl_->Observe(response); })) {
         response->success = false;
         response->message = "Gazebo did not acknowledge the read-only observation.";
@@ -179,6 +201,11 @@ static void JsonPose(std::ostream &out, const ignition::math::Pose3d &pose)
       << pose.Rot().X() << ',' << pose.Rot().Y() << ',' << pose.Rot().Z() << ',' << pose.Rot().W() << ']';
 }
 
+static void JsonVector(std::ostream &out, const ignition::math::Vector3d &value)
+{
+  out << '[' << value.X() << ',' << value.Y() << ',' << value.Z() << ']';
+}
+
 void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::SharedPtr response)
 {
   // The physics-thread snapshot never calls Attach, Detach, SetWorldPose or a
@@ -186,9 +213,19 @@ void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::Shared
   std::ostringstream out;
   out << std::setprecision(17) << "{\"version\":1,\"instance_id\":";
   JsonString(out, instance_id_);
+  out << ",\"physics_engine\":";
+  JsonString(out, world_->Physics()->GetType());
+  out << ",\"physics_configuration\":{\"max_step_size\":"
+      << world_->Physics()->GetMaxStepSize() << ",\"real_time_update_rate\":"
+      << world_->Physics()->GetRealTimeUpdateRate() << ",\"sdf\":";
+  JsonString(out, world_->Physics()->GetSDF()->ToString(""));
+  out << '}';
+  out << ",\"gravity\":";
+  JsonVector(out, world_->Gravity());
   out << ",\"simulation_time\":" << world_->SimTime().Double()
+      << ",\"world_paused\":" << (world_->IsPaused() ? "true" : "false")
       << ",\"attachment_revision\":" << attachment_revision_
-      << ",\"attachment_complete\":true,\"attachments\":[";
+      << ",\"attachment_complete\":true,\"attachment_evidence_version\":1,\"attachments\":[";
   bool comma = false;
   for (const auto &joint : GV_joints) {
     if (comma) out << ',';
@@ -197,6 +234,35 @@ void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::Shared
     out << ",\"link1\":"; JsonString(out, joint.link1);
     out << ",\"model2\":"; JsonString(out, joint.model2);
     out << ",\"link2\":"; JsonString(out, joint.link2);
+    const auto parent = joint.joint ? joint.joint->GetParent() : gazebo::physics::LinkPtr();
+    const auto child = joint.joint ? joint.joint->GetChild() : gazebo::physics::LinkPtr();
+    const bool connected = parent && child && parent == joint.l1 && child == joint.l2
+      && world_->ModelByName(joint.model1) == joint.m1
+      && world_->ModelByName(joint.model2) == joint.m2
+      && joint.m1 && joint.m2 && joint.m1->GetLink(joint.link1) == parent
+      && joint.m2->GetLink(joint.link2) == child;
+    if (connected) {
+      const auto parent_pose = parent->WorldPose();
+      const auto child_pose = child->WorldPose();
+      out << ",\"joint_evidence\":{\"status\":\"observed\",\"joint_name\":";
+      JsonString(out, joint.joint->GetName());
+      out << ",\"joint_scoped_name\":"; JsonString(out, joint.joint->GetScopedName());
+      out << ",\"fixed_joint\":"
+          << (joint.joint->HasType(gazebo::physics::Base::FIXED_JOINT) ? "true" : "false");
+      out << ",\"parent\":{\"model\":"; JsonString(out, parent->GetModel()->GetName());
+      out << ",\"link\":"; JsonString(out, parent->GetName());
+      out << ",\"scoped_name\":"; JsonString(out, parent->GetScopedName());
+      out << ",\"pose\":"; JsonPose(out, parent_pose);
+      out << "},\"child\":{\"model\":"; JsonString(out, child->GetModel()->GetName());
+      out << ",\"link\":"; JsonString(out, child->GetName());
+      out << ",\"scoped_name\":"; JsonString(out, child->GetScopedName());
+      out << ",\"pose\":"; JsonPose(out, child_pose);
+      out << "},\"parent_to_child\":"; JsonPose(out, parent_pose.Inverse() * child_pose);
+      out << '}';
+    } else {
+      out << ",\"joint_evidence\":{\"status\":\"NEEDS_CONTEXT\","
+             "\"reason\":\"Recorded attachment has no matching live joint endpoints\"}";
+    }
     out << '}';
   }
   out << "],\"models\":{";
@@ -205,7 +271,8 @@ void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::Shared
     if (comma) out << ',';
     comma = true;
     JsonString(out, model->GetName());
-    out << ":{\"static\":" << (model->IsStatic() ? "true" : "false") << ",\"pose\":";
+    out << ":{\"static\":" << (model->IsStatic() ? "true" : "false")
+        << ",\"joint_count\":" << model->GetJointCount() << ",\"pose\":";
     JsonPose(out, model->WorldPose());
     out << ",\"links\":{";
     bool link_comma = false;
@@ -214,14 +281,63 @@ void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::Shared
       link_comma = true;
       JsonString(out, link->GetName());
       out << ":{\"pose\":"; JsonPose(out, link->WorldPose());
+      out << ",\"mass\":" << link->GetInertial()->Mass()
+          << ",\"enabled\":" << (link->GetEnabled() ? "true" : "false")
+          << ",\"center_of_mass\":";
+      JsonVector(out, link->WorldCoGPose().Pos());
+      out << ",\"linear_velocity\":"; JsonVector(out, link->WorldLinearVel());
+      out << ",\"angular_velocity\":"; JsonVector(out, link->WorldAngularVel());
       out << ",\"linear_speed\":" << link->WorldLinearVel().Length()
-          << ",\"angular_speed\":" << link->WorldAngularVel().Length() << ",\"collisions\":[";
+          << ",\"angular_speed\":" << link->WorldAngularVel().Length();
+      if (const auto ode_link = boost::dynamic_pointer_cast<gazebo::physics::ODELink>(link)) {
+        if (const auto body = ode_link->GetODEId()) {
+          out << ",\"auto_disable\":{\"enabled\":"
+              << (dBodyGetAutoDisableFlag(body) ? "true" : "false")
+              << ",\"linear_threshold\":" << dBodyGetAutoDisableLinearThreshold(body)
+              << ",\"angular_threshold\":" << dBodyGetAutoDisableAngularThreshold(body)
+              << ",\"average_samples\":" << dBodyGetAutoDisableAverageSamplesCount(body)
+              << ",\"steps\":" << dBodyGetAutoDisableSteps(body)
+              << ",\"time\":" << dBodyGetAutoDisableTime(body) << '}';
+        }
+      }
+      out << ",\"collisions\":[";
       bool box_comma = false;
       for (const auto &collision : link->GetCollisions()) {
         const auto box = collision->BoundingBox();
         if (box_comma) out << ',';
         box_comma = true;
         out << "{\"id\":"; JsonString(out, collision->GetScopedName());
+        out << ",\"pose\":"; JsonPose(out, collision->WorldPose());
+        out << ",\"max_contacts\":" << collision->GetMaxContacts();
+        out << ",\"contact_min_depth\":";
+        if (const auto surface = boost::dynamic_pointer_cast<gazebo::physics::ODESurfaceParams>(collision->GetSurface())) {
+          out << surface->minDepth;
+        } else {
+          out << "null";
+        }
+        out << ",\"geometry\":";
+        if (const auto shape = boost::dynamic_pointer_cast<gazebo::physics::BoxShape>(collision->GetShape())) {
+          out << "{\"type\":\"box\",\"size\":";
+          JsonVector(out, shape->Size());
+          out << '}';
+        } else if (const auto shape = boost::dynamic_pointer_cast<gazebo::physics::CylinderShape>(collision->GetShape())) {
+          out << "{\"type\":\"cylinder\",\"radius\":" << shape->GetRadius()
+              << ",\"length\":" << shape->GetLength() << '}';
+        } else if (const auto shape = boost::dynamic_pointer_cast<gazebo::physics::MeshShape>(collision->GetShape())) {
+          // Shape::Scale() is the runtime resize multiplier, not the mesh's
+          // SDF import scale. Detached calculations use the original vertices.
+          const auto mesh_sdf = shape->GetSDF();
+          if (mesh_sdf && mesh_sdf->HasElement("scale")) {
+            out << "{\"type\":\"mesh\",\"uri\":"; JsonString(out, shape->GetMeshURI());
+            out << ",\"scale\":";
+            JsonVector(out, mesh_sdf->Get<ignition::math::Vector3d>("scale"));
+            out << ",\"scale_source\":\"MeshShape SDF scale\"}";
+          } else {
+            out << "null";
+          }
+        } else {
+          out << "null";
+        }
         const bool finite = box.Min().IsFinite() && box.Max().IsFinite();
         // Infinite ground-plane geometry is explicit missing finite evidence;
         // do not emit invalid JSON or replace it with invented coordinates.
@@ -245,7 +361,31 @@ void GazeboLinkAttacherPrivate::Observe(std_srvs::srv::Trigger::Response::Shared
     }
     out << "}}";
   }
-  out << "}}";
+  out << "},\"contacts\":[";
+  const auto manager = world_->Physics()->GetContactManager();
+  for (unsigned int index = 0; index < manager->GetContactCount(); ++index) {
+    const auto contact = manager->GetContact(index);
+    if (index) out << ',';
+    out << "{\"collision1\":"; JsonString(out, contact->collision1->GetScopedName());
+    out << ",\"collision2\":"; JsonString(out, contact->collision2->GetScopedName());
+    out << ",\"positions\":[";
+    for (int point = 0; point < contact->count; ++point) {
+      if (point) out << ',';
+      JsonVector(out, contact->positions[point]);
+    }
+    out << "],\"normals\":[";
+    for (int point = 0; point < contact->count; ++point) {
+      if (point) out << ',';
+      JsonVector(out, contact->normals[point]);
+    }
+    out << "],\"depths\":[";
+    for (int point = 0; point < contact->count; ++point) {
+      if (point) out << ',';
+      out << contact->depths[point];
+    }
+    out << "]}";
+  }
+  out << "]}";
   response->message = out.str();
   response->success = true;
 }

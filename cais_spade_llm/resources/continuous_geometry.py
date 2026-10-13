@@ -5,9 +5,36 @@ from __future__ import annotations
 import hashlib
 import itertools
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from pathlib import Path
 
 from cais_spade_llm.resources.continuous_motion import add, interval, mul, transform
+
+
+def observed_joint_configuration(configuration: dict, observed_joints: dict, root_pose: list) -> dict:
+    """Bind an existing owner model to one recorded root and passive-joint snapshot."""
+    import math
+
+    if (not isinstance(root_pose, list) or len(root_pose) != 7
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in root_pose)):
+        raise ValueError("Observed root pose is incomplete")
+    result = deepcopy(configuration)
+    result.update(root_xyz=root_pose[:3], root_quaternion=root_pose[3:])
+    for joint in result["joints"]:
+        if joint["type"] == "fixed" or joint["name"] in result["joint_names"]:
+            continue
+        name = joint["name"]
+        value = observed_joints.get(name, {}).get("position")
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("Observed non-commanded joint is missing or invalid: " + name)
+        joint.pop("frozen_interval", None)
+        joint["frozen_position"] = value
+    for name in result.get("fixed_joint_positions", {}):
+        value = observed_joints.get(name, {}).get("position")
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("Observed fixed joint record is missing or invalid: " + name)
+        result["fixed_joint_positions"][name] = value
+    return result
 
 
 def _values(element, key, default):
@@ -41,6 +68,12 @@ def _joint_tree(tree, root, joint_names, observed_joints):
                 frozen = {"frozen_position": value}
             if row.find("mimic") is not None and name in joint_names:
                 raise ValueError("Commanded mimic joints require another interpolation contract")
+            limits = {}
+            declared_limit = row.find("limit")
+            if kind in {"revolute", "prismatic"} and declared_limit is not None:
+                low, high = declared_limit.get("lower"), declared_limit.get("upper")
+                if low is not None and high is not None:
+                    limits["position_bounds"] = list(interval(float(low), float(high)))
             joints.append(
                 {
                     "name": name,
@@ -51,6 +84,7 @@ def _joint_tree(tree, root, joint_names, observed_joints):
                     "xyz": _values(row.find("origin"), "xyz", "0 0 0"),
                     "rpy": _values(row.find("origin"), "rpy", "0 0 0"),
                     **frozen,
+                    **limits,
                 }
             )
             links.add(child)
@@ -156,6 +190,7 @@ def load_continuous_geometry(
                     "bounds": bounds,
                 }
             )
+    owned_joints = {joint["name"] for joint in joints}
     return {
         "root": root,
         "reference_link": reference_link,
@@ -170,6 +205,6 @@ def load_continuous_geometry(
         "fixed_joint_positions": {
             name: row["position"]
             for name, row in observed_joints.items()
-            if name not in joint_names
+            if name not in joint_names and name in owned_joints
         },
     }

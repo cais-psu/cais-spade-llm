@@ -1,6 +1,6 @@
-"""Observed checkpoints for the four simulation failure scenarios."""
-
 from __future__ import annotations
+
+"""Observed checkpoints for the four simulation failure scenarios."""
 
 from copy import deepcopy
 
@@ -13,6 +13,9 @@ CHECKPOINTS = {
 
 
 SUPPORTED_CHECKPOINTS = {scenario: (name,) for scenario, name in CHECKPOINTS.items()}
+SUPPORTED_CHECKPOINTS["Machining breakdown during part processing"] = (
+    "during_processing_halfway", "during_processing",
+)
 SUPPORTED_CHECKPOINTS["Part slippage"] = (
     "during_place_lowering", "after_both_pickups_before_place",
 )
@@ -123,6 +126,12 @@ def checkpoint(context, configuration: dict) -> dict | None:
 
 def holds_task(context, configuration: dict | None, task: dict) -> bool:
     """Hold selected custody while allowing the configured placement to lower."""
+    if (configuration and configuration["scenario"] == "Machining breakdown during part processing"
+            and configuration.get("checkpoint") == "during_processing" and task["event_name"] == "machine_part"):
+        machines = context.inputs["scene"]["machines"]
+        return any(context.resources[row["resource_id"]].valuation.get("resource_state") != "loaded"
+                   or context.resources[row["handling_robot"]].valuation.get("held_part") is not None
+                   for row in machines)
     if not configuration or configuration["scenario"] != "Part slippage":
         return False
     other = configuration["additional_condition"]

@@ -1,0 +1,48 @@
+{
+  "ordering": "Original triangle indices sorted by their bit-reversed index",
+  "max_contacts": 64,
+  "models": {
+    "gear_small": {
+      "source_mesh_sha256": "ad56322517131ca5eeb2977b1d320f07d5f46b2cb0a0da57396e9c37c07edd21",
+      "output_mesh_sha256": "1c63c93db730e935a8390bdec6cfb62d294ba7a6aa9a07a3b674627eafb04c1b",
+      "triangle_count": 9768,
+      "triangle_record_multiset_unchanged": true,
+      "triangle_record_multiset_sha256": "da1bf727f578a99ce5fa159952ceb6cc2cac8df7cc6c4055734956197b29e824",
+      "index_bit_width": 14,
+      "index_order_sha256": "af75b34754bcac664f69aaf0070648c66d15797c25843d8aa98557ca33a13e3a",
+      "collision_name_pose_scale_surface_unchanged": true,
+      "collision_count": 1,
+      "inertial_and_visual_unchanged": true,
+      "source_mesh": "gear_small/meshes/Gear_Small.STL",
+      "output_mesh": "gear_small/meshes/Gear_Small_contact.STL"
+    },
+    "gear_medium": {
+      "source_mesh_sha256": "73d2c5d06497db2042ec6624a45558398ee47c9e55ccd87d49184c179a501507",
+      "output_mesh_sha256": "cbfca7f49cd7db66f500a9b662ec285e0b99525424ac74ca23451ade9a8c5936",
+      "triangle_count": 15210,
+      "triangle_record_multiset_unchanged": true,
+      "triangle_record_multiset_sha256": "a0cf66737c375d467c314b5cafbb1bc777b267f4fc3e33d987545b4bbf2242a3",
+      "index_bit_width": 14,
+      "index_order_sha256": "222bdde99f9e7bfd55f7ea5c18dcebde388b267f89e727be6c016a3d902c91e8",
+      "collision_name_pose_scale_surface_unchanged": true,
+      "collision_count": 1,
+      "inertial_and_visual_unchanged": true,
+      "source_mesh": "gear_medium/meshes/Gear_Medium.STL",
+      "output_mesh": "gear_medium/meshes/Gear_Medium_contact.STL"
+    },
+    "gear_large": {
+      "source_mesh_sha256": "23653ebb972546a15404b4f945ce745a6c8162e744f37fc4d7cd853a54bd8388",
+      "output_mesh_sha256": "7a1875544c5b680a11af2f06f60904e19723a3041f36b9ff0adc98d23bda449d",
+      "triangle_count": 22884,
+      "triangle_record_multiset_unchanged": true,
+      "triangle_record_multiset_sha256": "16cba887dfee546da057da2b208006eea67fc3a9667bef376af16943e247c54c",
+      "index_bit_width": 15,
+      "index_order_sha256": "3e2aca3093e903d56921ef16b6e7b6ba28ca080664c945a3fecc4590f1571656",
+      "collision_name_pose_scale_surface_unchanged": true,
+      "collision_count": 1,
+      "inertial_and_visual_unchanged": true,
+      "source_mesh": "gear_large/meshes/Gear_Large.STL",
+      "output_mesh": "gear_large/meshes/Gear_Large_contact.STL"
+    }
+  }
+}

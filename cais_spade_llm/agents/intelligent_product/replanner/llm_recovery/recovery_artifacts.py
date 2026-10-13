@@ -2,17 +2,205 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import os
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_RECOVERY_RUNTIME_DATA_DIR = Path(
     "cais_spade_llm/agents/intelligent_product/replanner/llm_recovery/runtime_data"
 )
 DEFAULT_RECOVERY_DEBUG_DIR = DEFAULT_RECOVERY_RUNTIME_DATA_DIR
 _RUNTIME_MULTI_TURN_FULL_TURN_WINDOW = 1
+
+
+def nominal_continuation_context_binding(session: dict, prepared: dict) -> str:
+    """Bind a nominal proof to its source, accepted state, models, and requirements."""
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+    from cais_spade_llm.resources.recovery_geometry import outline_event_binding
+
+    physical = session.get("projected_physical_evidence", prepared.get("physical_evidence", {}))
+    if not isinstance(physical, dict):
+        raise ValueError("Nominal continuation physical evidence must be an object")
+    for container, fields in ((physical, ("resource_models", "resources")),
+                              (prepared, ("llm_input", "physical_evidence", "recovery_resources"))):
+        if any(key in container and not isinstance(container[key], dict) for key in fields):
+            raise ValueError("Nominal continuation model context must contain recorded objects")
+    if (any(not isinstance(row, dict) for row in physical.get("resource_models", {}).values())
+            or any(not isinstance(row, dict) for row in physical.get("resources", {}).values())
+            or any(not isinstance(row, dict) for row in prepared.get("recovery_resources", {}).values())):
+        raise ValueError("Nominal continuation resource context must contain recorded objects")
+    return recovery_validation_fingerprint({
+        "prepared": {key: prepared[key] for key in (
+            "source_observation_fingerprint", "source_observation_run_id", "source_context_revision",
+            "validation_contract_version", "primitive_support_semantics", "nominal_continuation_semantics",
+            "outline_safety_specifications", "saved_pending_nodes", "completed_task_ids",
+            "marked_reentry_context", "goal_state", "obligation_targets",
+        ) if key in prepared},
+        "session": {key: session[key] for key in (
+            "accepted_outline_prefix", "symbolic_resources", "symbolic_parts",
+            "derived_resource_snapshots", "outline_monitor_context", "validation_resource_context",
+        ) if key in session},
+        "physical_scene": outline_event_binding({}, {}, {}, physical)["scene_fingerprint"],
+        "goal_conditions": {key: value for key, value in prepared.get("llm_input", {}).items()
+                            if key == "goal_conditions"},
+        "initial_requirements": {key: value for key, value in prepared.get("physical_evidence", {}).items()
+                                 if key == "requirements"},
+        "named_joint_poses": {rid: model["named_joint_poses"]
+                              for rid, model in physical.get("resource_models", {}).items()
+                              if "named_joint_poses" in model},
+        "resources": {jid: {key: entry[key] for key in (
+            "recovery_des_model", "static_capabilities", "pending_tasks", "resource_evidence",
+        ) if key in entry} for jid, entry in prepared.get("recovery_resources", {}).items()},
+    })
+
+
+def _nominal_artifact_path(directory: Path, reference: dict) -> Path:
+    path = reference.get("path")
+    if (reference.get("version") != 1 or type(reference.get("version")) is not int
+            or not isinstance(path, str) or Path(path).is_absolute() or ".." in Path(path).parts
+            or re.fullmatch(r"turns/turn_\d{5,}_validation_\d{4,}\.json", path) is None):
+        raise ValueError("Nominal continuation artifact reference is invalid")
+    resolved = (directory / path).resolve()
+    resolved.relative_to(directory.resolve())
+    return resolved
+
+
+def _nominal_artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_nominal_continuation(record: dict, *, directory: Path,
+                              context_binding: str | None = None,
+                              artifact_records: dict[Path, dict] | None = None) -> dict:
+    """Read an exact proof within its trusted stage directory, including legacy records.
+
+    Completion audits supply the binding calculated from their independently
+    established current state. Display-only callers verify the stored binding.
+    """
+    if not isinstance(record, dict):
+        raise ValueError("Nominal continuation evidence must be an object")
+    if "artifact_reference" not in record:
+        return deepcopy(record)
+    reference = record["artifact_reference"]
+    if not isinstance(reference, dict):
+        raise ValueError("Nominal continuation artifact reference must be an object")
+    path = _nominal_artifact_path(Path(directory), reference)
+    expected = reference.get("sha256")
+    binding = reference.get("context_binding")
+    if (not isinstance(expected, str) or len(expected) != 64
+            or any(char not in "0123456789abcdef" for char in expected)
+            or not isinstance(binding, str) or len(binding) != 64
+            or any(char not in "0123456789abcdef" for char in binding)
+            or context_binding is not None and binding != context_binding):
+        raise ValueError("Nominal continuation artifact binding does not match")
+    if _nominal_artifact_sha256(path) != expected:
+        raise ValueError("Nominal continuation artifact hash does not match")
+    with path.open(encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if _nominal_artifact_sha256(path) != expected:
+        raise ValueError("Nominal continuation artifact changed while reading")
+    if (not isinstance(payload, dict) or type(payload.get("nominal_continuation_artifact_version")) is not int
+            or payload.get("nominal_continuation_artifact_version") != 1
+            or payload.get("nominal_continuation_context_binding") != binding
+            or type(reference.get("turn_index")) is not int
+            or type(payload.get("turn_index")) is not int
+            or payload.get("turn_index") != reference["turn_index"]
+            or payload.get("phase") != "outline" or reference.get("phase") != "outline"):
+        raise ValueError("Nominal continuation artifact belongs to another validation context")
+    proof = payload.get("nominal_continuation_evidence")
+    if not isinstance(proof, dict) or "artifact_reference" in proof:
+        raise ValueError("Nominal continuation artifact does not contain the complete proof")
+    fields = ("complete", "status", "reason", "execution_authorized")
+    if (set(record) != {key for key in fields if key in proof} | {"artifact_reference"}
+            or any(key in record and (type(record[key]) is not type(proof.get(key)) or record[key] != proof[key])
+                   for key in fields)):
+        raise ValueError("Nominal continuation summary differs from the complete proof")
+    if artifact_records is not None:
+        artifact_records[path] = payload
+    return proof
+
+
+def write_recovery_validation_record(directory: Path, turn: dict) -> tuple[Path, str]:
+    """Publish one complete indexed validation record without replacing an attempt."""
+    from cais_spade_llm.recovery_framework.diagnostics import write_record
+
+    turns = Path(directory) / "turns"
+    temporary = turns / f".nominal_{uuid4().hex}.json"
+    try:
+        number = turn.get("turn_index")
+        if type(number) is not int or number < 0:
+            raise ValueError("Recovery validation turn index is invalid")
+        turns.mkdir(parents=True, exist_ok=True)
+        pattern = f"turn_{number:05d}_validation_"
+        indices = [int(path.stem[len(pattern):]) for path in turns.glob(pattern + "*.json")
+                   if path.stem[len(pattern):].isdigit()]
+        path = turns / f"{pattern}{max(indices, default=0) + 1:04d}.json"
+        write_record(temporary, turn)
+        digest = _nominal_artifact_sha256(temporary)
+        os.link(temporary, path)
+        return path, digest
+    finally:
+        for leftover in (temporary, temporary.with_suffix(".json.tmp")):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Recovery validation temporary record could not be removed: %s", exc)
+
+
+def archive_nominal_continuation(prepared: dict, session: dict, turn: dict, *, decision: str) -> Path | None:
+    """Persist a full immutable validation record before reducing diagnostic copies.
+
+    Failed persistence retains both full in-memory proofs. Active validation
+    inputs and pending nominal scenes are never changed by this operation.
+    """
+    if (prepared.get("nominal_continuation_artifact_version") != 1
+            or session.get("validation_contract_version") != 2):
+        return None
+    proof = turn.get("nominal_continuation_evidence")
+    if not isinstance(proof, dict) or "artifact_reference" in proof:
+        return None
+    if session.get("nominal_continuation_evidence") != proof:
+        raise ValueError("Current turn and session nominal continuation evidence differ")
+    from cais_spade_llm.agents.shared_information.llm_request_records import recovery_request_directory
+
+    directory = recovery_request_directory(prepared, "outline")
+    try:
+        source = prepared.get("source_observation_fingerprint")
+        if (not isinstance(source, str) or len(source) != 64
+                or any(char not in "0123456789abcdef" for char in source)):
+            raise ValueError("Nominal continuation archive requires its source observation fingerprint")
+        number = turn.get("source_turn_index") or turn.get("turn_index") or session.get("turn_index", 0)
+        if type(number) is not int or number < 0:
+            raise ValueError("Nominal continuation turn index is invalid")
+        binding = nominal_continuation_context_binding(session, prepared)
+        payload = {**turn, "turn_index": number, "phase": "outline", "decision": decision,
+                   "nominal_continuation_artifact_version": 1,
+                   "nominal_continuation_context_binding": binding}
+        # Publish a complete file without ever replacing an earlier attempt.
+        path, digest = write_recovery_validation_record(directory, payload)
+        summary = {key: deepcopy(proof[key]) for key in (
+            "complete", "status", "reason", "execution_authorized") if key in proof}
+        summary["artifact_reference"] = {"version": 1, "path": str(path.relative_to(directory)),
+            "sha256": digest, "turn_index": number, "phase": "outline", "context_binding": binding}
+        session["nominal_continuation_evidence"] = deepcopy(summary)
+        turn["nominal_continuation_evidence"] = deepcopy(summary)
+        return path
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("Nominal continuation proof remains embedded because archival failed: %s", exc)
+        return None
 
 
 def _resolve_debug_dir(debug_dir: str | Path | None) -> Path:
@@ -1188,7 +1376,7 @@ def _primitive_substream_prompt_text(turn: dict[str, Any]) -> str:
 
 
 def _primitive_substream_response_text(turn: dict[str, Any]) -> str:
-    response_payload = turn.get("raw_response")
+    response_payload = deepcopy(turn.get("raw_response"))
     if not isinstance(response_payload, dict):
         response_payload = deepcopy(turn.get("llm_raw_response") or {})
     if not isinstance(response_payload, dict):
@@ -1327,9 +1515,9 @@ def _multi_turn_resume_checkpoint_payload(payload: dict[str, Any]) -> dict[str, 
     return {
         "kind": "multi_turn_resume_checkpoint",
         "saved_at_utc": datetime.now(timezone.utc).isoformat(),
-        "prepared_recovery_request": deepcopy(prepared_recovery_request),
-        "session_state": deepcopy(session_state),
-        "current_turn": deepcopy(current_turn),
+        "prepared_recovery_request": prepared_recovery_request,
+        "session_state": session_state,
+        "current_turn": current_turn,
     }
 
 
@@ -1380,9 +1568,14 @@ def write_recovery_artifacts(
     write_session_transcript: bool | None = None,
     write_phase_prompt_response: bool = True,
 ) -> dict[str, str]:
-    """Write recovery prompt/response artifacts."""
+    """Write recovery prompt/response artifacts without mutating the input.
+
+    The writer is synchronous. Keep the complete validation records available
+    while reading only the fields each artifact needs, rather than copying the
+    prepared request and its recorded scenes again for every retrieval turn.
+    """
     del phase_label, filename_prefix
-    normalized_payload = deepcopy(payload if isinstance(payload, dict) else {"payload": payload})
+    normalized_payload = dict(payload) if isinstance(payload, dict) else {"payload": payload}
     base_target_dir = _resolve_debug_dir(debug_dir)
     base_target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1746,7 +1939,7 @@ def write_recovery_artifacts(
         llm_response_artifact_path = target_dir / llm_response_artifact_name
         llm_response_artifact_path.write_text(llm_raw_response, encoding="utf-8")
         artifact_paths["llm_response_artifact_path"] = str(llm_response_artifact_path)
-    session_transcript = _extract_session_transcript(normalized_payload)
+    session_transcript = _extract_session_transcript(normalized_payload) if write_session_transcript else ""
     if write_session_transcript and session_transcript:
         session_transcript_artifact_path = target_dir / session_transcript_artifact_name
         session_transcript_artifact_path.write_text(

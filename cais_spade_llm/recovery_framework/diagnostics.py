@@ -32,7 +32,8 @@ def read_object(path: Path) -> dict:
 def write_record(path: Path, value: dict) -> None:
     """Atomically publish a diagnostic record for polling clients."""
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, indent=2, ensure_ascii=False)
     temporary.replace(path)
 
 

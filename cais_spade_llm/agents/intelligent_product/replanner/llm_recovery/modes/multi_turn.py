@@ -1,6 +1,6 @@
-"""Multi-turn recovery execution engine — one-task-at-a-time outline."""
-
 from __future__ import annotations
+
+"""Multi-turn recovery execution engine — one-task-at-a-time outline."""
 
 from cais_spade_llm.agents.shared_information.llm_request_records import (
     recorded_structured_call, recovery_request_directory,
@@ -18,6 +18,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.mult
     infer_outline_predecessors,
 )
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
+    archive_nominal_continuation,
     compact_multi_turn_runtime_session,
     write_recovery_artifacts,
 )
@@ -73,6 +74,7 @@ _TRANSITIONS: dict[str, dict[str, str]] = {
         "grounded": "outline",
     },
     "outline": {
+        "need_context": "outline",
         "outline_ready": "primitive_generation",
         "need_revision": "outline",
         "need_next_task": "outline",
@@ -277,6 +279,13 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
 
     return {
         "current_phase": "grounding",
+        "validation_contract_version": prepared_recovery_request.get("validation_contract_version"),
+        **({"primitive_support_semantics": prepared_recovery_request["primitive_support_semantics"]}
+           if "primitive_support_semantics" in prepared_recovery_request else {}),
+        **({"nominal_continuation_semantics": prepared_recovery_request["nominal_continuation_semantics"]}
+           if "nominal_continuation_semantics" in prepared_recovery_request else {}),
+        "outline_monitor_context": deepcopy(prepared_recovery_request.get("outline_monitor_context") or {}),
+        "outline_context_retrieval": bool(recovery_session.get("outline_context_retrieval")),
         "turn_index": 0,
         "max_turns": max_turns,
         "max_observations": max_observations,
@@ -726,6 +735,8 @@ def _record_observation_fact(
         or str(existing.get("observation_key") or "").strip()
         or None,
     }
+    if dict(observation_row.get("output") or {}).get("source") == "saved_observations":
+        ledger[fact_key]["freshness"] = "saved_observations"
     session_state["observation_fact_ledger"] = ledger
 
 
@@ -779,6 +790,9 @@ def _seed_grounded_part_pose_observations(
         )
         part_row = dict(llm_part_facts.get(part_name) or {})
         payload: dict[str, Any] = {"part_name": part_name, "pose": deepcopy(pose)}
+        if prepared_recovery_request.get("offline_recovery") is True:
+            payload.update(source="saved_observations",
+                           captured_at=prepared_recovery_request.get("source_observation_captured_at"))
         for axis in ("x", "y", "z", "qx", "qy", "qz", "qw"):
             value = pose.get(axis)
             if value is not None:
@@ -953,6 +967,13 @@ async def _execute_observe_requests(
                 f"observation primitive {primitive_name!r} on {resource_jid!r} did not "
                 f"produce a reusable output: {extract_error or 'unknown error'}"
             )
+        if prepared_recovery_request.get("offline_recovery") is True:
+            extracted_output.update(
+                source="saved_observations",
+                captured_at=normalized_result.get("captured_at")
+                or extracted_output.get("captured_at")
+                or prepared_recovery_request.get("source_observation_captured_at"),
+            )
 
         observation_row = {
             "fact_key": fact_key,
@@ -974,7 +995,7 @@ async def _execute_observe_requests(
                 **deepcopy(observation_row),
                 "turn_index": int(session_state.get("turn_index") or 0),
                 "validity": "current",
-                "freshness": "current_session",
+                "freshness": "saved_observations" if prepared_recovery_request.get("offline_recovery") is True else "current_session",
                 "observation_key": observation_key,
             }
 
@@ -1438,9 +1459,13 @@ def _normalized_blocker_kind(condition: dict[str, Any]) -> str:
     return kind
 
 
-def _condition_expected_matches(actual: Any, expected: Any) -> bool:
+def _condition_expected_matches(actual: Any, expected: Any, *, exact: bool = False) -> bool:
     if isinstance(expected, dict) and set(expected) == {"not"}:
-        return not _condition_expected_matches(actual, expected.get("not"))
+        return not _condition_expected_matches(actual, expected.get("not"), exact=exact)
+    if exact:
+        from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+
+        return recovery_validation_fingerprint(actual) == recovery_validation_fingerprint(expected)
     if isinstance(expected, (dict, list)):
         return actual == expected
     if expected in (None, ""):
@@ -1464,6 +1489,30 @@ def _continuation_condition_satisfied(  # noqa: C901, PLR0912
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
     )
+
+    if session_state.get("validation_contract_version") == 2:
+        rows = {"resource": resources_by_jid, "part": parts_by_name}.get(entity_kind)
+        if rows is not None:
+            row = dict(rows.get(entity) or {})
+            projected_field = {
+                ("resource", "state"): "resource_state",
+                ("resource", "location"): "resource_location",
+                ("part", "state"): "part_state",
+                ("part", "location"): "part_location",
+            }.get((entity_kind, field))
+            if projected_field is not None:
+                known, actual = _projected_state_value(
+                    row=row, field_name=projected_field, scope=entity_kind,
+                )
+            elif entity_kind == "part" and field == "holder":
+                holder_field = (
+                    "part_holder_resource_jid" if "part_holder_resource_jid" in row
+                    else "current_holder_resource_jid"
+                )
+                known, actual = holder_field in row, row.get(holder_field)
+            else:
+                known, actual = field in row, row.get(field)
+            return known and _condition_expected_matches(actual, expected, exact=True)
 
     if entity_kind == "resource" and entity:
         row = dict(resources_by_jid.get(entity) or {})
@@ -2310,10 +2359,11 @@ def _generated_candidate_start_state(
     part_name: str,
     end_state: dict[str, Any],
     state_variables: dict[str, dict[str, Any]],
+    declared_fields_only: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Bind one LLM-authored successor to the exact projected current state."""
-    field_names = {"resource_state", *end_state}
-    if part_name:
+    field_names = set(end_state) if declared_fields_only else {"resource_state", *end_state}
+    if part_name and not declared_fields_only:
         field_names.update(
             field_name
             for field_name in ("held_part", "part_state", "part_location")
@@ -2376,8 +2426,7 @@ def _derive_candidate_outline_task(
     resource_jid = _task_resource_jid(candidate_task)
     event_name = str(candidate_task.get("event_name") or "").strip()
     raw_part_name = candidate_task.get("part_name")
-    # The per-resource schema uses null to encode an omitted resource-only binding.
-    part_name_present = "part_name" in candidate_task and raw_part_name is not None
+    part_name_present = "part_name" in candidate_task
     part_name = raw_part_name if isinstance(raw_part_name, str) else ""
     rationale = str(candidate_task.get("rationale") or "").strip()
     recovery_entry = dict(
@@ -2458,7 +2507,7 @@ def _derive_candidate_outline_task(
             )
         ]
 
-    if part_name_present and (
+    if part_name_present and raw_part_name is not None and (
         not isinstance(raw_part_name, str)
         or not raw_part_name
         or raw_part_name != raw_part_name.strip()
@@ -2522,12 +2571,23 @@ def _derive_candidate_outline_task(
             )
         ]
 
-    completeness_findings = _candidate_state_completeness_findings(
-        candidate_task=candidate_task,
-        part_name=part_name,
-        end_state=end_state,
-        state_variables=state_variables,
-    )
+    declared_fields_only = session_state.get("validation_contract_version") == 2
+    if declared_fields_only:
+        invalid = [name for name in end_state if name not in state_variables
+                   or state_variables[name].get("private") is True
+                   or str(name).startswith(("task_ctx.", "_"))
+                   or state_variables[name].get("scope") == "part" and not part_name]
+        completeness_findings = ([_candidate_schema_finding(task=candidate_task,
+            reason="expected_end_state requires declared public fields and part_name for part-scoped fields",
+            evidence={"field": "expected_end_state", "unexpected": invalid})]
+            if invalid or not end_state else [])
+    else:
+        completeness_findings = _candidate_state_completeness_findings(
+            candidate_task=candidate_task,
+            part_name=part_name,
+            end_state=end_state,
+            state_variables=state_variables,
+        )
     if completeness_findings:
         return None, completeness_findings
 
@@ -2538,6 +2598,7 @@ def _derive_candidate_outline_task(
         part_name=part_name,
         end_state=end_state,
         state_variables=state_variables,
+        declared_fields_only=declared_fields_only,
     )
     if start_state_findings:
         return None, start_state_findings
@@ -2550,8 +2611,8 @@ def _derive_candidate_outline_task(
         "expected_end_state": end_state,
         "rationale": rationale,
     }
-    if part_name:
-        validated_task["part_name"] = part_name
+    if part_name_present:
+        validated_task["part_name"] = deepcopy(raw_part_name)
     return validated_task, []
 
 
@@ -2570,7 +2631,7 @@ def _commit_selected_candidate_task(
     return committed_task
 
 
-def _apply_task_effects_to_symbolic_state(  # noqa: C901
+def _apply_task_effects_to_symbolic_state(  # noqa: C901, PLR0912, PLR0915
     task: dict[str, Any],
     session_state: dict[str, Any],
 ) -> None:
@@ -2588,6 +2649,8 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901
 
     symbolic_resources = dict(session_state.get("symbolic_resources") or {})
     symbolic_parts = dict(session_state.get("symbolic_parts") or {})
+    previous_resource = deepcopy(symbolic_resources.get(resource_jid) or {})
+    previous_part = deepcopy(symbolic_parts.get(part_name) or {})
 
     if resource_jid:
         res = symbolic_resources.setdefault(resource_jid, {"resource_jid": resource_jid})
@@ -2651,6 +2714,33 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901
             part["current_holder_resource_jid"] = deepcopy(
                 end_state.get("part_holder_resource_jid")
             )
+
+    resource = symbolic_resources.get(resource_jid) or {}
+    proposed_pose = end_state.get("position") or end_state.get("pose")
+    explicit_pose = isinstance(proposed_pose, dict) and "x" in proposed_pose
+    resource_moved = (
+        resource.get("resource_location", resource.get("current_location"))
+        != previous_resource.get("resource_location", previous_resource.get("current_location"))
+        or resource.get("current_pose") != previous_resource.get("current_pose")
+        or explicit_pose
+    )
+    for name, part in symbolic_parts.items():
+        holder = part.get("part_holder_resource_jid", part.get("current_holder_resource_jid"))
+        carried_part_moved = bool(resource_jid and resource_moved and (
+            holder == resource_jid or previous_resource.get("held_part") == name))
+        bound_part_changed = name == part_name and (
+            explicit_pose
+            or part.get("part_location", part.get("current_location", part.get("location")))
+            != previous_part.get("part_location", previous_part.get("current_location", previous_part.get("location")))
+            or holder != previous_part.get("part_holder_resource_jid", previous_part.get("current_holder_resource_jid"))
+        )
+        if not carried_part_moved and not bound_part_changed:
+            continue
+        if isinstance(part.get("observed_pose"), dict):
+            part["last_observed_pose"] = deepcopy(part["observed_pose"])
+        part["observed_pose"] = None
+        part["observed_pose_current"] = False
+        part["projected_pose"] = deepcopy(proposed_pose) if name == part_name and explicit_pose else None
 
     session_state["symbolic_resources"] = symbolic_resources
     session_state["symbolic_parts"] = symbolic_parts
@@ -3404,6 +3494,8 @@ def _build_phase_prompt(
 
     phase = str(session_state.get("current_phase") or "grounding").strip().lower()
     llm_input = dict(prepared_recovery_request.get("llm_input") or {})
+    if "prompt_safety_rules" in prepared_recovery_request:
+        llm_input["prompt_safety_rules"] = deepcopy(prepared_recovery_request["prompt_safety_rules"])
     outline_mode = str(session_state.get("outline_mode") or "incremental").strip().lower()
 
     world_observation_surface: dict[str, Any] | None = None
@@ -3427,10 +3519,20 @@ def _build_phase_prompt(
         )
         session_state["candidate_bound"] = candidate_bound
 
+    prompt_session = session_state
+    if session_state.get("validation_contract_version") == 2 and phase in {"grounding", "outline"}:
+        # These records remain in the validation session and saved inputs. The
+        # renderer does not use them; copying prior prompt inputs here embeds
+        # the complete previous session again inside every subsequent turn.
+        prompt_session = {key: value for key, value in session_state.items() if key not in {
+            "turns", "projected_physical_evidence", "pending_outline_validation",
+            "nominal_continuation_evidence", "outline_monitor_context",
+            "validation_resource_context", "validation_resource_evidence_captures",
+        }}
     prompt_input = build_multi_turn_phase_prompt_input(
         phase=phase,
         llm_input=llm_input,
-        session_state=session_state,
+        session_state=prompt_session,
         recovery_resources=dict(prepared_recovery_request.get("recovery_resources") or {}),
         world_observation_surface=world_observation_surface,
         current_recovery_blockers=current_recovery_blockers,
@@ -3442,7 +3544,15 @@ def _build_phase_prompt(
                 prepared_recovery_request=prepared_recovery_request,
             )
         )
+    if session_state.get("outline_context_retrieval") and phase in {"grounding", "outline"}:
+        from .multi_turn_context import scope_prompt_input
+
+        prompt_input = scope_prompt_input(prompt_input, prepared_recovery_request, session_state)
     prompt_text = render_multi_turn_phase_prompt(prompt_input)
+    feedback = prepared_recovery_request.get("recovery_feedback")
+    if feedback:
+        prompt_input["recovery_feedback"] = feedback
+        prompt_text += "\n\nOperator feedback:\n" + str(feedback)
     return prompt_input, prompt_text
 
 
@@ -3475,12 +3585,16 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
             declared_state_variables[str(field_name)] = deepcopy(
                 dict(declaration or {})
             )
-        if "resource_state" in declared_state_variables:
+        if "resource_state" in declared_state_variables or (
+            session_state.get("validation_contract_version") == 2 and declared_state_variables
+        ):
             declared_state_variables_by_resource_jid[str(resource_jid)] = (
                 declared_state_variables
             )
     return multi_turn_phase_response_schema(
         phase,
+        outline_context_retrieval=bool(session_state.get("outline_context_retrieval")),
+        validation_contract_version=session_state.get("validation_contract_version"),
         outline_mode=outline_mode,
         candidate_bound=candidate_bound,
         candidate_count=session_state.get("candidate_count", "auto"),
@@ -3741,19 +3855,19 @@ def _compact_artifact_candidate_evaluations(  # noqa: C901
             if not isinstance(enabledness, dict):
                 continue
             summary[key] = {
-                field_name: deepcopy(enabledness.get(field_name) or default)
-                for field_name, default in (
-                    ("symbolically_enabled_event_ids", []),
-                    ("ra_admissible_event_ids", []),
-                    ("cca_admissible_event_ids", []),
-                    ("admissible_event_ids", []),
-                    ("event_evaluations", []),
-                    ("ra_snapshot_fingerprints", {}),
-                    ("ra_descriptor_fingerprints", {}),
-                    ("safety_rule_fingerprint", ""),
-                    ("live_safety_dfa_state_fingerprint", ""),
+                field_name: deepcopy(enabledness[field_name])
+                for field_name in (
+                    "symbolically_enabled_event_ids",
+                    "ra_admissible_event_ids",
+                    "cca_admissible_event_ids",
+                    "admissible_event_ids",
+                    "event_evaluations",
+                    "ra_snapshot_fingerprints",
+                    "ra_descriptor_fingerprints",
+                    "safety_rule_fingerprint",
+                    "live_safety_dfa_state_fingerprint",
                 )
-                if enabledness.get(field_name) not in (None, "", [], {})
+                if field_name in enabledness
             }
         summaries.append(summary)
     return summaries
@@ -4877,18 +4991,29 @@ def _write_per_turn_artifact(
     per_turn_debug_dir = str(recovery_debug.get("per_turn_debug_dir") or "").strip()
     if not per_turn_debug_dir:
         return
+    # The synchronous writer reads the current turn before the next detached
+    # debug publication. These views never leave the artifact writer.
+    recovery_debug.update(
+        status=str(session_state.get("status") or "running"),
+        multi_turn_session=session_state,
+    )
+    artifact_prepared = {
+        **prepared_recovery_request,
+        "recovery_debug": recovery_debug,
+        "multi_turn_session_state": session_state,
+    }
     payload = {
-        **deepcopy(prepared_recovery_request),
-        "prepared_recovery_request": deepcopy(prepared_recovery_request),
+        **artifact_prepared,
+        "prepared_recovery_request": artifact_prepared,
         "reasoning_mode": "multi_turn",
-        "multi_turn_current_turn": deepcopy(turn_entry),
-        "multi_turn_prompt_input": deepcopy(turn_entry.get("prompt_input")),
+        "multi_turn_current_turn": turn_entry,
+        "multi_turn_prompt_input": turn_entry.get("prompt_input"),
         "multi_turn_prompt_text": str(turn_entry.get("prompt_text") or ""),
-        "multi_turn_raw_response": deepcopy(turn_entry.get("raw_response")),
-        "multi_turn_session_result": deepcopy(session_state),
+        "multi_turn_raw_response": turn_entry.get("raw_response"),
+        "multi_turn_session_result": session_state,
     }
     if isinstance(turn_entry.get("llm_raw_response"), dict):
-        payload["multi_turn_llm_raw_response"] = deepcopy(turn_entry.get("llm_raw_response"))
+        payload["multi_turn_llm_raw_response"] = turn_entry["llm_raw_response"]
     try:
         artifact_paths = write_recovery_artifacts(
             payload,
@@ -4896,6 +5021,21 @@ def _write_per_turn_artifact(
             debug_dir=per_turn_debug_dir,
             write_latest=False,
         )
+        from cais_spade_llm.recovery_framework.diagnostics import write_record
+
+        phase = turn_entry.get("phase", "outline")
+        directory = recovery_request_directory(prepared_recovery_request, phase) / "turns"
+        directory.mkdir(parents=True, exist_ok=True)
+        write_record(directory / f"turn_{turn_entry['turn_index']:05d}_{phase}.json", {
+            "turn_index": turn_entry["turn_index"], "phase": phase,
+            "decision": turn_entry.get("decision"), "status": session_state.get("status"),
+            "request_record_paths": (turn_entry.get("llm_request") or {}).get("request_record_paths", []),
+            **{key: deepcopy(turn_entry[key]) for key in (
+                "context_selection", "context_requests", "served_context", "context_errors", "observations",
+                "validation_stages", "validation_context_exchanges", "nominal_continuation_evidence",
+                "transition_validation", "next_transition", "validation_contract_version",
+            ) if key in turn_entry},
+        })
         stamped_paths = {
             key: str(artifact_paths.get(key) or "").strip()
             for key in (
@@ -5645,13 +5785,12 @@ async def execute_multi_turn_recovery(
     compact_multi_turn_runtime_session(session_state)
     session_state["status"] = "running"
 
-    recovery_debug = deepcopy(prepared_recovery_request.get("recovery_debug") or {})
+    recovery_debug = {
+        key: deepcopy(value)
+        for key, value in (prepared_recovery_request.get("recovery_debug") or {}).items()
+        if key != "multi_turn_session"
+    }
     recovery_debug["status"] = "running"
-    recovery_debug["multi_turn_session"] = deepcopy(session_state)
-    prepared_recovery_request["recovery_debug"] = deepcopy(recovery_debug)
-    prepared_recovery_request["multi_turn_session_state"] = deepcopy(session_state)
-    if hasattr(planner, "_set_last_recovery_debug"):
-        planner._set_last_recovery_debug(recovery_debug)
 
     while int(session_state.get("turn_index") or 0) < int(session_state.get("max_turns") or 0):
         session_state["turn_index"] = int(session_state.get("turn_index") or 0) + 1
@@ -5690,7 +5829,7 @@ async def execute_multi_turn_recovery(
             )
         else:
             modeled_continuation = None
-            if current_phase == "outline":
+            if current_phase == "outline" and session_state.get("validation_contract_version") != 2:
                 modeled_continuation = await _try_handle_modeled_continuation(
                     session_state=session_state,
                     prepared_recovery_request=prepared_recovery_request,
@@ -5739,6 +5878,10 @@ async def execute_multi_turn_recovery(
                             status_label="still_waiting_for_llm",
                             elapsed_s=elapsed_s,
                         )
+                    except asyncio.CancelledError:
+                        response_task.cancel()
+                        await asyncio.gather(response_task, return_exceptions=True)
+                        raise
                 parsed_response = deepcopy(
                     raw_response if isinstance(raw_response, dict) else {}
                 )
@@ -5759,6 +5902,10 @@ async def execute_multi_turn_recovery(
                 )
 
                 # 3. Dispatch to phase handler
+                if session_state.get("outline_context_retrieval"):
+                    from .multi_turn_context import check_context_revision
+
+                    check_context_revision(prepared_recovery_request, planner)
                 handler = _PHASE_HANDLERS.get(current_phase)
                 if handler is None:
                     _logger.error("[MultiTurn] No handler for phase=%s", current_phase)
@@ -5777,6 +5924,8 @@ async def execute_multi_turn_recovery(
         turn_entry["phase"] = current_phase
         if prompt_input:
             turn_entry["prompt_input"] = deepcopy(prompt_input)
+            if "outline_context" in prompt_input:
+                turn_entry["context_selection"] = deepcopy(prompt_input["outline_context"])
         turn_entry["prompt_text"] = prompt_text
         if llm_request:
             turn_entry["llm_request"] = deepcopy(llm_request)
@@ -5794,6 +5943,7 @@ async def execute_multi_turn_recovery(
             parsed_response=parsed_response,
             turn_entry=turn_entry,
         )
+        archive_nominal_continuation(prepared_recovery_request, session_state, turn_entry, decision=decision)
         session_state.setdefault("turns", []).append(deepcopy(turn_entry))
         compact_multi_turn_runtime_session(session_state)
 
@@ -5811,8 +5961,19 @@ async def execute_multi_turn_recovery(
         if current_phase == "finalize" and decision == "accepted":
             session_state["status"] = "completed"
 
-        # Update debug + write per-turn artifacts
-        _sync_recovery_debug_state()
+        # A successful context retrieval continues synchronously into the next
+        # loop's detached publication; keep every terminal publication intact.
+        continuing_context_retrieval = (
+            session_state.get("validation_contract_version") == 2
+            and current_phase == "outline"
+            and decision == "need_context"
+            and next_phase == "outline"
+            and session_state.get("status") == "running"
+            and int(session_state.get("turn_index") or 0)
+            < int(session_state.get("max_turns") or 0)
+        )
+        if not continuing_context_retrieval:
+            _sync_recovery_debug_state()
         _write_per_turn_artifact(prepared_recovery_request, session_state, turn_entry)
 
         if current_phase == "outline" and decision == "outline_ready":
@@ -5849,6 +6010,7 @@ async def execute_multi_turn_recovery(
             break
 
         if session_state.get("status") in (
+            "NEEDS_CONTEXT",
             "completed",
             "paused_after_outline_turn",
             "ready_for_primitive_generation",
@@ -5867,6 +6029,7 @@ async def execute_multi_turn_recovery(
 
     # Turn budget exhausted
     if session_state.get("status") not in (
+        "NEEDS_CONTEXT",
         "completed",
         "paused_after_outline_turn",
         "ready_for_primitive_generation",

@@ -1,6 +1,6 @@
-"""Generic resource profile registry and snapshot helpers."""
-
 from __future__ import annotations
+
+"""Generic resource profile registry and snapshot helpers."""
 
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -415,6 +415,35 @@ def resource_snapshot_fields_map(
         str(field): resource_snapshot_field_value(snapshot, str(field), profile=profile)
         for field in fields
     }
+
+
+def resource_snapshot_declared_fields(
+    snapshot: dict[str, Any], state_variables: dict[str, Any],
+) -> dict[str, Any]:
+    """Read exact resource declarations without supplying absent observations."""
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+        recovery_validation_fingerprint,
+    )
+
+    containers = [snapshot]
+    core = snapshot.get("resource_core")
+    if isinstance(core, dict):
+        containers.append(core)
+    facets = snapshot.get("resource_facets")
+    if isinstance(facets, dict):
+        containers.extend(value for value in facets.values() if isinstance(value, dict))
+    result = {}
+    for name, declaration in state_variables.items():
+        if not isinstance(declaration, dict) or declaration.get("scope", "resource") != "resource":
+            continue
+        values = [container[name] for container in containers if name in container]
+        if not values:
+            continue
+        fingerprint = recovery_validation_fingerprint(values[0])
+        if any(recovery_validation_fingerprint(value) != fingerprint for value in values[1:]):
+            raise ValueError(f"Conflicting recorded resource field: {name}")
+        result[name] = deepcopy(values[0])
+    return result
 
 
 def resource_snapshot_availability(

@@ -2,7 +2,7 @@
 
 Start with the [computed results](REPORT.md). They compare three supplied mock
 recovery plans against the unchanged
-[predefined specifications](../../../../cais_spade_llm/specification/safety/safety_assembly_board-v1_predefined.txt).
+[combined regression specifications](specifications.txt).
 
 `ur5e-4` has dropped `gear_small` near `ur5e-3`. `KET4_Square_4mm` is ready in
 `Buffer For Machined parts`. `ur5e-3` initially occupies `assembly_board-v1`

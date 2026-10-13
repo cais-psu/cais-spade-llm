@@ -1,6 +1,6 @@
-"""Observed Gazebo execution for machining and controlled part transport."""
-
 from __future__ import annotations
+
+"""Observed Gazebo execution for machining and controlled part transport."""
 
 from copy import deepcopy
 
@@ -114,6 +114,8 @@ class WorkflowPrimitiveRunner:
         current_clock: Callable[[], float],
         wait_simulation: Callable[[float, Callable[[float], None] | None], tuple[float, float]],
         update_part_collisions: Callable[[dict[str, Any]], None] | None = None,
+        machine_jobs=None,
+        checkpoint_observation: Callable[[], dict] | None = None,
     ) -> None:
         self.request = request
         self.scene = request["scene"]
@@ -130,6 +132,8 @@ class WorkflowPrimitiveRunner:
         self.state: dict[str, Any] = {}
         self.observations: dict[str, Any] = {}
         self.primitive_trace: list[dict[str, Any]] = []
+        self.machine_jobs = machine_jobs
+        self.checkpoint_observation = checkpoint_observation
 
     def execute(self) -> dict[str, Any]:
         """Run only the ordered implemented primitives for the bound event."""
@@ -142,6 +146,9 @@ class WorkflowPrimitiveRunner:
             "dwell": self.dwell,
             "move_relative": self.move_relative,
         }
+        from cais_spade_llm.resources.machine.machine_jobs import MACHINE_PRIMITIVES
+        for name in MACHINE_PRIMITIVES:
+            primitives[name] = lambda _name=name: self.machine_command(_name)
         for step in program["steps"]:
             primitive_name = step["op"]
             primitive = primitives[primitive_name]
@@ -164,6 +171,171 @@ class WorkflowPrimitiveRunner:
                 record["wall_clock_sec"] = time.monotonic() - started
                 record["observations"] = self.progress_evidence()
         return self.observations
+
+    def _job_observation(self, part: str) -> dict:
+        self.part_name = part
+        self.observe_workholding()
+        self.verify_process_clearance()
+        return {"part_name": part, "correct_part_present": True, "robot_access_clear": True,
+                "observed_at_simulation_sec": self.current_clock(),
+                "robot_clearance_m": deepcopy(self.state["robot_distances"]),
+                "KMR_arm_clearance_m": deepcopy(self.state["kmr_distances"]),
+                "source": "gazebo_workholding_observation"}
+
+    def _save_jobs(self) -> None:
+        path = self.request.get("_jobs_path")
+        if path and self.machine_jobs is not None:
+            destination = Path(path)
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.machine_jobs.snapshot()))
+            temporary.replace(destination)
+
+    def _poll_machine_control(self) -> None:
+        path = self.request.get("_control_path")
+        if not path or not Path(path).is_file():
+            return
+        envelope = json.loads(Path(path).read_text())
+        if envelope["id"] == self.state.get("control_id"):
+            return
+        self.state["control_id"] = envelope["id"]
+        try:
+            command = envelope["request"]
+            if any(command.get(key) != self.task.get(key) for key in ("run_id", "resource_id")):
+                raise ValueError("Stale machine control identity")
+            if command.get("observation_only") is True:
+                result = self.observe_machine_checkpoint(command)
+            else:
+                params = command["parameters"]
+                job = self.machine_jobs.record["jobs"].get(params.get("job_id"), {})
+                part = params.get("part_name", job.get("part_name"))
+                needs_observation = command['primitive'] != 'select_program' and not (
+                    command['primitive'] == 'stop_job' and job.get('job_state') == 'paused')
+                observations = self._job_observation(part) if part and needs_observation else {}
+                result = self.machine_jobs.command(command["primitive"], params,
+                    command_id=envelope["id"], now=self.current_clock(), observations=observations)
+        except (KeyError, TypeError, ValueError, RuntimeError, TimeoutError) as exc:
+            result = {"status": "failed", "error": str(exc)}
+        self._save_jobs()
+        target = Path(path).with_name("control_result.json")
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"id": envelope["id"], "result": result}))
+        temporary.replace(target)
+
+    def observe_machine_checkpoint(self, request: dict) -> dict:
+        """Synchronize recorded progress with a native frozen observation."""
+        if (set(request) != {"run_id", "resource_id", "observation_only", "checkpoint_id"}
+                or not request.get("checkpoint_id") or self.checkpoint_observation is None):
+            raise ValueError("Incomplete read-only machine checkpoint request")
+        native = self.checkpoint_observation()
+        if native.get("world_paused") is not True or not native.get("instance_id"):
+            raise ValueError("Machine checkpoint requires a confirmed frozen Gazebo world")
+        now = self.machine_jobs._time(native.get("simulation_time"))
+        active = self.machine_jobs.record["active_job"]
+        if active is not None:
+            part = self.machine_jobs.record["jobs"][active]["part_name"]
+            self.machine_jobs.observe(now, self._job_observation(part))
+        elif now != self.machine_jobs.record.get("simulation_clock_sec"):
+            self.machine_jobs.record.update(simulation_clock_sec=now,
+                revision=self.machine_jobs.record["revision"] + 1)
+        self._save_jobs()
+        return {"status": "observed", "command_sent": False, "checkpoint_id": request["checkpoint_id"],
+                "native_source": {key: native[key] for key in ("instance_id", "simulation_time", "world_paused")},
+                "processing_observations": self.machine_jobs.snapshot()}
+
+    def tick_machine(self) -> None:
+        """Observe active processing and service controls without dispatching motion."""
+        if self.machine_jobs is None:
+            return
+        active = self.machine_jobs.record["active_job"]
+        now = self.current_clock()
+        if active is not None and now > self.machine_jobs.record.get("simulation_clock_sec", -1):
+            job = self.machine_jobs.record["jobs"][active]
+            observations = self._job_observation(job["part_name"])
+            self.machine_jobs.observe(now, observations)
+        self._save_jobs()
+        self._poll_machine_control()
+
+    def machine_command(self, primitive: str) -> None:
+        """Acknowledge job commands; machine_part waits for observed completion."""
+        from cais_spade_llm.resources.machine.machine_jobs import MachineJobs
+
+        if self.machine_jobs is None:
+            machine = next(row for row in self.scene["machines"] if row["resource_id"] == self.task["resource_id"])
+            self.machine_jobs = MachineJobs(machine, self.task["run_id"], self.request.get("machine_jobs"))
+        params = deepcopy(self.params)
+        if self.task["event_name"] == "machine_part":
+            params.update(job_id=self.task["task_id"], task_id=self.task["task_id"])
+        job = self.machine_jobs.record["jobs"].get(params.get("job_id"), {})
+        part = params.get("part_name", job.get("part_name"))
+        needs_observation = primitive != 'select_program' and not (
+            primitive == 'stop_job' and job.get('job_state') == 'paused')
+        observations = self._job_observation(part) if part and needs_observation else {}
+        acknowledgement = self.machine_jobs.command(primitive, params,
+            command_id=self.task["task_id"], now=self.current_clock(), observations=observations)
+        self._save_jobs()
+        self.observations = {"command": acknowledgement, "processing_observations": self.machine_jobs.snapshot()}
+        if self.task["event_name"] != "machine_part":
+            return
+        job_id = params["job_id"]
+        interval = self.machine_jobs.machine["simulation_process"]["observation_interval_sec"]
+        while True:
+            self.tick_machine()
+            job = self.machine_jobs.record["jobs"][job_id]
+            if job["job_state"] == "completed":
+                self.part_name = job["part_name"]
+                self.state.update(process_duration=job["processing_active_sec"],
+                    started_sim=job["simulation_started_sec"], completed_sim=job["simulation_completed_sec"])
+                self.confirm_process_observation()
+                self.observations["processing_observations"] = self.machine_jobs.snapshot()
+                return
+            if job["job_state"] in {"stopped", "interrupted"}:
+                raise InterruptedError("Machining job ended without completion: " + job["job_state"])
+            self._job_failure_checkpoint(job)
+            self.wait_simulation(interval, lambda _elapsed: self._poll_machine_control())
+
+    def _job_failure_checkpoint(self, job: dict) -> None:
+        fault = self.request.get("failure_injection") or {}
+        if not fault or job["job_state"] != "running" or not self._machine_fault_armed():
+            return
+        control = json.loads(Path(fault["control_path"]).read_text())
+        elapsed = job["processing_active_sec"]
+        if fault["checkpoint"] == "during_processing_halfway":
+            ready = elapsed >= job["processing_time_sec"] * .5
+        else:
+            from cais_spade_llm.resources.machine.machine_jobs import processing_failure_time
+            records = {rid: json.loads(Path(path).read_text())
+                for rid, path in fault["processing_paths"].items() if Path(path).is_file()}
+            if "chosen_timing" not in self.state:
+                chosen = processing_failure_time(records, list(fault["processing_paths"]),
+                    now=self.current_clock(), seed=fault["seed"],
+                    observation_interval_sec=self.machine_jobs.machine["simulation_process"]["observation_interval_sec"])
+                if chosen is None:
+                    return
+                self.state["chosen_timing"] = chosen
+            chosen = self.state["chosen_timing"]
+            ready = self.current_clock() >= chosen["interruption_simulation_sec"]
+            if ready and (self.current_clock() >= chosen["overlap_end_simulation_sec"] or any(
+                    not row.get("active_job") for row in records.values())):
+                raise ValueError("Processing overlap ended before failure observation; trial was not repeated")
+            if ready:
+                self.state["processing_observations"] = records
+        if not ready:
+            return
+        if elapsed >= job["processing_time_sec"]:
+            raise ValueError("Machine completed before the selected failure point")
+        observed = self.entity(self.state["model"]).pose.position
+        self.state["failure_injection"] = {
+            **{key: self.task[key] for key in ("run_id", "task_id", "resource_id")},
+            **deepcopy(job), "checkpoint": fault["checkpoint"],
+            "source": "gazebo_workholding_observation", "observation_status": "completed",
+            "observed_pose": {axis: float(getattr(observed, axis)) for axis in ("x", "y", "z")},
+            "actual_interruption_simulation_sec": self.current_clock(),
+            "chosen_timing": deepcopy(self.state.get("chosen_timing")),
+            "processing_observations": deepcopy(self.state.get("processing_observations", {
+                self.task["resource_id"]: self.machine_jobs.snapshot()})),
+        }
+        self._publish_machine_interruption()
+        raise RuntimeError("Machining breakdown during part processing")
 
     def progress_evidence(self) -> dict[str, Any]:
         """Return serializable physical progress without implying event completion."""
@@ -312,7 +484,7 @@ class WorkflowPrimitiveRunner:
             return False
         if (any(fault.get(key) != self.task.get(key)
                 for key in ("run_id", "task_id", "resource_id"))
-                or fault.get("checkpoint") != "during_processing_halfway"):
+                or fault.get("checkpoint") not in {"during_processing_halfway", "during_processing"}):
             raise ValueError("Machining fault request does not match the executing task")
         control = json.loads(Path(fault["control_path"]).read_text())
         if any(control.get(key) != self.task.get(key) for key in ("run_id", "resource_id")):
@@ -553,6 +725,18 @@ def run(request: dict, session: dict | None = None) -> dict:
                 if time.monotonic() >= deadline:
                     raise
 
+    def checkpoint_observation() -> dict:
+        from std_srvs.srv import Trigger
+
+        service = scene["safety_preparation"]["observation_service"]
+        client = clients.setdefault("checkpoint", node.create_client(Trigger, service))
+        if not client.wait_for_service(timeout_sec=5.):
+            raise TimeoutError("Native checkpoint observation service is unavailable")
+        reply = wait_future(client.call_async(Trigger.Request()), label=service)
+        if not reply.success:
+            raise ValueError(reply.message)
+        return json.loads(reply.message)
+
     if request.get("operation") in {
         "register_assembly_fixtures",
         "prepare_assembly",
@@ -727,9 +911,14 @@ def run(request: dict, session: dict | None = None) -> dict:
         current_clock=current_clock,
         wait_simulation=wait_simulation,
         update_part_collisions=update_part_collisions,
+        machine_jobs=session.get("machine_jobs"),
+        checkpoint_observation=checkpoint_observation,
     )
     try:
         observations = runner.execute()
+        if runner.machine_jobs is not None:
+            session["machine_jobs"] = runner.machine_jobs
+            session["machine_runner"] = runner
         return {
             "status": "completed",
             "resource_id": task["resource_id"],
@@ -741,12 +930,17 @@ def run(request: dict, session: dict | None = None) -> dict:
                 "planning_sec": 0.0,
                 "motion_sec": observations.get("transport_time_sec", 0.0),
                 "waiting_sec": observations.get("processing_time_sec", 0.0),
-                "simulation_sec": observations["simulation_completed_sec"]
-                - observations["simulation_started_sec"],
+                "simulation_sec": (observations.get("simulation_completed_sec", 0.)
+                - observations.get("simulation_started_sec", 0.)),
                 "wall_clock_sec": time.monotonic() - started_wall,
             },
         }
     except (OSError, KeyError, TypeError, ValueError, RuntimeError, TimeoutError, InterruptedError) as exc:
+        if runner.machine_jobs is not None:
+            runner.machine_jobs.interrupt(str(exc))
+            runner._save_jobs()
+            session["machine_jobs"] = runner.machine_jobs
+            session["machine_runner"] = runner
         return {
             "status": "failed",
             "resource_id": task.get("resource_id"),
@@ -756,6 +950,7 @@ def run(request: dict, session: dict | None = None) -> dict:
             "primitive_trace": runner.primitive_trace,
             "partial_motion": runner.progress_evidence(),
             "failure_injection": deepcopy(runner.state.get("failure_injection")),
+            "processing_shutdown": runner.machine_jobs.snapshot() if runner.machine_jobs is not None else None,
             "physical_state_reconciliation_required": bool(runner.state.get("last_commanded_x")) or any(
                 abs(position - runner.state.get("initial_x", {}).get(name, position)) > 1e-6
                 for name, position in runner.state.get("observed_x", {}).items()
@@ -805,9 +1000,20 @@ def serve(directory: Path) -> None:
                     temporary.replace(directory / "result.json")
             if "node" in session:
                 rclpy.spin_once(session["node"], timeout_sec=0.02)
+                runner = session.get("machine_runner")
+                if runner is not None:
+                    try:
+                        runner.tick_machine()
+                    except (ValueError, RuntimeError, TimeoutError, InterruptedError) as exc:
+                        runner.machine_jobs.interrupt(str(exc))
+                        runner._save_jobs()
             else:
                 time.sleep(0.02)
     finally:
+        runner = session.get("machine_runner")
+        if runner is not None:
+            runner.machine_jobs.interrupt("Worker shutdown")
+            runner._save_jobs()
         if "node" in session:
             session["node"].destroy_node()
         if rclpy.ok():

@@ -32,13 +32,14 @@
       "slot_floor_z_m_by_part": {
         "gear_small": 1.0289916,
         "gear_medium": 1.0289916,
-        "gear_large": 1.0289916
+        "gear_large": 1.0289916,
+        "KET4_Square_4mm": 1.015
       },
       "target_origin_z_m": {
         "gear_small": 1.0389916,
         "gear_medium": 1.0389916,
         "gear_large": 1.0389916,
-        "KET4_Square_4mm": 1.0239916,
+        "KET4_Square_4mm": 1.015,
         "KET8_Square_8mm": 1.0239916,
         "KET12_Square_12mm": 1.0239916,
         "KET16_Square_16mm": 1.0239916,

@@ -469,7 +469,8 @@ def launch_setup(context, *args, **kwargs):
             launch_arguments={
                 name: LaunchConfiguration(name) for name in (
                     'world_file', 'run_perception', 'include_assembly_parts',
-                    'include_loose_parts', 'launch_gazebo', 'launch_moveit', 'launch_rviz',
+                    'include_loose_parts', 'launch_gazebo', 'launch_gazebo_gui',
+                    'launch_moveit', 'launch_rviz', 'launch_nav2', 'recovery_observations',
                     'rviz_software_rendering',
                     'enable_camera_streams',
                     'simulation_speed', 'ur_controller_rate_hz', 'dynamic_shadows',
@@ -582,6 +583,12 @@ def generate_launch_description():
             'launch_moveit',
             default_value='true',
             description='Launch the combined sim move_group.',
+        ),
+        DeclareLaunchArgument('launch_gazebo_gui', default_value='true'),
+        DeclareLaunchArgument('launch_nav2', default_value='true'),
+        DeclareLaunchArgument(
+            'recovery_observations', default_value='true',
+            description='Enable owner controller observations in the recovery framework world.',
         ),
         DeclareLaunchArgument(
             'enable_camera_streams',

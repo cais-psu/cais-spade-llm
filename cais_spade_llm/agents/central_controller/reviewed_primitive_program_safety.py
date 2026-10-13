@@ -27,6 +27,9 @@ from cais_spade_llm.agents.central_controller.ppr_ap import (
     parse_ap_record, physical_ap_binding, physical_ap_kind, physical_binding_fields,
 )
 
+_LITERAL_RESOURCE_REGION_MEANING = ("The bound resource's configured robot/tool geometry, including any carried part, "
+    "touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.")
+
 _CLOCK_VERSION = "primitive_observations_joint_trace_v1"
 _FIRST = canonical_ap_key(make_ap_definition("ap_state", "*", "*", "$first_resource", "any", {"region": "$region"}))
 _SECOND = canonical_ap_key(make_ap_definition("ap_state", "*", "*", "$second_resource", "any", {"region": "$region"}))
@@ -35,6 +38,7 @@ _COMPLETED = canonical_ap_key(make_ap_definition("ap_state", "$part", "$process"
 _TARGET_COMPLETED = canonical_ap_key(make_ap_definition("ap_state", "$part", "$process", "*", "processCompleted", {"target": "$target"}))
 _RECEIVING_ENTRY = canonical_ap_key(make_ap_definition("ap_event", "$part", "*", "$resource", "receiving_region_entry", {"region": "$region"}))
 _CONTAINS_OTHER = canonical_ap_key(make_ap_definition("ap_state", "$part", "*", "$receiving_resource", "contains_other_part"))
+_CAPACITY_EXCEEDED = canonical_ap_key(make_ap_definition("ap_state", "*", "*", "*", "capacity_exceeded", {"region": "$region", "capacity": 1}))
 _MEANINGS = {
     _FIRST: "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
     _SECOND: "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
@@ -43,10 +47,17 @@ _MEANINGS = {
     _TARGET_COMPLETED: "The bound part's explicitly complete processCompleted ledger contains the exact bound process and target record.",
     _RECEIVING_ENTRY: "The bound resource's incoming tool/part begins occupying the bound receiving region while carrying the bound part. Boundary contact counts as occupancy; initial occupancy does not create an entry.",
     _CONTAINS_OTHER: "The complete modeled inventory of the bound receiving_resource contains a part other than the bound incoming part.",
+    _CAPACITY_EXCEEDED: "The number of modeled parts touching or overlapping the bound region exceeds its declared capacity. Uncertain occupancy retains every possible count.",
 }
+from cais_spade_llm.agents.central_controller.recovery_case_evidence import (
+    CASE_AP_MEANINGS, case_ap_value,
+)
+
 _PHYSICAL_MEANINGS = {
     physical_ap_kind(full): meaning for full, meaning in _MEANINGS.items()
 }
+_PHYSICAL_MEANINGS.update(CASE_AP_MEANINGS)
+_PHYSICAL_MEANINGS["loading_reserved_by"] = "The complete receiving_resource state ledger reserves loading for the exact bound resource."
 
 
 def _ground_rule_aps(rule: dict[str, Any]) -> dict[str, Any]:
@@ -194,7 +205,10 @@ def _catalog(catalog: Any, *, structured_groundings: bool = False) -> dict[str, 
                 expected = _MEANINGS.get(full, _PHYSICAL_MEANINGS[kind])
                 if kind == "resource_region" and definition["resource"] in {"$first_resource", "$second_resource"}:
                     expected = _MEANINGS[_FIRST if definition["resource"] == "$first_resource" else _SECOND]
-                if ap["meaning"] != expected:
+                allowed = {expected}
+                if kind == "resource_region" and not definition["resource"].startswith("$") and definition["resource"] != "*":
+                    allowed.add(_LITERAL_RESOURCE_REGION_MEANING)
+                if ap["meaning"] not in allowed:
                     raise ValueError("Unsupported predicate or changed fixed AP meaning")
             elif not structured_groundings:
                 raise ValueError("Unsupported typed predicate: complete structured grounding is required")
@@ -269,6 +283,12 @@ def _population(scope: dict[str, Any], geometry: dict[str, Any]) -> tuple[set[st
 def _scope_geometry(binding: dict, geometry: dict, regions: Any, resources: Any) -> None:
     if "region" in binding and binding["region"] not in regions:
         raise ValueError("Scoped region has no configured geometry")
+    if "capacity" in binding:
+        capacity = binding["capacity"]
+        if (type(capacity) is not int or capacity < 0
+                or type(regions[binding["region"]].get("capacity")) is not int
+                or regions[binding["region"]]["capacity"] != capacity):
+            raise ValueError("Scoped capacity differs from the configured region capacity")
     if "part" in binding and binding["part"] not in _object(geometry.get("parts"), "geometry.parts"):
         raise ValueError("Scoped part has no configured geometry")
     if "target" in binding and _object(geometry["parts"][binding["part"]], "part geometry").get("target") != binding["target"]:
@@ -471,6 +491,27 @@ def _valuation(
                 "contained_parts",
             )
             value = any(part != binding["part"] for part in inventory)
+        elif kind == "capacity_exceeded":
+            region = binding["region"]
+            possibilities = observation.get("part_occupancy_possibilities", {}).get(region)
+            if possibilities is None:
+                possibilities = {name: [_boolean(value)] for name, value in
+                                 observation["part_region_occupancy"][region].items()}
+            if set(possibilities) != set(observation["parts"]):
+                raise ValueError("Capacity requires the complete modeled part population")
+            if any(not isinstance(row, list) or not row or any(type(v) is not bool for v in row)
+                   for row in possibilities.values()):
+                raise ValueError("Capacity occupancy alternatives require explicit Boolean bounds")
+            minimum = sum(all(row) for row in possibilities.values())
+            maximum = sum(any(row) for row in possibilities.values())
+            value = sorted({minimum > binding["capacity"], maximum > binding["capacity"]})
+        elif kind == "loading_reserved_by":
+            reservation = observation["state_snapshot"][binding["receiving_resource"]]["loading_reserved_by"]
+            if reservation is not None and not isinstance(reservation, str):
+                raise ValueError("Loading reservation requires its exact resource identity or explicit null")
+            value = reservation == binding["resource"]
+        elif kind in CASE_AP_MEANINGS:
+            value = case_ap_value(kind, binding["resource"], observation)
         else:
             raise ValueError("Unsupported physical AP condition")
         values[ap["label"]] = value

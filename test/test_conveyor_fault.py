@@ -61,7 +61,7 @@ def runtime_at_pickup(*, evidence="resource", origin="M1", completed=True):
     context.resources["Conveyor"].executors["advance_conveyor"] = Mock()
     runtime = SimpleNamespace(context=context, stopped=False, outcome={}, queue_save=Mock())
 
-    def stop(reason):
+    def stop(reason, *, preserve_recovery=False):
         runtime.stopped = True
         for task_id in tuple(context.pending_tasks):
             context.cancel_pending(task_id)
@@ -440,6 +440,56 @@ def test_machine_worker_fault_rejects_stale_evidence_and_never_completes_process
     assert not runtime.context.pending_tasks
     assert runtime.conveyor_fault.evidence["simulation_elapsed_sec"] == 2.5
     assert not runtime.conveyor_fault.evidence["process_completed"]
+
+
+@pytest.mark.parametrize("capture_error", [None, "checkpoint observation conflict"])
+def test_machine_checkpoint_precedes_cancellation_and_retains_capture_error(monkeypatch, capture_error):
+    runtime, part, _ = runtime_with_failure("Machining breakdown during part processing")
+    fault = runtime.conveyor_fault
+    fault.configuration["checkpoint"] = "during_processing"
+    fault.checkpoint = Mock(return_value={"source": "gazebo_workholding_observation"})
+    runtime.context.pending_tasks["job"] = {"task_id": "job", "part_name": part}
+    sequence = []
+    original_stop = runtime.stop
+
+    def stop(*args, **kwargs):
+        sequence.append("stop")
+        original_stop(*args, **kwargs)
+
+    async def capture(owner, evidence):
+        sequence.append("capture")
+        assert owner.stopped and owner.recovery_checkpoint_capturing
+        assert "job" in owner.context.pending_tasks
+        assert "stop" not in sequence
+        owner.recovery_capture_frozen = True
+        if capture_error:
+            raise ValueError(capture_error)
+        owner.recovery_checkpoint_observations = {"processing_observations": {"M2": {"job_state": "running"}}}
+
+    async def cancel():
+        sequence.append("cancel")
+        assert runtime.recovery_capture_frozen
+
+    def unfreeze(paused):
+        assert paused is False
+        sequence.append("unfreeze")
+
+    runtime.stop, runtime.cancel_owned = stop, cancel
+    runtime.recovery_observation_preparation = SimpleNamespace(reader=SimpleNamespace(set_world_paused=unfreeze))
+    runtime.part_slippage_recovery = SimpleNamespace(begin=Mock())
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.recovery_observations.capture_machine_checkpoint", capture)
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker", Mock(return_value={"status": "completed"}))
+    asyncio.run(fault.trigger())
+    assert sequence == ["capture", "stop", "cancel", "unfreeze"]
+    assert not runtime.recovery_capture_frozen and not runtime.recovery_checkpoint_capturing
+    assert not runtime.context.pending_tasks
+    if capture_error:
+        assert fault.evidence["injection_status"] == "failed"
+        assert fault.evidence["error"] == capture_error
+    else:
+        assert fault.evidence["injection_status"] == "completed"
+        assert runtime.recovery_checkpoint_observations["processing_observations"]["M2"]["job_state"] == "running"
+        assert fault.evidence["processing_shutdown"] == {}
 
 
 @pytest.mark.parametrize("scenario", ["Conveyor breakdown", "ur5e-1 breakdown", "Part slippage"])

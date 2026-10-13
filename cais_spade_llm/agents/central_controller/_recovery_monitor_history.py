@@ -142,7 +142,9 @@ def continuous_transition(checker: BaseSafetyChecker, rule_ids: list[str], monit
         if not states:
             raise ValueError("Continuous monitor history has no possible state")
         possible_violation = False
-        for cell in cells:
+        violating_cell, uncertain_cell = None, None
+        for cell_index, cell in enumerate(cells):
+            cell_before, cell_violation = sorted(states), False
             labels, options = _continuous_alphabets(cell[identifier], values[identifier])
             pending, reached = list(states), set()
             while pending:
@@ -156,6 +158,7 @@ def continuous_transition(checker: BaseSafetyChecker, rule_ids: list[str], monit
                         raise ValueError("Incomplete monitor transition for continuous evidence")
                     if row["status"] != "passed":
                         possible_violation = True
+                        cell_violation = True
                         continue
                     if row["to"] not in reached:
                         reached.add(row["to"])
@@ -164,8 +167,22 @@ def continuous_transition(checker: BaseSafetyChecker, rule_ids: list[str], monit
                 if len(reached) > budget.max_states:
                     raise AnalysisLimit("Continuous DFA closure exceeds state budget")
             states = reached
+            if cell_violation:
+                evidence = {"cell_index": cell_index, "ap_values": deepcopy(cell[identifier]),
+                            "from": cell_before, "to": sorted(states)}
+                intervals = observation.get("continuous_cells")
+                if isinstance(intervals, list) and cell_index < len(intervals):
+                    evidence["interval"] = deepcopy(intervals[cell_index]["interval"])
+                if not states and violating_cell is None:
+                    violating_cell = evidence
+                elif states and uncertain_cell is None:
+                    uncertain_cell = evidence
         check = {"rule_id": identifier, "ap_values": deepcopy(values[identifier]),
                  "from": list(current), "to": sorted(states), "possible_violation": possible_violation}
+        if violating_cell is not None:
+            check["violating_cell"] = violating_cell
+        if uncertain_cell is not None:
+            check["uncertain_cell"] = uncertain_cell
         checks.append(check)
         if not states:
             violation = violation or check

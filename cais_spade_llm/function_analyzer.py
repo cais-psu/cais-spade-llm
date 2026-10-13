@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from types import UnionType
 from typing import Union
 
 import yaml  # ← NEW
@@ -44,12 +45,23 @@ class FunctionAnalyzer:
         """Convert a Python type annotation into a minimal JSON Schema fragment."""
         origin = typing.get_origin(py_type)
 
+        if py_type is type(None) or py_type is None:
+            return {"type": "null"}
+        if origin in (Union, UnionType):
+            members = [FunctionAnalyzer._json_schema(item) for item in typing.get_args(py_type)]
+            nonnull = [item for item in members if item != {"type": "null"}]
+            if len(nonnull) == 1 and len(members) == 2 and isinstance(nonnull[0].get("type"), str):
+                return {**nonnull[0], "type": [nonnull[0]["type"], "null"]}
+            if all(set(item) == {"type"} for item in members):
+                return {"type": list(dict.fromkeys(item["type"] for item in members))}
+            return {"anyOf": members}
+
         # list[...] / List[...]
         if origin in (list, list):
             elem = typing.get_args(py_type)[0] if typing.get_args(py_type) else str
             return {
                 "type": "array",
-                "items": {"type": FunctionAnalyzer.openai_types.get(elem, "string")},
+                "items": FunctionAnalyzer._json_schema(elem),
             }
 
         # tuple / set  → treat like list of strings
@@ -92,11 +104,10 @@ class FunctionAnalyzer:
         hints = typing.get_type_hints(fn)
         hints.pop("return", None)
 
-        required = [
-            p
-            for p, t in hints.items()
-            if not (typing.get_origin(t) is Union and type(None) in typing.get_args(t))
-        ]
+        required = [name for name, parameter in inspect.signature(fn).parameters.items()
+                    if name in hints and parameter.default is inspect.Parameter.empty
+                    and parameter.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                                               inspect.Parameter.VAR_KEYWORD)]
 
         # 2. doc-string -------------------------------------------------
         doc = inspect.getdoc(fn) or ""

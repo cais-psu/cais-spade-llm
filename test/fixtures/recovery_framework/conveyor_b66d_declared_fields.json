@@ -1,0 +1,1784 @@
+{
+  "source_run_id": "b66d6fdf72e842bdb7a29cd2d080c685",
+  "source_sha256": "ab42f3d31eaff66c5d0d2bb0798d7f6d50b30abf57dba80fb0339ce4311c2063",
+  "resources": {
+    "recovery-resource-1@localhost": {
+      "resource_id": "ur5e-1",
+      "resource_type": "robot",
+      "snapshot": {
+        "resource_state": "picked",
+        "held_part": "KET4_Square_4mm",
+        "resource_location": "M1",
+        "task_ctx.origin_resource_location": "M1",
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": "KET4_Square_4mm",
+        "part_state": "in_gripper",
+        "part_location": "ur5e-1"
+      },
+      "state_variables": {
+        "held_part": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "KET4_Square_4mm"
+          ]
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [
+            "M1",
+            "Conveyor",
+            "recovery-resource-1@localhost",
+            null,
+            "M1 staging tray"
+          ]
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [
+            "ready",
+            "in_gripper",
+            null,
+            "assembled",
+            "in_transit"
+          ]
+        },
+        "resource_location": {
+          "scope": "resource",
+          "domain": [
+            "M1",
+            "home",
+            "Conveyor",
+            "M1 staging tray"
+          ]
+        },
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "picked",
+            "positioned",
+            "idle",
+            "at_pick",
+            "placed"
+          ]
+        },
+        "task_ctx.destination_location": {
+          "scope": "resource",
+          "domain": [
+            "M1",
+            "home",
+            "Conveyor",
+            null,
+            "M1 staging tray"
+          ],
+          "private": true
+        },
+        "task_ctx.gripper_close_position": {
+          "scope": "resource",
+          "domain": [
+            "M1",
+            "home",
+            "Conveyor",
+            null,
+            "M1 staging tray"
+          ],
+          "private": true
+        },
+        "task_ctx.origin_resource_location": {
+          "scope": "resource",
+          "domain": [
+            "M1",
+            "home",
+            "Conveyor",
+            null,
+            "M1 staging tray"
+          ],
+          "private": true
+        },
+        "task_ctx.part_name": {
+          "scope": "resource",
+          "domain": [
+            "M1",
+            "home",
+            "Conveyor",
+            null,
+            "M1 staging tray"
+          ],
+          "private": true
+        }
+      },
+      "expected": {
+        "resource_state": "picked",
+        "held_part": "KET4_Square_4mm",
+        "resource_location": "M1",
+        "task_ctx.origin_resource_location": "M1",
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": "KET4_Square_4mm"
+      },
+      "static_capabilities": {
+        "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
+        "reachability": [
+          "M1",
+          "M1 staging tray",
+          "Conveyor"
+        ],
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": -4.05,
+            "y": 1.1,
+            "z": 0.8
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "prusa-mk3": {
+            "anchor_pose": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          },
+          "prusa-mk4-2": {
+            "anchor_pose": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          }
+        }
+      }
+    },
+    "recovery-resource-2@localhost": {
+      "resource_id": "ur5e-2",
+      "resource_type": "robot",
+      "snapshot": {
+        "resource_state": "idle",
+        "held_part": null,
+        "resource_location": null,
+        "task_ctx.origin_resource_location": null,
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": null,
+        "part_state": null,
+        "part_location": null
+      },
+      "state_variables": {
+        "held_part": {
+          "scope": "resource",
+          "domain": [
+            null
+          ]
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [
+            "Conveyor",
+            "M2 staging tray",
+            "M2",
+            null,
+            "recovery-resource-2@localhost"
+          ]
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [
+            "ready",
+            "in_gripper",
+            null,
+            "assembled",
+            "in_transit"
+          ]
+        },
+        "resource_location": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            "Conveyor",
+            "M2 staging tray",
+            "M2",
+            null
+          ]
+        },
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "picked",
+            "positioned",
+            "idle",
+            "at_pick",
+            "placed"
+          ]
+        },
+        "task_ctx.destination_location": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            "Conveyor",
+            "M2 staging tray",
+            "M2",
+            null
+          ],
+          "private": true
+        },
+        "task_ctx.gripper_close_position": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            "Conveyor",
+            "M2 staging tray",
+            "M2",
+            null
+          ],
+          "private": true
+        },
+        "task_ctx.origin_resource_location": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            "Conveyor",
+            "M2 staging tray",
+            "M2",
+            null
+          ],
+          "private": true
+        },
+        "task_ctx.part_name": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            "Conveyor",
+            "M2 staging tray",
+            "M2",
+            null
+          ],
+          "private": true
+        }
+      },
+      "expected": {
+        "resource_state": "idle",
+        "held_part": null,
+        "resource_location": null,
+        "task_ctx.origin_resource_location": null,
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": null
+      },
+      "static_capabilities": {
+        "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
+        "reachability": [
+          "M2",
+          "M2 staging tray",
+          "Conveyor"
+        ],
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": -2.05,
+            "y": 1.1,
+            "z": 0.8
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "prusa-mk3": {
+            "anchor_pose": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          },
+          "prusa-mk4-2": {
+            "anchor_pose": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          }
+        }
+      }
+    },
+    "recovery-resource-3@localhost": {
+      "resource_id": "ur5e-3",
+      "resource_type": "robot",
+      "snapshot": {
+        "resource_state": "idle",
+        "held_part": null,
+        "resource_location": "home",
+        "task_ctx.origin_resource_location": null,
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": null,
+        "part_state": null,
+        "part_location": null
+      },
+      "state_variables": {
+        "held_part": {
+          "scope": "resource",
+          "domain": [
+            null
+          ]
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [
+            "Buffer For Machined parts",
+            "recovery-resource-3@localhost",
+            null,
+            "Exit",
+            "assembly_board-v1"
+          ]
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [
+            "ready",
+            "in_gripper",
+            null,
+            "assembled",
+            "in_transit"
+          ]
+        },
+        "resource_location": {
+          "scope": "resource",
+          "domain": [
+            "Buffer For Machined parts",
+            "home",
+            "Exit",
+            "assembly_board-v1"
+          ]
+        },
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "picked",
+            "positioned",
+            "idle",
+            "at_pick",
+            "placed"
+          ]
+        },
+        "task_ctx.destination_location": {
+          "scope": "resource",
+          "domain": [
+            "Buffer For Machined parts",
+            "home",
+            null,
+            "Exit",
+            "assembly_board-v1"
+          ],
+          "private": true
+        },
+        "task_ctx.gripper_close_position": {
+          "scope": "resource",
+          "domain": [
+            "Buffer For Machined parts",
+            "home",
+            null,
+            "Exit",
+            "assembly_board-v1"
+          ],
+          "private": true
+        },
+        "task_ctx.origin_resource_location": {
+          "scope": "resource",
+          "domain": [
+            "Buffer For Machined parts",
+            "home",
+            null,
+            "Exit",
+            "assembly_board-v1"
+          ],
+          "private": true
+        },
+        "task_ctx.part_name": {
+          "scope": "resource",
+          "domain": [
+            "Buffer For Machined parts",
+            "home",
+            null,
+            "Exit",
+            "assembly_board-v1"
+          ],
+          "private": true
+        }
+      },
+      "expected": {
+        "resource_state": "idle",
+        "held_part": null,
+        "resource_location": "home",
+        "task_ctx.origin_resource_location": null,
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": null
+      },
+      "static_capabilities": {
+        "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
+        "reachability": [
+          "Buffer For Machined parts",
+          "assembly_board-v1",
+          "Exit"
+        ],
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": 0.0,
+            "y": 0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "prusa-mk3": {
+            "anchor_pose": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          },
+          "prusa-mk4-2": {
+            "anchor_pose": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          }
+        }
+      }
+    },
+    "recovery-resource-4@localhost": {
+      "resource_id": "ur5e-4",
+      "resource_type": "robot",
+      "snapshot": {
+        "resource_state": "idle",
+        "held_part": null,
+        "resource_location": "home",
+        "task_ctx.origin_resource_location": null,
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": null,
+        "part_state": "assembled",
+        "part_location": "assembly_board-v1"
+      },
+      "state_variables": {
+        "held_part": {
+          "scope": "resource",
+          "domain": [
+            null
+          ]
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [
+            "recovery-resource-4@localhost",
+            null,
+            "3D Printing Station",
+            "assembly_board-v1"
+          ]
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [
+            "ready",
+            "in_gripper",
+            null,
+            "assembled",
+            "in_transit"
+          ]
+        },
+        "resource_location": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            "3D Printing Station",
+            "assembly_board-v1"
+          ]
+        },
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "picked",
+            "positioned",
+            "idle",
+            "at_pick",
+            "placed"
+          ]
+        },
+        "task_ctx.destination_location": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            null,
+            "3D Printing Station",
+            "assembly_board-v1"
+          ],
+          "private": true
+        },
+        "task_ctx.gripper_close_position": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            null,
+            "3D Printing Station",
+            "assembly_board-v1"
+          ],
+          "private": true
+        },
+        "task_ctx.origin_resource_location": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            null,
+            "3D Printing Station",
+            "assembly_board-v1"
+          ],
+          "private": true
+        },
+        "task_ctx.part_name": {
+          "scope": "resource",
+          "domain": [
+            "home",
+            null,
+            "3D Printing Station",
+            "assembly_board-v1"
+          ],
+          "private": true
+        }
+      },
+      "expected": {
+        "resource_state": "idle",
+        "held_part": null,
+        "resource_location": "home",
+        "task_ctx.origin_resource_location": null,
+        "task_ctx.destination_location": null,
+        "task_ctx.part_name": null
+      },
+      "static_capabilities": {
+        "resource_type": "robot",
+        "supports_manipulator_pick_place": true,
+        "reachability": [
+          "3D Printing Station",
+          "assembly_board-v1"
+        ],
+        "gripper_reach": {
+          "frame": "world",
+          "origin_pose": {
+            "x": 0.0,
+            "y": -0.5,
+            "z": 1.021
+          },
+          "max_xy_radius_m": 0.7,
+          "z_min_m": 0.85,
+          "z_max_m": 1.6,
+          "tolerance_m": 0.01
+        },
+        "staging_areas": {
+          "prusa-mk3": {
+            "anchor_pose": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": -0.4,
+              "y": 0.0,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          },
+          "prusa-mk4-2": {
+            "anchor_pose": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "board_center": {
+              "x": 0.4,
+              "y": 0.3,
+              "z": 1.04
+            },
+            "slot_xy": [
+              0.0,
+              0.0
+            ],
+            "slot_floor_z_m": 1.04
+          }
+        }
+      }
+    },
+    "recovery-resource-5@localhost": {
+      "resource_id": "M1",
+      "resource_type": "resource",
+      "snapshot": {
+        "resource_state": "idle",
+        "part_name": null,
+        "staging_part": null
+      },
+      "state_variables": {
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "idle",
+            "loaded",
+            "completed"
+          ],
+          "domain_complete": true
+        },
+        "part_name": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "staging_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "resource_state": "idle",
+        "part_name": null,
+        "staging_part": null
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-6@localhost": {
+      "resource_id": "M2",
+      "resource_type": "resource",
+      "snapshot": {
+        "resource_state": "idle",
+        "part_name": null,
+        "staging_part": null
+      },
+      "state_variables": {
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "idle",
+            "loaded",
+            "completed"
+          ],
+          "domain_complete": true
+        },
+        "part_name": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "staging_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "resource_state": "idle",
+        "part_name": null,
+        "staging_part": null
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-7@localhost": {
+      "resource_id": "Storage",
+      "resource_type": "resource",
+      "snapshot": {
+        "inventory.gear_small": false,
+        "inventory.gear_medium": false,
+        "inventory.gear_large": false,
+        "inventory.KET4_Square_4mm": false,
+        "inventory.KET8_Square_8mm": true,
+        "inventory.KET12_Square_12mm": true,
+        "inventory.KET16_Square_16mm": true,
+        "inventory.RGOCG4-50_Round_4mm": true,
+        "inventory.RGOCG8-50_8mm": true,
+        "inventory.RGOCG12-50_12mm": true,
+        "inventory.RGOCG16-50_16mm": true,
+        "inventory.assembly_board-v1": false
+      },
+      "state_variables": {
+        "inventory.gear_small": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.gear_medium": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.gear_large": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.KET4_Square_4mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.KET8_Square_8mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.KET12_Square_12mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.KET16_Square_16mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.RGOCG4-50_Round_4mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.RGOCG8-50_8mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.RGOCG12-50_12mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.RGOCG16-50_16mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "inventory.assembly_board-v1": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "inventory.gear_small": false,
+        "inventory.gear_medium": false,
+        "inventory.gear_large": false,
+        "inventory.KET4_Square_4mm": false,
+        "inventory.KET8_Square_8mm": true,
+        "inventory.KET12_Square_12mm": true,
+        "inventory.KET16_Square_16mm": true,
+        "inventory.RGOCG4-50_Round_4mm": true,
+        "inventory.RGOCG8-50_8mm": true,
+        "inventory.RGOCG12-50_12mm": true,
+        "inventory.RGOCG16-50_16mm": true,
+        "inventory.assembly_board-v1": false
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-8@localhost": {
+      "resource_id": "KMR",
+      "resource_type": "kmr",
+      "snapshot": {
+        "resource_state": "idle",
+        "held_part": null,
+        "approached_part": null,
+        "resource_location": "Storage"
+      },
+      "state_variables": {
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "idle",
+            "at_pick",
+            "carrying",
+            "positioned"
+          ],
+          "domain_complete": true
+        },
+        "held_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "approached_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "resource_location": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "Storage",
+            "M1",
+            "M2"
+          ],
+          "domain_complete": true
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "resource_state": "idle",
+        "held_part": null,
+        "approached_part": null,
+        "resource_location": "Storage"
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-9@localhost": {
+      "resource_id": "Conveyor",
+      "resource_type": "resource",
+      "snapshot": {
+        "belt_stopped": true,
+        "loading_reserved_by": null,
+        "part_location.gear_small": null,
+        "part_location.gear_medium": null,
+        "part_location.gear_large": null,
+        "part_location.KET4_Square_4mm": null,
+        "part_location.KET8_Square_8mm": null,
+        "part_location.KET12_Square_12mm": null,
+        "part_location.KET16_Square_16mm": null,
+        "part_location.RGOCG4-50_Round_4mm": null,
+        "part_location.RGOCG8-50_8mm": null,
+        "part_location.RGOCG12-50_12mm": null,
+        "part_location.RGOCG16-50_16mm": null,
+        "part_location.assembly_board-v1": null,
+        "part_order.gear_small": null,
+        "part_order.gear_medium": null,
+        "part_order.gear_large": null,
+        "part_order.KET4_Square_4mm": null,
+        "part_order.KET8_Square_8mm": null,
+        "part_order.KET12_Square_12mm": null,
+        "part_order.KET16_Square_16mm": null,
+        "part_order.RGOCG4-50_Round_4mm": null,
+        "part_order.RGOCG8-50_8mm": null,
+        "part_order.RGOCG12-50_12mm": null,
+        "part_order.RGOCG16-50_16mm": null,
+        "part_order.assembly_board-v1": null
+      },
+      "state_variables": {
+        "belt_stopped": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "loading_reserved_by": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "ur5e-1",
+            "ur5e-2"
+          ],
+          "domain_complete": true
+        },
+        "part_location.gear_small": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.gear_medium": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.gear_large": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.KET4_Square_4mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.KET8_Square_8mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.KET12_Square_12mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.KET16_Square_16mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.RGOCG4-50_Round_4mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.RGOCG8-50_8mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.RGOCG12-50_12mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.RGOCG16-50_16mm": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_location.assembly_board-v1": {
+          "scope": "resource",
+          "domain": [
+            null,
+            "loading_position_1",
+            "after loading_position_1",
+            "loading_position_2",
+            "after loading_position_2",
+            "output_nest"
+          ],
+          "domain_complete": true
+        },
+        "part_order.gear_small": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.gear_medium": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.gear_large": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.KET4_Square_4mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.KET8_Square_8mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.KET12_Square_12mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.KET16_Square_16mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.RGOCG4-50_Round_4mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.RGOCG8-50_8mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.RGOCG12-50_12mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.RGOCG16-50_16mm": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_order.assembly_board-v1": {
+          "scope": "resource",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "belt_stopped": true,
+        "loading_reserved_by": null,
+        "part_location.gear_small": null,
+        "part_location.gear_medium": null,
+        "part_location.gear_large": null,
+        "part_location.KET4_Square_4mm": null,
+        "part_location.KET8_Square_8mm": null,
+        "part_location.KET12_Square_12mm": null,
+        "part_location.KET16_Square_16mm": null,
+        "part_location.RGOCG4-50_Round_4mm": null,
+        "part_location.RGOCG8-50_8mm": null,
+        "part_location.RGOCG12-50_12mm": null,
+        "part_location.RGOCG16-50_16mm": null,
+        "part_location.assembly_board-v1": null,
+        "part_order.gear_small": null,
+        "part_order.gear_medium": null,
+        "part_order.gear_large": null,
+        "part_order.KET4_Square_4mm": null,
+        "part_order.KET8_Square_8mm": null,
+        "part_order.KET12_Square_12mm": null,
+        "part_order.KET16_Square_16mm": null,
+        "part_order.RGOCG4-50_Round_4mm": null,
+        "part_order.RGOCG8-50_8mm": null,
+        "part_order.RGOCG12-50_12mm": null,
+        "part_order.RGOCG16-50_16mm": null,
+        "part_order.assembly_board-v1": null
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-10@localhost": {
+      "resource_id": "Buffer For Machined parts",
+      "resource_type": "resource",
+      "snapshot": {
+        "zone_1_part": null,
+        "zone_2_part": null,
+        "zone_3_part": null,
+        "zone_4_part": null
+      },
+      "state_variables": {
+        "zone_1_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "zone_2_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "zone_3_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "zone_4_part": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "zone_1_part": null,
+        "zone_2_part": null,
+        "zone_3_part": null,
+        "zone_4_part": null
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-11@localhost": {
+      "resource_id": "3D Printing Station",
+      "resource_type": "resource",
+      "snapshot": {
+        "output.gear_small": false,
+        "output.gear_medium": true,
+        "output.gear_large": true,
+        "output.KET4_Square_4mm": false,
+        "output.KET8_Square_8mm": false,
+        "output.KET12_Square_12mm": false,
+        "output.KET16_Square_16mm": false,
+        "output.RGOCG4-50_Round_4mm": false,
+        "output.RGOCG8-50_8mm": false,
+        "output.RGOCG12-50_12mm": false,
+        "output.RGOCG16-50_16mm": false,
+        "output.assembly_board-v1": false,
+        "resource_state": "completed"
+      },
+      "state_variables": {
+        "output.gear_small": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.gear_medium": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.gear_large": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.KET4_Square_4mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.KET8_Square_8mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.KET12_Square_12mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.KET16_Square_16mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.RGOCG4-50_Round_4mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.RGOCG8-50_8mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.RGOCG12-50_12mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.RGOCG16-50_16mm": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "output.assembly_board-v1": {
+          "scope": "resource",
+          "domain": [
+            false,
+            true
+          ],
+          "domain_complete": true
+        },
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "idle",
+            "completed"
+          ],
+          "domain_complete": true
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "output.gear_small": false,
+        "output.gear_medium": true,
+        "output.gear_large": true,
+        "output.KET4_Square_4mm": false,
+        "output.KET8_Square_8mm": false,
+        "output.KET12_Square_12mm": false,
+        "output.KET16_Square_16mm": false,
+        "output.RGOCG4-50_Round_4mm": false,
+        "output.RGOCG8-50_8mm": false,
+        "output.RGOCG12-50_12mm": false,
+        "output.RGOCG16-50_16mm": false,
+        "output.assembly_board-v1": false,
+        "resource_state": "completed"
+      },
+      "static_capabilities": {}
+    },
+    "recovery-resource-12@localhost": {
+      "resource_id": "Exit",
+      "resource_type": "resource",
+      "snapshot": {
+        "resource_state": "empty",
+        "part_name": null,
+        "product_location": "assembly_board-v1"
+      },
+      "state_variables": {
+        "resource_state": {
+          "scope": "resource",
+          "domain": [
+            "empty",
+            "occupied"
+          ],
+          "domain_complete": true
+        },
+        "part_name": {
+          "scope": "resource",
+          "type": [
+            "string",
+            "null"
+          ],
+          "reference": "part_name",
+          "domain": [
+            null,
+            "gear_small",
+            "gear_medium",
+            "gear_large",
+            "KET4_Square_4mm",
+            "KET8_Square_8mm",
+            "KET12_Square_12mm",
+            "KET16_Square_16mm",
+            "RGOCG4-50_Round_4mm",
+            "RGOCG8-50_8mm",
+            "RGOCG12-50_12mm",
+            "RGOCG16-50_16mm",
+            "assembly_board-v1"
+          ],
+          "domain_complete": false
+        },
+        "product_location": {
+          "scope": "part",
+          "domain": [
+            "assembly_board-v1",
+            "ur5e-3",
+            "Exit"
+          ],
+          "domain_complete": true
+        },
+        "part_state": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        },
+        "part_location": {
+          "scope": "part",
+          "domain": [],
+          "domain_complete": false
+        }
+      },
+      "expected": {
+        "resource_state": "empty",
+        "part_name": null
+      },
+      "static_capabilities": {}
+    }
+  }
+}

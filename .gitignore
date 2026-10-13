@@ -20,8 +20,9 @@ cais_spade_llm/monitor/plan/*_requirements.json
 cais_spade_llm/monitor/state/*_product_state.json
 cais_spade_llm/monitor/state/*_resource_state.json
 cais_spade_llm/monitor/**/archive/
-cais_spade_llm/monitor/recovery_gazebo_runs/latest/
-cais_spade_llm/monitor/environment_runs/latest/
+/cais_spade_llm/monitor/environment_runs/
+/cais_spade_llm/monitor/recovery_gazebo_runs/
+/cais_spade_llm/monitor/recovery_safety_preparation/
 cais_spade_llm/monitor/**/.latest-owner.json
 cais_spade_llm/monitor/**/.reports.lock
 

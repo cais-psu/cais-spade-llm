@@ -265,9 +265,14 @@ class EnvironmentRuntime:
                  or not prepared.get("launch_identity"))
         ):
             raise ValueError("CCA bypass requires an explicitly prepared simulation launch")
-        # The recovery completion gate always enforces its result, including simulation.
         self.requested_diagnostic_cca_bypass = self.diagnostic_cca_bypass
-        self.diagnostic_cca_bypass = False
+        from cais_spade_llm.recovery_framework.part_slippage_recovery import diagnostic_setup
+
+        self.diagnostic_cca_bypass = self.diagnostic_cca_bypass and diagnostic_setup(prepared["setup"])
+        self.setup = deepcopy(prepared["setup"])
+        self.launch_identity = deepcopy(prepared.get("launch_identity"))
+        self.nominal_idle = asyncio.Event()
+        self.nominal_idle.set()
         self.operation_goals: dict[str, dict] = {}
         self.admission = None
         self.held_tasks: dict[str, dict] = {}
@@ -326,6 +331,11 @@ class EnvironmentRuntime:
 
         self.conveyor_fault = ConveyorFault(self, prepared["setup"])
         agent.part_tracker = deepcopy(self.context.part_tracker)
+        self.part_slippage_recovery = None
+        if self.diagnostic_cca_bypass:
+            from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
+
+            self.part_slippage_recovery = PartSlippageRecovery(self)
 
     async def calculate_capability(self, function, *args, request: dict, resource_id: str):
         """Evaluate detached capability inputs using at most two owned workers."""
@@ -384,6 +394,7 @@ class EnvironmentRuntime:
             "conveyor_fault": self.conveyor_fault.snapshot(),
             "unavailable_resources": sorted(self.context.unavailable_resources),
             "diagnostic_cca_bypass": self.diagnostic_cca_bypass,
+            "formal_safety_status": "skipped" if self.diagnostic_cca_bypass else "required",
             'collision_checks_bypassed': [
                 *[robot['resource_id'] for robot in self.context.inputs['scene']['robots']
                   if robot.get('cartesian_motion', {}).get('avoid_collisions') is False],
@@ -493,6 +504,7 @@ class EnvironmentRuntime:
             "unavailable_resources": sorted(context.unavailable_resources),
             "revision": context.revision,
             "diagnostic_cca_bypass": self.diagnostic_cca_bypass,
+            "formal_safety_status": "skipped" if self.diagnostic_cca_bypass else "required",
             'collision_checks_bypassed': [
                 *[robot['resource_id'] for robot in self.context.inputs['scene']['robots']
                   if robot.get('cartesian_motion', {}).get('avoid_collisions') is False],
@@ -536,6 +548,11 @@ class EnvironmentRuntime:
                 self._report_process_models = models
             write_started = time.monotonic()
             self.reports.save(report, self._report_processes)
+            recovery = self.part_slippage_recovery
+            if recovery is not None and (self.stopped or report["outcome"].get("status") == "completed"):
+                from cais_spade_llm.recovery_framework.diagnostics import write_record
+
+                write_record(recovery.path / "environment_run.json", report)
             self._persisted_sequence = sequence
             self.reporting_timing.append({"timestamp": time.time(),
                                           "snapshot_wall_time_sec": snapshot_duration,
@@ -579,9 +596,21 @@ class EnvironmentRuntime:
             })
 
     @admission_transaction
-    def stop(self, reason: str = "Stopped by operator") -> None:
+    def stop(self, reason: str = "Stopped by operator", *, preserve_recovery: bool = False) -> None:
         """Close discovery and suppress execution without altering acknowledged state."""
         self.stopped = True
+        recovery = getattr(self, "part_slippage_recovery", None)
+        if recovery is not None and not preserve_recovery:
+            recovery.stop(reason)
+        preparation = getattr(self, "recovery_observation_preparation", None)
+        if (preparation is not None and not preserve_recovery
+                and not getattr(self, "recovery_checkpoint_capturing", False)
+                and not getattr(self, "recovery_capture_frozen", False)):
+            self.recovery_observation_preparation = None
+            try:
+                preparation.reader.close()
+            except (RuntimeError, ValueError, OSError):
+                logger.warning("Could not close recovery observation reader", exc_info=True)
         if self.admission is not None:
             self.admission.invalidate(reason)
         self._close_calculations()
@@ -650,6 +679,15 @@ class EnvironmentRuntime:
             | Template(metadata={"type": "replan_request"})
         )
         agent.add_behaviour(EnvironmentProductLoop(), execution)
+        if self.part_slippage_recovery is not None:
+            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+                RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
+            )
+
+            agent.add_behaviour(
+                agent._RecoveryOutlinePhysicalValidatedInbox(),
+                Template(metadata={"type": RECOVERY_OUTLINE_PHYSICAL_VALIDATED}),
+            )
 
     def set_plan(self, task: dict) -> None:
         """Build the existing DAG/FSA interface for one rechecked next task."""
@@ -760,8 +798,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
         self.agent._set_kickoff_result(
             success=True,
             message=(
-                "Environmental execution started after CCA validation; "
-                "progress remains available through SystemBridge."
+                ("Environmental execution started with safety checks deferred; "
+                 if runtime.diagnostic_cca_bypass else "Environmental execution started after CCA validation; ")
+                + "progress remains available through SystemBridge."
             ),
             retries_used=0,
             retries_max=0,
@@ -813,6 +852,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
     async def work(self, runtime: EnvironmentRuntime) -> None:
         """Negotiate ready goals and dispatch again after each acknowledgement."""
         context = runtime.context
+        runtime.nominal_idle.clear()
         discoveries: dict[str, asyncio.Task] = {}
         attempted: dict[str, str] = {}
         failures: dict[str, dict] = {}
@@ -985,9 +1025,18 @@ class EnvironmentProductLoop(CyclicBehaviour):
                         "request_id": request_id, "tasks": pending, "new_admissions": new_admissions,
                         "requested_monotonic": time.monotonic(), "requested_at_unix": time.time(),
                     }
-                    payload = runtime.composition_request(pending, request_id)
-                    self._awaiting_plan_request = request_id
-                    await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
+                    if runtime.diagnostic_cca_bypass:
+                        decision = {"safety_status": "skipped", "decisions": {
+                            task["task_id"]: {"status": "skipped", "reason": "diagnostic_cca_bypass"}
+                            for task in pending
+                        }}
+                        if not await self._dispatch_approved(runtime, approval, decision, attempted):
+                            return
+                        approval = None
+                    else:
+                        payload = runtime.composition_request(pending, request_id)
+                        self._awaiting_plan_request = request_id
+                        await send_agent_message(self, message(self.agent.cca_jid, "plan_safety_check", payload))
                 if not discoveries and not context.pending_tasks and not runtime.safety_retry_goals:
                     if ready and all(runtime.conveyor_fault.holds_task(row["tasks"][0]) for row in ready.values()):
                         runtime.outcome = {"status": "blocked", "reason": "Both observed pickups could not be established"}
@@ -1020,6 +1069,7 @@ class EnvironmentProductLoop(CyclicBehaviour):
             await runtime.cancel_owned()
             raise
         finally:
+            runtime.nominal_idle.set()
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
             self._awaiting_plan_request = None
@@ -1033,6 +1083,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
             runtime.conveyor_fault.not_reached()
             if runtime.outcome.get("status") == "completed":
                 runtime._close_calculations()
+            recovery = getattr(runtime, "part_slippage_recovery", None)
+            if recovery is not None:
+                recovery.nominal_finished()
 
     async def _dispatch_approved(self, runtime, approval: dict, decision: dict, attempted: dict) -> bool:
         """Recheck and send approved work without another scheduling cycle."""
@@ -1061,7 +1114,9 @@ class EnvironmentProductLoop(CyclicBehaviour):
         for task in approval["tasks"]:
             goal_key = task.get("composition_goal_key", task["part_name"])
             candidate_result = decision.get("decisions", {}).get(task["task_id"], {})
-            permitted = candidate_result.get("status") == "allowed"
+            permitted = candidate_result.get("status") == "allowed" or (
+                runtime.diagnostic_cca_bypass and candidate_result.get("status") == "skipped"
+            )
             if not permitted:
                 context.cancel_pending(task["task_id"])
                 if (candidate_result.get("status") == "inconclusive"
@@ -1495,44 +1550,45 @@ async def execute_environment_task(behaviour, msg, task: dict) -> None:
             is not True
         ):
             raise ValueError("Resource start conditions have not been validated")
-        await send_agent_message(
-            behaviour,
-            message(
-                agent.cca_jid,
-                "resource_event",
-                {
-                    "task_id": task_id,
-                    "resource_jid": str(agent.jid),
-                    "run_id": context.run_id,
-                    "function_name": name,
-                    "params": task["parameters"],
-                    "status": "safety_check",
-                },
-            ),
-        )
-        context.negotiations.append({
-            "kind": "resource_safety_requested", "task_id": task_id,
-            "resource_id": actor.resource_id, "timestamp": time.time(),
-        })
-        decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id),
-                                         getattr(runtime, "composition_timeout_s", 60))
-        context.negotiations.append({
-            "kind": "resource_safety_decision", "task_id": task_id,
-            "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
-        })
-        if decision != "allow":
-            await ack("held", reason="CCA requires a fresh admissible start")
-            return
-        if (
-            runtime.stopped
-            or not context.relevant_revisions_match(task)
-        ):
-            raise ValueError("CCA permission missing or execution context changed")
-        live = getattr(runtime, "live_safety_runtime", None)
-        if live is not None:
-            grant = agent._recovery_composition_grants.pop(task_id, None)
-            if not isinstance(grant, dict):
-                raise ValueError("Nominal task has no exact physical execution grant")
+        if not runtime.diagnostic_cca_bypass:
+            await send_agent_message(
+                behaviour,
+                message(
+                    agent.cca_jid,
+                    "resource_event",
+                    {
+                        "task_id": task_id,
+                        "resource_jid": str(agent.jid),
+                        "run_id": context.run_id,
+                        "function_name": name,
+                        "params": task["parameters"],
+                        "status": "safety_check",
+                    },
+                ),
+            )
+            context.negotiations.append({
+                "kind": "resource_safety_requested", "task_id": task_id,
+                "resource_id": actor.resource_id, "timestamp": time.time(),
+            })
+            decision = await asyncio.wait_for(agent._wait_for_safety_decision(task_id),
+                                             getattr(runtime, "composition_timeout_s", 60))
+            context.negotiations.append({
+                "kind": "resource_safety_decision", "task_id": task_id,
+                "resource_id": actor.resource_id, "timestamp": time.time(), "decision": decision,
+            })
+            if decision != "allow":
+                await ack("held", reason="CCA requires a fresh admissible start")
+                return
+            if (
+                runtime.stopped
+                or not context.relevant_revisions_match(task)
+            ):
+                raise ValueError("CCA permission missing or execution context changed")
+            live = getattr(runtime, "live_safety_runtime", None)
+            if live is not None:
+                grant = agent._recovery_composition_grants.pop(task_id, None)
+                if not isinstance(grant, dict):
+                    raise ValueError("Nominal task has no exact physical execution grant")
         physical_binding = ({"recovery_composition_ref": deepcopy(grant["recovery_composition_ref"])}
                             if grant is not None else {})
         await ack("running")

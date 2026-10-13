@@ -7,6 +7,7 @@ the admission coordinator. A configured CCA evidence provider may supply complet
 observation contracts; UI input contains candidate programs, never safety facts.
 """
 
+import hashlib
 import json
 import math
 import threading
@@ -568,8 +569,12 @@ def controller_goal_identity(observations: dict | None, *, model_execution: bool
                 "maximum_observed_position_error"}
     if model_execution:
         changing.add("observed_stationary")
-    return {name: {key: deepcopy(value) for key, value in row.items() if key not in changing}
-            for name, row in observations.items()}
+    result = {name: {key: deepcopy(value) for key, value in row.items() if key not in changing}
+              for name, row in observations.items()}
+    for row in result.values():
+        for observed in row.get("command_gate_evidence", {}).get("nav2_goal_observations", {}).values():
+            observed.pop("received_monotonic", None)
+    return result
 
 
 class GazeboSafetyReader:
@@ -644,15 +649,23 @@ class GazeboSafetyReader:
                     )
             return deepcopy(self._goal_status)
 
-    def _idle_service_goals(self):
+    def controller_activity(self, *, recorded: bool = False) -> dict:
+        """Capture active and idle owners without asserting a stationary hold."""
+        return self._idle_service_goals(require_idle=False, recorded=recorded)
+
+    def _idle_service_goals(self, *, require_idle: bool = True, recorded: bool = False):
         sources = self.configuration["controller_state_services"]
-        covered = [topic for row in sources.values() for topic in row["covers"]]
+        covered = [topic for row in sources.values() for topic in (
+            row["covers"] + row.get("command_gate", {}).get("status_topics", []))]
         if (len(covered) != len(set(covered))
                 or set(covered) != set(self.configuration["controller_status_topics"])):
             raise ValueError("Controller observation owners do not cover all configured endpoints")
         result = {}
         for service, configuration in sources.items():
-            client = self._node.create_client(self._type, service)
+            endpoint = service
+            if recorded and "command_gate" not in configuration:
+                endpoint = service.removesuffix("/recovery_state") + "/recovery_recorded_state"
+            client = self._node.create_client(self._type, endpoint)
             try:
                 reply = self._call(client, self._type.Request())
                 if not reply.success:
@@ -666,28 +679,94 @@ class GazeboSafetyReader:
                     or type(stamp) not in (int, float) or not math.isfinite(stamp)
                     or abs(now - stamp) > 2):
                 raise ValueError("Stale or incomplete controller state: " + service)
-            if (row.get("has_active_goal") is not False or row.get("has_pending_goal") is not False
-                    or row.get("holding") is not True):
+            if endpoint != service and (row.get("recorded_observation") is not True
+                                        or row.get("command_unchanged") is not True):
+                raise ValueError("Recorded controller export is incomplete: " + endpoint)
+            proof = None
+            if "command_gate" in configuration:
+                try:
+                    proof = self._command_gate_evidence(row, configuration)
+                except (ValueError, OSError) as exc:
+                    if require_idle:
+                        raise
+                    proof = {"status": "NEEDS_CONTEXT", "reason": str(exc)}
+            activity = row if proof is None else row["owned_activity"]
+            if require_idle and (activity.get("has_active_goal") is not False or activity.get("has_pending_goal") is not False
+                                 or activity.get("holding") is not True):
                 raise ValueError("Controller is not holding without active goals: " + service)
             if any(row.get(key) != value for key, value in configuration.get("required_values", {}).items()):
                 raise ValueError("Controller observation contract is unavailable: " + service)
             result[service] = {**row, "observed_monotonic": time.monotonic(),
-                               "covers": deepcopy(configuration["covers"])}
+                               "source": endpoint, "covers": deepcopy(configuration["covers"])}
+            if proof is not None:
+                result[service]["command_gate_evidence"] = proof
         return result
 
-    def _call(self, client, request, timeout=2.0):
+    def _command_gate_evidence(self, row, configuration):
+        from ament_index_python.packages import get_package_prefix
+
+        declaration = configuration["command_gate"]
+        gate = row.get("command_gate", {})
+        owned = row.get("owned_activity", {})
+        path = Path(get_package_prefix(declaration["source_package"])) / "lib" / declaration["source_package"] / declaration["source_executable"]
+        source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        if (type(gate.get("version")) is not int or gate["version"] != 1 or gate.get("closed") is not True
+                or gate.get("input_topic") != declaration["input_topic"]
+                or gate.get("output_topic") != declaration["output_topic"]
+                or gate.get("owned_status_topics") != configuration["covers"]
+                or gate.get("gated_status_topics") != declaration["status_topics"]
+                or row.get("controller_node") != declaration["controller_node"]
+                or row.get("controller_source_sha256") != source_sha256
+                or owned.get("holding") is not True or owned.get("has_active_goal") is not False
+                or owned.get("has_pending_goal") is not False
+                or not isinstance(row.get("last_output"), list) or len(row["last_output"]) != 3
+                or any(type(value) not in (int, float) or value != 0 for value in row["last_output"])):
+            raise ValueError("Closed controller command gate is unsupported: " + declaration["output_topic"])
+        publishers = self._node.get_publishers_info_by_topic(declaration["output_topic"])
+        if (len(publishers) != 1 or not list(publishers[0].endpoint_gid)
+                or publishers[0].node_namespace.rstrip("/") + "/" + publishers[0].node_name != declaration["controller_node"]):
+            raise ValueError("Controller velocity command authority is incomplete: " + declaration["output_topic"])
+        observations = {}
+        with self._lock:
+            for topic in declaration["status_topics"]:
+                observed = self._goal_status.get(topic)
+                sources = self._node.get_publishers_info_by_topic(topic)
+                if (observed is None or len(sources) != 1
+                        or not list(sources[0].endpoint_gid)
+                        or list(sources[0].endpoint_gid) != observed.get("publisher_gid")):
+                    observations[topic] = {"status": "unknown", "reason": "Current publisher goal status is unavailable"}
+                else:
+                    observations[topic] = {"status": "observed", **deepcopy(observed)}
+        return {"status": "supported", "source_sha256": source_sha256,
+                "controller_node": row["controller_node"], "controller_instance_id": row["instance_id"],
+                "output_publisher_gid": [int(value) for value in publishers[0].endpoint_gid],
+                "output_publisher_count": len(publishers),
+                "output_publisher_node": publishers[0].node_namespace.rstrip("/") + "/" + publishers[0].node_name,
+                "declaration": {**deepcopy(declaration), "owned_status_topics": deepcopy(configuration["covers"])},
+                "command_gate": deepcopy(gate), "owned_activity": deepcopy(owned),
+                "nav2_goal_observations": observations,
+                "all_nav2_goals_idle": None,
+                "assumptions": ["No new owned base goals or external actuator commands during this owner interval"],
+                "physical_execution_verified": False}
+
+    def _call(self, client, request, timeout=5.0):
         if not client.wait_for_service(timeout_sec=timeout):
             raise ValueError("Gazebo read-only service unavailable: " + client.srv_name)
-        future = client.call_async(request)
-        completed = threading.Event()
-        future.add_done_callback(lambda _: completed.set())
-        if not completed.wait(timeout):
-            future.cancel()
-            raise ValueError("Gazebo read-only service timed out: " + client.srv_name)
-        result = future.result()
-        if result is None:
-            raise ValueError("Gazebo read-only service returned no observation")
-        return result
+        # Only observation services use this reader. Retry a lost reply without
+        # changing source timestamps or accepting stale captured evidence.
+        for _ in range(3):
+            future = client.call_async(request)
+            completed = threading.Event()
+            future.add_done_callback(lambda _, event=completed: event.set())
+            if not completed.wait(timeout):
+                future.cancel()
+                client.remove_pending_request(future)
+                continue
+            result = future.result()
+            if result is None:
+                raise ValueError("Gazebo read-only service returned no observation")
+            return result
+        raise ValueError("Gazebo read-only service timed out after 3 attempts: " + client.srv_name)
 
     def parameter(self, node: str, name: str):
         """Read a declared string parameter without changing controller state."""
@@ -701,6 +780,63 @@ class GazeboSafetyReader:
             return result.values[0].string_value
         finally:
             self._node.destroy_client(client)
+
+    def double_parameter(self, node: str, name: str) -> float:
+        """Read a finite declared parameter without interpreting it as a physical bound."""
+        from rcl_interfaces.srv import GetParameters
+
+        client = self._node.create_client(GetParameters, node.rstrip("/") + "/get_parameters")
+        try:
+            result = self._call(client, GetParameters.Request(names=[name]))
+            if (len(result.values) != 1 or result.values[0].type != 3
+                    or not math.isfinite(result.values[0].double_value)):
+                raise ValueError("Required finite parameter unavailable: " + node + "/" + name)
+            return result.values[0].double_value
+        finally:
+            self._node.destroy_client(client)
+
+    def controller_state(self, node: str, *, recorded: bool = False) -> dict:
+        """Read native command activity and targets without requiring observed stationarity."""
+        endpoint = node.rstrip("/") + ("/recovery_recorded_state" if recorded else "/recovery_state")
+        client = self._node.create_client(self._type, endpoint)
+        try:
+            reply = self._call(client, self._type.Request())
+            if not reply.success:
+                raise ValueError("Controller state unavailable: " + node + ": " + reply.message)
+            row = json.loads(reply.message)
+            stamp = row.get("simulation_time")
+            if (row.get("version") != 1 or not row.get("instance_id")
+                    or type(stamp) not in (int, float) or not math.isfinite(stamp)):
+                raise ValueError("Incomplete controller state: " + node)
+            if recorded and (row.get("recorded_observation") is not True or row.get("command_unchanged") is not True):
+                raise ValueError("Incomplete recorded controller state: " + node)
+            source = node.rstrip("/") + "/recovery_state"
+            result = {**row, "observed_monotonic": time.monotonic(), "source": endpoint}
+            configuration = self.configuration.get("controller_state_services", {}).get(source, {})
+            if "command_gate" in configuration:
+                try:
+                    result["command_gate_evidence"] = self._command_gate_evidence(row, configuration)
+                except (ValueError, OSError) as exc:
+                    result["command_gate_evidence"] = {"status": "NEEDS_CONTEXT", "reason": str(exc)}
+            return result
+        finally:
+            self._node.destroy_client(client)
+
+    def set_world_paused(self, paused: bool) -> dict:
+        """Change only simulation time and confirm it through native observation."""
+        from std_srvs.srv import Empty
+
+        if type(paused) is not bool:
+            raise ValueError("World pause selection must be Boolean")
+        client = self._node.create_client(Empty, "/pause_physics" if paused else "/unpause_physics")
+        try:
+            self._call(client, Empty.Request())
+        finally:
+            self._node.destroy_client(client)
+        record = self.snapshot(refresh=True)
+        if record.get("world_paused") is not paused:
+            raise ValueError("Gazebo did not confirm the selected simulation pause state")
+        return record
 
     def snapshot(self, *, max_age=2.0, refresh=False):
         """Return a finite stamped physics snapshot, retaining one capture window."""
@@ -770,6 +906,76 @@ def _envelope(links, pose):
     ]
 
 
+def _part_local_bounds(links: dict, pose: list) -> list:
+    """Enclose observed world collision boxes in the recorded part frame."""
+    from itertools import product
+    from cais_spade_llm.recovery_framework.geometry import rotate
+
+    if (len(pose) != 7 or any(not math.isfinite(value) for value in pose)
+            or not math.isclose(sum(value * value for value in pose[3:]), 1., abs_tol=1e-5)):
+        raise ValueError("Part geometry requires a finite unit-quaternion pose")
+    inverse = [-pose[3], -pose[4], -pose[5], pose[6]]
+    boxes = [row.get("bounds") for link in links.values() for row in link["collisions"]]
+    if not boxes or any(box is None for box in boxes):
+        raise ValueError("Observed part collision geometry is missing")
+    points = []
+    for box in boxes:
+        if (len(box) != 3 or any(len(axis) != 2 or axis[0] > axis[1]
+                or any(not math.isfinite(value) for value in axis) for axis in box)):
+            raise ValueError("Observed part collision bounds are invalid")
+        points.extend(rotate(inverse, [point[i] - pose[i] for i in range(3)])
+                      for point in product(*box))
+    return [[math.nextafter(min(point[i] for point in points), -math.inf),
+             math.nextafter(max(point[i] for point in points), math.inf)] for i in range(3)]
+
+
+def _observed_attachment(record: dict, config: dict, links: dict, state: dict,
+                         pose: list, part_tracker: dict, part_geometry: dict) -> dict:
+    """Bind observed robot attachments to exact configured part identities."""
+    from cais_spade_llm.recovery_framework.geometry import multiply, rotate
+
+    attached = []
+    for row in record["attachments"]:
+        sides = [side for side in (1, 2)
+                 if row[f"model{side}"] == config["model"] and row[f"link{side}"] in links]
+        if sides:
+            if len(sides) != 1:
+                raise ValueError("Attachment does not identify one resource endpoint")
+            attached.append((row, 3 - sides[0]))
+    result = {"model_name": None, "observed_attachment_complete": True,
+              "instance_id": record["instance_id"], "revision": record["attachment_revision"],
+              "records": [deepcopy(row) for row, _ in attached]}
+    if "held_part" not in state:
+        return result
+    held = state["held_part"]
+    if not attached:
+        if held is not None:
+            raise ValueError("Symbolic custody disagrees with the observed empty attachment set")
+        state["grasp_transform"] = None
+        return result
+    if len(attached) != 1 or held is None or held not in part_tracker:
+        raise ValueError("Observed attachment has missing or ambiguous held_part custody")
+    row, side = attached[0]
+    model_name = (part_geometry.get("model_map", {}).get(held)
+                  or part_geometry.get(held, {}).get("model_name"))
+    if not model_name or row[f"model{side}"] != model_name:
+        raise ValueError("Observed attachment differs from the configured held_part model")
+    model = record["models"][model_name]
+    if row[f"link{side}"] not in model["links"]:
+        raise ValueError("Observed attachment part link is unavailable")
+    part_pose = model["pose"]
+    local_bounds = _part_local_bounds(model["links"], part_pose)
+    _part_local_bounds(links, pose)
+    inverse = [-pose[3], -pose[4], -pose[5], pose[6]]
+    transform = [*rotate(inverse, [part_pose[i] - pose[i] for i in range(3)]),
+                 *multiply(inverse, part_pose[3:])]
+    state["grasp_transform"] = transform
+    result.update(model_name=model_name, part_name=held, part_pose=deepcopy(part_pose),
+                  grasp_transform=deepcopy(transform), part_local_bounds=local_bounds,
+                  transform_source="GETRECOVERYSTATE attachment and observed tool/part poses")
+    return result
+
+
 def _configured_static_part_geometry(record: dict, declaration: dict, part: dict) -> dict:
     """Enclose configured static fixtures relative to their observed carrier.
 
@@ -799,6 +1005,15 @@ def _configured_static_part_geometry(record: dict, declaration: dict, part: dict
     return {"frame": "world", "footprint": _envelope(links, part["pose"])}
 
 
+def _same_frozen_native_observation(record: dict, runtime) -> bool:
+    frozen = getattr(runtime, "recovery_capture_native", None)
+    return (getattr(runtime, "recovery_capture_frozen", False) is True
+            and isinstance(frozen, dict) and frozen.get("world_paused") is True
+            and bool(frozen.get("instance_id"))
+            and {key: value for key, value in record.items() if key != "observed_monotonic"}
+            == {key: value for key, value in frozen.items() if key != "observed_monotonic"})
+
+
 class GazeboResourceObservation:
     """Resource-owned idle observation support, selected entirely by configuration."""
 
@@ -806,6 +1021,7 @@ class GazeboResourceObservation:
         self.provider, self.owner = provider, owner
         self.configuration = deepcopy(configuration)
         self.motion_configuration = None
+        self.custody_configuration = None
         self.support_error = None
 
     @property
@@ -813,9 +1029,16 @@ class GazeboResourceObservation:
         """Expose the registered entity reader without a robot-controller dependency."""
         return self.provider.reader.entity
 
-    def capture(self, *, max_age=2.0, native=None):
+    def capture(self, *, max_age=2.0, native=None, record=None):
         """Capture physical facts; record observed motion without claiming idle coverage."""
-        record = self.provider.reader.snapshot(max_age=max_age)
+        record = self.provider.reader.snapshot(max_age=max_age) if record is None else deepcopy(record)
+        frozen = _same_frozen_native_observation(record, self.provider.runtime)
+        if not frozen and not 0 <= time.monotonic() - record["observed_monotonic"] <= max_age:
+            raise ValueError("Stale resource observation")
+        native_source = (native or {}).get("native_physics_source")
+        if native_source is not None and any(native_source.get(key) != record.get(key)
+                for key in ("instance_id", "simulation_time", "observed_monotonic")):
+            raise ValueError("Kinematic and collision observations belong to different physics snapshots")
         config, rid = self.configuration, self.owner.agent_name
         links = _links(record, config)
         moving = {
@@ -836,21 +1059,9 @@ class GazeboResourceObservation:
                 raise ValueError("Controller and physics-thread tool observations disagree")
         else:
             pose = links[reference]["pose"] if reference else model["pose"]
-        attached = [
-            row
-            for row in record["attachments"]
-            if any(
-                row[f"model{side}"] == config["model"] and row[f"link{side}"] in links
-                for side in (1, 2)
-            )
-        ]
-        # This slice does not silently reinterpret assembly containment as grasp.
-        if attached:
-            raise ValueError(
-                "Idle motion preparation requires observed empty resource custody: " + rid
-            )
-        if state.get("held_part") is not None:
-            raise ValueError("Symbolic custody disagrees with the observed empty attachment set")
+        attachment = _observed_attachment(
+            record, config, links, state, pose, self.provider.runtime.context.part_tracker,
+            self.provider.runtime.context.inputs["geometry"].get("parts", {}))
         state["current_pose"] = deepcopy(pose)
         state["contained_parts"] = sorted(
             part
@@ -866,7 +1077,6 @@ class GazeboResourceObservation:
             if len(matches) != 1:
                 raise ValueError("Gripper observation is not a supported configured state")
             state["gripper_state"] = matches[0]
-            state["grasp_transform"] = None
         if native is not None:
             state["joint_positions"] = deepcopy(native["joint_positions"])
             state["joint_names"] = deepcopy(native["joint_names"])
@@ -880,13 +1090,13 @@ class GazeboResourceObservation:
             "launch_id": self.provider.launch_id,
             "observed_monotonic": record["observed_monotonic"],
             "simulation_time": record["simulation_time"],
-            "custody_complete": True,
-            "attachment": {
-                "model_name": None,
-                "observed_attachment_complete": True,
-                "instance_id": record["instance_id"],
-                "revision": record["attachment_revision"],
+            "native_physics_source": {
+                key: deepcopy(record[key])
+                for key in ("instance_id", "simulation_time", "observed_monotonic")
             },
+            "custody_complete": True,
+            "attachment": attachment,
+            "link_states": deepcopy(links),
             "stationary_contract": deepcopy(config["stationary_contract"]),
             "idle": not moving,
             "moving_links": moving,
@@ -902,6 +1112,9 @@ class GazeboResourceObservation:
             ],
             "footprint": _envelope(links, pose),
         }
+        if frozen:
+            physical["frozen_native_fingerprint"] = fingerprint({
+                key: value for key, value in record.items() if key != "observed_monotonic"})
         return physical
 
     def stationary_coverage(self, intervals: list, checkpoint: dict) -> dict:

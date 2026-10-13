@@ -1723,7 +1723,7 @@ class RobotAgent(ResourceAgent):
                 primitive,
                 "ok" if step_result.get("success") else "failed",
             )
-            results.append({"primitive": primitive, "result": step_result})
+            results.append({"primitive": primitive, "params": deepcopy(params), "result": deepcopy(step_result)})
 
             if not step_result.get("success", False):
                 enhanced_msg = step_result.get("message", "")
@@ -1766,6 +1766,7 @@ class RobotAgent(ResourceAgent):
                         "primitive_result": step_result,
                         "completed_steps": len(results) - 1,
                         "total_steps": len(primitive_steps),
+                        "primitive_results": deepcopy(results),
                     },
                 }
 
@@ -1869,6 +1870,7 @@ class RobotAgent(ResourceAgent):
                 "completed_steps": len(results),
                 "total_steps": len(primitive_steps),
                 "event_facts": deepcopy(event_facts),
+                "primitive_results": deepcopy(results),
             },
         }
 
@@ -1922,6 +1924,26 @@ class RobotAgent(ResourceAgent):
                 or []
             ),
         )
+        scene = getattr(self, "gazebo_program_scene", None)
+        if self.execution_mode == "simulation" and isinstance(scene, dict) and "resource_programs" in scene:
+            from dataclasses import asdict
+            from cais_spade_llm.resources.gazebo_programs import saved_robot_definition
+
+            for event in raw_descriptor.get("events", []):
+                program = saved_robot_definition(scene, self.agent_name, event["event_name"]).program
+                event["primitive_support"] = [
+                    {"primitive": step.op, "params": deepcopy(step.params),
+                     "when": [asdict(guard) for guard in step.when]}
+                    for step in program.steps if step.executor == "primitive"
+                ]
+                event["recovery_visible_steps"] = program.render_recovery_steps()
+        for event in raw_descriptor.get("events", []):
+            event["primitive_support"] = [
+                step for step in event["primitive_support"]
+                if not any(guard.get("predicate") == "execution_mode"
+                           and guard.get("args", {}).get("mode") != self.execution_mode
+                           for guard in step.get("when", []))
+            ]
         return build_recovery_des_model(
             self,
             snapshot=live_snapshot,
@@ -2716,6 +2738,78 @@ class RobotAgent(ResourceAgent):
         )
         return None
 
+    def validate_recovery_primitive_support(
+        self, *, task: dict[str, Any], recovery_des_model: dict[str, Any],
+        recovery_snapshot: dict[str, Any], physical_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Supply observed capability witnesses without authoring execution parameters."""
+        from cais_spade_llm.resources.recovery_feasibility import validate_primitive_support
+
+        if physical_input.get("primitive_support_semantics") == "successor_primitive_union":
+            return ResourceAgent.validate_recovery_primitive_support(
+                self, task=task, recovery_des_model=recovery_des_model,
+                recovery_snapshot=recovery_snapshot, physical_input=physical_input)
+
+        parameter_evidence = {}
+        pose = recovery_snapshot.get("current_pose")
+        if isinstance(pose, dict):
+            parameter_evidence.update({axis: pose[axis] for axis in ("x", "y", "z") if axis in pose})
+            travel_z = (getattr(self, "_task_ctx", None) or {}).get("travel_z")
+            if isinstance(travel_z, (int, float)) and isinstance(pose.get("z"), (int, float)):
+                parameter_evidence["dz"] = travel_z - pose["z"]
+        runtime = getattr(self, "environment_runtime", None)
+        geometry = getattr(getattr(runtime, "context", None), "geometry", {})
+        part = task.get("part_name")
+        if part in geometry and geometry[part].get("model_name"):
+            parameter_evidence["model_name"] = geometry[part]["model_name"]
+        pick_evidence = None
+        controller = getattr(self, "_controller", None)
+        observed_pose = (physical_input.get("part_context") or {}).get("observed_pose")
+        if ("dz" not in parameter_evidence and part in geometry
+                and isinstance(pose, dict) and isinstance(pose.get("z"), (int, float))
+                and isinstance(observed_pose, dict)
+                and getattr(runtime, "diagnostic_cca_bypass", False)
+                and getattr(self, "execution_mode", None) == "simulation"
+                and getattr(controller, "execution_mode", None) == "simulation"):
+            from cais_spade_llm.recovery_framework.part_slippage_recovery import diagnostic_setup
+            from cais_spade_llm.recovery_framework.workflow_execution import _part_geometry
+
+            if diagnostic_setup(runtime.setup):
+                pick_evidence = controller.compute_pick_targets(
+                    part_name=part, product_geometry=_part_geometry(runtime.context, part),
+                    target_pose=deepcopy(observed_pose), target_pose_source="observed_pose",
+                    use_global_min_pick_tcp_z=False,
+                )
+                travel_z = pick_evidence.get("travel_z")
+                if pick_evidence.get("success") is True and isinstance(travel_z, (int, float)):
+                    parameter_evidence["dz"] = travel_z - pose["z"]
+
+        def validate_primitive(*, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
+            return self.check_recovery_primitive_feasibility(
+                primitive=primitive, params=params, task=task, recovery_snapshot=recovery_snapshot,
+                part_context=deepcopy(physical_input.get("part_context") or {}),
+                grounded_action=deepcopy(physical_input.get("grounded_action") or {}),
+            )
+
+        result = validate_primitive_support(
+            task=task, recovery_des_model=recovery_des_model, recovery_snapshot=recovery_snapshot,
+            validate_primitive=validate_primitive, parameter_evidence=parameter_evidence,
+        )
+        if pick_evidence is not None:
+            result["primitive_support"]["pick_target_evidence"] = deepcopy(pick_evidence)
+        return result
+
+    def prepare_recovery_primitive_parameters(
+        self, *, task: dict[str, Any], recovery_des_model: dict[str, Any],
+        recovery_snapshot: dict[str, Any], physical_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Calculate scoped parameter facts without calling the robot controller."""
+        from cais_spade_llm.resources.robot.recovery_capability import prepare_robot_primitive_parameters
+
+        return prepare_robot_primitive_parameters(task=task, recovery_des_model=recovery_des_model,
+            recovery_snapshot=recovery_snapshot, resource_evidence=physical_input.get("resource_evidence") or {},
+            resource_jid=str(self.jid), physical_evidence=physical_input.get("physical_evidence"))
+
     def check_recovery_primitive_feasibility(
         self,
         *,
@@ -2725,11 +2819,55 @@ class RobotAgent(ResourceAgent):
         recovery_snapshot: dict[str, Any],
         part_context: dict[str, Any],
         grounded_action: dict[str, Any],
+        resource_evidence: dict[str, Any] | None = None,
+        physical_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Check a bound primitive against robot-owned capability evidence."""
         from copy import deepcopy
 
+        if resource_evidence is not None:
+            from cais_spade_llm.resources.robot.recovery_capability import check_robot_primitive_capability
+
+            checked = check_robot_primitive_capability(primitive=primitive, params=params, task=task,
+                recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
+                static_capabilities=self.static_capabilities, primitive_catalog=self.recovery_execution_primitive_catalog(),
+                resource_jid=str(self.jid), part_context=part_context, physical_evidence=physical_evidence)
+            if checked is not None:
+                return checked
+            return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+                    "reason": "Robot primitive has no independent recorded capability evaluator",
+                    "context_requests": [f"/resources/{self.jid}/recovery_des_model"],
+                    "evidence": {"primitive": primitive, "command_sent": False}}
         del task
+        runtime = getattr(self, "environment_runtime", None)
+        controller = getattr(self, "_controller", None)
+        if (getattr(runtime, "diagnostic_cca_bypass", False)
+                and getattr(self, "execution_mode", None) == "simulation"
+                and getattr(controller, "execution_mode", None) == "simulation"
+                and primitive in {"detect_parts", "compute_pick_targets", "compute_place_targets"}):
+            from cais_spade_llm.recovery_framework.part_slippage_recovery import diagnostic_setup
+            from cais_spade_llm.recovery_framework.workflow_execution import _part_geometry, _destination_geometry
+
+            if diagnostic_setup(runtime.setup):
+                arguments = deepcopy(params)
+                part = arguments.get("part_name")
+                if primitive == "compute_pick_targets" and part in runtime.context.geometry:
+                    arguments.setdefault("product_geometry", _part_geometry(runtime.context, part))
+                    if isinstance(part_context.get("observed_pose"), dict):
+                        arguments.update(target_pose=deepcopy(part_context["observed_pose"]),
+                                         target_pose_source="observed_pose", use_global_min_pick_tcp_z=False)
+                elif primitive == "compute_place_targets" and part in runtime.context.geometry:
+                    destination = arguments.get("destination_location")
+                    arguments.setdefault("product_geometry", _destination_geometry(
+                        runtime.context, part, destination, self.agent_name))
+                    arguments = self._inject_current_pick_ctx_for_place_targets(primitive, arguments)
+                observed = getattr(controller, primitive)(**arguments)
+                allowed = bool(observed) if primitive == "detect_parts" else observed.get("success") is True
+                return {"allowed": allowed, "feasibility_status": "FEASIBLE" if allowed else "NEEDS_CONTEXT",
+                        "reason": "Resource-owned observation or target calculation completed without motion."
+                        if allowed else "Resource-owned observation or target calculation is unavailable.",
+                        "evidence": {"primitive": primitive, "params": arguments,
+                                     "result": deepcopy(observed), "command_sent": False}}
         action = deepcopy(grounded_action)
         action["function_name"] = primitive
         target = dict(action.get("target") or {})
@@ -2757,6 +2895,15 @@ class RobotAgent(ResourceAgent):
             target["named_pose"] = params["pose_name"]
         elif primitive in {"move_cartesian", "move_pose"}:
             target["pose"] = {key: params[key] for key in ("x", "y", "z") if key in params}
+        elif primitive == "move_relative" and isinstance(recovery_snapshot.get("current_pose"), dict):
+            pose = recovery_snapshot["current_pose"]
+            if all(isinstance(pose.get(axis), (int, float)) for axis in ("x", "y", "z")):
+                target["pose"] = {axis: pose[axis] + params.get("d" + axis, 0.)
+                                  for axis in ("x", "y", "z")}
+            else:
+                return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+                        "constraint_code": "resource_validation_unavailable",
+                        "reason": "Relative motion requires the observed current pose."}
         elif primitive in {"move_relative", "move_joints", "rotate_joint"}:
             return {
                 "allowed": False,
@@ -2765,6 +2912,9 @@ class RobotAgent(ResourceAgent):
                 "reason": "Live robot-model planning is required for this primitive.",
                 "evidence": {"primitive": primitive, "params": deepcopy(params)},
             }
+        elif primitive in {"grasp_part", "release_part", "open_gripper", "close_gripper"}:
+            if isinstance(recovery_snapshot.get("current_pose"), dict):
+                target["pose"] = deepcopy(recovery_snapshot["current_pose"])
         action["target"] = target
         result = self.check_recovery_physical_feasibility(
             part_context=part_context,
@@ -2835,6 +2985,19 @@ class RobotAgent(ResourceAgent):
                 key in expected_part and expected_part.get(key) not in (None, "", [], {})
                 for key in ("state", "location", "pose", "holder")
             )
+        )
+        missing_part_fact = object()
+        recorded_part_effects = {
+            "state": part_context.get("part_state", part_context.get("current_state", missing_part_fact)),
+            "location": part_context.get("part_location", part_context.get("current_location", missing_part_fact)),
+            "pose": part_context.get("observed_pose", missing_part_fact),
+            "holder": part_context.get(
+                "part_holder_resource_jid", part_context.get("current_holder_resource_jid", missing_part_fact)
+            ),
+        }
+        part_changes = any(
+            field in expected_part and expected_part[field] != recorded_part_effects[field]
+            for field in ("state", "location", "pose", "holder")
         )
         named_pose = str(
             target_info.get("named_pose") or part_context.get("named_pose") or ""
@@ -3029,7 +3192,7 @@ class RobotAgent(ResourceAgent):
                     ),
                     "evidence": evidence,
                 }
-        elif part_affecting and part_name and task_kind != "continuation_resume":
+        elif part_changes and part_name and task_kind != "continuation_resume":
             if held_part != str(part_name).strip() and current_holder != resource_jid:
                 return {
                     "allowed": False,
@@ -3063,14 +3226,14 @@ class RobotAgent(ResourceAgent):
         if configured_pick_place_result is not None:
             return configured_pick_place_result
 
-        target_pose: dict[str, Any] | None = None
+        target_pose: dict[str, Any] | None = target_info.get("pose")
         source_location = str(
             source_ref.get("location") or target_info.get("source_location") or ""
         ).strip()
         source_location_is_pose_only = (
             source_location == "observed_pose" or source_location.endswith("_observed_pose")
         )
-        if requires_part_acquisition or source_location_is_pose_only:
+        if target_pose is None and (requires_part_acquisition or source_location_is_pose_only):
             source_pose = dict(source_ref.get("pose") or {})
             target_pose = (
                 source_pose
@@ -3111,6 +3274,71 @@ class RobotAgent(ResourceAgent):
             }
 
         evidence["checked_pose"] = deepcopy(target_pose)
+        runtime = getattr(self, "environment_runtime", None)
+        controller = getattr(self, "_controller", None)
+        if (getattr(runtime, "diagnostic_cca_bypass", False)
+                and getattr(self, "execution_mode", None) == "simulation"
+                and getattr(controller, "execution_mode", None) == "simulation"):
+            from cais_spade_llm.recovery_framework.part_slippage_recovery import diagnostic_setup
+
+            if diagnostic_setup(runtime.setup):
+                approach = None
+                if requires_part_acquisition and not target_info.get("pose"):
+                    from cais_spade_llm.recovery_framework.workflow_execution import _part_geometry
+                    from cais_spade_llm.resources.robot.robot_primitives import _extract_pick_targets_output
+
+                    pick = controller.compute_pick_targets(
+                        part_name=part_name, product_geometry=_part_geometry(runtime.context, part_name),
+                        target_pose=deepcopy(target_pose), target_pose_source="observed_pose",
+                        use_global_min_pick_tcp_z=False,
+                    )
+                    if pick.get("success") is not True:
+                        return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+                                "constraint_code": "resource_validation_unavailable",
+                                "reason": pick.get("message", "Pick target calculation is unavailable"),
+                                "evidence": {**evidence, "pick_targets": pick}}
+                    evidence["pick_targets"] = deepcopy(pick)
+                    targets, error = _extract_pick_targets_output({}, pick)
+                    if error:
+                        return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+                                "constraint_code": "resource_validation_unavailable",
+                                "reason": error, "evidence": evidence}
+                    target_pose = targets["target_pose"]
+                    approach = targets["approach_pose"]
+                target = controller._get_ee_pose()
+                if target is not None and all(
+                    isinstance(target_pose.get(axis), (int, float))
+                    and math.isfinite(target_pose[axis]) for axis in ("x", "y", "z")
+                ):
+                    target = deepcopy(target)
+                    for axis in ("x", "y", "z"):
+                        setattr(target.position, axis, target_pose[axis])
+                    for axis in ("x", "y", "z", "w"):
+                        if "q" + axis in target_pose:
+                            setattr(target.orientation, axis, target_pose["q" + axis])
+                    waypoints = []
+                    if approach is not None:
+                        waypoint = deepcopy(target)
+                        for axis in ("x", "y", "z"):
+                            setattr(waypoint.position, axis, approach[axis])
+                        waypoints.append(waypoint)
+                    plan = controller._prepare_cartesian_motion(
+                        target, label="recovery capability witness", min_fraction=1.,
+                        allow_partial=False, consume_prepared=False, waypoints=waypoints,
+                    )
+                    if plan is not None:
+                        trajectory = plan[0].joint_trajectory
+                        evidence["native_plan"] = {
+                            "joint_names": list(trajectory.joint_names),
+                            "points": [{"positions": list(point.positions),
+                                        "time_from_start": point.time_from_start.sec + point.time_from_start.nanosec / 1e9}
+                                       for point in trajectory.points],
+                            "command_sent": False,
+                        }
+                        return {"allowed": True, "feasibility_status": "FEASIBLE",
+                                "reason": "Native controller prepared the capability witness without dispatch.",
+                                "evidence": evidence}
+                    evidence["native_planning_reason"] = controller._last_failure_message
         # This synchronous precondition check cannot establish live robot reachability.
         # Its caller must obtain robot-model planning evidence before accepting the pose.
         return {

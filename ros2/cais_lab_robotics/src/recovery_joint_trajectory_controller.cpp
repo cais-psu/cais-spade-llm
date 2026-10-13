@@ -48,6 +48,7 @@ public:
       maximum_error_.assign(params_.joints.size(), 0.);
       observed_positions_.clear();
       observed_velocities_.clear();
+      commanded_positions_.clear();
     }
     // The base callbacks are nonvirtual. Replace both public endpoints so a
     // second ROS sender cannot bypass an armed reservation or stationary hold.
@@ -129,6 +130,28 @@ public:
         response->success = active() && observation_fresh(false);
         response->message = response->success ? observation_ : "Active controller update unavailable";
       });
+    recorded_observation_service_ = get_node()->create_service<std_srvs::srv::Trigger>(
+      "~/recovery_recorded_state", [this](std_srvs::srv::Trigger::Request::SharedPtr,
+      std_srvs::srv::Trigger::Response::SharedPtr response) {
+        std::lock_guard<std::mutex> lock(owner_mutex_);
+        // Frozen-checkpoint export retains the last update's simulation time.
+        // This read-only endpoint never supplies freshness for command admission.
+        response->success = active() && !observation_.empty() && !stop_requested_ &&
+          *traj_msg_external_point_ptr_.readFromNonRT() == last_command_;
+        if (!response->success) {
+          response->message = "Recorded controller update unavailable or command changed";
+          return;
+        }
+        auto record = observation_json();
+        record.pop_back();
+        std::ostringstream metadata;
+        metadata << std::setprecision(17)
+                 << ",\"recorded_observation\":true,\"command_unchanged\":true"
+                 << ",\"observation_wall_age_sec\":"
+                 << std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - observation_time_).count() << '}';
+        response->message = record + metadata.str();
+      });
     contract_service_ = get_node()->create_service<Contract>(
       "~/recovery_motion_contract", [this](Contract::Request::SharedPtr request,
       Contract::Response::SharedPtr response) {
@@ -205,6 +228,15 @@ public:
       for (size_t i = 0; i < hold_positions_.size(); ++i) {
         joint_command_interface_[0][i].get().set_value(hold_positions_[i]);
       }
+    }
+    commanded_positions_.clear();
+    if (!joint_command_interface_.empty()) {
+      for (const auto & command : joint_command_interface_[0]) {
+        commanded_positions_.push_back(command.get().get_value());
+      }
+    }
+    if (commanded_positions_.size() != params_.joints.size() || !finite(commanded_positions_)) {
+      commanded_positions_.clear();
     }
     if (contract_state_ != "unlocked") {
       std::vector<double> commands;
@@ -448,6 +480,11 @@ private:
 
   void publish_observation()
   {
+    observation_ = observation_json();
+  }
+
+  std::string observation_json()
+  {
     const auto goal = *rt_active_goal_.readFromNonRT();
     const bool has_active_goal = (goal && goal->gh_ && goal->gh_->is_active()) ||
       (owned_goal_ && (owned_goal_->is_active() || owned_goal_->is_canceling()));
@@ -479,10 +516,14 @@ private:
     json_array(row, observed_positions_);
     row << ",\"velocities\":";
     json_array(row, observed_velocities_);
+    row << ",\"commanded_positions\":";
+    if (commanded_positions_.empty()) {row << "null";}
+    else {json_array(row, commanded_positions_);}
+    row << ",\"commanded_positions_source\":\"native position command interfaces\"";
     row << ",\"maximum_observed_position_error\":";
     json_array(row, maximum_error_);
     row << '}';
-    observation_ = row.str();
+    return row.str();
   }
 
   std::mutex owner_mutex_;
@@ -494,12 +535,14 @@ private:
   double simulation_time_{0.}, maximum_period_{0.};
   std::chrono::steady_clock::time_point observation_time_{};
   std::vector<double> observed_positions_, observed_velocities_, hold_positions_, maximum_error_;
+  std::vector<double> commanded_positions_;
   std::vector<double> last_native_positions_;
   trajectory_msgs::msg::JointTrajectory trajectory_;
   rclcpp_action::GoalUUID controller_goal_id_{};
   std::shared_ptr<GoalHandle> owned_goal_;
   std::shared_ptr<trajectory_msgs::msg::JointTrajectory> last_command_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr observation_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recorded_observation_service_;
   rclcpp::Service<Contract>::SharedPtr contract_service_;
 };
 }  // namespace cais_lab_robotics

@@ -33,6 +33,73 @@ _SCENE_IDENTITY_PARAMETERS = (
 )
 
 
+def _wait_navigation_ready(names, *, read_state, read_active, read_map, startup, spin,
+                           operations, now=time.monotonic, timeout=120.):
+    """Reconcile startup observations within one deadline without repeating mutations."""
+    deadline, states, active = now() + timeout, {}, False
+    previous, stable_since, startup_sent = None, None, False
+
+    def budget():
+        remaining = deadline - now()
+        if remaining <= 0:
+            raise TimeoutError(f'KMR active navigation/map not observed: states={states}, '
+                               f'map={bool(read_map())}, observations={operations}')
+        return remaining
+
+    while True:
+        budget()
+        for name in names:
+            try:
+                states[name] = read_state(name, min(5., budget()))
+            except TimeoutError as exc:
+                states.pop(name, None)
+                operations.append({'operation': '/KMR/' + name + '/get_state',
+                                   'success': False, 'error': str(exc), 'retry_read': True})
+        try:
+            active = read_active(min(5., budget()))
+        except TimeoutError as exc:
+            active = None
+            operations.append({'operation': '/KMR/lifecycle_manager_navigation/is_active',
+                               'success': False, 'error': str(exc), 'retry_read': True})
+        occupancy = read_map()
+        if _navigation_ready(names, states, occupancy, active):
+            return states, occupancy, active
+        # The manager can abort initial bringup after losing a read-only reply.
+        # Its existing proxy reconciles already-configured nodes. An uncertain
+        # STARTUP response is observed afterward, never automatically resent.
+        snapshot = tuple(states.get(name) for name in names)
+        if (active is False and all(type(value) is int and value in (1, 2) for value in snapshot)
+                and not startup_sent):
+            if snapshot != previous:
+                previous, stable_since = snapshot, now()
+            elif now() - stable_since >= 2.:
+                startup_sent = True
+                request = {'operation': '/KMR/lifecycle_manager_navigation/manage_nodes',
+                           'command': 'STARTUP', 'observed_states': deepcopy(states),
+                           'response': None, 'recovery_execution_started': False}
+                operations.append(request)
+                try:
+                    request['response'] = {'success': startup(min(45., budget()))}
+                except TimeoutError as exc:
+                    request['error'] = str(exc)
+        else:
+            previous, stable_since = None, None
+        spin()
+
+
+def _navigation_ready(names: list[str], states: dict, occupancy: dict, manager_active: bool) -> bool:
+    """Require observed active lifecycle nodes and a complete world map."""
+    return bool(manager_active is True and names and len(set(names)) == len(names)
+        and all(isinstance(name, str) and name and type(states.get(name)) is int and states[name] == 3 for name in names)
+        and occupancy.get('frame_id') == 'world'
+        and type(occupancy.get('width')) is int and occupancy['width'] > 0
+        and type(occupancy.get('height')) is int and occupancy['height'] > 0
+        and type(occupancy.get('resolution')) in (int, float)
+        and math.isfinite(occupancy['resolution']) and occupancy['resolution'] > 0
+        and isinstance(occupancy.get('data'), list)
+        and len(occupancy['data']) == occupancy['width'] * occupancy['height'])
+
+
 def _scene_identity(values: list[str]) -> dict[str, str]:
     valid_settings = False
     if len(values) == len(_SCENE_IDENTITY_PARAMETERS):
@@ -162,6 +229,9 @@ def run(request: dict, session: dict | None = None) -> dict:
     from gazebo_msgs.srv import GetEntityState
     from geometry_msgs.msg import Pose, Pose2D
     from linkattacher_msgs.srv import AttachLink, DetachLink
+    from lifecycle_msgs.srv import GetState
+    from nav_msgs.msg import OccupancyGrid
+    from nav2_msgs.srv import ManageLifecycleNodes
     from moveit_msgs.msg import (
         AttachedCollisionObject, CollisionObject, Constraints, JointConstraint,
         OrientationConstraint, PlanningScene, PlanningSceneComponents, PositionConstraint, RobotState, RobotTrajectory,
@@ -173,7 +243,7 @@ def run(request: dict, session: dict | None = None) -> dict:
     from rclpy.action import ActionClient
     from rclpy.clock import Clock, ClockType
     from rclpy.parameter import Parameter
-    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy, ReliabilityPolicy
     from sensor_msgs.msg import JointState
     from shape_msgs.msg import SolidPrimitive
     from std_msgs.msg import String
@@ -292,6 +362,16 @@ def run(request: dict, session: dict | None = None) -> dict:
 
     if 'status_subscription' not in session:
         session['status_subscription'] = node.create_subscription(String, '/KMR/base_motion_status', on_base_status, 10)
+
+    navigation_map = session.setdefault('navigation_map', {})
+    if 'navigation_map_subscription' not in session:
+        def on_navigation_map(message):
+            navigation_map.clear()
+            navigation_map.update(frame_id=message.header.frame_id, width=message.info.width,
+                                  height=message.info.height, resolution=message.info.resolution,
+                                  data=list(message.data))
+        session['navigation_map_subscription'] = node.create_subscription(OccupancyGrid, '/KMR/map', on_navigation_map,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
 
     def timings():
         now = time.monotonic()
@@ -1082,23 +1162,9 @@ def run(request: dict, session: dict | None = None) -> dict:
         return result
 
     def route_between(source: str, target: str) -> list[list[float]]:
-        for row in kmr['predefined_route_waypoints']:
-            if row['resources'] == [source, target]:
-                route = deepcopy(row['poses'])
-                if source == 'Storage':
-                    pick_pose = dict(
-                        scene['Storage'].get('KMR_pick_docking_poses') or {}
-                    ).get(part)
-                    if pick_pose and math.dist(pick_pose[:2], route[0][:2]) > .01:
-                        route = (
-                            [list(pick_pose), *route[1:]]
-                            if target == 'M2'
-                            else [list(pick_pose), *route]
-                        )
-                return route
-            if row['resources'] == [target, source]:
-                return list(reversed(deepcopy(row['poses'])))
-        raise ValueError(f'No configured KMR route from {source} to {target}')
+        from cais_spade_llm.recovery_framework.kmr_recovery import route_between as calculate_route
+
+        return calculate_route(scene, part, source, target)
 
     def validate_transport(state, route=None):
         nonlocal planning_seconds
@@ -1482,35 +1548,14 @@ def run(request: dict, session: dict | None = None) -> dict:
                     carrying_arm_configuration=(request.get('custody') or {})['carrying_arm_configuration'])
 
     def transport_pose(orientation=None):
-        offset = config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m']
-        target = compose(entity('KMR'), [*offset, 0., 0., 0., 1.])
-        observed = tcp() if orientation is None else orientation
-        selected = observed[3:]
-        if rotate(selected, [0., 0., 1.])[2] > -math.cos(config['orientation_tolerance_rad']):
-            raise ValueError('KMR transport requires a downward observed gripper')
-        return [*target[:3], *selected]
+        from cais_spade_llm.recovery_framework.kmr_recovery import transport_pose as calculate_transport_pose
+
+        return calculate_transport_pose(scene, entity('KMR'), tcp() if orientation is None else orientation)
 
     def transfer_waypoints(start, target):
-        from cais_spade_llm.recovery_framework.kmr_motion import downward_transfer_waypoints
-        from cais_spade_llm.resources.robot.cartesian_waypoints import sample_segment
+        from cais_spade_llm.recovery_framework.kmr_recovery import transfer_waypoints as calculate_transfer_waypoints
 
-        base = entity('KMR')
-        mount = compose(base, [*kmr['arm_mount_xyz'], *quaternion(kmr['arm_mount_rpy'])])
-        settings = config['cartesian_waypoints']
-        waypoints = downward_transfer_waypoints(start, target, mount, settings)
-        middle = settings.get('transfer_orientation_waypoint_xyzw_in_base_frame')
-        if (middle and waypoints and abs(sum(a*b for a,b in zip(start[3:], target[3:])))
-                < math.sin(kmr['base_control']['yaw_tolerance_rad'] + config['orientation_tolerance_rad'])):
-            # The saved midpoint fixes the downward yaw direction of a half turn.
-            middle = compose(base, [0., 0., 0., *middle])[3:]
-            half = len(waypoints)//2
-            first = sample_segment(start, [*start[:3], *middle], linear_step=1e6,
-                                   angular_step=1e6, minimum_samples=half)
-            second = sample_segment([*target[:3], *middle], target, linear_step=1e6,
-                                    angular_step=1e6, minimum_samples=len(waypoints)-half-1)
-            for waypoint, orientation in zip(waypoints, [*first, *second[1:]], strict=True):
-                waypoint[3:] = orientation[3:]
-        return waypoints
+        return calculate_transfer_waypoints(scene, entity('KMR'), start, target)
 
     def compute_place_targets(transform):
         if not _at_dock(entity('KMR'), machine['KMR_docking_pose']):
@@ -1518,22 +1563,9 @@ def run(request: dict, session: dict | None = None) -> dict:
         for peg in component_parts:
             if peg != part and math.dist(entity(peg)[:3], fixture[:3]) < .08:
                 raise ValueError(f'{target_resource} workholding is occupied before placement')
-        destination = [*fixture[:3], *quaternion(fixture[3:])]
-        target = compose(destination, inverse(transform))
-        target[2] += .003
-        if rotate(target[3:], [0., 0., 1.])[2] > -.999:
-            raise ValueError('KMR placement requires a downward-facing grasp')
-        approach = target.copy()
-        approach[2] = max(target[2] + config['minimum_pick_lift_m'],
-                          config['cartesian_waypoints']['transport_tcp_position_in_base_frame_m'][2])
-        retreat = target.copy()
-        retreat[2] = max(target[2] + config['release_offsets_m'][0][2], approach[2])
-        # Return the empty arm to the observed pre-placement orientation, so
-        # successive transfers do not accumulate wrist turns at a joint limit.
-        transport = transport_pose()
-        return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
-                'transfer_waypoints': transfer_waypoints(tcp(), approach), 'transport': transport,
-                'withdraw_waypoints': transfer_waypoints(retreat, transport)}
+        from cais_spade_llm.recovery_framework.kmr_recovery import place_targets
+
+        return place_targets(scene, machine, transform, tcp(), entity('KMR'), fixture)
 
     def compute_pick_dock_pose():
         transport_target = transport_pose()
@@ -1619,25 +1651,9 @@ def run(request: dict, session: dict | None = None) -> dict:
         return dict(part_location=target_resource, attached=False, robot_clear=True)
 
     def compute_pick_targets(initial=None):
-        observed = entity(part)
-        if initial is not None and math.dist(observed[:3], initial[:3]) > .01:
-            raise ValueError('Storage part moved before target computation')
-        choices = scene['Storage']['KMR_pick_orientations_xyzw'][part]
-        orientation = _nearest_pick_orientation(tcp()[3:], choices, config['orientation_tolerance_rad'])
-        target = [*observed[:3], *orientation]
-        target[2] += config['grasp_height_m']
-        approach = target.copy()
-        approach[2] += scene['Storage']['KMR_pick_approach_clearance_m'][part]
-        clearance = target.copy()
-        clearance[2] += config['minimum_pick_lift_m']
-        lift = transport_pose(target)
-        if lift[2] < clearance[2]:
-            raise ValueError('Saved KMR carrying height does not clear the picked part')
-        retreat = lift.copy()
-        return {'target': target, 'approach': approach, 'lift': lift,
-                'lift_waypoints': [clearance], 'retreat': retreat,
-                'seed': list(scene['Storage']['KMR_pick_arm_configurations'][part]),
-                'carrying': list(config['carrying_arm_configuration'])}
+        from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets
+
+        return pick_targets(scene, part, entity(part), tcp(), entity('KMR'), initial)
 
     def check_startup_pose():
         """Require the measured parked arm and collision clearance before production."""
@@ -1767,6 +1783,33 @@ def run(request: dict, session: dict | None = None) -> dict:
                     '/KMR/move_base',
                 ],
             })
+            navigation = service(GetParameters, '/KMR_base_controller/get_parameters',
+                GetParameters.Request(names=['navigation_enabled']), 30., retry_read=True)
+            if len(navigation.values) != 1 or navigation.values[0].type != 1 or navigation.values[0].bool_value is not True:
+                raise ValueError('KMR navigation is not enabled for nominal base movement')
+            managed = service(GetParameters, '/KMR/lifecycle_manager_navigation/get_parameters',
+                GetParameters.Request(names=['node_names']), 30., retry_read=True)
+            names = list(managed.values[0].string_array_value) if len(managed.values) == 1 and managed.values[0].type == 9 else []
+            if not names or len(set(names)) != len(names) or any(not name or '/' in name for name in names):
+                raise ValueError('KMR managed navigation node identities are unavailable')
+            def navigation_spin():
+                executor.spin_once(timeout_sec=.1)
+                check_clock()
+            navigation_operations = []
+            operations.append({'operation': 'navigation_startup_observations', 'records': navigation_operations})
+            states, observed_map, manager_active = _wait_navigation_ready(names,
+                read_state=lambda name, timeout: service(GetState, '/KMR/' + name + '/get_state',
+                    GetState.Request(), timeout, retry_read=True).current_state.id,
+                read_active=lambda timeout: service(Trigger, '/KMR/lifecycle_manager_navigation/is_active',
+                    Trigger.Request(), timeout, retry_read=True).success,
+                read_map=lambda: navigation_map,
+                startup=lambda timeout: service(ManageLifecycleNodes,
+                    '/KMR/lifecycle_manager_navigation/manage_nodes',
+                    ManageLifecycleNodes.Request(command=ManageLifecycleNodes.Request.STARTUP), timeout).success,
+                spin=navigation_spin, operations=navigation_operations)
+            operations.append({'operation': 'verified_navigation_readiness', 'success': True,
+                               'states': deepcopy(states), 'map_fingerprint': fingerprint(observed_map),
+                               'map_frame': observed_map['frame_id'], 'lifecycle_manager_active': manager_active})
         install_scene()
         if mode == 'probe':
             operations.append(check_startup_pose())
