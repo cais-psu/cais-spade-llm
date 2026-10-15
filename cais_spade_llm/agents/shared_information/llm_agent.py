@@ -1,6 +1,6 @@
-"""Shared base class for all SPADE agents that communicate via an OpenAI-powered LLM."""
-
 from __future__ import annotations
+
+"""Shared base class for all SPADE agents that communicate via an OpenAI-powered LLM."""
 
 import asyncio
 import json
@@ -402,6 +402,7 @@ class LlmAgent(Agent):
         tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
         max_tool_rounds: int = 3,
         include_agent_instructions: bool = True,
+        max_attempts: int = 5,
     ) -> dict[str, Any]:
         """Call LLM with structured output + optional tool use (v3 bridge).
 
@@ -421,12 +422,17 @@ class LlmAgent(Agent):
             Maximum number of tool-call rounds before raising.
         include_agent_instructions:
             Whether to prepend this agent's configured system instructions.
+        max_attempts:
+            Application-level attempts per request; one also disables SDK retries.
 
         Returns
         -------
         dict:
             The parsed structured response from the LLM.
         """
+
+        if not 1 <= max_attempts <= 5:
+            raise ValueError("max_attempts must be between 1 and 5")
 
         initial_messages: list[dict[str, Any]] = []
         if include_agent_instructions and self.instructions:
@@ -466,10 +472,10 @@ class LlmAgent(Agent):
 
                 back = 1.0
                 last_err: Exception | None = None
-                for attempt in range(1, 6):
+                for attempt in range(1, max_attempts + 1):
                     try:
                         r = records.submit(
-                            _client.chat.completions.create, kwargs,
+                            (_client.with_options(max_retries=0) if max_attempts == 1 else _client).chat.completions.create, kwargs,
                             tool_round=tool_round, attempt=attempt,
                         )
                         break

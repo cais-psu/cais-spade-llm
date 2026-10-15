@@ -414,9 +414,9 @@ def test_three_selectable_safety_inputs_and_saved_defaults() -> None:
     from cais_spade_llm.ui.bridge import SystemBridge
 
     expected = {"safety_none.txt", *_STANDALONE_FILES.values(),
-        "safety_Conveyor_breakdown.txt", "safety_ur5e-1_breakdown.txt",
-        "safety_Machining_breakdown_during_part_processing.txt",
+        "safety_M1_mutex.txt",
         "safety_M2_mutex.txt",
+        "safety_assembly_board-v1_KET4_Square_4mm_before_gear_small.txt",
         "safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt"}
     assert {path.name for path in _SAFETY_DIR.glob("*.txt")} == expected
     bridge = SystemBridge.__new__(SystemBridge)

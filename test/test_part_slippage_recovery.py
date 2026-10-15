@@ -25,6 +25,17 @@ from cais_spade_llm.recovery_framework.part_slippage_recovery import (
 from cais_spade_llm.ui.recovery_evidence import list_examples, read_stage_record, stage_records
 
 
+def _accepted_composition_inputs():
+    event = {"outline_id": "step1", "resource_jid": "owner", "event_name": "move_home",
+             "part_name": None, "expected_start_state": {"mode": "failed"},
+             "expected_end_state": {"mode": "idle"}}
+    return {"recovery_resources": {"owner": {
+        "recovery_des_model": {"state_variables": {"mode": {"scope": "resource"}}},
+        "execution_primitive_catalog": [{"name": "move_to_named_pose", "params": {},
+                                           "effects": {"mode": {"set": "idle"}}}]}},
+        "multi_turn_session_state": {"current_phase": "primitive_generation", "accepted_outline_prefix": [event]}}
+
+
 @pytest.fixture
 def recovery(tmp_path, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
@@ -47,13 +58,14 @@ def recovery(tmp_path, monkeypatch):
         session._context_revision = runtime.context.revision
         session._proposal = {}
         session._outline_request = {}
-        session._prepared = {"recovery_debug": {"artifact_directory": str(directory)}, "recovery_feedback": feedback}
+        session._prepared = {**_accepted_composition_inputs(),
+                             "recovery_debug": {"artifact_directory": str(directory)}, "recovery_feedback": feedback}
 
     async def generate(planner, prepared, *, session_state):
         stage = prepared["_stop_after_multi_turn_phase"]
         session_state = deepcopy(session_state or {})
         if stage == "outline":
-            session_state.update(current_phase="primitive_generation", accepted_outline_prefix=[{"outline_id": "step1"}])
+            session_state.update(_accepted_composition_inputs()["multi_turn_session_state"])
         else:
             session_state.update(final_output={"primitive_program_complete": True}, accepted_primitive_program=[{"primitive_steps": [{"primitive": "move_to_named_pose"}]}])
         prepared["multi_turn_session_state"] = session_state
@@ -89,6 +101,12 @@ def test_stage_modes_stop_before_execution(recovery, monkeypatch, outline_mode, 
             await recovery._task
         assert recovery.snapshot()["status"] == "ready_to_execute"
         execute.assert_not_called()
+        assert recovery.snapshot()["execution_authorized"] is False
+        with pytest.raises(ValueError, match="does not authorize execution"):
+            recovery.action("execute")
+        # Retain coverage of the pre-composition execution and nominal-resume path.
+        recovery._state.pop("composition_validation_version")
+        recovery._proposal.pop("composition_validation_version", None)
         recovery.action("execute")
         with pytest.raises(ValueError, match="already running"):
             recovery.action("execute")
@@ -277,9 +295,10 @@ def test_primitive_regeneration_retains_verified_nominal_archive(recovery, tmp_p
 
     source = tmp_path / "original_generation"
     proof = {"complete": True, "status": "passed", "tasks": [], "execution_authorized": False}
-    state = {"validation_contract_version": 2, "current_phase": "primitive_generation", "turn_index": 2,
+    inputs = _accepted_composition_inputs()
+    state = {**inputs["multi_turn_session_state"], "validation_contract_version": 2, "turn_index": 2,
              "nominal_continuation_evidence": deepcopy(proof)}
-    prepared = {"nominal_continuation_artifact_version": 1, "validation_contract_version": 2,
+    prepared = {**inputs, "nominal_continuation_artifact_version": 1, "validation_contract_version": 2,
         "source_observation_fingerprint": "a" * 64, "recovery_session": {},
         "recovery_debug": {"per_turn_debug_dir": str(source)}, "multi_turn_session_state": state}
     turn = {"turn_index": 2, "nominal_continuation_evidence": deepcopy(proof)}
@@ -881,21 +900,22 @@ def test_regeneration_invalidates_downstream_and_keeps_previous_records(recovery
         original = recovery.snapshot()["artifact_directory"]
         recovery._state["outline_mode"] = "manual"
         recovery.action("regenerate_outline", feedback="Keep the observed custody")
-        with pytest.raises(ValueError, match="already running"):
+        with pytest.raises(ValueError, match="does not authorize execution"):
             recovery.action("execute")
         await recovery._task
         state = recovery.snapshot()
         assert state["status"] == "outline_review" and state["primitives"] == []
         assert recovery._proposal == {}
         assert state["artifact_directory"] != original
-        assert (recovery.path / "generation_0001/proposal.json").is_file()
+        assert (Path(original) / "proposal.json").is_file()
         assert recovery._prepared["recovery_feedback"] == "Keep the observed custody"
         recovery.action("continue_outline")
         await recovery._task
         recovery.action("regenerate_primitives", feedback="Review the destination")
         await recovery._task
         assert recovery.snapshot()["status"] == "ready_to_execute"
-        assert recovery._prepared["multi_turn_session_state"]["primitive_rejection_feedback"][-1]["reason"] == "Review the destination"
+        assert recovery._prepared["recovery_feedback"] == "Review the destination"
+        assert recovery.snapshot()["execution_authorized"] is False
     asyncio.run(run())
 
 
@@ -919,6 +939,69 @@ def test_stop_cancels_generation_and_rejects_stale_actions(recovery, monkeypatch
     asyncio.run(run())
 
 
+def test_composition_keeps_outline_evidence_out_of_active_checkpoint(recovery):
+    from cais_spade_llm.recovery_framework.primitive_composition import start_composition_attempt
+
+    async def prepare():
+        await recovery._prepare()
+        recovery.offline = True
+        recovery._prepared["physical_evidence"] = {"recorded": [1, 2, 3]}
+        state = recovery._prepared["multi_turn_session_state"]
+        state.update(projected_physical_evidence={"outline_end": [4, 5, 6]},
+                     outline_monitor_context={"accepted": [7, 8, 9]},
+                     base_symbolic_resources={"owner": {"mode": "failed"}})
+        recovery._outline_request = deepcopy(recovery._prepared)
+        original = deepcopy(recovery._outline_request)
+        await start_composition_attempt(recovery)
+        active = recovery._prepared["multi_turn_session_state"]
+        assert "projected_physical_evidence" not in active
+        assert "outline_monitor_context" not in active
+        assert active["base_symbolic_resources"] == state["base_symbolic_resources"]
+        assert recovery._prepared["physical_evidence"] == original["physical_evidence"]
+        assert recovery._outline_request == original
+        saved = Path(recovery.snapshot()["artifact_directory"]) / "outline_request.json"
+        assert json.loads(saved.read_text()) == original
+
+    asyncio.run(prepare())
+
+
+def test_stop_during_composition_preparation_does_not_publish_worker_state(recovery, monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
+
+    started, release = threading.Event(), threading.Event()
+
+    def preview(prepared, state):
+        assert state["turns"] == []
+        started.set()
+        assert release.wait(5)
+        return {}, "Not sent"
+
+    monkeypatch.setattr(multi_turn, "_build_phase_prompt", preview)
+
+    async def run():
+        await recovery._prepare()
+        recovery.offline = True
+        recovery._prepared["multi_turn_session_state"]["turns"] = [{"phase": "outline", "validation": "preserved"}]
+        recovery._outline_request = deepcopy(recovery._prepared)
+        original = deepcopy(recovery._outline_request)
+        prepared = recovery._prepared
+        recovery._state.update(status="outline_review", primitive_mode="manual")
+        recovery.action("continue_outline")
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            assert recovery.snapshot()["primitive_status"] == "preparing"
+            recovery.stop()
+        finally:
+            release.set()
+        await asyncio.gather(recovery._task, return_exceptions=True)
+        assert recovery.snapshot()["status"] == "stopped"
+        assert recovery._prepared is prepared
+        assert recovery._outline_request == original
+        assert recovery.snapshot()["execution_authorized"] is False
+
+    asyncio.run(run())
+
+
 def test_context_change_blocks_execution_and_generation_errors_are_retained(recovery, monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr("cais_spade_llm.recovery_framework.slippage_execution.execute_generated_recovery", execute)
@@ -926,6 +1009,8 @@ def test_context_change_blocks_execution_and_generation_errors_are_retained(reco
     async def run():
         recovery.begin({"injection_status": "completed"})
         await recovery._task
+        recovery._state.pop("composition_validation_version")
+        recovery._proposal.pop("composition_validation_version", None)
         recovery.runtime.context.revision += 1
         recovery.action("execute")
         await recovery._task
@@ -1036,7 +1121,7 @@ def test_machine_safety_defaults_reach_ui_state_without_overwriting_saved_select
     selected = example.set_options(source="offline", scenario=scenario, safety_files=expected)
     assert selected["selected_safety_files"] == expected
     assert selected["outline_mode"] == selected["primitive_mode"] == "manual"
-    old = ["cais_spade_llm/specification/safety/safety_Machining_breakdown_during_part_processing.txt"]
+    old = ["cais_spade_llm/specification/safety/safety_none.txt"]
     selected = example.set_options(source="offline", scenario=scenario, safety_files=old)
     assert selected["selected_safety_files"] == old
     assert example.snapshot()["selected_safety_files"] == old
@@ -1210,9 +1295,9 @@ def test_preparation_passes_observed_failure_and_declared_contracts_without_guid
 
 @pytest.mark.parametrize("scenario", ["Conveyor breakdown", "ur5e-1 breakdown", "Machining breakdown during part processing"])
 @pytest.mark.parametrize("mode", ["auto", "manual"])
-def test_other_failures_capture_and_finish_at_outline_review(recovery, scenario, mode):
-    recovery.runtime.setup = example_setup(scenario=scenario, outline_mode=mode, primitive_mode="auto")
-    recovery._state.update(scenario=scenario, outline_only=True, outline_mode=mode)
+def test_other_failures_compose_from_ready_contracts(recovery, scenario, mode):
+    recovery.runtime.setup = example_setup(scenario=scenario, outline_mode=mode, primitive_mode="manual")
+    recovery._state.update(scenario=scenario, outline_only=False, outline_mode=mode, primitive_mode="manual")
 
     async def run():
         recovery.begin({"injection_status": "completed", "part_name": "recorded-part"})
@@ -1221,16 +1306,21 @@ def test_other_failures_capture_and_finish_at_outline_review(recovery, scenario,
             assert recovery.snapshot()["status"] == "outline_ready"
             recovery.action("generate_outline")
             await recovery._task
-        assert recovery.snapshot()["status"] == "outline_review"
-        assert recovery.snapshot()["outline"] == [{"outline_id": "step1"}]
+            assert recovery.snapshot()["status"] == "outline_review"
+            recovery.action("continue_outline")
+            await recovery._task
+        assert recovery.snapshot()["status"] == "primitive_ready"
+        assert recovery.snapshot()["outline"] == _accepted_composition_inputs()["multi_turn_session_state"]["accepted_outline_prefix"]
         assert recovery._observations["scenario"] == scenario
-        for action in ("continue_outline", "generate_primitives", "regenerate_primitives", "execute"):
-            with pytest.raises(ValueError, match="stops at Recovery outline review"):
-                recovery.action(action)
-        for operation in (recovery._generate_primitives, recovery._execute):
-            with pytest.raises(ValueError, match="stops at Recovery outline review"):
-                await operation()
-        assert not recovery.snapshot()["primitives"]
+        recovery.action("generate_primitives")
+        await recovery._task
+        assert recovery.snapshot()["status"] == "ready_to_execute"
+        assert recovery.snapshot()["primitives"]
+        assert recovery.snapshot()["execution_authorized"] is False
+        with pytest.raises(ValueError, match="does not authorize execution"):
+            recovery.action("execute")
+        with pytest.raises(ValueError, match="does not authorize execution"):
+            await recovery._execute()
     asyncio.run(run())
 
 
@@ -1837,8 +1927,8 @@ def test_saved_result_load_preserves_attempt_marker_and_validation_records(recov
 
 @pytest.mark.parametrize("marked", [False, True])
 def test_primitive_regeneration_preserves_the_outline_attempt_marker(recovery, marked):
-    prepared = {"validation_contract_version": 2, "recovery_session": {}, "recovery_debug": {},
-                "multi_turn_session_state": {"current_phase": "primitive_generation"}}
+    prepared = {**_accepted_composition_inputs(), "validation_contract_version": 2,
+                "recovery_session": {}, "recovery_debug": {}}
     if marked:
         prepared["primitive_support_semantics"] = "successor_primitive_union"
         prepared["multi_turn_session_state"]["primitive_support_semantics"] = "successor_primitive_union"
@@ -2497,7 +2587,8 @@ def test_new_attempt_restores_declared_owner_fields_without_rewriting_capture_or
     recovery.agent.resources = {jid: owner}
     recovery.runtime.setup['selected_safety_files'] = []
     recovery._observations = {'run_id': 'capture', 'resource_evidence': {jid: {
-        'environment_models': {'M2': {'state_variables': declared}}, 'snapshot': deepcopy(recorded)}}}
+        'resource_id': 'M2', 'environment_models': {'M2': {'state_variables': declared}}, 'snapshot': deepcopy(recorded)}}}
+    owner.get_recovery_resource_evidence = Mock(return_value=deepcopy(recovery._observations['resource_evidence'][jid]))
     original = deepcopy(recovery._observations)
     prepared = {'recovery_session': {}, 'recovery_debug': {}, 'validation_contract_version': 2,
         'ra_jid': jid, 'recovery_resources': {jid: {'resource_type': 'resource',
@@ -2518,6 +2609,8 @@ def test_new_attempt_restores_declared_owner_fields_without_rewriting_capture_or
         assert entry['execution_primitive_catalog'][0]['name'] == 'dwell'
         assert entry['recovery_adapter']['supports_executable_recovery'] is True
         assert recovery.snapshot()['execution_authorized'] is False
+        assert recovery._prepared['recovery_session']['outline_mode'] == 'incremental_candidates_validated'
+        assert recovery._prepared['multi_turn_session_seed']['outline_mode'] == 'incremental_candidates_validated'
         current = recovery._prepared['llm_input']['observed_runtime_state']['resources'][0]
         assert current['resource_state'] == 'idle' and current['part_name'] is None
         assert 'staging_part' not in current
@@ -2525,3 +2618,72 @@ def test_new_attempt_restores_declared_owner_fields_without_rewriting_capture_or
         assert recovery._prepared == before
         owner.get_recovery_snapshot.assert_not_called()
         owner.recovery_des_model.assert_not_called()
+
+
+def test_full_validation_choices_stay_locked_when_generation_pauses_without_an_event(recovery, monkeypatch):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
+
+    choices = dict.fromkeys(CHECK_FIELDS, True)
+    recovery._publish(status="outline_ready", outline=[], primitives=[], validation_checks=choices)
+    example = PartSlippageExample(SimpleNamespace(system_running=False))
+    example.source, example.safety_files = "offline", []
+    example.validation_checks, example._offline = choices, recovery
+
+    async def paused():
+        recovery._publish(status="blocked", outline_status="NEEDS_CONTEXT", outline=[])
+
+    monkeypatch.setattr(recovery, "_generate_outline", paused)
+
+    async def run():
+        await example.action("generate_outline")
+        assert example.snapshot()["validation_checks_locked"] is True
+        await recovery._task
+        assert example.snapshot()["outline"] == []
+        assert example.snapshot()["validation_checks_locked"] is True
+        with pytest.raises(ValueError, match="Start fresh"):
+            example.set_options(source="offline", scenario="Part slippage", safety_files=[],
+                check_ra_feasibility=False, check_physical_evidence=False, check_cca_safety=False)
+
+    asyncio.run(run())
+
+
+def test_offline_primitive_generate_includes_review_preparation(recovery, monkeypatch):
+    order = []
+    recovery.offline = True
+    recovery._state["status"] = "outline_review"
+
+    async def prepare():
+        order.append("prepare")
+        recovery._publish(status="primitive_ready")
+
+    async def generate():
+        order.append("generate")
+
+    monkeypatch.setattr(recovery, "_continue_outline", prepare)
+    monkeypatch.setattr(recovery, "_generate_primitives", generate)
+
+    async def run():
+        recovery.action("generate_primitives")
+        await recovery._task
+
+    asyncio.run(run())
+    assert order == ["prepare", "generate"]
+
+
+def test_offline_primitive_generate_keeps_partial_outline_gate(recovery, monkeypatch):
+    recovery.offline = True
+    recovery._state["status"] = "outline_review"
+    recovery._outline_request = {"multi_turn_session_state": {
+        "outline_diagnostic_bypass": True, "current_phase": "primitive_generation", "accepted_outline_prefix": []}}
+    generate = AsyncMock()
+    monkeypatch.setattr(recovery, "_generate_primitives", generate)
+
+    async def run():
+        recovery.action("generate_primitives")
+        await recovery._task
+
+    asyncio.run(run())
+    assert recovery.snapshot()["status"] == "blocked"
+    assert "full validation is required" in recovery.snapshot()["message"]
+    generate.assert_not_called()

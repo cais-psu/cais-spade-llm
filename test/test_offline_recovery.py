@@ -67,6 +67,95 @@ def test_readiness_reports_conflicting_saved_fields_before_generation(captured):
     assert captured == before
 
 
+def test_saved_m1_without_descriptor_does_not_block_unrelated_preparation(captured):
+    from cais_spade_llm.recovery_framework.outline_validation import validate_resource_outline_payload
+
+    jid = "recovery-resource-5@localhost"
+    entry = {"resource_jid": jid, "resource_type": "resource", "recovery_des_model": {},
+        "static_capabilities": {}, "recovery_snapshot": {"resource_type": "resource", "current_state": "unknown",
+            "current_location": "M1", "availability": "unknown", "occupancy": {}}}
+    captured["jids"]["M1"] = jid
+    captured["prepared_recovery_request"]["recovery_resources"][jid] = entry
+    captured["resource_evidence"] = {jid: {"snapshot": {"resource_state": "idle", "part_name": None}}}
+    before = deepcopy(captured)
+    session = offline_recovery.create_offline_recovery(captured, outline_mode="manual", primitive_mode="manual")
+
+    async def prepare():
+        session.begin(captured["failure"], generate_outline=False, defer_observation_save=True)
+        await session._task
+
+    asyncio.run(prepare())
+    assert session.snapshot()["status"] == "outline_ready", session.snapshot()["message"]
+    assert session._prepared["recovery_resources"][jid]["recovery_des_model"] == {}
+    assert "recovery_des_model_fingerprint" not in session._prepared["recovery_resources"][jid]
+    assert captured == before
+    owner = session.agent.resources[jid]
+    with pytest.raises(ValueError, match="descriptor_fingerprint"):
+        owner.recovery_des_model(snapshot=owner.get_recovery_snapshot())
+    task = {"outline_id": "M1_event", "resource_jid": jid, "expected_end_state": {"resource_state": "completed"}}
+    result = validate_resource_outline_payload(owner, {"primitive_support_semantics": "successor_primitive_union",
+        "candidates": [{"task": task}]}, offline=True)["results"][0]
+    assert result["allowed"] is False and result["feasibility_status"] == "NEEDS_CONTEXT"
+    assert result["candidate_fingerprint"] == recovery_validation_fingerprint(task)
+    assert result["geometry_evidence"]["status"] == "needs_context"
+    assert result["execution_authorized"] is False
+    assert captured == before
+
+
+def test_fresh_generate_with_all_checks_uses_manual_session(captured, tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import part_slippage_example, part_slippage_recovery
+
+    path = tmp_path / "observations.json"
+    write_record(path, captured)
+    monkeypatch.setattr(part_slippage_example, "read_observations", lambda source: read_observations(source, root=tmp_path))
+    generated = AsyncMock()
+    monkeypatch.setattr(part_slippage_recovery.PartSlippageRecovery, "_generate_outline", generated)
+    example = part_slippage_example.PartSlippageExample(SimpleNamespace(system_running=False))
+    example.set_options(source="offline", scenario="Part slippage", safety_files=[], observation_path=str(path),
+        check_ra_feasibility=True, check_physical_evidence=True, check_cca_safety=True, defer_preparation=True)
+
+    async def run():
+        state = await example.action("generate_outline_fresh")
+        assert state["busy"] and state["validation_checks_locked"]
+        await example._task
+        assert example._draft is None and example._offline is not None
+        assert example._offline.snapshot()["outline_mode"] == "manual"
+        assert example._offline.snapshot()["primitive_mode"] == "manual"
+        generated.assert_awaited_once()
+        assert not example.snapshot()["validation_checks_locked"]
+
+    asyncio.run(run())
+
+
+def test_fresh_full_preparation_reports_needed_context_without_error_trace(captured, tmp_path, monkeypatch, caplog):
+    from cais_spade_llm.recovery_framework import part_slippage_example, part_slippage_recovery
+
+    path = tmp_path / "observations.json"
+    write_record(path, captured)
+    monkeypatch.setattr(part_slippage_example, "read_observations", lambda source: read_observations(source, root=tmp_path))
+    generated = AsyncMock()
+    monkeypatch.setattr(part_slippage_recovery.PartSlippageRecovery, "_generate_outline", generated)
+
+    def needs_context(self, *args, **kwargs):
+        raise ValueError("NEEDS_CONTEXT: conflicting recorded observed_pose for gear_small")
+
+    monkeypatch.setattr(part_slippage_recovery.PartSlippageRecovery, "_install_prepared", needs_context)
+    example = part_slippage_example.PartSlippageExample(SimpleNamespace(system_running=False))
+    example.set_options(source="offline", scenario="Part slippage", safety_files=[], observation_path=str(path),
+        check_ra_feasibility=True, check_physical_evidence=True, check_cca_safety=True, defer_preparation=True)
+
+    async def run():
+        await example.action("generate_outline_fresh")
+        await example._task
+
+    asyncio.run(run())
+    assert example.snapshot()["status"] == "NEEDS_CONTEXT"
+    assert example.snapshot()["outline"] == []
+    assert not example.snapshot()["validation_checks_locked"]
+    generated.assert_not_called()
+    assert not any(record.exc_info for record in caplog.records)
+
+
 def test_saved_generation_retains_missing_physical_compatibility(captured, monkeypatch):
     from cais_spade_llm.recovery_framework.recovery_observations import (
         offline_preparation_missing, processing_capture_compatibility,
@@ -311,6 +400,25 @@ def test_public_preparation_uses_recorded_physical_part_pose(captured):
     prepared['part_tracker'][part]['observed_pose']['x'] = 100.
     with pytest.raises(ValueError, match='conflicting recorded observed_pose'):
         restore_recorded_public_facts(prepared, captured)
+
+
+@pytest.mark.parametrize('offset_m,conflict', [(1.9e-08, False), (0.002, True)])
+def test_recorded_part_poses_agree_within_configured_bounds(offset_m, conflict):
+    from cais_spade_llm.recovery_framework.recovery_observations import restore_recorded_public_facts
+
+    part = 'gear_small'
+    pose = [0., 0.3, 1.025, 0., 0., 0.00065, 0.9999997887]
+    tracked = dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), pose))
+    tracked.update(y=0.3 + offset_m, qx=-2.8e-05)
+    observations = {'run_id': 'capture', 'physical_evidence': {'snapshot': {'frame': 'world'}, 'parts': {
+        part: {'name': part, 'frame': 'world', 'pose': pose, 'source': 'GETRECOVERYSTATE'}}}}
+    prepared = {'part_tracker': {part: {'observed_pose': tracked}}}
+    if conflict:
+        with pytest.raises(ValueError, match='conflicting recorded observed_pose'):
+            restore_recorded_public_facts(prepared, observations)
+        return
+    restore_recorded_public_facts(prepared, observations)
+    assert prepared['part_tracker'][part]['observed_pose']['y'] == 0.3
 
 
 @pytest.mark.parametrize('field,value', [('frame', 'other'), ('name', 'other'), ('pose', [0., 0., 1.])])
@@ -1554,7 +1662,9 @@ def test_offline_stages_never_access_live_observations(captured, monkeypatch, ou
         assert prepared["recovery_resources"] == original["prepared_recovery_request"]["recovery_resources"]
         state = deepcopy(session_state or {})
         if prepared["_stop_after_multi_turn_phase"] == "outline":
-            state.update(current_phase="primitive_generation", accepted_outline_prefix=[{"outline_id": "RECOVERY_SEQ1"}])
+            state.update(current_phase="primitive_generation", accepted_outline_prefix=[{"outline_id": "RECOVERY_SEQ1",
+                "resource_jid": prepared["ra_jid"], "event_name": "move_home", "part_name": None,
+                "expected_start_state": {"resource_state": "failed"}, "expected_end_state": {"resource_state": "idle"}}])
         else:
             state.update(final_output={"primitive_program_complete": True}, accepted_primitive_program=[{"outline_id": "RECOVERY_SEQ1"}])
         prepared["multi_turn_session_state"] = state
@@ -1942,7 +2052,9 @@ def scripted_generation(monkeypatch):
         calls.append(stage)
         state = deepcopy(session_state or {})
         if stage == "outline":
-            state.update(current_phase="primitive_generation", accepted_outline_prefix=[{"outline_id": "RECOVERY_SEQ1"}])
+            state.update(current_phase="primitive_generation", accepted_outline_prefix=[{"outline_id": "RECOVERY_SEQ1",
+                "resource_jid": prepared["ra_jid"], "event_name": "move_home", "part_name": None,
+                "expected_start_state": {"resource_state": "failed"}, "expected_end_state": {"resource_state": "idle"}}])
         else:
             state.update(final_output={"primitive_program_complete": True}, accepted_primitive_program=[{"outline_id": "RECOVERY_SEQ1"}])
         prepared["multi_turn_session_state"] = state
@@ -2480,7 +2592,9 @@ def _saved_outline_review(captured, tmp_path, monkeypatch, *, proof_changes=None
         nominal_continuation_artifact_version=1,
         source_observation_fingerprint=observation_fingerprint(observations), saved_pending_nodes=[],
         recovery_debug={"artifact_directory": str(directory), "per_turn_debug_dir": str(directory)})
-    accepted = [{"outline_id": "proposed_event", "candidate_source": "llm", "part_name": None}]
+    accepted = [{"outline_id": "proposed_event", "candidate_source": "llm", "part_name": None,
+        "resource_jid": prepared["ra_jid"], "event_name": "move_home",
+        "expected_start_state": {"resource_state": "failed"}, "expected_end_state": {"resource_state": "idle"}}]
     proof = {"complete": True, "status": "passed", "execution_authorized": False,
         "tasks": [], "replaced_task_ids": [], "replacement_evidence": {}}
     proof.update(proof_changes or {})
@@ -2514,11 +2628,13 @@ def _saved_outline_review(captured, tmp_path, monkeypatch, *, proof_changes=None
 
 
 @pytest.mark.parametrize("select_original", [False, True])
-def test_saved_outline_review_loads_bound_proof_without_composition(captured, tmp_path, monkeypatch, select_original):
+@pytest.mark.parametrize("preparation_status", ["idle", "blocked"])
+def test_saved_outline_review_loads_bound_proof_without_composition(captured, tmp_path, monkeypatch, select_original, preparation_status):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_artifacts
     from cais_spade_llm.agents.shared_information.llm_request_records import recovery_request_directory
 
     example, source, directory, prepared, archive, llm = _saved_outline_review(captured, tmp_path, monkeypatch)
+    example._status.update(status=preparation_status)
     originals = {path: path.read_bytes() for path in source.rglob("*.json")}
     if select_original:
         original = source.parent / captured["run_id"] / "observations.json"
@@ -2529,7 +2645,8 @@ def test_saved_outline_review_loads_bound_proof_without_composition(captured, tm
         assert len(index) == 1 and index[0]["result_available"] is True
         assert index[0]["source_path"] == str(original)
         assert index[0]["result_observation_path"] == str(source / "observations.json")
-    result = example.load_offline_result()
+    result = (asyncio.run(asyncio.to_thread(example.load_offline_result))
+              if preparation_status == "blocked" else example.load_offline_result())
     restored = example._offline
     copied = Path(result["artifact_directory"])
     assert restored.runtime.source_observation_path == example.observation_path
@@ -2645,7 +2762,9 @@ def test_saved_outline_review_continue_keeps_original_request_and_requires_gener
     assert state["status"] == "primitive_ready" and state["primitive_status"] == "ready"
     assert state["execution_authorized"] is False
     assert state["outline"] == accepted
-    preview = json.loads((Path(result["artifact_directory"]) / "primitive_input_preview.json").read_text())
+    assert state["artifact_directory"] != result["artifact_directory"]
+    assert state["composition_validation_version"] == 1
+    preview = json.loads((Path(state["artifact_directory"]) / "primitive_input_preview.json").read_text())
     assert preview["request_sent"] is False
     assert preview["prompt_input"]["accepted_outline_prefix"] == accepted
     assert {path: path.read_bytes() for path in originals} == originals
@@ -2670,6 +2789,93 @@ def test_saved_outline_review_rejects_a_changed_copy(captured, tmp_path, monkeyp
         example.load_offline_result()
     assert example._offline is None and archive.read_bytes() == original
     llm.assert_not_called()
+
+
+@pytest.mark.parametrize("tamper", [None, "program", "proposal", "source", "authorization"])
+def test_versioned_composition_regeneration_reload_and_source_preservation(captured, tmp_path, monkeypatch, tamper):
+    from cais_spade_llm.resources.recovery_composition import composition_start_views, validate_recovery_primitive_composition
+
+    example, source, _, _, _, llm = _saved_outline_review(captured, tmp_path, monkeypatch)
+    originals = {path: path.read_bytes() for path in source.rglob("*.json")}
+    example.load_offline_result()
+    restored = example._offline
+    async def composed(stage):
+        assert stage == "primitive"
+        prepared = restored._prepared
+        state = prepared["multi_turn_session_state"]
+        task = state["accepted_outline_prefix"][0]
+        entry = prepared["recovery_resources"][task["resource_jid"]]
+        resource, part = composition_start_views(session=state, prepared=prepared, task=task)
+        steps = [{"primitive": "move_to_named_pose", "params": {"pose_name": "home"}}]
+        evidence = validate_recovery_primitive_composition(task=task, primitive_steps=steps,
+            recovery_des_model=entry["recovery_des_model"], recovery_snapshot=resource,
+            part_context=part, grounding_context={}, primitive_catalog=entry["execution_primitive_catalog"],
+            validate_primitive=lambda **_: {"allowed": True, "feasibility_status": "FEASIBLE"})
+        assert evidence["allowed"], evidence
+        state["accepted_primitive_program"] = [{**deepcopy(task), "primitive_steps": steps, "composition_validation": evidence}]
+        state["final_output"] = {"transition_trace": state["accepted_outline_prefix"],
+            "accepted_primitive_program": state["accepted_primitive_program"], "primitive_program_complete": True}
+        return state
+    monkeypatch.setattr(restored, "_run_stage", composed)
+    async def run():
+        restored.action("continue_outline")
+        await restored._task
+        restored.action("generate_primitives")
+        await restored._task
+        first = Path(restored._state["artifact_directory"])
+        records = {path: path.read_bytes() for path in first.rglob("*.json")}
+        restored.action("regenerate_primitives", feedback="Review the exact bindings")
+        await restored._task
+        assert restored._state["status"] == "offline_completed", restored._state.get("message")
+        assert Path(restored._state["artifact_directory"]) != first
+        assert restored._prepared["recovery_feedback"] == "Review the exact bindings"
+        assert {path: path.read_bytes() for path in records} == records
+    asyncio.run(run())
+    assert {path: path.read_bytes() for path in originals} == originals
+    directory = Path(restored._state["artifact_directory"])
+    composition = json.loads((directory / "composition.json").read_text())
+    if tamper == "program":
+        composition["accepted_primitive_program"][0]["composition_validation"]["projected_snapshot"]["current_state"] = "failed"
+    elif tamper == "source":
+        composition["source_outline_fingerprint"] = "changed"
+    elif tamper == "authorization":
+        composition["execution_authorized"] = True
+    elif tamper == "proposal":
+        proposal = json.loads((directory / "proposal.json").read_text())
+        proposal["macro_tasks"][0]["primitive_steps"] = []
+        write_record(directory / "proposal.json", proposal)
+    write_record(directory / "composition.json", composition)
+    example.set_options(source="offline", scenario="Part slippage", safety_files=[],
+                        observation_path=str(restored.path / "observations.json"))
+    if tamper:
+        with pytest.raises(ValueError):
+            example.load_offline_result()
+    else:
+        state = example.load_offline_result()
+        assert state["status"] == "offline_completed" and state["composition_feasibility"] == "FEASIBLE"
+        assert state["execution_authorized"] is False
+        assert state["primitives"] == composition["accepted_primitive_program"]
+        with pytest.raises(ValueError, match="does not authorize execution"):
+            example._offline.action("execute")
+    llm.assert_not_called()
+    example.bridge.ros2_start.assert_not_called()
+    example.bridge.start_system.assert_not_called()
+
+
+def test_observation_display_cache_invalidates_changed_capture(captured, tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import recovery_observations
+
+    path = tmp_path / "captures" / "source" / "observations.json"
+    path.parent.mkdir(parents=True)
+    write_record(path, captured)
+    reader = Mock(wraps=recovery_observations.read_observations)
+    monkeypatch.setattr(recovery_observations, "read_observations", reader)
+    assert list_observations(root=path.parent.parent)[0]["offline_ready"]
+    assert list_observations(root=path.parent.parent)[0]["offline_ready"]
+    assert reader.call_count == 1
+    write_record(path, {**captured, "prepared_recovery_request": {}})
+    assert not list_observations(root=path.parent.parent)[0]["offline_ready"]
+    assert reader.call_count == 2
 
 
 def _native_archive_fixture(tmp_path):
@@ -2994,6 +3200,42 @@ def test_all_failure_scenarios_prepare_manual_offline_without_live_calls(capture
     original = deepcopy(captured)
     session = offline_recovery.create_offline_recovery(captured, outline_mode='auto', primitive_mode='auto')
     assert session.runtime.setup['failure_scenario']['scenario'] == scenario
-    assert session.runtime.setup['outline_only'] is (scenario != 'Part slippage')
+    assert session.runtime.setup['outline_only'] is False
     assert session.snapshot()['outline_mode'] == session.snapshot()['primitive_mode'] == 'manual'
     assert captured == original
+
+
+@pytest.mark.parametrize('resource_id', ['ur5e-1', 'ur5e-2', 'ur5e-3', 'ur5e-4'])
+@pytest.mark.parametrize('explicit', [False, True])
+def test_cell_capability_calculation_preserves_explicit_limits_and_source(resource_id, explicit):
+    from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_resource_adapter import (
+        adapt_recovery_resource_snapshot,
+    )
+
+    scene = json.loads(SCENE_PATH.read_text())
+    robot = next(row for row in scene['robots'] if row['resource_id'] == resource_id)
+    template = json.loads((ROOT / 'cais_spade_llm/initialization/resources/robot_ur5e.json').read_text())
+    capabilities = deepcopy(template['ur5e']['gazebo']['static_capabilities'])
+    capabilities['gripper_reach']['origin_pose'] = dict(zip(('x', 'y', 'z'), robot['base_xyz'], strict=True))
+    if explicit:
+        capabilities['gripper_reach']['max_xy_radius_m'] = .3
+    jid = resource_id + '@localhost'
+    entry = {'resource_type': 'robot', 'static_capabilities': capabilities,
+             'recovery_snapshot': deepcopy(capabilities)}
+    observations = {'jids': {resource_id: jid}, 'inputs': {'scene': scene}}
+    original = deepcopy((entry, observations))
+    owner = offline_recovery.SavedRecoveryResource(jid, entry, observations)
+    assert owner.static_capabilities == capabilities
+    calculation = owner.prepare_current_scene_capabilities()
+    if explicit:
+        assert owner.static_capabilities['gripper_reach'] == capabilities['gripper_reach']
+    else:
+        assert 'gripper_reach' not in owner.static_capabilities
+        assert 'gripper_reach' not in owner.get_recovery_snapshot()
+    assert calculation['recorded_static_capabilities'] == capabilities
+    assert calculation['execution_authorized'] is False
+    snapshot = owner.get_recovery_snapshot()
+    assert snapshot == adapt_recovery_resource_snapshot(resource_jid=jid, resource_type='robot',
+        snapshot=snapshot, state_variables={})
+    assert (entry, observations) == original

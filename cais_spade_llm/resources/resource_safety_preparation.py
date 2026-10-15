@@ -676,7 +676,8 @@ def _outline_nominal_task_effects(*, task: dict, recovery_des_model: dict,
 
 def prepare_outline_event_preview_request(*, task: dict, recovery_snapshot: dict,
                                          recovery_des_model: dict, physical_evidence: dict,
-                                         resource_evidence: dict, static_capabilities: dict | None = None) -> dict:
+                                         resource_evidence: dict, static_capabilities: dict | None = None,
+                                         endpoint_only: bool = False) -> dict:
     """Calculate an owner motion target without producing a primitive program.
 
     The target follows recorded destination geometry or a declared named joint
@@ -694,6 +695,8 @@ def prepare_outline_event_preview_request(*, task: dict, recovery_snapshot: dict
               "missing_facts": [], "motion_requests": []}
     resource_evidence_fingerprint = recovery_validation_fingerprint(resource_evidence)
     try:
+        if endpoint_only and physical_evidence.get("endpoint_evidence_policy_version") != 2:
+            raise ValueError("Endpoint calculation requires its recorded outline evidence policy")
         rejected = rejected_owner_event_effects(task=task, recovery_snapshot=recovery_snapshot,
             recovery_des_model=recovery_des_model, physical_evidence=physical_evidence)
         if rejected is not None:
@@ -932,7 +935,8 @@ def prepare_outline_event_preview_request(*, task: dict, recovery_snapshot: dict
                     raise ValueError(f"Owner private condition {field} has conflicting effects")
                 private_updates[field] = deepcopy(value)
         nominal = None
-        if scene.get("physical_preview_contract_version") == 7 and task.get("required_task_contract"):
+        if (not endpoint_only and scene.get("physical_preview_contract_version") == 7
+                and task.get("required_task_contract")):
             nominal = _outline_nominal_program(task=task, recovery_snapshot=recovery_snapshot,
                 recovery_des_model=recovery_des_model, physical_evidence=scene, resource_evidence=resource_evidence)
             motions = nominal["motion_requests"]
@@ -973,7 +977,7 @@ def prepare_outline_event_preview_request(*, task: dict, recovery_snapshot: dict
             contract["carried_part_transition"] = True
         if custody is not None and custody["kind"] == "release":
             contract["placement_target"] = deepcopy(custody["target_calculation"])
-        if contract["version"] in {4, 5, 6, 7}:
+        if contract["version"] in {4, 5, 6, 7} and not endpoint_only:
             from cais_spade_llm.resources.robot.recovery_capability import check_outline_motion_capabilities
 
             if not isinstance(resource_evidence.get("source"), dict):

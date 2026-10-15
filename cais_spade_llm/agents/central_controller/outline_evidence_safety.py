@@ -172,6 +172,22 @@ def _owner_ledgers(observation: dict, models: dict, parts: dict) -> tuple:
     return tasks, initial, updates, task_ledger, state_ledger
 
 
+def _owner_state_declarations(models: dict, parts: dict) -> dict:
+    """Expand owner declarations against the recorded part population."""
+    declared = {}
+    for rid, model in models.items():
+        fields = {}
+        for field, declaration in model.get("state_variables", {}).items():
+            names = ([field.replace("{part_name}", part) for part in parts]
+                     if "{part_name}" in field else [field])
+            for name in names:
+                if name in fields and _digest(fields[name]) != _digest(declaration):
+                    raise ValueError("Parameterized owner state declarations conflict")
+                fields[name] = deepcopy(declaration)
+        declared[rid] = {"state_variables": fields}
+    return declared
+
+
 def bind_outline_owner_safety_evidence(projection: dict) -> dict:
     """Bind complete owner ledgers to each unchanged physical observation.
 
@@ -185,20 +201,11 @@ def bind_outline_owner_safety_evidence(projection: dict) -> dict:
     models = evidence.get("resource_models")
     if not isinstance(models, dict) or not models:
         raise ValueError("Resource-owned safety declarations are unavailable")
-    declared = {}
+    declared = _owner_state_declarations(models, result["geometry"]["parts"])
     event_fingerprints = deepcopy(evidence.get("resource_event_fingerprints", {}))
     for rid, model in models.items():
         if "events" in model:
             event_fingerprints[rid] = _digest(model["events"])
-        fields = {}
-        for field, declaration in model.get("state_variables", {}).items():
-            names = ([field.replace("{part_name}", part) for part in result["geometry"]["parts"]]
-                     if "{part_name}" in field else [field])
-            for name in names:
-                if name in fields and _digest(fields[name]) != _digest(declaration):
-                    raise ValueError("Parameterized owner state declarations conflict")
-                fields[name] = deepcopy(declaration)
-        declared[rid] = {"state_variables": fields}
     observations = result["observations"]
     if not observations or not set(observations[0]["resources"]).issubset(declared):
         raise ValueError("Resource-state declarations omit the complete physical population")
@@ -452,19 +459,27 @@ def _replay(checker: BaseSafetyChecker, rules: list, observations: list,
 
 def _restore_history(context: dict, fingerprint: str, checker: BaseSafetyChecker,
                      rules: list, states: list, budget: Budget, first: dict,
-                     models: dict | None = None, parts: dict | None = None) -> tuple[list, list]:
+                     models: dict | None = None, parts: dict | None = None,
+                     selective: bool = False) -> tuple[list, list]:
     if context.get("rules_fingerprint") != fingerprint:
         raise ValueError("Selected safety rules, bindings, or geometry changed since the retained history")
     history = deepcopy(context.get("observations"))
     if not isinstance(history, list) or not history:
         raise ValueError("Active safety requires retained observation history")
+    if selective:
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import check_monitor_evidence
+
+        check_monitor_evidence(context)
     states, _, violation, uncertainty = _replay(checker, rules, history, states, budget, models, parts)
     if violation is not None or uncertainty is not None:
         raise ValueError("Retained monitor history contains rejected or unresolved safety evidence")
     identifiers = [rule["rule_id"] for rule in rules]
     if context.get("states") != {rid: list(state) for rid, state in zip(identifiers, states, strict=True)}:
         raise ValueError("Retained monitor states disagree with replayed observations")
-    if _physical_state(history[-1]) != _physical_state(first):
+    from cais_spade_llm.recovery_framework.outline_evidence_policy import predicate_checkpoint
+
+    checkpoint = (lambda row: predicate_checkpoint(row, rules)) if selective else _physical_state
+    if checkpoint(history[-1]) != checkpoint(first):
         raise ValueError("Projected candidate does not continue the retained physical checkpoint")
     if any(physical_ap_kind(ap) in {None, "loading_reserved_by"} for rule in rules for ap in rule["aps"]):
         if _digest(history[-1].get("state_snapshot")) != _digest(first.get("state_snapshot")):
@@ -494,6 +509,14 @@ def validate_outline_evidence_safety(*, projection: dict, catalog: dict,
                           reason="No safety specification is selected")
             return result
         definitions = _catalog(deepcopy(catalog), structured_groundings=True)
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import policy_enabled, evidence_coverage
+
+        selective = policy_enabled(projection)
+        if selective:
+            required = projection["evidence_requirements"]
+            checked_coverage = evidence_coverage(requirements=required, projection=projection)
+            if checked_coverage != projection.get("evidence_coverage") or checked_coverage["status"] != "covered":
+                raise ValueError("Selected predicates lack independently checked evidence coverage")
         if projection.get("status") != "projected":
             raise ValueError("; ".join(projection.get("unresolved") or ["Projected geometry is unavailable"]))
         structured = any(physical_ap_kind(ap) in {None, "loading_reserved_by"}
@@ -519,6 +542,15 @@ def validate_outline_evidence_safety(*, projection: dict, catalog: dict,
                     raise ValueError(f"{rid}: stationary_only conflicts with recorded custody fields")
         rules, coverage = _rules(definitions, requirement_scopes, models, geometry)
         identity = {"rules": rules, "geometry": geometry}
+        if selective:
+            # Rules already contain exact grounded regions, parts and process
+            # bindings. Moving configurations are facts, not new specifications.
+            from cais_spade_llm.recovery_framework.outline_evidence_policy import predicate_geometry_identity
+
+            identity = {"rules": rules, "outline_evidence_policy_version": projection["outline_evidence_policy_version"],
+                        "predicate_geometry": predicate_geometry_identity(geometry, rules)}
+            if "endpoint_evidence_policy_version" in projection:
+                identity["endpoint_evidence_policy_version"] = projection["endpoint_evidence_policy_version"]
         if structured or any("stationary_only" in scope for scope in requirement_scopes):
             identity["resource_state_declarations"] = models
         if any(physical_ap_kind(ap) in CASE_AP_MEANINGS for rule in rules for ap in rule["aps"]):
@@ -537,7 +569,7 @@ def validate_outline_evidence_safety(*, projection: dict, catalog: dict,
         history = []
         if monitor_context is not None:
             states, history = _restore_history(monitor_context, fingerprint, checker, rules,
-                                               states, budget, observations[0], models, geometry["parts"])
+                                               states, budget, observations[0], models, geometry["parts"], selective)
         elif not prospective_activation:
             raise ValueError("Safety history is missing; prospective activation must be explicit")
         result["states_before"] = {rid: list(state) for rid, state in zip(identifiers, states, strict=True)}
@@ -555,15 +587,18 @@ def validate_outline_evidence_safety(*, projection: dict, catalog: dict,
             return result
         if uncertainty is not None:
             result["counterexample"] = uncertainty
-            result["requires_projection"] = True
+            bounded = projection.get("endpoint_evidence_policy_version") in (1, 2)
+            result["requires_projection"] = not bounded
+            if bounded:
+                result["requires_predicate_bounds"] = True
             result["context_requests"] = ["/physical_evidence"]
             result["missing_facts"] = [
-                "Refined physical occupancy for " + uncertainty["rule_id"]
+                ("More precise supported occupancy bounds for " if bounded else "Refined physical occupancy for ") + uncertainty["rule_id"]
                 + " at observation " + str(uncertainty["observation_index"])
                 + ", cell " + str(uncertainty.get("cell_index", 0))
                 + ", interval " + str(uncertainty.get("interval", [uncertainty["time"]]))]
             raise ValueError("Geometric occupancy alternatives include a safety violation")
-        if projection.get("interval_complete") is not True:
+        if not selective and projection.get("interval_complete") is not True:
             result["requires_projection"] = True
             raise ValueError("Endpoint checks are recorded; primitive motion intervals remain unverified")
         pending = [rid for rid, current in zip(identifiers, after, strict=True)
@@ -573,6 +608,12 @@ def validate_outline_evidence_safety(*, projection: dict, catalog: dict,
                    "pending_rule_ids": pending,
                    "activation": (monitor_context or {}).get("activation", "prospective"),
                    "evidence_kind": "projected"}
+        if selective:
+            context["outline_evidence_policy_version"] = projection["outline_evidence_policy_version"]
+            context["evidence_history"] = deepcopy((monitor_context or {}).get("evidence_history", []))
+            from cais_spade_llm.recovery_framework.outline_evidence_policy import monitor_evidence_record
+
+            context["evidence_history"].append(monitor_evidence_record(projection))
         result.update(is_safe=True, status="prefix_checked", validation_status="FEASIBLE",
                       reason="Selected requirements hold over the supplied projected primitive witness",
                       pending_rule_ids=deepcopy(pending),

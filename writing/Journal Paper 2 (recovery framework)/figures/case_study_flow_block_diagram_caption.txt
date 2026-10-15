@@ -1,0 +1,1 @@
+Flow block diagram of the manufacturing setup used in the case study. Arrows indicate material flow. UR5e-3 also handles the transfer from Assembly Board to Exit.

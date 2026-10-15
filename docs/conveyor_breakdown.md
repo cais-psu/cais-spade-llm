@@ -9,7 +9,7 @@ result. An automatic trigger runs once when the observed checkpoint is reached.
 | Scenario | Observed checkpoint and stopped state |
 | --- | --- |
 | Conveyor breakdown | Acknowledged ur5e-1 pickup from completed M1, before Conveyor release. The robot retains the part and Conveyor transport becomes unavailable. |
-| ur5e-1 breakdown | Acknowledged M1 processing completion before pickup. M1 retains the completed part; ur5e-1 execution is disabled and its pose is observed. |
+| ur5e-1 breakdown | Acknowledged `pick_approach` at completed M1, before `pick_grasp`. M1 retains the completed part; ur5e-1 remains at the observed pose with `resource_state=failed`. Nominal dispatch stops while recorded recovery motion remains available. |
 | Machining breakdown during part processing | The selected machine, default M1, interrupts at the first simulation-clock observation at or beyond half its configured dwell. The record retains WIP, observed pose, elapsed simulation time and unfinished process requirements. No successful machining effect is committed. |
 | Part slippage | Both ur5e-3 and ur5e-4 must acknowledge pickup of different selected NIST parts. Subsequent tasks for each held part wait for the peer. Either robot can be selected to slip. |
 
@@ -124,3 +124,58 @@ diagnostic, recovery dry-run and feasibility suites, including both slippage
 directions and the new cancellation/teardown cases. An active-code search found
 no remaining `lg_slippage` or retired recipe imports. `bridge.py` retained
 its original working-tree contents throughout this change.
+
+## Conveyor breakdown Recovery example
+
+The Recovery example retains `after_M1_pick_before_release` and now requires
+both acknowledged pickups: `ur5e-1` holds `KET4_Square_4mm` from completed M1,
+and `ur5e-4` holds `gear_small` from `3D Printing Station`. Its existing
+`additional_condition` records the second pickup. Either pickup may finish
+first; subsequent tasks for each holding robot wait for the other pickup.
+Conveyor becomes unavailable while both parts remain held and both assemblies
+are unfinished. Configurations without `additional_condition` retain the
+original Conveyor checkpoint behavior.
+
+The default Conveyor specifications are independently selectable:
+
+- `SAFE_shared_area_mutex`, from `safety_assembly_board-v1_mutex.txt`, retains
+  `G !(ap001 & ap002)` over resource-pair occupancy of `assembly_board-v1`,
+  including KMR when its geometry enters that region. Robot, tool, and carried
+  part geometry determine occupancy.
+- `SAFE_KET4_Square_4mm_before_gear_small`, from
+  `safety_assembly_board-v1_KET4_Square_4mm_before_gear_small.txt`, requires
+  `gear_small` entry only after completed `assembly` of `KET4_Square_4mm` at
+  `GMC_Laser_Plate_Virtual/KET4_Square_4mm`. Its formula is
+  `(!ap001 U (ap002 & !ap001)) | G !ap001`. Machining completion and simultaneous
+  completion/entry do not establish the required earlier assembly completion.
+
+This ordering is the selected manufacturing requirement for this scenario.
+Other scenarios retain their own specification selections. The original broad
+`safety_Conveyor_breakdown.txt` remains available, and existing saved results
+retain their recorded specifications.
+
+The capture-only harness keeps nominal preparation headless. With `--scene-image`,
+it opens an owned Gazebo GUI at the stopped failure checkpoint and saves
+`failure_scene.png` and `failure_scene.json` beside `observations.json`.
+The image records its window process ownership, run identity, source observation
+SHA256, and physical evidence fingerprint. Capture verification checks both
+retained pickups, unfinished assemblies, unavailable Conveyor transport, and
+observed `gear_small` clearance from `assembly_board-v1`.
+
+The harness refuses an existing UI/runtime, uses its isolated ROS domain and
+Gazebo master, and stops only its owned processes. Recovery stages are Manual
+and the existing example records `diagnostic_cca_bypass=true`. The capture
+establishes observed failure data; it does not establish CCA authorization or
+executed recovery. Safety satisfaction alone does not establish completion of
+both assemblies.
+
+The verified October 14 capture is
+`cais_spade_llm/monitor/environment_runs/recovery/capture_1b3f3d1d729a4701b94cff514c783130/`.
+It contains `observations.json`, `failure_scene.png`, image provenance in
+`failure_scene.json`, and `native_preview_model/manifest.json`. The real
+Recovery → Offline → Conveyor breakdown controls loaded it and survived
+reload with the exact two specifications selected. Its source run is
+`d49d4e9e71354325b11328a1cee4a5ce`; both held parts and all recorded part
+positions were independently checked against the same native Gazebo instance
+before and after image acquisition. X11 reads now run in a child process so
+window-mapping errors can be retried without exiting the capture parent.

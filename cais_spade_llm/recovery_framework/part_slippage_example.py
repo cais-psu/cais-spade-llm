@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
 from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS
 from cais_spade_llm.recovery_framework.recovery_observations import (
     copy_generation_records,
@@ -19,6 +20,7 @@ from cais_spade_llm.recovery_framework.recovery_observations import (
     observation_fingerprint,
     observation_summary,
     read_observations,
+    RECORDS,
 )
 from cais_spade_llm.ui.recovery_setup import (
     FAILURE_SCENARIOS,
@@ -35,10 +37,38 @@ _PART_SLIPPAGE_SAFETY_FILES = (
     "cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt",
 )
 
+_DEFAULT_OBSERVATIONS = {
+    "Part slippage": "capture_f923020bf9ce496eb443826291f8f2c2",
+    "Machining breakdown during part processing": "capture_8beafdb8a01e444894cfaf41d29921fd",
+    "Conveyor breakdown": "capture_1b3f3d1d729a4701b94cff514c783130",
+    "ur5e-1 breakdown": "capture_0a7fde8074b6426586b204204f2b3417",
+}
+
+
+def default_observation_paths() -> dict[str, str]:
+    """Return the retained capture paths available for fresh Recovery attempts.
+
+    Returns:
+        Exact failure scenario names mapped to existing original observations files.
+    """
+    return {scenario: str(path) for scenario, identifier in _DEFAULT_OBSERVATIONS.items()
+            if (path := RECORDS / identifier / "observations.json").is_file()}
+
 
 def example_setup(*, outline_mode: str = "auto", primitive_mode: str = "auto",
                   scenario: str = "Part slippage", safety_files: list[str] | None = None, root=ROOT) -> dict:
-    """Build the two-part simulation settings without changing saved setup files."""
+    """Build simulation settings without changing saved setup files.
+
+    Args:
+        outline_mode: Selected outline generation mode.
+        primitive_mode: Selected primitive generation mode.
+        scenario: Exact configured failure scenario.
+        safety_files: Explicit specifications, or the scenario defaults.
+        root: Project checkout containing the configuration.
+
+    Returns:
+        Validated simulation settings with the selected failure checkpoint.
+    """
     if outline_mode not in {"auto", "manual"} or primitive_mode not in {"auto", "manual"}:
         raise ValueError("Recovery stages require Auto or Manual")
     setup = default_setup(root)
@@ -67,6 +97,11 @@ def example_setup(*, outline_mode: str = "auto", primitive_mode: str = "auto",
             setup["permitted_resources"] = [rid for rid in setup["permitted_resources"] if rid not in {"M2", "ur5e-2"}]
         setup["failure_scenario"] = {"scenario": scenario, "resource_id": resource_id,
                                      "checkpoint": CHECKPOINTS[scenario], "mode": "once"}
+        if scenario == "Conveyor breakdown":
+            setup["failure_scenario"].update(
+                part_name="KET4_Square_4mm",
+                additional_condition={"resource_id": "ur5e-4", "part_name": "gear_small"},
+            )
         if scenario == "Machining breakdown during part processing":
             setup["selected_product_order_file"] = "cais_spade_llm/specification/products/orders/assembly_board-v1-machine-breakdown.json"
             setup["failure_scenario"].update(checkpoint="during_processing", seed=secrets.randbits(32))
@@ -88,8 +123,15 @@ class PartSlippageExample:
         self.scenario = "Part slippage"
         self.safety_files: list[str] = list(_PART_SLIPPAGE_SAFETY_FILES)
         self.observation_path = ""
+        self.validation_checks: dict[str, bool] | None = None
+        self._defer_preparation = False
+        self._selection_revision = 0
+        self._selected_observation_summary: dict | None = None
+        self._fresh_cancel = threading.Event()
         self._selected_observations: dict = {}
         self._offline = None
+        self._draft = None
+        self._saved_draft_path: Path | None = None
         self._test_proposal: dict | None = None
         self._test_observations: dict | None = None
         self._test_source: dict | None = None
@@ -104,17 +146,24 @@ class PartSlippageExample:
     def snapshot(self) -> dict:
         """Read progress without creating processes or modifying settings."""
         state = {
-            "source": self.source, "scenario": self.scenario, "outline_only": self.scenario != "Part slippage",
+            "source": self.source, "scenario": self.scenario, "outline_only": False,
             "selected_safety_files": list(self.safety_files), "selected_observation_path": self.observation_path,
             "observations": {}, "observation_path": "",
             "outline_mode": self.outline_mode, "primitive_mode": self.primitive_mode,
             "outline_status": "waiting", "primitive_status": "waiting",
             "outline": [], "primitives": [], "execution": [], "artifact_directory": "",
             "safety_status": "skipped", **deepcopy(self._status),
+            "validation_checks": deepcopy(self.validation_checks or dict.fromkeys(CHECK_FIELDS, False)),
+            "validation_checks_selected": self.validation_checks is not None,
+            "validation_checks_locked": False,
+            "defer_preparation": self._defer_preparation,
+            "selection_revision": self._selection_revision,
         }
         runtime = self._runtime
+        offline_state = {}
         if self.source == "offline" and self._offline is not None:
-            state.update(self._offline.snapshot())
+            offline_state = self._offline.snapshot()
+            state.update(offline_state)
         elif self.source == "gazebo" and runtime is not None and self._status["status"] in {"running_example", "blocked", "stopped"}:
             state.update(runtime.part_slippage_recovery.snapshot())
             if self._status["status"] in {"blocked", "stopped"}:
@@ -131,8 +180,13 @@ class PartSlippageExample:
                              or (self._preview_task is not None and not self._preview_task.done())
                              or (session is not None and session._task is not None and not session._task.done()))
         if self.source == "offline" and self._offline is None and self._selected_observations:
-            state.update(observations=observation_summary(self._selected_observations), observation_path=self.observation_path)
+            if self._selected_observation_summary is None:
+                self._selected_observation_summary = observation_summary(self._selected_observations)
+            state.update(observations=deepcopy(self._selected_observation_summary), observation_path=self.observation_path)
         if self.source == "offline":
+            if self._draft is not None:
+                state.update(self._draft.snapshot())
+                state["busy"] = state["busy"] or bool(self._draft._task and not self._draft._task.done())
             state.update(outline_mode="manual", primitive_mode="manual")
             missing = (state.get("observations") or {}).get("missing") or []
             if not self.observation_path:
@@ -150,15 +204,55 @@ class PartSlippageExample:
                 reason = ""
             state["outline_generate_reason"] = reason
             state["can_generate_outline"] = not reason
+            state["can_generate_outline_only"] = bool(self.observation_path and not state["busy"])
+            state["can_load_draft"] = bool(self._saved_draft_path and not state["busy"])
+            if self._draft is not None:
+                state["can_generate_outline"] = self._draft.record["status"] == "draft_ready" and not state["busy"]
+                state["outline_generate_reason"] = "" if state["can_generate_outline"] else "Start fresh for another attempt."
+            elif self._offline is not None:
+                state["validation_checks"] = deepcopy(offline_state.get("validation_checks") or dict.fromkeys(CHECK_FIELDS, True))
+                state["validation_checks_locked"] = bool(offline_state.get("validation_checks_locked")
+                                                         or state["busy"] or state.get("outline") or state.get("primitives"))
+            if self._defer_preparation:
+                state["validation_checks"] = deepcopy(self.validation_checks or dict.fromkeys(CHECK_FIELDS, False))
+                state["validation_checks_locked"] = state["busy"]
+                state["can_generate_outline"] = bool(self.observation_path and not state["busy"])
+                state["outline_generate_reason"] = ("Generation already running." if state["busy"] else
+                    "Select saved observations to prepare the recovery input." if not self.observation_path else "")
         return state
 
-    def set_options(self, *, source: str, scenario: str, safety_files: list[str], observation_path: str = "") -> dict:
-        """Select the next input source without launching work or enabling safety."""
+    def set_options(self, *, source: str, scenario: str, safety_files: list[str], observation_path: str = "",
+                    check_ra_feasibility: bool = True, check_physical_evidence: bool = True,
+                    check_cca_safety: bool = True, defer_preparation: bool = False) -> dict:
+        """Select the next input source and checks without launching generation.
+
+        Args:
+            source: Existing Gazebo or Offline source selection.
+            scenario: Exact failure scenario.
+            safety_files: Selected safety specification paths.
+            observation_path: Original saved failure observations.
+            check_ra_feasibility: Run ResourceAgent feasibility validation.
+            check_physical_evidence: Run physical evidence calculations.
+            check_cca_safety: Run CCA validation for the selected specifications.
+            defer_preparation: Store preferences without reading observations or preparing an attempt.
+
+        Returns:
+            The current workflow state with the selected checks.
+        """
         state = self.snapshot()
+        choices = dict(zip(CHECK_FIELDS, (check_ra_feasibility, check_physical_evidence, check_cca_safety)))
+        if any(type(value) is not bool for value in choices.values()) or type(defer_preparation) is not bool:
+            raise ValueError("Outline check selections must be booleans")
+        checks_changed = choices != self.validation_checks
+        if checks_changed and state.get("validation_checks_locked") and not (defer_preparation and not state["busy"]):
+            if defer_preparation:
+                raise ValueError("Wait for the current generation before changing checks")
+            raise ValueError("Start fresh before changing this attempt's checks")
         preparing = self.source == "offline" and state["status"] == "preparing_outline"
-        if (state["busy"] and not preparing) or state["status"] in {"running_example", "executing", "resuming"}:
+        if (state["busy"] and (defer_preparation or not preparing)) or state["status"] in {"running_example", "executing", "resuming"}:
             raise ValueError("Stop the current action before changing the example")
-        if state["status"] not in {"idle", "stopped"} and (scenario != self.scenario or safety_files != self.safety_files):
+        ready = state["status"] in {"idle", "stopped", "draft_ready", "outline_ready"} and not state.get("outline")
+        if not ready and not defer_preparation and (scenario != self.scenario or safety_files != self.safety_files):
             raise ValueError("Reset example before changing its failure or safety selections")
         if source not in {"gazebo", "offline"} or scenario not in FAILURE_SCENARIOS:
             raise ValueError("Select Gazebo or Offline and an existing failure scenario")
@@ -175,10 +269,14 @@ class PartSlippageExample:
             path = (ROOT / name).resolve()
             if not path.is_relative_to(safety_root) or not path.is_file():
                 raise ValueError(f"Safety specification is unavailable: {name}")
-        selected = read_observations(observation_path) if observation_path else {}
+        input_changed = (self.source, self.scenario, self.observation_path, self.safety_files) != (source, scenario, observation_path, safety_files)
+        if defer_preparation:
+            selected = {} if input_changed else self._selected_observations
+        else:
+            selected = read_observations(observation_path) if observation_path else {}
         if selected and selected.get("scenario") != scenario:
             raise ValueError("Saved observations belong to a different failure scenario")
-        changed = (self.source, self.scenario, self.observation_path) != (source, scenario, observation_path)
+        changed = input_changed or checks_changed or defer_preparation != self._defer_preparation
         if source != self.source:
             if source == "offline":
                 self._gazebo_modes = (self.outline_mode, self.primitive_mode)
@@ -187,8 +285,28 @@ class PartSlippageExample:
                 self.outline_mode, self.primitive_mode = self._gazebo_modes
         self.source, self.scenario = source, scenario
         self.safety_files, self.observation_path = list(safety_files), observation_path
+        self.validation_checks = choices
         self._selected_observations = selected
+        self._defer_preparation = defer_preparation
         if changed:
+            self._selection_revision += 1
+        if input_changed or not defer_preparation:
+            self._selected_observation_summary = None
+        if defer_preparation:
+            if input_changed:
+                self._draft = None
+                self._offline = None
+            self._saved_draft_path = None
+            if input_changed or (self._draft is None and self._offline is None):
+                self._status = {"status": "idle", "message": "Choose checks, then Generate a fresh outline from the verified capture."}
+            return self.snapshot()
+        if changed:
+            self._draft = None
+            self._saved_draft_path = None
+            if source == "offline" and selected:
+                from .outline_draft import latest_draft
+
+                self._saved_draft_path = latest_draft(selected)
             if self._offline is not None:
                 self._offline.stop("Saved observation selection changed")
                 if self._offline._task is not None and not self._offline._task.done():
@@ -237,6 +355,8 @@ class PartSlippageExample:
         if self.source != "offline":
             raise ValueError("Select Offline before preparing saved observations")
         state = self.snapshot()
+        if self._draft is not None:
+            return state
         if state["busy"] or (self._offline is not None and state["status"] not in {"blocked", "stopped"}):
             return state
         return self._new_offline(generate_outline=False)
@@ -254,14 +374,25 @@ class PartSlippageExample:
             if observations.get("scenario") != self.scenario:
                 raise ValueError("Saved observations belong to a different failure scenario")
             self._selected_observations = observations
+            self._selected_observation_summary = observation_summary(observations)
+            choices = self.validation_checks or dict.fromkeys(CHECK_FIELDS, True)
+            if not all(choices.values()):
+                from .outline_draft import OutlineDraft
+
+                self._draft = OutlineDraft(observations, self.safety_files, **choices)
+                self._draft._save()
+                return self.snapshot()
             session = create_offline_recovery(observations, outline_mode=self.outline_mode,
                                                primitive_mode=self.primitive_mode,
                                                source_observation_path=self.observation_path)
             session.runtime.setup["selected_safety_files"] = list(self.safety_files)
-            session._publish(selected_safety_files=self.safety_files)
+            session._publish(selected_safety_files=self.safety_files, validation_checks=choices,
+                             validation_checks_locked=generate_outline is True
+                             or (generate_outline is None and self.outline_mode == "auto"))
             session.begin(observations["failure"], generate_outline=generate_outline)
             self._offline = session
         except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._draft = None
             self._status = {"status": "blocked", "message": str(exc)}
         return self.snapshot()
 
@@ -276,7 +407,7 @@ class PartSlippageExample:
         from cais_spade_llm.recovery_framework.diagnostics import read_object, write_record
         from cais_spade_llm.recovery_framework.offline_recovery import create_offline_recovery
 
-        if self.source != "offline" or self.snapshot()["busy"] or self.snapshot()["status"] not in {"idle", "outline_ready", "stopped"}:
+        if self.source != "offline" or self.snapshot()["busy"] or self.snapshot()["status"] not in {"idle", "outline_ready", "stopped", "blocked"}:
             raise ValueError("Reset the offline example before loading a saved result")
         observations = read_observations(self.observation_path)
         if observations.get("scenario") != self.scenario:
@@ -293,8 +424,6 @@ class PartSlippageExample:
         if state.get("status") not in {"offline_completed", "outline_review"}:
             raise ValueError("This capture has no completed offline outline or composition")
         outline_only = state["status"] == "outline_review"
-        if self.scenario != "Part slippage" and not outline_only:
-            raise ValueError("This failure scenario stops at Recovery outline review")
         source = Path(state["artifact_directory"]).resolve()
         if not source.is_relative_to(parent):
             raise ValueError("Saved composition refers to another run")
@@ -322,6 +451,24 @@ class PartSlippageExample:
                 raise ValueError("Saved outline does not match its completed source and accepted events")
         elif proposal.get("source_observation_fingerprint") != observation_fingerprint(observations):
             raise ValueError("Saved composition does not match its source observations")
+        if proposal.get("composition_validation_version") == 1:
+            from cais_spade_llm.resources.recovery_composition import composition_program_error
+            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+
+            composition = read_object(source / "composition.json")
+            program = composition.get("accepted_primitive_program", [])
+            error = composition_program_error(outline_request.get("multi_turn_session_state", {}).get("accepted_outline_prefix", []),
+                program, prepared=outline_request, session=outline_request.get("multi_turn_session_state", {}))
+            if (error or composition.get("execution_authorized") is not False
+                    or proposal.get("execution_authorized") is not False
+                    or composition.get("source_outline_fingerprint") != recovery_validation_fingerprint(outline_request)
+                    or composition.get("accepted_outline_prefix") != outline_request["multi_turn_session_state"]["accepted_outline_prefix"]
+                    or recovery_validation_fingerprint(program) != recovery_validation_fingerprint(state.get("primitives"))
+                    or [{key: row.get(key) for key in ("outline_id", "resource_jid", "part_name", "primitive_steps", "composition_validation")}
+                        for row in proposal.get("macro_tasks", [])] !=
+                       [{key: row.get(key) for key in ("outline_id", "resource_jid", "part_name", "primitive_steps", "composition_validation")}
+                        for row in program]):
+                raise ValueError(error or "Saved composition evidence differs from the displayed result")
         session = create_offline_recovery(observations, outline_mode=self.outline_mode,
                                           primitive_mode=self.primitive_mode,
                                           source_observation_path=self.observation_path)
@@ -329,10 +476,12 @@ class PartSlippageExample:
         session._save_observations()
         directory = session._new_artifact_directory()
         session._install_prepared(outline_request, directory, "", new_attempt=False, source_directory=source,
-                                  require_nominal_complete=outline_only)
+                                  require_nominal_complete=outline_only or proposal.get("composition_validation_version") == 1)
         session._proposal = proposal
         session._outline_request = deepcopy(outline_request)
         paths = copy_generation_records(state, parent, directory)
+        if proposal.get("composition_validation_version") == 1:
+            (directory / "composition.json").write_bytes((source / "composition.json").read_bytes())
         for name in ("prompt_safety_rules.json", "outline_evidence_requirements.json"):
             if (source / name).is_file():
                 (directory / name).write_bytes((source / name).read_bytes())
@@ -340,7 +489,7 @@ class PartSlippageExample:
                             ("outline.json", {"outline": state["outline"]})):
             if name != "proposal.json" or not outline_only:
                 write_record(directory / name, value)
-        if outline_only:
+        if outline_only or proposal.get("composition_validation_version") == 1:
             from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
                 _nominal_artifact_path, _nominal_artifact_sha256,
             )
@@ -364,6 +513,8 @@ class PartSlippageExample:
                          validation_contract_version=(outline_request.get("validation_contract_version") if outline_only
                                                       else session._proposal.get("validation_contract_version")),
                          execution_authorized=False,
+                         composition_validation_version=session._proposal.get("composition_validation_version"),
+                         composition_feasibility=session._proposal.get("composition_feasibility", "not_checked"),
                          outline_safety_status=state.get("outline_safety_status", "skipped"),
                          **paths,
                          selected_safety_files=self.safety_files,
@@ -516,6 +667,73 @@ class PartSlippageExample:
 
     async def action(self, action: str, *, feedback: str = "") -> dict:  # noqa: C901, PLR0912 - explicit operator actions
         """Forward an operator action to the owning ProductAgent event loop."""
+        if action == "generate_outline_fresh":
+            if self.source != "offline" or self.snapshot()["busy"] or not self.observation_path:
+                raise ValueError("Select saved observations in Offline and wait for the current action")
+            options = (self.observation_path, self.scenario, list(self.safety_files),
+                       deepcopy(self.validation_checks or dict.fromkeys(CHECK_FIELDS, True)))
+            self._fresh_cancel = threading.Event()
+            self._draft = self._offline = None
+            self._status = {"status": "preparing_outline", "message": "Preparing a fresh outline from the verified capture."}
+            self._task = asyncio.create_task(self._generate_outline_fresh(*options), name="generate_outline_fresh")
+            self._task.add_done_callback(self._task_finished)
+            return self.snapshot()
+        if action == "stop" and self._task is not None and not self._task.done() and self._task.get_name() == "generate_outline_fresh":
+            self._fresh_cancel.set()
+            if self._draft is not None:
+                self._draft.stop()
+            if self._offline is not None:
+                self._offline.stop()
+            self._status = {"status": "stopped", "message": "Stopping the current attempt; captured responses retained."}
+            return self.snapshot()
+        if action == "start_fresh":
+            if self.source != "offline" or self.snapshot()["busy"]:
+                raise ValueError("Select Offline and wait for the current action before starting fresh")
+            self._draft = None
+            if self._offline is not None:
+                self._offline.stop("Starting a fresh outline attempt")
+            self._offline = None
+            self._status = {"status": "idle", "message": "Preparing a fresh outline from the original failure capture."}
+            return self._new_offline(generate_outline=False)
+        if self.source == "offline" and action in {"generate_outline_only", "load_draft"}:
+            from .outline_draft import OutlineDraft, latest_draft, load_draft
+
+            if self.snapshot()["busy"]:
+                raise ValueError("Wait for the current action to finish")
+            observations = read_observations(self.observation_path)
+            path = latest_draft(observations)
+            previous = load_draft(path, observations) if path is not None else None
+            settings = previous.get("llm_settings", {}) if previous else {}
+            draft = OutlineDraft(observations, self.safety_files,
+                model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"))
+            if action == "load_draft":
+                if previous is None:
+                    raise ValueError("No complete draft for these saved observations")
+                draft.record = previous
+                draft.directory = path.parent
+                self._saved_draft_path = path
+            else:
+                async def generate_draft() -> None:
+                    await draft.generate()
+                    if draft.record["status"] == "draft":
+                        self._saved_draft_path = draft.directory / "draft.json"
+
+                draft._task = asyncio.create_task(generate_draft(), name="generate_outline_only")
+                draft._task.add_done_callback(self._task_finished)
+            self._draft = draft
+            return self.snapshot()
+        if self._draft is not None:
+            if action == "generate_outline" and self._draft.record["status"] == "draft_ready":
+                self._draft._task = asyncio.create_task(self._draft.generate(), name="generate_outline")
+                self._draft._task.add_done_callback(self._task_finished)
+                return self.snapshot()
+            if action == "stop":
+                self._draft.stop()
+                return self.snapshot()
+            if action == "reset" and not self.snapshot()["busy"]:
+                self._draft = None
+            else:
+                raise ValueError("Unvalidated drafts are for review only; reset before validated recovery")
         if action != "stop" and self._preview_task is not None and not self._preview_task.done():
             raise ValueError("A recovery action is already running")
         if action == "prepare_gazebo_evidence":
@@ -561,6 +779,8 @@ class PartSlippageExample:
                 raise ValueError("Select saved observations and prepare the recovery input first")
             else:
                 self._offline.action(action, feedback=feedback)
+                if action in {"generate_outline", "regenerate_outline", "continue_outline"}:
+                    self._offline._publish(validation_checks_locked=True)
             return self.snapshot()
         if action == "stop":
             self._cancelled = True
@@ -591,6 +811,70 @@ class PartSlippageExample:
             await self.bridge._run_on_agent_runtime(dispatch())
             self._status = {"status": "running_example", "message": "Recovery action queued."}
         return self.snapshot()
+
+    async def _fresh_work(self, operation):
+        """Drain private preparation/provider work before releasing its owner."""
+        worker = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            self._fresh_cancel.set()
+            if self._draft is not None:
+                self._draft.stop()
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                    break
+            if not worker.cancelled():
+                worker.exception()
+            raise
+
+    async def _generate_outline_fresh(self, path: str, scenario: str, safety_files: list[str], choices: dict[str, bool]) -> None:
+        from .offline_recovery import create_offline_recovery
+        from .outline_draft import OutlineDraft
+
+        def prepare():
+            observations = read_observations(path)
+            if observations.get("scenario") != scenario:
+                raise ValueError("Saved observations belong to a different failure scenario")
+            summary = observation_summary(observations)
+            if self._fresh_cancel.is_set():
+                return observations, summary, None
+            if not all(choices.values()):
+                owner = OutlineDraft(observations, safety_files, **choices)
+                owner._save()
+            else:
+                owner = create_offline_recovery(observations, outline_mode="manual", primitive_mode="manual",
+                                                source_observation_path=path)
+                owner.runtime.setup["selected_safety_files"] = safety_files
+                owner._publish(selected_safety_files=safety_files, validation_checks=choices, validation_checks_locked=True)
+            return observations, summary, owner
+
+        try:
+            observations, summary, owner = await self._fresh_work(prepare)
+            self._selected_observations, self._selected_observation_summary = observations, summary
+            if self._fresh_cancel.is_set():
+                if owner is not None:
+                    owner.stop()
+                return
+            if not all(choices.values()):
+                self._draft = owner
+                owner._task = self._task
+                await self._fresh_work(lambda: asyncio.run(owner.generate()))
+            else:
+                self._offline = owner
+                owner.begin(observations["failure"], generate_outline=True, defer_observation_save=True)
+                await owner._task
+        except asyncio.CancelledError:
+            self._status = {"status": "stopped", "message": "Stopped; saved observations and responses retained."}
+            raise
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            self._status = {"status": "NEEDS_CONTEXT" if isinstance(exc, ValueError) and str(exc).startswith("NEEDS_CONTEXT:")
+                            else "blocked", "message": str(exc)}
+            logger.warning("Fresh recovery outline could not start: %s", exc)
 
     def _prepare_gazebo_evidence(self) -> dict:
         """Queue an explicit preview while leaving generation and execution idle."""
@@ -669,7 +953,8 @@ class PartSlippageExample:
         if (self.source != "offline" or self._offline is None
                 or self.snapshot()["busy"] or self._offline.snapshot()["status"] != "offline_completed"):
             raise ValueError("Complete the offline primitive composition first")
-        if self._offline._proposal.get("validation_contract_version") == 2:
+        if (self._offline._proposal.get("validation_contract_version") == 2
+                or self._offline._proposal.get("composition_validation_version") == 1):
             raise ValueError("Outline validation does not authorize execution; runtime CCA integration is pending")
         self._test_proposal = deepcopy(self._offline._proposal)
         self._test_observations = deepcopy(self._offline._observations)

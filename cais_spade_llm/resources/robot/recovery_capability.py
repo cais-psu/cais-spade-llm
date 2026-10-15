@@ -9,7 +9,7 @@ from itertools import product
 from cais_spade_llm.resources.recovery_parameter_evidence import prepare_resource_primitive_parameters
 from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
 from cais_spade_llm.resources.robot.target_calculations import (
-    controlled_link_height, pick_travel_height, placement_poses, vertical_pick_bias,
+    controlled_link_height, handling_robot_access_poses, pick_travel_height, placement_poses, vertical_pick_bias,
 )
 
 
@@ -52,6 +52,10 @@ def _destination_geometry(evidence: dict, destination: str, part: str) -> dict |
                 "target": geometry.get("parts", {}).get("assembly_target_map", {}).get(part),
                 "simulation_mating_contact": deepcopy(board.get("mating_contact_by_part", {}).get(part))}
     node = scene.get(destination)
+    staging = [row for row in scene.get("machines", [])
+               if destination == row.get("resource_id", "") + " staging tray"]
+    if len(staging) == 1:
+        node = {"pickup_pose": staging[0].get("staging_pose")}
     if not isinstance(node, dict):
         node = next((row for row in scene.get("machines", []) if row.get("resource_id") == destination), None)
     if not isinstance(node, dict):
@@ -313,6 +317,15 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
                 current[axis] = captured_current[axis]
     motion = resource_evidence.get("motion_config") or resource_evidence.get("controller_config", {}).get("motion") or {}
     geometry = (resource_evidence.get("pick_geometry") or {}).get(part) or {}
+    handling_access = geometry.get("handling_robot_access") or {}
+    if not handling_access:
+        location = observed.get("part_location", observed.get("current_location", observed.get("location")))
+        sources = [row for row in resource_evidence.get("inputs", {}).get("scene", {}).get("machines", [])
+                   if row.get("resource_id") == location
+                   and row.get("handling_robot_access", {}).get("resource_id") == resource_evidence.get("resource_id",
+                       resource_evidence.get("source", {}).get("resource_id"))]
+        if len(sources) == 1:
+            handling_access = sources[0]["handling_robot_access"]
     policy = (resource_evidence.get("pick_policy") or {}).get(part) or {}
     offset_record = resource_evidence.get("tcp_observation") or {}
     offset = None
@@ -325,7 +338,10 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
         and .999 <= sum(current[key] ** 2 for key in ("qx", "qy", "qz", "qw")) <= 1.001
         and .999 <= sum(paired[key] ** 2 for key in ("qx", "qy", "qz", "qw")) <= 1.001)
     transform = motion.get("tcp_transform")
-    if transform is not None:
+    if _number(handling_access.get("tcp_offset_z_m")):
+        offset = handling_access["tcp_offset_z_m"]
+        offset_ref = "/pick_geometry/" + str(part) + "/handling_robot_access/tcp_offset_z_m"
+    elif transform is not None:
         offset_ref = "/motion_config/tcp_transform"
         valid = (isinstance(transform, dict) and transform.get("fixed") is True
                  and transform.get("parent_frame") == motion.get("controlled_link")
@@ -361,16 +377,19 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
     need(all(_number(current.get(axis)) for axis in ("x", "y", "z", "qx", "qy", "qz", "qw")),
          "/snapshot/current_pose", "Current tool pose and orientation are required")
     need(_number(offset), offset_ref, "A recorded fixed controlled-link/TCP transform or matching observed height offset is required")
-    for key in ("pick_tcp_z_bias_min_m", "pick_tcp_z_bias_max_m", "approach_height_m"):
-        need(_number(motion.get(key)), "/motion_config/" + key, "Recorded vertical pick policy is required")
-    for key in ("surface_clearance_override_m", "pick_z_adjustment_m"):
-        need(_number(policy.get(key)), "/pick_policy/" + str(part) + "/" + key, "Explicit pick policy parameter is required")
-    need(type(policy.get("use_global_min_pick_tcp_z")) is bool, "/pick_policy/" + str(part) + "/use_global_min_pick_tcp_z", "Explicit TCP minimum policy is required")
-    if policy.get("use_global_min_pick_tcp_z") is True:
-        need(_number(motion.get("min_pick_tcp_z_m")), "/motion_config/min_pick_tcp_z_m", "Recorded TCP minimum height is required")
+    explicit_access = handling_access.get("approach_pose") is not None or handling_access.get("target_pose") is not None
+    if not explicit_access:
+        for key in ("pick_tcp_z_bias_min_m", "pick_tcp_z_bias_max_m", "approach_height_m"):
+            need(_number(motion.get(key)), "/motion_config/" + key, "Recorded vertical pick policy is required")
+        for key in ("surface_clearance_override_m", "pick_z_adjustment_m"):
+            need(_number(policy.get(key)), "/pick_policy/" + str(part) + "/" + key, "Explicit pick policy parameter is required")
+        need(type(policy.get("use_global_min_pick_tcp_z")) is bool, "/pick_policy/" + str(part) + "/use_global_min_pick_tcp_z", "Explicit TCP minimum policy is required")
+        if policy.get("use_global_min_pick_tcp_z") is True:
+            need(_number(motion.get("min_pick_tcp_z_m")), "/motion_config/min_pick_tcp_z_m", "Recorded TCP minimum height is required")
     need(_number(geometry.get("part_height_m")) and geometry.get("part_height_m", 0) > 0,
          "/pick_geometry/" + str(part) + "/part_height_m", "Recorded supported vertical part height is required")
-    need(_number(geometry.get("board_center", {}).get("z")), "/pick_geometry/" + str(part) + "/board_center/z", "Recorded source support height is required")
+    if not explicit_access:
+        need(_number(geometry.get("board_center", {}).get("z")), "/pick_geometry/" + str(part) + "/board_center/z", "Recorded source support height is required")
     record = {"status": "NEEDS_CONTEXT" if missing else "calculated", "missing_facts": missing,
               "context_requests": [row["ref"] for row in missing], "part_name": part, "command_sent": False,
               "source": {"kind": "calculated", "calculation": "vertical_pick_bias, controlled_link_height, pick_travel_height",
@@ -378,11 +397,22 @@ def calculate_recovery_pick_target(*, task: dict, recovery_snapshot: dict, resou
                                     root + "/motion_config", root + offset_ref, root + "/snapshot"]}}
     if missing:
         return record
-    handling_access = geometry.get("handling_robot_access") or {}
     if handling_access:
-        return {**record, "status": "NEEDS_CONTEXT", "context_requests": [root + "/pick_geometry/" + str(part) + "/handling_robot_access"],
-                "missing_facts": [{"ref": root + "/pick_geometry/" + str(part) + "/handling_robot_access",
-                    "reason": "Recorded handling_robot_access requires an owning-resource access calculation"}]}
+        try:
+            poses = handling_robot_access_poses(handling_access, offset, (pose["x"], pose["y"]),
+                                                handling_access.get("grasp_orientation_xyzw"))
+        except (ValueError, TypeError) as exc:
+            ref = root + "/pick_geometry/" + str(part) + "/handling_robot_access"
+            return {**record, "status": "NEEDS_CONTEXT", "context_requests": [ref],
+                    "missing_facts": [{"ref": ref, "reason": str(exc)}]}
+        if poses is not None:
+            approach, target = poses
+            return {**record, "target_pose": target, "approach_pose": approach,
+                "observed_pose": pose, "pick_tcp_z": target["z"] + offset, "tcp_offset_z": offset,
+                "travel_z": approach["z"], "tx": pose["x"], "ty": pose["y"], "tz": pose["z"],
+                "pick_z": target["z"], "part_height": geometry["part_height_m"], "access_retreat_pose": approach,
+                "source": {"kind": "calculated", "calculation": "handling_robot_access_poses",
+                           "inputs": [root + "/pick_geometry/" + str(part) + "/handling_robot_access", root + "/observed_parts"]}}
     bias = vertical_pick_bias(geometry["part_height_m"], motion["pick_tcp_z_bias_min_m"], motion["pick_tcp_z_bias_max_m"])
     pick_tcp_z = pose["z"] + bias + max(0., policy["surface_clearance_override_m"])
     if policy["use_global_min_pick_tcp_z"]:
@@ -668,6 +698,186 @@ def _place_step_outputs(*, task: dict, support: dict, recovery_snapshot: dict,
     return calculations, missing
 
 
+def _cartesian_joint_witness(*, pose: dict, resource_jid: str, recovery_snapshot: dict,
+                             resource_evidence: dict, physical_evidence: dict) -> dict:
+    """Verify an endpoint with recorded joint limits; do not claim a motion path."""
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+    from cais_spade_llm.recovery_framework.kmr_motion import bounded_joints
+    from cais_spade_llm.recovery_framework.kmr_recovery import _calculate_cartesian_joints
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms, representative_pose
+
+    root = f"/resources/{resource_jid}/resource_evidence"
+    missing = {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
+        "context_requests": ["/physical_evidence", root + "/snapshot"],
+        "evidence": {"command_sent": False, "execution_authorized": False,
+                     "scope": "Independent endpoint capability; motion and collision remain composition obligations"}}
+    identities = [rid for rid, jid in physical_evidence.get("jids", {}).items() if jid == resource_jid]
+    if len(identities) != 1:
+        return {**missing, "reason": "Recorded owner identity for joint capability is unavailable"}
+    rid = identities[0]
+    model = physical_evidence.get("resource_models", {}).get(rid, {})
+    config = model.get("configuration")
+    state = physical_evidence.get("snapshot", {}).get("resources", {}).get(rid, {})
+    names = state.get("joint_names")
+    joints = state.get("joint_positions")
+    if (not isinstance(config, dict) or not isinstance(names, list) or not names
+            or names != config.get("joint_names") or not isinstance(joints, list)
+            or len(joints) != len(names) or not all(_number(value) for value in joints)):
+        return {**missing, "reason": "Recorded owner kinematics and joint configuration are incomplete"}
+    target = [pose.get(axis) for axis in ("x", "y", "z", "qx", "qy", "qz", "qw")]
+    if not all(_number(value) for value in target) or abs(sum(value * value for value in target[3:]) - 1) > 1e-6:
+        return {**missing, "reason": "Cartesian joint calculation requires a finite target and unit orientation"}
+    try:
+        limits = {row['name']: dict(zip(('lower', 'upper'), row['position_bounds'], strict=True))
+                  for row in config.get('joints', []) if 'position_bounds' in row}
+        if not all(name in limits and all(_number(value) for value in limits[name].values()) for name in names):
+            return {**missing, "reason": "Recorded owner joint limits are incomplete"}
+        if not bounded_joints(names, joints, limits):
+            return {**missing, "reason": "Recorded owner joint configuration conflicts with its limits"}
+        seeds = [joints, *(value.get('positions') if isinstance(value, dict) else value
+                           for value in model.get('named_joint_poses', {}).values())]
+        calculated = _calculate_cartesian_joints(config, names, target, seeds, limits)
+        if calculated is None:
+            return {**missing, "reason": "Bounded endpoint search found no verified joint witness; reachability is unresolved"}
+        witness = calculated['joint_positions']
+        transforms = kinematic_transforms(config, {name: interval(value)
+            for name, value in zip(names, witness, strict=True)})
+        verified = representative_pose(transforms[config['reference_link']])
+        if (not bounded_joints(names, witness, limits) or math.dist(verified[:3], target[:3]) > 1e-5
+                or abs(sum(a * b for a, b in zip(verified[3:], target[3:], strict=True))) < 1 - 1e-10):
+            return {**missing, "reason": "Calculated joint witness does not reproduce the Cartesian target"}
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        return {**missing, "reason": "Recorded owner joint calculation is incomplete: " + str(exc)}
+    return {"allowed": True, "feasibility_status": "FEASIBLE", "context_requests": [],
+        "reason": "Calculated joint witness reproduces the requested target within recorded owner limits",
+        "evidence": {**missing['evidence'], "joint_positions": witness, "joint_names": names,
+            "calculated_pose": verified, "checked_pose": deepcopy(pose),
+            "configuration_fingerprint": recovery_validation_fingerprint(config),
+            "starting_snapshot_fingerprint": recovery_validation_fingerprint(recovery_snapshot),
+            "owner_evidence_fingerprint": recovery_validation_fingerprint(resource_evidence),
+            "endpoint_calculation": calculated}}
+
+
+def project_robot_outline_endpoint(*, task: dict, recovery_snapshot: dict, recovery_des_model: dict,
+                                   resource_evidence: dict, physical_evidence: dict) -> tuple[dict, list, dict]:
+    """Calculate conditional robot endpoints through the recorded owner policies.
+
+    Independent joint witnesses establish the custody and final configurations.
+    No trajectory, elapsed duration, collision clearance, or execution is claimed.
+    """
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+    from cais_spade_llm.recovery_framework.kmr_motion import bounded_joints
+    from cais_spade_llm.resources.continuous_motion import representative_pose
+    from cais_spade_llm.resources.recovery_geometry import (
+        _configuration_after, _custody, _joint_geometry, projected_part_support,
+    )
+    from cais_spade_llm.resources.resource_safety_preparation import (
+        _outline_custody_evidence, prepare_outline_event_preview_request,
+    )
+    from cais_spade_llm.recovery_framework.outline_endpoint_evidence import _local_checkpoint
+    from cais_spade_llm.recovery_framework.outline_evidence_policy import POSE_FIELDS
+
+    prepared = prepare_outline_event_preview_request(task=task, recovery_snapshot=recovery_snapshot,
+        recovery_des_model=recovery_des_model, physical_evidence=physical_evidence,
+        resource_evidence=resource_evidence, endpoint_only=True)
+    if prepared["status"] != "ready":
+        raise ValueError(prepared.get("reason") or str(prepared.get("missing_facts")))
+    endpoint, rid = prepared["physical_evidence"], prepared["resource_id"]
+    model = endpoint["resource_models"][rid]
+    record = prepared["event_record"]
+    contract = model["event_projection_contracts"][record["contract_id"]]
+    owner = endpoint["snapshot"]["resources"][rid]
+    capabilities = model.get("static_capabilities", {})
+    checks = []
+
+    def cartesian(pose: dict) -> None:
+        capability = check_robot_primitive_capability(primitive="move_cartesian", params=pose, task=task,
+            recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
+            static_capabilities=capabilities, primitive_catalog=[], resource_jid=task["resource_jid"],
+            physical_evidence=physical_evidence)
+        if capability is None or capability["feasibility_status"] != "FEASIBLE":
+            raise ValueError((capability or {}).get("reason", "Owner Cartesian capability is unavailable"))
+        witness = capability
+        if not witness.get("evidence", {}).get("joint_positions"):
+            witness = _cartesian_joint_witness(pose=pose, resource_jid=task["resource_jid"],
+                recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
+                physical_evidence=physical_evidence)
+        if witness["feasibility_status"] != "FEASIBLE":
+            raise ValueError(witness["reason"])
+        owner["joint_positions"] = deepcopy(witness["evidence"]["joint_positions"])
+        _, transform = _joint_geometry(owner, model)
+        owner["current_pose"] = representative_pose(transform)
+        endpoint["snapshot"]["parts"].update(_local_checkpoint(endpoint, rid)["parts"])
+        checks.append({"step": {"op": "move_cartesian"}, "status": "calculated",
+                       "capability": capability, "endpoint_witness": witness})
+
+    custody = prepared["custody_operation"]
+    if custody is not None:
+        part = custody["part_name"]
+        target = custody["target_calculation"]
+        grasp = custody["kind"] == "grasp"
+        cartesian(target["target_pose"] if grasp else target["insert_pose"])
+        custody_contract = model["primitive_model"]["configuration"].get("custody")
+        if not isinstance(custody_contract, dict):
+            raise ValueError("Recorded robot custody configuration is unavailable")
+        state = "closed" if grasp else "open"
+        for name, position in custody_contract["joint_positions"][state].items():
+            low, high = custody_contract["joint_bounds"][name]
+            if not _number(position) or not low <= position <= high:
+                raise ValueError("Robot custody configuration exceeds its recorded joint bounds")
+        op = "grasp_part" if grasp else "release_part"
+        output = _outline_custody_evidence(primitive=op,
+            params={"part_name": part, "model_name": custody["model_name"]},
+            snapshot=endpoint["snapshot"], resource_id=rid, model=model, contract=custody_contract)
+        if not grasp:
+            support = projected_part_support(part_name=part, state=endpoint["snapshot"], evidence=endpoint)
+            if support.get("status") != "supported":
+                raise ValueError("Robot release requires supported deposited-part evidence: " + str(support.get("reason")))
+            destination = custody["destination_location"]
+            if destination not in endpoint["snapshot"]["resources"]:
+                raise ValueError("Robot release requires a recorded destination owner")
+            output["custody_effects"][0]["contained_by"] = destination
+            endpoint.setdefault("stationary_part_evidence", {})[part] = support
+            if part not in endpoint.setdefault("stationary_parts", []):
+                endpoint["stationary_parts"].append(part)
+        else:
+            endpoint.get("stationary_part_evidence", {}).pop(part, None)
+            endpoint["stationary_parts"] = [name for name in endpoint.get("stationary_parts", []) if name != part]
+        _configuration_after(endpoint["resource_models"], rid, output)
+        _custody(endpoint["snapshot"], rid, output["custody_effects"], endpoint["geometry"])
+        checks.append({"step": {"op": op}, "status": "calculated", "output": output})
+    bindings = record["bindings"]
+    if "target_pose" in bindings:
+        cartesian(_pose_mapping(bindings["target_pose"]))
+    elif "joint_positions" in bindings:
+        limits = {row["name"]: dict(zip(("lower", "upper"), row["position_bounds"], strict=True))
+                  for row in model["configuration"]["joints"] if "position_bounds" in row}
+        if not bounded_joints(owner["joint_names"], bindings["joint_positions"], limits):
+            raise ValueError("Named endpoint violates recorded joint limits")
+        owner["joint_positions"] = deepcopy(bindings["joint_positions"])
+        _, transform = _joint_geometry(owner, model)
+        owner["current_pose"] = representative_pose(transform)
+        checks.append({"step": {"op": "move_to_named_pose"}, "status": "calculated"})
+    for field in POSE_FIELDS - {"current_pose", "base_pose", "joint_positions", "grasp_transform"}:
+        owner.pop(field, None)
+    owner.update(current_pose_source="projected_state", observed_pose_current=False)
+    moved_parts = {effect["part"] for row in checks for effect in row.get("output", {}).get("custody_effects", [])}
+    if owner.get("held_part"):
+        moved_parts.add(owner["held_part"])
+    for part in moved_parts:
+        part_row = endpoint["snapshot"]["parts"][part]
+        for field in POSE_FIELDS - {"current_pose"}:
+            part_row.pop(field, None)
+        part_row.update(current_pose_source="projected_state", observed_pose_current=False)
+    if contract.get("pickup_target_calculation"):
+        endpoint["resources"][rid]["validated_pickup_target_calculation"] = {
+            "source": "resource-owned pickup preview", "binding": deepcopy(record["binding"]),
+            "contract_id": record["contract_id"], "contract_fingerprint": recovery_validation_fingerprint(contract),
+            "part_name": task["part_name"], "calculation": deepcopy(contract["pickup_target_calculation"]),
+            "physical_execution_verified": False}
+    return endpoint, checks, contract
+
+
 def check_robot_primitive_capability(
     *, primitive: str, params: dict, task: dict, recovery_snapshot: dict,
     resource_evidence: dict, static_capabilities: dict, primitive_catalog: list, resource_jid: str,
@@ -848,6 +1058,14 @@ def check_robot_primitive_capability(
     if not all(_number(value) for value in pose.values()):
         return result("NEEDS_CONTEXT", "Cartesian capability requires explicit finite x, y, z")
     reach = static_capabilities.get("gripper_reach")
+    if reach is None:
+        pose.update({axis: params[axis] for axis in ("qx", "qy", "qz", "qw") if axis in params})
+        if primitive == "move_relative":
+            pose.update({axis: current[axis] for axis in ("qx", "qy", "qz", "qw") if axis in current})
+        checked = _cartesian_joint_witness(pose=pose, resource_jid=resource_jid,
+            recovery_snapshot=recovery_snapshot, resource_evidence=resource_evidence,
+            physical_evidence=physical_evidence or {})
+        return {**checked, "evidence": {**evidence, **checked["evidence"]}}
     if not isinstance(reach, dict) or reach.get("frame") != frame:
         return result("NEEDS_CONTEXT", "Recorded gripper_reach is unavailable", refs=[f"/resources/{resource_jid}/static_capabilities/gripper_reach"])
     from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent

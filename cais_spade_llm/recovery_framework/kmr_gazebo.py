@@ -718,12 +718,16 @@ def run(request: dict, session: dict | None = None) -> dict:
     def execute(trajectory):
         if not trajectory.joint_trajectory.points:
             raise ValueError('MoveIt returned an empty trajectory')
+        timeout = kmr.get('arm_motion_wall_timeout_sec', 120.)
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError('KMR arm_motion_wall_timeout_sec must be finite and positive')
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = trajectory.joint_trajectory
         action(
             FollowJointTrajectory,
             kmr['arm_controller']+'/follow_joint_trajectory',
             goal,
+            timeout=float(timeout),
         )
 
     def observed_state():
@@ -1558,14 +1562,15 @@ def run(request: dict, session: dict | None = None) -> dict:
         return calculate_transfer_waypoints(scene, entity('KMR'), start, target)
 
     def compute_place_targets(transform):
-        if not _at_dock(entity('KMR'), machine['KMR_docking_pose']):
+        dock = machine.get('KMR_pick_docking_poses', {}).get(part, machine['KMR_docking_pose'])
+        if not _at_dock(entity('KMR'), dock):
             raise ValueError(f'KMR is not docked at {target_resource}')
         for peg in component_parts:
             if peg != part and math.dist(entity(peg)[:3], fixture[:3]) < .08:
                 raise ValueError(f'{target_resource} workholding is occupied before placement')
         from cais_spade_llm.recovery_framework.kmr_recovery import place_targets
 
-        return place_targets(scene, machine, transform, tcp(), entity('KMR'), fixture)
+        return place_targets(scene, machine, transform, tcp(), entity('KMR'), fixture, part_name=part)
 
     def compute_pick_dock_pose():
         transport_target = transport_pose()
@@ -1576,7 +1581,10 @@ def run(request: dict, session: dict | None = None) -> dict:
         }
 
     def observe_pick_approach(targets):
-        pickup_dock = scene['Storage']['KMR_pick_docking_poses'][part]
+        from cais_spade_llm.recovery_framework.kmr_recovery import pickup_docking_pose
+
+        location = parameters.get('origin_resource_location', 'Storage')
+        pickup_dock = pickup_docking_pose(scene, location, part)
         if not _at_dock(entity('KMR'), pickup_dock):
             raise ValueError('KMR pickup dock changed before pick_part')
         if math.dist(tcp()[:3], targets['approach'][:3]) > .015:
@@ -1585,8 +1593,8 @@ def run(request: dict, session: dict | None = None) -> dict:
             raise ValueError('KMR gripper is not open at pick approach')
         if math.dist(entity(part)[:3], initial[:3]) > .01:
             raise ValueError('Storage part moved during pick approach')
-        return {'part_location': 'Storage', 'attached': False,
-                'resource_location': 'Storage', 'approach_observed': True,
+        return {'part_location': location, 'attached': False,
+                'resource_location': location, 'approach_observed': True,
                 'pick_targets': deepcopy(targets)}
 
     def confirm_pick_approach(previous):
@@ -1602,7 +1610,8 @@ def run(request: dict, session: dict | None = None) -> dict:
 
     def observe_place_approach(targets, transform):
         custody(transform)
-        if not _at_dock(entity('KMR'), machine['KMR_docking_pose']):
+        dock = machine.get('KMR_pick_docking_poses', {}).get(part, machine['KMR_docking_pose'])
+        if not _at_dock(entity('KMR'), dock):
             raise ValueError('KMR left the configured machine dock')
         if math.dist(tcp()[:3], targets['approach'][:3]) > .015:
             raise ValueError('KMR TCP did not reach the place approach')
@@ -1653,7 +1662,8 @@ def run(request: dict, session: dict | None = None) -> dict:
     def compute_pick_targets(initial=None):
         from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets
 
-        return pick_targets(scene, part, entity(part), tcp(), entity('KMR'), initial)
+        return pick_targets(scene, part, entity(part), tcp(), entity('KMR'), initial,
+                            location=parameters.get('origin_resource_location', 'Storage'))
 
     def check_startup_pose():
         """Require the measured parked arm and collision clearance before production."""
@@ -1723,10 +1733,13 @@ def run(request: dict, session: dict | None = None) -> dict:
             None,
         )
         fixture = machine['workholding_pose'] if machine is not None else None
+        if target_resource == 'Storage' and name in {'place_approach', 'place_release'}:
+            machine = scene['Storage']
+            fixture = machine['slots'][part]
         observed_scene = {'operation': 'observed_scene', 'success': True,
                           'part_pose': initial, 'KMR_pose': base}
         if machine is not None:
-            observed_scene[f'{machine["resource_id"]}_pose'] = entity(machine['resource_id'])
+            observed_scene[f'{target_resource}_pose'] = entity(target_resource)
         operations.append(observed_scene)
         if mode == 'probe' or (name in {'pick_approach', 'pick_part'} and mode != 'primitive'):
             if math.dist(initial[:3], scene['Storage']['slots'][part][:3]) > .012:
@@ -1852,10 +1865,19 @@ def run(request: dict, session: dict | None = None) -> dict:
             if name not in {'pick_approach', 'pick_part', 'move_to_resource',
                              'place_approach', 'place_release'}:
                 raise ValueError('Unsupported environmental KMR event')
-            if name in {'pick_approach', 'pick_part'} and parameters.get('origin_resource_location') != 'Storage':
-                raise ValueError('KMR pickup must use Storage')
-            if name in {'place_approach', 'place_release'} and parameters.get('destination_location') not in {'M1', 'M2'}:
-                raise ValueError('KMR release must use M1 or M2')
+            if name in {'pick_approach', 'pick_part'}:
+                from cais_spade_llm.recovery_framework.kmr_recovery import pickup_docking_pose
+
+                pickup_docking_pose(scene, parameters['origin_resource_location'], part)
+            if name in {'place_approach', 'place_release'}:
+                from cais_spade_llm.recovery_framework.kmr_recovery import recorded_location
+
+                destination, _ = recorded_location(scene, parameters['destination_location'])
+                if 'slots' in destination:
+                    if parameters['destination_location'] != 'Storage' or part not in destination['slots']:
+                        raise ValueError('KMR release has no implemented receiving contract')
+                elif 'workholding_pose' not in destination:
+                    raise ValueError('KMR release requires recorded workholding geometry')
         elif mode == 'function':
             if name != 'move_to_location' or set(parameters) != {'x', 'y', 'yaw'}:
                 raise ValueError('Unsupported KMR coordinate function or arguments')
@@ -1937,7 +1959,9 @@ def run(request: dict, session: dict | None = None) -> dict:
         state = {'initial': initial, 'previous': previous,
                  'task_id': pending.get('task_id')}
         if name == 'pick_approach':
-            state['pickup_pose'] = list(scene['Storage']['KMR_pick_docking_poses'][part])
+            from cais_spade_llm.recovery_framework.kmr_recovery import pickup_docking_pose
+
+            state['pickup_pose'] = pickup_docking_pose(scene, parameters.get('origin_resource_location', 'Storage'), part)
             state['pickup_waypoints'] = []
         elif name == 'move_to_resource':
             pose = (scene['Storage']['KMR_docking_pose'] if target_resource == 'Storage'

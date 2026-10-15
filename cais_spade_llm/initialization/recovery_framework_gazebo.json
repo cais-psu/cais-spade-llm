@@ -12160,6 +12160,10 @@
       "stationary_angular_speed_max": 0.001,
       "requires_no_active_goals": true,
       "future_execution_tracking": "not_established"
+    },
+    "observed_pose_agreement": {
+      "position_m": 0.001,
+      "orientation_rad": 0.001
     }
   },
   "planning_scene_mounting_contacts": {

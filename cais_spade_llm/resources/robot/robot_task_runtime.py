@@ -2375,6 +2375,10 @@ def _resolved_cartesian_pose_error(
 
     capabilities = dict(getattr(agent, "static_capabilities", {}) or {})
     gripper_reach = capabilities.get("gripper_reach")
+    if gripper_reach is None:
+        # A workspace envelope is optional. Native movement still plans through
+        # the configured robot model and enforces joint and collision limits.
+        return ""
     if not isinstance(gripper_reach, dict) or not gripper_reach:
         return f"{task.name}.{step.id} gripper_reach capability data is unavailable"
     if str(gripper_reach.get("frame") or "world").strip() != "world":

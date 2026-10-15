@@ -122,6 +122,7 @@ class PartSlippageRecovery:
         self._stopped = False
         self._offline_cancel = threading.Event()
         self._generate_on_begin: bool | None = None
+        self._defer_observation_save = False
         self._failure: dict = {}
         self._prepared: dict = {}
         self._outline_request: dict = {}
@@ -137,7 +138,7 @@ class PartSlippageRecovery:
             "selected_safety_files": deepcopy(runtime.setup.get("selected_safety_files", [])),
             "status": "running_example",
             "message": f"Running the example to the observed {runtime.setup['failure_scenario']['scenario']} checkpoint.",
-            "outline_only": runtime.setup["failure_scenario"]["scenario"] != "Part slippage",
+            "outline_only": False,
             "operator_assistance": [],
             "attempt_provenance": {}, "provenance_path": "",
             "outline_mode": "manual" if self.offline else runtime.setup.get("runtime_recovery_mode", "auto"),
@@ -161,6 +162,10 @@ class PartSlippageRecovery:
             state["can_prepare_gazebo_evidence"] = bool(
                 not self._stopped and state.get("validation_contract_version") == 2
                 and session.get("pending_outline_validation") and state["status"] == "blocked")
+            if self._outline_request:
+                from .primitive_composition import composition_readiness
+
+                state["composition_readiness"] = composition_readiness(self._outline_request)
             return state
 
     async def retry_outline_validation(self, evidence: dict) -> None:
@@ -396,6 +401,12 @@ class PartSlippageRecovery:
             except asyncio.CancelledError:
                 raise
             except (OSError, ValueError, KeyError, TypeError, RuntimeError, TimeoutError, OpenAIError) as exc:
+                if self._defer_observation_save and isinstance(exc, ValueError) and str(exc).startswith("NEEDS_CONTEXT:"):
+                    if not self._stopped:
+                        self._publish(status="NEEDS_CONTEXT", outline_status="NEEDS_CONTEXT",
+                                      outline_safety_status="unresolved", execution_authorized=False, message=str(exc))
+                        logger.info("Offline recovery needs recorded context: %s", exc)
+                    return
                 logger.exception("Part slippage recovery could not complete")
                 if not self._stopped:
                     self._record_error(f"{type(exc).__name__}: {exc}")
@@ -414,7 +425,7 @@ class PartSlippageRecovery:
 
     def _record_error(self, message: str) -> None:
         updates = {f"{stage}_status": "failed" for stage in ("outline", "primitive")
-                   if self._state[f"{stage}_status"] == "generating"}
+                   if self._state[f"{stage}_status"] in {"generating", "preparing"}}
         if self._state["status"] == "preparing_outline":
             updates["outline_status"] = "failed"
         if self._state.get("validation_contract_version") == 2 and updates.get("outline_status") == "failed":
@@ -431,12 +442,22 @@ class PartSlippageRecovery:
         write_record(path, self._observations)
         self._publish(observation_path=str(path), observations=observation_summary(self._observations))
 
-    def begin(self, failure: dict, *, generate_outline: bool | None = None) -> None:
-        """Prepare once; optionally defer generation until an explicit action."""
+    def begin(self, failure: dict, *, generate_outline: bool | None = None,
+              defer_observation_save: bool = False) -> None:
+        """Prepare once; optionally defer generation until an explicit action.
+
+        Args:
+            failure: Exact recorded reconciled failure.
+            generate_outline: Whether this operator action includes outline generation.
+            defer_observation_save: Save a detached Offline capture in the worker before preparation.
+        """
+        if defer_observation_save and not self.offline:
+            raise ValueError("Deferred observation saving requires Offline recovery")
         if self._failure or self._stopped:
             return
         self._failure = deepcopy(failure)
         self._generate_on_begin = generate_outline
+        self._defer_observation_save = defer_observation_save
         if not self.offline:
             checkpoint = getattr(self.runtime, "recovery_checkpoint_observations", None)
             self._observations = (deepcopy(checkpoint) if checkpoint is not None else
@@ -444,11 +465,14 @@ class PartSlippageRecovery:
             if checkpoint is not None:
                 self._observations["failure"] = deepcopy(failure)
                 self._observations["processing_shutdown"] = deepcopy(failure.get("processing_shutdown", {}))
-        self._save_observations()
+        if not defer_observation_save:
+            self._save_observations()
         self._publish(status="preparing_outline", message=f"Preparing recovery from the observed {self._state['scenario']}.")
         self._schedule(self._begin)
 
     async def _begin(self) -> None:
+        if self._defer_observation_save:
+            await self._offline_work(self._save_observations)
         await self.runtime.nominal_idle.wait()
         if not self.offline and self._observations.get("physical_evidence", {}).get("status") == "pending":
             from cais_spade_llm.recovery_framework.recovery_observations import (
@@ -526,7 +550,8 @@ class PartSlippageRecovery:
         self._generation += 1
         directory = self.path / f"generation_{self._generation:04d}"
         directory.mkdir(parents=True, exist_ok=False)
-        self._publish(artifact_directory=str(directory))
+        self._publish(artifact_directory=str(directory), composition_validation_version=None,
+                      composition_feasibility="not_checked", composition_findings=[], execution_authorized=False)
         return directory
 
     async def _prepare(self, feedback: str = "") -> None:
@@ -545,10 +570,15 @@ class PartSlippageRecovery:
         saved = self._observations.get("prepared_recovery_request")
         if saved and (self.offline or self._observations.get("offline_ready")):
             if self.offline:
-                missing = offline_preparation_missing(self._observations)
-                if missing:
-                    raise ValueError("NEEDS_CONTEXT: " + ", ".join(missing))
-            self._install_prepared(deepcopy(saved), directory, feedback)
+                def install():
+                    missing = offline_preparation_missing(self._observations)
+                    if missing:
+                        raise ValueError("NEEDS_CONTEXT: " + ", ".join(missing))
+                    self._install_prepared(deepcopy(saved), directory, feedback)
+
+                await self._offline_work(install)
+            else:
+                self._install_prepared(deepcopy(saved), directory, feedback)
             return
         if self.offline:
             raise ValueError("NEEDS_CONTEXT: saved capture has no prepared_recovery_request; see missing observations")
@@ -770,6 +800,21 @@ class PartSlippageRecovery:
                 if not isinstance(evidence.get("snapshot"), dict):
                     continue
                 owner = self.agent.resources[jid]
+                owner_evidence = owner.get_recovery_resource_evidence()
+                recorded_model = entry.get("recovery_des_model") or {}
+                if (not recorded_model.get("descriptor_fingerprint")
+                        and not (entry.get("resource_type") != "robot" and
+                                 owner_evidence.get("environment_models", {}).get(owner_evidence.get("resource_id")))):
+                    # Older captures retain physical facts for resources without
+                    # a recovery descriptor. A dependent event must request that
+                    # descriptor; unrelated resources do not block preparation.
+                    entry["resource_evidence"] = owner_evidence
+                    continue
+                prepare_capabilities = getattr(owner, "prepare_current_scene_capabilities", None)
+                if callable(prepare_capabilities):
+                    calculation = prepare_capabilities()
+                    if calculation:
+                        prepared.setdefault("scene_capability_calculations", {})[jid] = calculation
                 snapshot = owner.get_recovery_snapshot()
                 model = owner.recovery_des_model(snapshot=snapshot)
                 variables = model.get("state_variables", {})
@@ -781,6 +826,7 @@ class PartSlippageRecovery:
                 entry["resource_core"] = deepcopy(entry["recovery_snapshot"]["resource_core"])
                 entry["resource_facets"] = deepcopy(entry["recovery_snapshot"]["resource_facets"])
                 entry["static_capabilities"] = deepcopy(owner.static_capabilities)
+                entry["resource_evidence"] = owner.get_recovery_resource_evidence()
                 if entry.get("resource_type") != "robot" and evidence.get("environment_models"):
                     catalog = deepcopy(model.get("primitive_catalog", []))
                     entry["execution_primitive_catalog"] = catalog
@@ -803,6 +849,12 @@ class PartSlippageRecovery:
         )
 
         prepared["validation_contract_version"] = OUTLINE_VALIDATION_CONTRACT_VERSION
+        from .outline_evidence_policy import OUTLINE_EVIDENCE_POLICY_VERSION
+
+        prepared["outline_evidence_policy_version"] = OUTLINE_EVIDENCE_POLICY_VERSION
+        prepared.setdefault("recovery_session", {}).update(
+            outline_mode="incremental_candidates_validated", recovery_selection_mode="neurosymbolic",
+            outline_context_retrieval=True, action_horizon="1", candidate_bound=5, candidate_count="auto")
         prepared["primitive_support_semantics"] = "successor_primitive_union"
         prepared["nominal_continuation_semantics"] = "recorded_unfinished_tasks"
         prepared["public_safety_context_version"] = 1
@@ -810,6 +862,17 @@ class PartSlippageRecovery:
         prepared["physical_evidence"]["physical_preview_contract_version"] = 7
         prepared["physical_evidence"]["owner_projection_clock_version"] = 1
         physical = prepared["physical_evidence"]
+        for jid, calculation in prepared.get("scene_capability_calculations", {}).items():
+            rid = calculation["resource_id"]
+            if rid in physical.get("resource_models", {}):
+                physical["resource_models"][rid]["static_capabilities"] = deepcopy(calculation["static_capabilities"])
+        from .outline_endpoint_evidence import POLICY_VERSION
+
+        physical["endpoint_evidence_policy_version"] = POLICY_VERSION
+        physical["outline_evidence_policy_version"] = OUTLINE_EVIDENCE_POLICY_VERSION
+        description = (self._observations.get("planning_scene_capture") or {}).get("robot_description")
+        if description is not None:
+            physical["endpoint_robot_description"] = description
         if "processing_observations" in self._observations:
             from cais_spade_llm.recovery_framework.recovery_observations import (
                 processing_capture_compatibility, recorded_processing_fields,
@@ -847,7 +910,8 @@ class PartSlippageRecovery:
             model["static_capabilities"] = deepcopy(recorded)
         for jid, evidence in self._observations.get("resource_evidence", {}).items():
             if jid in prepared.get("recovery_resources", {}):
-                prepared["recovery_resources"][jid]["resource_evidence"] = deepcopy(evidence)
+                prepared["recovery_resources"][jid]["resource_evidence"] = (
+                    self.agent.resources[jid].get_recovery_resource_evidence() if self.offline else deepcopy(evidence))
         if "pending_nodes" in self._observations:
             prepared["saved_pending_nodes"] = deepcopy(self._observations["pending_nodes"])
         prepared["completed_task_ids"] = deepcopy(self._observations.get("completed_task_ids") or [])
@@ -865,7 +929,6 @@ class PartSlippageRecovery:
                      prepared["physical_evidence"].get("recorded_geometry_supplements", {}))
         prepared["outline_evidence_requirements"] = outline_evidence_requirements(prepared)
         write_record(directory / "outline_evidence_requirements.json", prepared["outline_evidence_requirements"])
-        prepared["recovery_session"].update(outline_mode="incremental_validated", recovery_selection_mode="pure_llm")
         self._publish(validation_contract_version=OUTLINE_VALIDATION_CONTRACT_VERSION,
                       primitive_support_semantics=prepared["primitive_support_semantics"],
                       outline_safety_status="pending", execution_authorized=False)
@@ -981,6 +1044,8 @@ class PartSlippageRecovery:
 
         generation = self._generation
         self._prepared["_stop_after_multi_turn_phase"] = stage
+        if self.offline and stage == "primitive":
+            self.agent._composition_cancel_event = self._offline_cancel
         preview_attempts: set[str] = set()
         provider_turns = 0
         while True:
@@ -1018,6 +1083,13 @@ class PartSlippageRecovery:
             if self._stopped or generation != self._generation:
                 raise asyncio.CancelledError()
             session = prepared.get("multi_turn_session_state", {})
+            if stage == "primitive":
+                findings = deepcopy(session.get("primitive_rejection_feedback", []))
+                self._publish(primitives=deepcopy(session.get("accepted_primitive_program", [])),
+                    composition_findings=findings,
+                    composition_feasibility=(findings[0].get("feasibility_status", "NEEDS_CONTEXT") if findings else "in_progress"),
+                    message=f"Validated {len(session.get('accepted_primitive_program', []))} of "
+                            f"{len(session.get('accepted_outline_prefix', []))} recovery events.")
             if (stage == "outline" and session.get("current_phase") in {"primitive_generation", "finalize"}
                     and session.get("accepted_outline_prefix")):
                 return session
@@ -1030,7 +1102,8 @@ class PartSlippageRecovery:
                 "paused_after_outline_turn", "ready_for_primitive_generation", "paused_after_primitive_turn",
                 "paused_after_primitive_generation",
             }:
-                raise ValueError(f"{stage}: {session.get('status', 'No completed output')}")
+                reasons = "; ".join(row.get("reason", "") for row in session.get("primitive_rejection_feedback", [])) if stage == "primitive" else ""
+                raise ValueError(f"{stage}: {reasons or session.get('status', 'No completed output')}")
 
     async def _offline_work(self, operation):
         """Drain detached work before releasing ownership or publishing results."""
@@ -1074,6 +1147,12 @@ class PartSlippageRecovery:
 
     async def _prepare_offline_outline_evidence(self, attempted: set[str]) -> None:
         """Calculate saved-model evidence and retry the unchanged pending task."""
+        from .outline_endpoint_evidence import endpoint_policy
+
+        if endpoint_policy(self._prepared.get("physical_evidence") or {}):
+            session = self._prepared.get("multi_turn_session_state", {})
+            raise ValueError("NEEDS_CONTEXT: recovery outline validation requires additional facts or corrected candidate bindings. "
+                + str(session.get("outline_validation_findings") or "Required validation evidence is unavailable"))
         from cais_spade_llm.recovery_framework.outline_gazebo_evidence import (
             pending_outline_event, prepare_owner_event_evidence,
         )
@@ -1183,24 +1262,15 @@ class PartSlippageRecovery:
             await self._continue_outline()
 
     async def _continue_outline(self) -> None:
-        if self._state["outline_only"]:
-            raise ValueError("This failure scenario stops at Recovery outline review")
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
-            _build_phase_prompt,
-        )
+        from .primitive_composition import start_composition_attempt
 
-        preview, prompt = _build_phase_prompt(self._prepared, self._prepared.get("multi_turn_session_state", {}))
-        write_record(Path(self._state["artifact_directory"]) / "primitive_input_preview.json", {
-            "request_sent": False, "preview_status": "not sent", "prompt_input": preview, "prompt": prompt,
-        })
+        await start_composition_attempt(self)
         self._publish(status="primitive_ready", primitive_status="ready",
                       message="Primitive composition is ready to generate.")
         if not self.offline and self._state["primitive_mode"] == "auto":
             await self._generate_primitives()
 
     async def _generate_primitives(self) -> None:
-        if self._state["outline_only"]:
-            raise ValueError("This failure scenario stops at Recovery outline review")
         from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
             build_multi_turn_recovery_proposal,
         )
@@ -1216,33 +1286,45 @@ class PartSlippageRecovery:
         self._proposal = adapted["recovery_proposal"]
         self._proposal["offline_recovery"] = self.offline
         self._proposal["validation_contract_version"] = self._prepared.get("validation_contract_version")
+        if self._prepared.get("composition_validation_version") == 1:
+            self._proposal["composition_validation_version"] = 1
         if "primitive_support_semantics" in self._prepared:
             self._proposal["primitive_support_semantics"] = self._prepared["primitive_support_semantics"]
         self._proposal["execution_authorized"] = False
         self._proposal["source_observation_fingerprint"] = observation_fingerprint(self._observations)
         write_record(Path(self._state["artifact_directory"]) / "proposal.json", self._proposal)
+        write_record(Path(self._state["artifact_directory"]) / "composition.json", {
+            "composition_validation_version": self._prepared.get("composition_validation_version"),
+            "source_outline_fingerprint": self._prepared.get("composition_source_fingerprint"),
+            "accepted_outline_prefix": self._outline_request["multi_turn_session_state"]["accepted_outline_prefix"],
+            "accepted_primitive_program": session.get("accepted_primitive_program", []),
+            "composition_feasibility": "FEASIBLE", "execution_authorized": False,
+            "cca_composition_status": "not_checked"})
         self._publish(status="offline_completed" if self.offline else "ready_to_execute", primitive_status="completed",
                       primitives=session.get("accepted_primitive_program", []),
+                      composition_validation_version=self._prepared.get("composition_validation_version"),
+                      composition_feasibility="FEASIBLE", execution_authorized=False,
                       message=("Composition completed for review. Execution requires the subsequent runtime CCA integration."
-                               if self._prepared.get("validation_contract_version") == 2 else
+                               if self._prepared.get("validation_contract_version") == 2
+                               or self._prepared.get("composition_validation_version") == 1 else
                                "Offline composition completed. Test in Gazebo before execution." if self.offline
                                else "Primitive composition completed. Review it, then Execute recovery."))
 
     def action(self, action: str, *, feedback: str = "") -> dict:
         """Schedule one explicit operator action and return immediately."""
         status = self._state["status"]
-        if self._state["outline_only"] and action in {"continue_outline", "generate_primitives", "regenerate_primitives", "execute"}:
-            raise ValueError("This failure scenario stops at Recovery outline review")
         if feedback:
             self._publish(operator_assistance=[*self._state["operator_assistance"],
                 {"action": action, "feedback": feedback, "generation": self._generation}])
-        if action == "execute" and self._state.get("validation_contract_version") == 2:
+        if action == "execute" and (self._state.get("validation_contract_version") == 2
+                                    or self._state.get("composition_validation_version") == 1):
             raise ValueError("Outline validation does not authorize execution; runtime CCA integration is pending")
         operations = {
             "prepare": ({"blocked"}, self._begin),
             "generate_outline": ({"outline_ready"}, self._generate_outline),
             "continue_outline": ({"outline_review"}, self._continue_outline),
-            "generate_primitives": ({"primitive_ready"}, self._generate_primitives),
+            "generate_primitives": ({"primitive_ready", "outline_review"} if self.offline else {"primitive_ready"},
+                                    self._generate_primitives_from_review),
             "execute": ({"ready_to_execute"}, self._execute),
         }
         if action in {"regenerate_outline", "regenerate_primitives"}:
@@ -1256,49 +1338,9 @@ class PartSlippageRecovery:
                 else:
                     if not self._outline_request:
                         raise ValueError("Generate the recovery outline first")
-                    self._prepared = deepcopy(self._outline_request)
-                    self._proposal = {}
-                    from cais_spade_llm.agents.shared_information.llm_request_records import recovery_request_directory
-                    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-                        nominal_continuation_context_binding, read_nominal_continuation,
-                    )
+                    from .primitive_composition import start_composition_attempt
 
-                    nominal = self._prepared.get("multi_turn_session_state", {}).get("nominal_continuation_evidence", {})
-                    source_stage = recovery_request_directory(self._prepared, "outline")
-                    binding = None
-                    if "artifact_reference" in nominal:
-                        binding = nominal_continuation_context_binding(self._prepared["multi_turn_session_state"], self._prepared)
-                        read_nominal_continuation(nominal, directory=source_stage, context_binding=binding)
-                    directory = self._new_artifact_directory()
-                    if binding is not None:
-                        import shutil
-
-                        relative = nominal["artifact_reference"]["path"]
-                        destination = directory / "recovery_outline" / relative
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(source_stage / relative, destination)
-                        read_nominal_continuation(nominal, directory=directory / "recovery_outline", context_binding=binding)
-                    session_id = f"{self.runtime.context.run_id}_{self._generation:04d}"
-                    self._prepared.setdefault("recovery_session", {})["session_id"] = session_id
-                    self._prepared["multi_turn_session_state"]["recovery_session_id"] = session_id
-                    self._imported_proposal = None
-                    self._imported_observations = None
-                    self._publish(primitive_artifact_directory=str(directory / "recovery_primitves"))
-                    self._prepared["recovery_debug"].update(
-                        artifact_directory=str(directory), per_turn_debug_dir=str(directory))
-                    self._prepared["recovery_feedback"] = feedback
-                    self._prepared["multi_turn_session_state"].setdefault(
-                        "primitive_rejection_feedback", []).append({"reason": feedback})
-                    write_record(directory / "outline_request.json", self._outline_request)
-                    write_record(directory / "outline.json", {"outline": self._state["outline"]})
-                    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
-                        _build_phase_prompt,
-                    )
-
-                    preview, prompt = _build_phase_prompt(self._prepared, self._prepared["multi_turn_session_state"])
-                    write_record(directory / "primitive_input_preview.json", {
-                        "request_sent": False, "preview_status": "not sent", "prompt_input": preview, "prompt": prompt,
-                    })
+                    await start_composition_attempt(self, feedback=feedback)
                     await self._generate_primitives()
 
             self._schedule(regenerate)
@@ -1308,12 +1350,17 @@ class PartSlippageRecovery:
             self._schedule(operations[action][1])
         return self.snapshot()
 
+    async def _generate_primitives_from_review(self) -> None:
+        if self._state["status"] == "outline_review":
+            await self._continue_outline()
+        await self._generate_primitives()
+
     async def _execute(self) -> None:
-        if self._state["outline_only"]:
-            raise ValueError("This failure scenario stops at Recovery outline review")
         from cais_spade_llm.recovery_framework.slippage_execution import execute_generated_recovery
 
-        if self._state.get("validation_contract_version") == 2 or self._proposal.get("validation_contract_version") == 2:
+        if (self._state.get("validation_contract_version") == 2 or self._proposal.get("validation_contract_version") == 2
+                or self._state.get("composition_validation_version") == 1
+                or self._proposal.get("composition_validation_version") == 1):
             raise ValueError("Outline validation does not authorize execution; runtime CCA integration is pending")
         if self.offline or self._proposal.get("offline_recovery"):
             raise ValueError("Offline proposals require Test in Gazebo before execution")

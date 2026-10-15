@@ -3,9 +3,13 @@ from __future__ import annotations
 """KMR owner calculations over explicitly supplied, recorded observations."""
 
 import math
+from contextvars import ContextVar
 from copy import deepcopy
 
 from cais_spade_llm.recovery_framework.geometry import compose, quaternion, rotate
+
+_cartesian_joint_calculation_cache: ContextVar[dict | None] = ContextVar(
+    "_cartesian_joint_calculation_cache", default=None)
 
 
 def _vector(value, length: int) -> bool:
@@ -122,8 +126,36 @@ def transfer_waypoints(scene: dict, base_pose: list, start: list, target: list) 
     return waypoints
 
 
+def recorded_location(scene: dict, location: str) -> tuple[dict, str]:
+    """Resolve one exact recorded location; ambiguity never selects a source."""
+    declarations = []
+    if isinstance(scene.get(location), dict):
+        declarations.append((scene[location], '/inputs/scene/' + location))
+    for key, value in scene.items():
+        if isinstance(value, list):
+            declarations.extend((row, f'/inputs/scene/{key}/{index}') for index, row in enumerate(value)
+                                if isinstance(row, dict) and row.get('resource_id') == location)
+    if len(declarations) != 1:
+        raise KeyError('One exact recorded location is required: ' + str(location))
+    return declarations[0]
+
+
+def pickup_docking_pose(scene: dict, location: str, part: str) -> list:
+    """Read the part-specific dock or the exact location's recorded common dock."""
+    source, _ = recorded_location(scene, location)
+    if 'KMR_pick_docking_poses' in source:
+        pose = source['KMR_pick_docking_poses'][part]
+        if not _vector(pose, 3):
+            raise ValueError('Recorded KMR pickup dock requires three finite coordinates')
+        return deepcopy(pose)
+    dock = source['KMR_docking_pose']
+    if not _vector(dock, 6) or any(abs(value) > 1e-9 for value in dock[3:5]):
+        raise ValueError('Recorded KMR docking pose requires a planar base pose')
+    return [dock[0], dock[1], dock[5]]
+
+
 def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
-                 base_pose: list, initial: list | None = None) -> dict:
+                 base_pose: list, initial: list | None = None, *, location: str = 'Storage') -> dict:
     """Calculate pickup targets from the same facts used by the execution owner."""
     from cais_spade_llm.recovery_framework.kmr_gazebo import _nearest_pick_orientation
 
@@ -132,35 +164,68 @@ def pick_targets(scene: dict, part: str, observed: list, current_pose: list,
     if initial is not None and (not _pose(initial) or math.dist(observed[:3], initial[:3]) > .01):
         raise ValueError('Storage part moved before target computation')
     config = scene['KMR']['task_execution']
-    orientation = _nearest_pick_orientation(current_pose[3:], scene['Storage']['KMR_pick_orientations_xyzw'][part],
-                                            config['orientation_tolerance_rad'])
+    source, _ = recorded_location(scene, location)
+    calibrated = ('KMR_pick_orientations_xyzw', 'KMR_pick_approach_clearance_m', 'KMR_pick_arm_configurations')
+    if any(field in source for field in calibrated):
+        choices = source['KMR_pick_orientations_xyzw'][part]
+        clearance_m = source['KMR_pick_approach_clearance_m'][part]
+        seed = source['KMR_pick_arm_configurations'][part]
+    else:
+        # These are owner-calculated targets, not inherited geometric proof.
+        # Incomplete location-specific calibration must not use this branch.
+        fixture = source['workholding_pose']
+        tolerance = config['position_tolerance_m']
+        if not _vector(fixture, 6) or not _vector([tolerance], 1) or tolerance <= 0:
+            raise KeyError('Recorded workholding pose and position tolerance')
+        if math.dist(observed[:3], fixture[:3]) > tolerance:
+            raise ValueError('Recorded part pose differs from the requested workholding location')
+        pickup_docking_pose(scene, location, part)
+        choices = [config['pick_orientation_xyzw']]
+        clearance_m = config['approach_clearance_m']
+        seed = config['ik_seed_configurations'][0]
+    if not _vector([clearance_m], 1) or clearance_m <= 0 or not _vector(seed, 7):
+        raise KeyError('Recorded pickup clearance and seven-joint seed')
+    orientation = _nearest_pick_orientation(current_pose[3:], choices, config['orientation_tolerance_rad'])
     target = [*observed[:3], *orientation]
     target[2] += config['grasp_height_m']
     approach = target.copy()
-    approach[2] += scene['Storage']['KMR_pick_approach_clearance_m'][part]
+    approach[2] += clearance_m
     clearance = target.copy()
     clearance[2] += config['minimum_pick_lift_m']
     lift = transport_pose(scene, base_pose, target)
     if lift[2] < clearance[2]:
         raise ValueError('Saved KMR carrying height does not clear the picked part')
     return {'target': target, 'approach': approach, 'lift': lift, 'lift_waypoints': [clearance],
-            'retreat': lift.copy(), 'seed': list(scene['Storage']['KMR_pick_arm_configurations'][part]),
+            'retreat': lift.copy(), 'seed': list(seed),
             'carrying': list(config['carrying_arm_configuration'])}
 
 
 def place_targets(scene: dict, machine: dict, transform: list, current_pose: list,
-                  base_pose: list, fixture: list) -> dict:
-    """Calculate placement poses without establishing workholding clearance."""
+                  base_pose: list, fixture: list | None, *, part_name: str | None = None) -> dict:
+    """Calculate placement poses without establishing clearance or supported rest.
+
+    Recorded slots and workholding specify the destination part pose. Preserve
+    that pose; the separate support calculation must establish resting contact.
+    """
     from cais_spade_llm.recovery_framework.kmr_gazebo import _at_dock, inverse
 
+    dock = machine['KMR_docking_pose']
+    slot = 'slots' in machine
+    if slot:
+        declared = machine['slots'][part_name]
+        if fixture is not None and fixture != declared:
+            raise ValueError('KMR placement fixture conflicts with the recorded slot')
+        fixture = declared
+        dock = machine.get('KMR_pick_docking_poses', {}).get(part_name, dock)
+    if fixture is None:
+        raise KeyError('Recorded placement fixture or slot')
     if not all(_pose(value) for value in (transform, current_pose, base_pose)) or not _vector(fixture, 6):
         raise ValueError('KMR placement needs observed attachment, TCP, base and declared fixture')
-    if not _at_dock(base_pose, machine['KMR_docking_pose']):
+    if not _at_dock(base_pose, dock):
         raise ValueError('KMR is not docked at the declared destination')
     config = scene['KMR']['task_execution']
     destination = [*fixture[:3], *quaternion(fixture[3:])]
     target = compose(destination, inverse(transform))
-    target[2] += .003
     if rotate(target[3:], [0., 0., 1.])[2] > -.999:
         raise ValueError('KMR placement requires a downward-facing grasp')
     approach = target.copy()
@@ -172,6 +237,91 @@ def place_targets(scene: dict, machine: dict, transform: list, current_pose: lis
     return {'target': target, 'approach': approach, 'retreat': retreat, 'destination': destination,
             'transfer_waypoints': transfer_waypoints(scene, base_pose, current_pose, approach),
             'transport': transport, 'withdraw_waypoints': transfer_waypoints(scene, base_pose, retreat, transport)}
+
+
+def _calculate_cartesian_joints(config: dict, names: list, target: list,
+                                seeds: list[list], limits: dict) -> dict | None:
+    """Search bounded owner kinematics; the caller independently checks its FK.
+
+    An unsuccessful finite search is missing evidence. It does not establish
+    that the requested pose is unreachable, collision-free, or executable.
+    """
+    import numpy as np
+    from scipy.optimize import least_squares
+    from scipy.spatial.transform import Rotation
+    from .kmr_motion import bounded_joints
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+
+    cache = _cartesian_joint_calculation_cache.get()
+    identity = recovery_validation_fingerprint([config, names, target, seeds, limits]) if cache is not None else None
+    if cache is not None and identity in cache:
+        return deepcopy(cache[identity])
+
+    by_child = {row['child']: row for row in config['joints']}
+    chain, child = [], config['reference_link']
+    while child != config['root']:
+        if child not in by_child or any(row['child'] == child for row in chain):
+            return None
+        row = by_child[child]
+        if ('frozen_interval' in row and row['frozen_interval'][0] != row['frozen_interval'][1]
+                or row['type'] not in {'fixed', 'revolute', 'continuous', 'prismatic'}):
+            return None
+        chain.append(row)
+        child = row['parent']
+    chain.reverse()
+    if set(names) - {row['name'] for row in chain}:
+        return None
+    root = np.eye(4)
+    root[:3, :3] = (Rotation.from_quat(config['root_quaternion']).as_matrix()
+                       if 'root_quaternion' in config else Rotation.from_euler('xyz', config['root_rpy']).as_matrix())
+    root[:3, 3] = config['root_xyz']
+    origins = []
+    for row in chain:
+        matrix = np.eye(4)
+        matrix[:3, :3] = Rotation.from_euler('xyz', row['rpy']).as_matrix()
+        matrix[:3, 3] = row['xyz']
+        origins.append(matrix)
+    goal = Rotation.from_quat(target[3:])
+
+    def residual(joints):
+        values = dict(zip(names, joints, strict=True))
+        matrix = root.copy()
+        for row, origin in zip(chain, origins, strict=True):
+            matrix = matrix @ origin
+            position = values.get(row['name'], row.get('frozen_position', row.get('frozen_interval', [0.])[0]))
+            change = np.eye(4)
+            axis = np.asarray(row['axis'], dtype=float)
+            if row['type'] in {'revolute', 'continuous'}:
+                norm = np.linalg.norm(axis)
+                if not norm:
+                    raise ValueError('Recorded kinematic joint axis is zero')
+                change[:3, :3] = Rotation.from_rotvec(axis / norm * position).as_matrix()
+            elif row['type'] == 'prismatic':
+                change[:3, 3] = axis * position
+            matrix = matrix @ change
+        return np.concatenate((matrix[:3, 3] - target[:3],
+            (goal.inv() * Rotation.from_matrix(matrix[:3, :3])).as_rotvec()))
+
+    tried = set()
+    for seed in seeds:
+        if not _vector(seed, len(names)) or not bounded_joints(names, seed, limits) or tuple(seed) in tried:
+            continue
+        tried.add(tuple(seed))
+        fit = least_squares(residual, seed,
+            bounds=([limits[name]['lower'] for name in names], [limits[name]['upper'] for name in names]),
+            method='dogbox', max_nfev=500, ftol=1e-12, xtol=1e-12, gtol=1e-12)
+        error = residual(fit.x)
+        if np.linalg.norm(error[:3]) <= 1e-5 and np.linalg.norm(error[3:]) <= 1e-5:
+            result = {'joint_positions': fit.x.tolist(), 'source': 'resource-owned bounded inverse kinematics',
+                'solver': 'scipy.optimize.least_squares', 'method': 'dogbox', 'evaluations': int(fit.nfev),
+                'solver_status': int(fit.status), 'seed': deepcopy(seed), 'max_nfev': 500,
+                'collision_or_path_validated': False, 'execution_authorized': False}
+            if cache is not None:
+                cache[identity] = deepcopy(result)
+            return result
+    if cache is not None:
+        cache[identity] = None
+    return None
 
 
 def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
@@ -218,6 +368,25 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
         if params.get('transform') is not None and params['transform'] != transform:
             return answer('INFEASIBLE', 'Requested transform conflicts with recorded KMR attachment')
         return answer('FEASIBLE', 'Recorded custody and attachment support release capability; placement remains separate', held_part=held)
+    if primitive == 'compute_place_targets':
+        attachment = evidence.get('attachment') or {}
+        transform = attachment.get('grasp_transform', state.get('grasp_transform'))
+        if (part is None or state.get('held_part') is None or attachment.get('attached') is not True
+                or not _pose(transform)):
+            return missing('KMR placement calculation needs recorded part custody and attachment',
+                           'snapshot/held_part', 'attachment')
+        if state['held_part'] != part or params.get('transform') != transform:
+            return answer('INFEASIBLE', 'KMR placement conflicts with recorded part custody or attachment')
+        try:
+            machine, source = recorded_location(scene, state['resource_location'])
+            targets = place_targets(scene, machine, transform, state['current_pose'], state['base_pose'],
+                                    machine.get('workholding_pose'), part_name=part)
+        except KeyError as exc:
+            return missing('KMR placement calculation lacks recorded input: ' + str(exc), 'inputs/scene', 'snapshot')
+        except ValueError as exc:
+            return answer('INFEASIBLE', str(exc))
+        return answer('FEASIBLE', 'KMR owner calculated placement targets; access and rest remain separate',
+                      calculated_targets=targets, source=source)
     if primitive in {'grasp_part', 'attach_part', 'detect_parts', 'compute_pick_targets'}:
         if part is None:
             return missing('The originating part binding is required', 'state/part_name')
@@ -232,7 +401,10 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
                 return answer('INFEASIBLE', 'KMR already holds a conflicting part')
         if primitive == 'compute_pick_targets':
             try:
-                targets = pick_targets(scene, part, pose, state['current_pose'], state['base_pose'], params.get('initial'))
+                location = recorded.get('resource_location', state.get('resource_location'))
+                if not isinstance(location, str):
+                    return missing('KMR pickup requires an exact recorded location', 'snapshot/resource_location')
+                targets = pick_targets(scene, part, pose, state['current_pose'], state['base_pose'], params.get('initial'), location=location)
             except KeyError as exc:
                 return missing('KMR pickup calculation lacks recorded input: ' + str(exc), 'snapshot', 'inputs/scene/Storage')
             except ValueError as exc:
@@ -312,19 +484,31 @@ def check_kmr_primitive_capability(*, primitive: str, params: dict, task: dict,
                     and recorded.get('source') and recorded.get('params') == params
                     and _vector(recorded.get('joint_positions'), 7)):
                 candidates.append(recorded['joint_positions'])
-        for candidate in candidates:
-            if not bounded_joints(names, candidate, limits):
-                continue
-            transforms = kinematic_transforms(config, {name: interval(value)
-                for name, value in zip(names, candidate, strict=True)})
-            calculated = representative_pose(transforms[config['reference_link']])
-            # This is an endpoint kinematic witness, not a collision or path proof.
-            if (math.dist(calculated[:3], target[:3]) <= 1e-5
-                    and abs(sum(a*b for a, b in zip(calculated[3:], target[3:], strict=True))) >= 1 - 1e-10):
-                return answer('FEASIBLE', 'Recorded KMR joint witness reproduces the requested TCP by owner FK; motion interval remains separate',
-                              joint_positions=deepcopy(candidate), calculated_pose=calculated,
-                              configuration_fingerprint=recovery_validation_fingerprint(config))
-        return missing('KMR Cartesian capability requires recorded inverse-kinematic or matching native path evidence',
+        calculated = None
+        for index in range(2):
+            if index == 1:
+                calculated = _calculate_cartesian_joints(config, names, target,
+                    [*candidates, kmr.get('task_execution', {}).get('carrying_arm_configuration'),
+                     *kmr.get('task_execution', {}).get('ik_seed_configurations', [])], limits)
+                if calculated is None:
+                    break
+                candidates = [calculated['joint_positions']]
+            for candidate in candidates:
+                if not bounded_joints(names, candidate, limits):
+                    continue
+                transforms = kinematic_transforms(config, {name: interval(value)
+                    for name, value in zip(names, candidate, strict=True)})
+                pose = representative_pose(transforms[config['reference_link']])
+                # Independently check a calculated witness with the same owner
+                # FK used for recorded witnesses; a solver status is not proof.
+                if (math.dist(pose[:3], target[:3]) <= 1e-5
+                        and abs(sum(a*b for a, b in zip(pose[3:], target[3:], strict=True))) >= 1 - 1e-10):
+                    return answer('FEASIBLE',
+                        ('Calculated' if calculated else 'Recorded') + ' KMR joint witness reproduces the requested TCP by owner FK; motion interval remains separate',
+                        joint_positions=deepcopy(candidate), calculated_pose=pose,
+                        configuration_fingerprint=recovery_validation_fingerprint(config),
+                        **({'endpoint_calculation': calculated} if calculated else {}))
+        return missing('Bounded KMR endpoint search found no independently verified joint witness; reachability is unresolved',
                        'primitive_capability_evidence/' + primitive)
     return missing('KMR owner calculation requires additional recorded parameters', 'state', 'primitive_capability_evidence/' + primitive)
 
@@ -357,15 +541,15 @@ def coordinate_parameters(bindings: dict, scene: dict) -> tuple[dict, dict]:
     """
     parameters, sources = deepcopy(bindings), {}
     location = bindings.get('observed_resource_location')
-    declarations = [(row['KMR_docking_pose'], f'/inputs/scene/machines/{index}/KMR_docking_pose')
-                    for index, row in enumerate(scene.get('machines', []))
-                    if row.get('resource_id') == location and 'KMR_docking_pose' in row]
-    if location == 'Storage' and 'KMR_docking_pose' in scene.get('Storage', {}):
-        declarations.append((scene['Storage']['KMR_docking_pose'], '/inputs/scene/Storage/KMR_docking_pose'))
     if location is not None:
-        if len(declarations) != 1 or not _vector(declarations[0][0], 6):
+        try:
+            declaration, reference = recorded_location(scene, location)
+        except KeyError as exc:
+            raise ValueError('KMR requested location lacks one declared docking pose: ' + str(location)) from exc
+        pose = declaration.get('KMR_docking_pose')
+        reference += '/KMR_docking_pose'
+        if not _vector(pose, 6):
             raise ValueError('KMR requested location lacks one declared docking pose: ' + str(location))
-        pose, reference = declarations[0]
         for name, value in zip(('x', 'y', 'yaw'), (pose[0], pose[1], pose[5]), strict=True):
             if name not in parameters:
                 parameters[name] = value
@@ -413,10 +597,13 @@ def prepare_kmr_primitive_parameters(*, task: dict, recovery_des_model: dict,
             if part is not None and _pose(pose):
                 state['initial'] = deepcopy(pose)
             if transition['event_name'] == 'pick_approach':
-                state['pickup_pose'] = deepcopy(scene['Storage']['KMR_pick_docking_poses'][part])
+                location = bindings['origin_resource_location']
+                declaration, _ = recorded_location(scene, location)
+                state['pickup_pose'] = pickup_docking_pose(scene, location, part)
                 state['pickup_waypoints'] = []  # The declared owner dispatch uses no intermediate pickup waypoints.
             if transition['event_name'] in {'pick_approach', 'pick_part'}:
-                targets = pick_targets(scene, part, pose, snapshot['current_pose'], snapshot['base_pose'])
+                targets = pick_targets(scene, part, pose, snapshot['current_pose'], snapshot['base_pose'],
+                                       location=bindings['origin_resource_location'])
                 state.setdefault('previous', {})['pick_targets'] = deepcopy(targets)
                 outputs.append({'event_name': transition['event_name'], 'parameter_bindings': deepcopy(bindings),
                                 'store_as': 'pick', 'output': targets, 'source': root + '/observed_parts/' + part})
@@ -442,13 +629,13 @@ def prepare_kmr_primitive_parameters(*, task: dict, recovery_des_model: dict,
                 if snapshot.get('held_part') is not None and part in (None, snapshot['held_part']):
                     state.setdefault('previous', {})['grasp_transform'] = deepcopy(attachment['grasp_transform'])
             if transition['event_name'] in {'place_approach', 'place_release'}:
-                machine = next(row for row in scene['machines'] if row['resource_id'] == bindings['destination_location'])
+                machine, reference = recorded_location(scene, bindings['destination_location'])
                 transform = state['previous']['grasp_transform']
                 targets = place_targets(scene, machine, transform, snapshot['current_pose'],
-                                        snapshot['base_pose'], machine['workholding_pose'])
+                                        snapshot['base_pose'], machine.get('workholding_pose'), part_name=part)
                 state.setdefault('previous', {})['place_targets'] = deepcopy(targets)
                 outputs.append({'event_name': transition['event_name'], 'parameter_bindings': deepcopy(bindings),
-                                'store_as': 'place', 'output': targets, 'source': root + '/inputs/scene/machines'})
+                                'store_as': 'place', 'output': targets, 'source': root + reference})
         except (KeyError, ValueError, TypeError, StopIteration) as exc:
             missing.append({'ref': root + '/snapshot', 'event_name': transition['event_name'],
                             'parameter_bindings': deepcopy(bindings), 'reason': str(exc)})
@@ -464,6 +651,16 @@ def prepare_kmr_primitive_parameters(*, task: dict, recovery_des_model: dict,
                 name not in bindings or 'equals' not in declaration or
                 recovery_validation_fingerprint(declaration['equals']) == recovery_validation_fingerprint(bindings[name])
                 for name, declaration in event.get('parameter_bindings', {}).items())]
+        for event in descriptor['events']:
+            if (resource_evidence.get('endpoint_evidence_policy_version') in (1, 2)
+                    and event['event_name'] == 'move_to_location' and snapshot.get('held_part') is not None):
+                steps = event.get('program_variants', {}).get('carrying', {}).get('steps', [])
+                original = event.get('primitive_support', [])
+                if (steps and [(row['id'], row['op']) for row in steps]
+                        == [(row['id'], row['primitive']) for row in original]):
+                    # The carrying variant adds the owner's attachment argument;
+                    # it does not change the independently derived primitive set.
+                    event['primitive_support'] = [dict(deepcopy(row), primitive=row['op']) for row in steps]
         prepared = prepare_resource_primitive_parameters(task=task, recovery_des_model=descriptor,
             recovery_snapshot=recovery_snapshot, resource_evidence=evidence, resource_jid=resource_jid,
             calculated_step_outputs=outputs)

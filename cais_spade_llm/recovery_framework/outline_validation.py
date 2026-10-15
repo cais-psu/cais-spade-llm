@@ -247,8 +247,15 @@ def load_outline_specifications(paths: list[str], root: Path) -> list[dict]:
     return records
 
 
-def outline_evidence_requirements(prepared: dict) -> dict:
+def outline_evidence_requirements(prepared: dict, *, task: dict | None = None,
+                                  snapshot: dict | None = None, model: dict | None = None,
+                                  physical_input: dict | None = None) -> dict:
     """Record which saved declarations and physical facts selected APs require."""
+    if task is not None:
+        from .outline_evidence_policy import event_evidence_requirements
+
+        return event_evidence_requirements(task=task, snapshot=snapshot or {}, model=model or {},
+            physical_input=physical_input or {}, specifications=prepared.get("outline_safety_specifications"))
     from cais_spade_llm.agents.central_controller.ppr_ap import physical_ap_kind
 
     fields = {
@@ -278,26 +285,90 @@ def outline_evidence_requirements(prepared: dict) -> dict:
                  for jid, entry in prepared.get("recovery_resources", {}).items()}
     return {"rules": rules, "resources": resources,
             "physical_evidence_fingerprint": recovery_validation_fingerprint(prepared.get("physical_evidence")),
-            "motion_evidence": ("Required separately for the proposed event; unordered primitive support "
-                                "does not establish a motion interval"),
+            **({"outline_evidence_policy_version": prepared["outline_evidence_policy_version"]} if prepared.get("outline_evidence_policy_version") in (1, 2) else {}),
+            "motion_evidence": ("Requested per event from selected predicate dependencies and independent capability/effect checks"
+                if prepared.get("outline_evidence_policy_version") in (1, 2) else
+                "Required separately for the proposed event; unordered primitive support does not establish a motion interval"),
             "execution_authorized": False}
 
 
 def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: bool = False) -> dict:
-    """Validate resource support separately from evidence needed by CCA."""
-    from cais_spade_llm.resources.recovery_feasibility import validate_recovery_transition
+    """Validate requested resource support and physical evidence independently.
+
+    Incremental check selections apply only to the detached saved-observation
+    workflow; existing runtime callers retain both checks.
+
+    Args:
+        owner: ResourceAgent or its saved-observation adapter.
+        payload: Exact candidate events and requested check selections.
+        offline: Whether validation uses the detached saved-observation workflow.
+
+    Returns:
+        Candidate-bound owner results, without execution authorization.
+    """
+    from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union, validate_recovery_transition
     from cais_spade_llm.resources.recovery_geometry import project_outline_evidence
 
-    snapshot = deepcopy(owner.get_recovery_snapshot())
-    model = deepcopy(owner.recovery_des_model(snapshot=snapshot))
     semantics = payload.get("primitive_support_semantics")
+    check_ra = payload.get("check_ra_feasibility", True)
+    check_physical = payload.get("check_physical_evidence", True)
+    if type(check_ra) is not bool or type(check_physical) is not bool:
+        raise ValueError("Outline check selections must be booleans")
+    if not offline and not (check_ra and check_physical):
+        raise ValueError("Incremental outline checks require saved observations")
+    snapshot = deepcopy(owner.get_recovery_snapshot())
+    try:
+        model = deepcopy(owner.recovery_des_model(snapshot=snapshot))
+    except ValueError as exc:
+        if not offline or not str(exc).startswith("NEEDS_CONTEXT:"):
+            raise
+        results = []
+        for candidate in payload.get("candidates", []):
+            task = candidate["task"]
+            if task.get("resource_jid") != str(owner.jid):
+                raise ValueError("Outline candidate does not identify the validating ResourceAgent")
+            requests = [f"/resources/{owner.jid}/recovery_des_model"]
+            results.append({"candidate_index": candidate.get("candidate_index", 0),
+                "event_id": candidate.get("event_id", task.get("outline_id")),
+                "candidate_fingerprint": recovery_validation_fingerprint(task),
+                "allowed": False if check_ra else None,
+                "feasibility_status": "NEEDS_CONTEXT" if check_ra else "not_checked",
+                "geometry_evidence": {"status": "needs_context" if check_physical else "not_checked",
+                    "unresolved": [str(exc)] if check_physical else [], "context_requests": requests if check_physical else [],
+                    "execution_authorized": False},
+                "reason": str(exc), "context_requests": requests,
+                "validation_contract_version": OUTLINE_VALIDATION_CONTRACT_VERSION,
+                **({"primitive_support_semantics": semantics} if semantics is not None else {}),
+                "findings": [{"constraint_owner": "resource", "constraint_code": "resource_validation_unavailable",
+                              "reason": str(exc)}], "execution_authorized": False, "planning_only": True})
+        return {"validator_jid": str(owner.jid), "snapshot": snapshot,
+            "snapshot_fingerprint": recovery_validation_fingerprint(snapshot), "recovery_des_model": {},
+            "recovery_des_model_fingerprint": None, "results": results,
+            "evidence_source": "saved_observations", "execution_authorized": False}
+    captured_model = deepcopy(model)
     results = []
     for candidate in payload.get("candidates", []):
+        model = deepcopy(captured_model)
         task = deepcopy(candidate["task"])
-        physical = candidate.get("physical_input") or {}
-        projected = deepcopy(physical.get("projected_snapshot") or snapshot)
+        physical = deepcopy(candidate.get("physical_input") or {})
+        if payload.get("outline_evidence_policy_version") in (1, 2):
+            from .outline_evidence_policy import sanitize_validation_input
+
+            physical["outline_evidence_policy_version"] = payload["outline_evidence_policy_version"]
+            physical.setdefault("projected_snapshot", deepcopy(snapshot))
+            sanitize_validation_input(physical, task.get("resource_jid"))
+        projected = deepcopy(physical.get("projected_snapshot", snapshot)
+            if payload.get("outline_evidence_policy_version") in (1, 2) else physical.get("projected_snapshot") or snapshot)
         part = deepcopy(physical.get("part_context") or {})
-        if task.get("resource_jid") != str(owner.jid):
+        if not check_ra:
+            if (task.get("resource_jid") != str(owner.jid)
+                    or physical.get("base_snapshot_fingerprint") not in (None, recovery_validation_fingerprint(snapshot))
+                    or physical.get("base_model_fingerprint") not in (None, recovery_validation_fingerprint(model))):
+                raise ValueError("Outline candidate identifiers or recorded owner bindings differ")
+            result = {"allowed": None, "feasibility_status": "not_checked", "findings": [],
+                      "primitive_support": derive_primitive_union(task=task, recovery_des_model=model,
+                                                                 recovery_snapshot=projected)}
+        elif task.get("resource_jid") != str(owner.jid):
             result = {"allowed": False, "feasibility_status": "INFEASIBLE",
                       "reason": "Proposed resource does not match the validating ResourceAgent"}
         elif physical.get("base_snapshot_fingerprint") not in (None, recovery_validation_fingerprint(snapshot)):
@@ -321,8 +392,13 @@ def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: boo
                 else:
                     result = evaluator(
                         task=task, recovery_des_model=calculation_model, recovery_snapshot=projected,
-                        physical_input={**deepcopy(physical), "primitive_support_semantics": semantics})
-                    if calculation_model is not model:
+                        physical_input={**deepcopy(physical), "primitive_support_semantics": semantics,
+                                        "check_physical_evidence": check_physical,
+                                        "recovery_session_id": payload.get("recovery_session_id", "")})
+                    if result.get("additional_binding_record"):
+                        model = deepcopy(result["calculation_model"])
+                        physical = deepcopy(result["calculation_physical_input"])
+                    elif calculation_model != captured_model:
                         result["successor_calculation"] = {
                             "source_model_fingerprint": model["source_model_fingerprint"],
                             "snapshot_fingerprint": recovery_validation_fingerprint(projected),
@@ -343,12 +419,38 @@ def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: boo
                       execution_authorized=False, planning_only=True)
         if semantics is not None:
             result["primitive_support_semantics"] = semantics
-        if result.get("allowed") is True and semantics == "successor_primitive_union":
+        if not check_physical:
+            result["geometry_evidence"] = {"status": "not_checked", "execution_authorized": False}
+            result.setdefault("findings", [] if result.get("allowed") or not check_ra else [{
+                "validation_category": "transition_feasibility", "constraint_owner": "resource",
+                "constraint_code": "resource_validation_unavailable" if result.get("feasibility_status") == "NEEDS_CONTEXT"
+                else "transition_feasibility_rejected", "reason": result.get("reason", ""),
+            }])
+            results.append(result)
+            continue
+        resource_allowed = result.get("allowed") is True or not check_ra
+        if resource_allowed and semantics == "successor_primitive_union":
             # This owner interface accepts event evidence, never the unordered
             # primitive union. A missing physical projection cannot undo RA's
             # independently established capability result.
+            from .outline_evidence_policy import policy_enabled, project_selected_successor, evidence_coverage
+
+            from .outline_endpoint_evidence import endpoint_policy
+
+            bounded = endpoint_policy(physical.get("physical_evidence") or {})
+            selective = policy_enabled(payload) or bounded
+            requirements, selected = None, None
+            if selective:
+                requirements = outline_evidence_requirements(
+                    {"outline_safety_specifications": physical.get("outline_safety_specifications")},
+                    task=task, snapshot=projected, model=model, physical_input=physical)
+                physical = {**physical, "outline_evidence_policy_version": payload.get("outline_evidence_policy_version", 1), "evidence_requirements": requirements}
+                selected = project_selected_successor(task=task, snapshot=projected, model=model,
+                    physical_input=physical, requirements=requirements)
             projector = getattr(owner, "project_recovery_outline_event", None)
-            if callable(projector):
+            if selected is not None:
+                result["geometry_evidence"] = selected
+            elif callable(projector):
                 result["geometry_evidence"] = deepcopy(projector(
                     task=deepcopy(task), recovery_snapshot=deepcopy(projected),
                     recovery_des_model=deepcopy(model), physical_input=deepcopy(physical)))
@@ -360,13 +462,13 @@ def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: boo
                     "requires_projection": True, "execution_authorized": False,
                 }
             from cais_spade_llm.resources.machine.machine_jobs import missing_processing_projection
-            missing_processing = missing_processing_projection(physical.get("physical_evidence") or {},
-                                                                 result["geometry_evidence"])
+            missing_processing = ([] if selected is not None else missing_processing_projection(
+                physical.get("physical_evidence") or {}, result["geometry_evidence"]))
             if missing_processing:
                 result["geometry_evidence"].update(status="needs_context", interval_complete=False,
                     unresolved=["Processing over the proposed interval is unresolved: " + ", ".join(missing_processing)],
                     context_requests=["/physical_evidence/processing_observations"], requires_projection=True)
-            if result["geometry_evidence"].get("status") != "projected":
+            if result["geometry_evidence"].get("status") != "projected" and not bounded:
                 from cais_spade_llm.resources.recovery_geometry import outline_event_binding
 
                 scene = physical.get("physical_evidence") or {}
@@ -397,8 +499,10 @@ def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: boo
 
             geometry = result["geometry_evidence"]
             compatibility = projection_capture_compatibility(
-                physical=physical.get("physical_evidence") or {}, task=task,
-                resource_evidence=physical.get("resource_evidence") or {}, projection=geometry)
+                physical={**(physical.get("physical_evidence") or {}),
+                    **({"outline_safety_specifications": physical.get("outline_safety_specifications")} if selective else {})}, task=task,
+                resource_evidence=physical.get("resource_evidence") or {},
+                projection={} if selected is not None else geometry)
             geometry["capture_compatibility"] = compatibility
             if compatibility["status"] == "NEEDS_CONTEXT" and geometry.get("status") != "rejected":
                 missing = [row for row in compatibility["checks"] if row["status"] == "NEEDS_CONTEXT"]
@@ -407,7 +511,15 @@ def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: boo
                     context_requests=list(dict.fromkeys([*geometry.get("context_requests", []),
                         *(ref for row in missing for ref in row.get("context_requests", []))])),
                     requires_projection=True, execution_authorized=False)
-        elif result.get("allowed") is True:
+            if selective:
+                geometry["outline_evidence_policy_version"] = payload.get("outline_evidence_policy_version", 1)
+                geometry["evidence_requirements"] = deepcopy(requirements)
+                geometry["evidence_coverage"] = evidence_coverage(requirements=requirements, projection=geometry)
+                geometry.setdefault("projection_reasons", deepcopy(requirements["reasons"]))
+        elif resource_allowed and physical.get("physical_evidence", {}).get("endpoint_evidence_policy_version") in (1, 2):
+            result.update(allowed=False, feasibility_status="NEEDS_CONTEXT",
+                reason="Endpoint validation requires successor_primitive_union owner semantics")
+        elif resource_allowed:
             evidence = deepcopy(physical.get("physical_evidence") or {})
             captured = deepcopy(evidence)
             evidence["step_evidence"] = {}
@@ -447,14 +559,23 @@ def validate_resource_outline_payload(owner: Any, payload: dict, *, offline: boo
         results.append(result)
     return {"validator_jid": str(owner.jid), "snapshot": snapshot,
             "snapshot_fingerprint": recovery_validation_fingerprint(snapshot),
-            "recovery_des_model": model,
-            "recovery_des_model_fingerprint": model.get("descriptor_fingerprint"),
+            "recovery_des_model": captured_model,
+            "recovery_des_model_fingerprint": captured_model.get("descriptor_fingerprint"),
             "evidence_source": "saved_observations" if offline else "resource",
             "results": results, "execution_authorized": False}
 
 
-def validate_safety_outline_payload(payload: dict, *, validator_jid: str = "cca") -> dict:
-    """Evaluate each frozen rule separately without granting execution permission."""
+def validate_safety_outline_payload(payload: dict, *, validator_jid: str = "cca", offline: bool = False) -> dict:
+    """Evaluate each frozen rule separately without granting execution permission.
+
+    Args:
+        payload: Candidate-bound evidence, selected specifications, and monitor history.
+        validator_jid: Existing CCA identifier recorded in the reply.
+        offline: Allow supported state-only evidence from saved owner declarations.
+
+    Returns:
+        CCA results and unchanged history when a candidate cannot be admitted.
+    """
     from cais_spade_llm.agents.central_controller.outline_evidence_safety import (
         validate_outline_evidence_safety,
     )
@@ -466,6 +587,40 @@ def validate_safety_outline_payload(payload: dict, *, validator_jid: str = "cca"
         before = deepcopy(safety.get("monitor_context") or {})
         checks, after = [], deepcopy(before)
         projection = safety.get("projection") or {}
+        if projection.get("state_only") is True:
+            from .outline_checks import state_only_projection
+
+            if not offline or payload.get("check_physical_evidence") is not False:
+                raise ValueError("State-only outline checks require saved observations and bypassed physical evidence")
+            source = safety["evidence_input"]
+            if (source["task"] != safety["task"]
+                    or recovery_validation_fingerprint(source["task"]) != safety["candidate_fingerprint"]):
+                raise ValueError("Evidence requirements belong to a different proposed candidate")
+            checked = state_only_projection(task=source["task"], snapshot=source["snapshot"],
+                model=source["model"], physical_input=source["physical_input"],
+                specifications=documents, monitor_context=before)
+            if recovery_validation_fingerprint(checked) != recovery_validation_fingerprint(projection):
+                raise ValueError("CCA state evidence differs from the recorded owner declarations")
+        from .outline_evidence_policy import check_evidence_policy, policy_enabled
+
+        if (policy_enabled(payload) and projection.get("state_only") is not True and projection.get("status") != "rejected"
+                and projection.get("physical_motion_unresolved") is not True):
+            try:
+                source = safety["evidence_input"]
+                if (source["task"] != safety["task"]
+                        or recovery_validation_fingerprint(source["task"]) != safety["candidate_fingerprint"]):
+                    raise ValueError("Evidence requirements belong to a different proposed candidate")
+                check_evidence_policy(task=source["task"], snapshot=source["snapshot"], model=source["model"],
+                    physical_input=source["physical_input"], specifications=documents, projection=projection)
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                results.append({"candidate_index": candidate.get("candidate_index", 0),
+                    "event_id": candidate.get("event_id"), "is_safe": False, "validation_status": "unresolved",
+                    "formal_safety_status": "not_checked", "checks": [], "reason": str(exc), "monitor_context_before": before,
+                    "monitor_context_after": deepcopy(before), "candidate_fingerprint": safety.get("candidate_fingerprint"),
+                    "evidence_requirements": deepcopy(projection.get("evidence_requirements")),
+                    "evidence_coverage": deepcopy(projection.get("evidence_coverage")),
+                    "execution_authorized": False, "planning_only": True})
+                continue
         if projection.get("status") == "rejected" and projection.get("owner_effect_rejected") is True:
             results.append({"candidate_index": candidate.get("candidate_index", 0),
                 "event_id": candidate.get("event_id"), "is_safe": False, "validation_status": "rejected",

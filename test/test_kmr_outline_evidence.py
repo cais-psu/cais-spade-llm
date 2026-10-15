@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import hashlib
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -117,6 +119,37 @@ def test_exact_kmr_move_joints_and_rotate_joint_names():
     assert rotated["joint_target"]["position"][6] == pytest.approx(1.5707963267948966)
 
 
+@pytest.mark.parametrize('defect', ['', 'part', 'declared_part', 'coordinate', 'duplicate'])
+def test_initial_state_separates_proposal_part_context_from_movement_arguments(monkeypatch, defect):
+    from cais_spade_llm.recovery_framework import kmr_outline_evidence, kmr_recovery
+
+    physical, _, _ = motion_fixture()
+    task = {'resource_jid': 'KMR@localhost', 'part_name': 'gear_small'}
+    declared = {'task': {'event_name': 'move_to_location', 'parameters': {'x': 1., 'y': 2., 'yaw': 0.}}}
+    parameters = {**declared['task']['parameters'], 'part_name': task['part_name']}
+    if defect == 'part':
+        parameters['part_name'] = 'KET4_Square_4mm'
+    elif defect == 'coordinate':
+        parameters['x'] = 3.
+    names = {name: {} for name in declared['task']['parameters']}
+    if defect == 'declared_part':
+        names['part_name'] = {'required': True}
+    record = {'event_name': 'move_to_location', 'parameter_bindings': parameters,
+              'calculated_state': {'previous': {'held_part': 'gear_small'}}}
+    calculations = [record, deepcopy(record)] if defect == 'duplicate' else [record]
+    monkeypatch.setattr(kmr_recovery, 'prepare_kmr_primitive_parameters',
+        lambda **kwargs: {'parameter_calculations': deepcopy(calculations), 'conflicts': []})
+    monkeypatch.setattr(kmr_outline_evidence, '_program', lambda *args: {'parameter_bindings': names})
+    before = deepcopy((task, declared, calculations, physical))
+    if defect:
+        with pytest.raises(ValueError, match='unique recorded contributor'):
+            kmr_outline_evidence._initial_state(task, {}, {}, physical, {}, declared)
+    else:
+        state = kmr_outline_evidence._initial_state(task, {}, {}, physical, {}, declared)
+        assert state == record['calculated_state']
+    assert (task, declared, calculations, physical) == before
+
+
 def test_route_or_seed_is_not_substituted_for_native_motion():
     physical, _, _ = motion_fixture()
     with pytest.raises(ValueError, match="base-controller"):
@@ -131,6 +164,69 @@ def test_base_model_does_not_override_a_conflicting_observation():
     physical["snapshot"]["resources"]["KMR"]["base_pose"] = [1., 0., 0., 0., 0., 0., 1.]
     with pytest.raises(ValueError, match="disagree"):
         _base_pose(physical)
+
+
+@pytest.mark.parametrize('change', [None, 'source', 'root', 'axis', 'origin', 'mimic', 'nonplanar',
+    'boolean', 'frame', 'missing_joint', 'duplicate_joint', 'malformed'])
+def test_private_base_projection_uses_the_bound_physical_pose_and_declared_chain(change):
+    from cais_spade_llm.recovery_framework.kmr_outline_evidence import _project_base_state
+
+    physical, _, _ = motion_fixture()
+    pose = [1.5, -2., 0., 0., 0., math.sin(.15), math.cos(.15)]
+    configuration = physical['resource_models']['KMR']['configuration']
+    if change == 'nonplanar':
+        pose[2] = .1
+    elif change == 'boolean':
+        pose[0] = True
+    configuration.update(root_xyz=pose[:3], root_quaternion=pose[3:])
+    physical['snapshot']['resources']['KMR']['base_pose'] = deepcopy(pose)
+    names = ['KMR_base_x_joint', 'KMR_base_y_joint', 'KMR_base_yaw_joint', 'unrelated_joint']
+    description = '<robot name="recorded">' + ''.join(
+        f'<joint name="{name}" type="{kind}"><parent link="{parent}"/><child link="{child}"/>'
+        f'<axis xyz="{axis}"/></joint>' for name, kind, parent, child, axis in (
+            (names[0], 'prismatic', 'world', 'KMR_base_x_link', '1 0 0'),
+            (names[1], 'prismatic', 'KMR_base_x_link', 'KMR_base_y_link', '0 1 0'),
+            (names[2], 'continuous', 'KMR_base_y_link', 'KMR_base_link', '0 0 1'))) + '</robot>'
+    if change == 'axis':
+        description = description.replace('xyz="1 0 0"', 'xyz="0 1 0"')
+    elif change == 'origin':
+        description = description.replace('<axis', '<origin xyz="1 0 0"/><axis', 1)
+    elif change == 'mimic':
+        description = description.replace('<axis', '<mimic joint="unrelated_joint"/><axis', 1)
+    elif change == 'malformed':
+        description = '<robot'
+    configuration['description_sha256'] = hashlib.sha256(description.encode()).hexdigest()
+    if change == 'source':
+        description += ' '
+    elif change == 'root':
+        physical['snapshot']['resources']['KMR']['base_pose'][0] += 1.
+    elif change == 'frame':
+        physical['snapshot']['frame'] = 'different'
+    state = {'joint_state': {'name': names, 'position': [99., 88., 77., 66.]}}
+    projected = {'start_state': deepcopy(state), 'planning_scene': {'robot_state': deepcopy(state)}}
+    if change == 'missing_joint':
+        projected['start_state']['joint_state']['name'].pop(0)
+        projected['start_state']['joint_state']['position'].pop(0)
+    elif change == 'duplicate_joint':
+        projected['start_state']['joint_state']['name'][3] = names[0]
+    capture = {'robot_description': description}
+    original = deepcopy(physical), deepcopy(capture)
+    if change is not None:
+        with pytest.raises(ValueError):
+            _project_base_state(capture, physical, projected)
+    else:
+        _project_base_state(capture, physical, projected)
+        assert projected['start_state']['joint_state']['position'] == pytest.approx([1.5, -2., .3, 66.])
+        assert projected['start_state'] == projected['planning_scene']['robot_state']
+    assert (physical, capture) == original
+
+
+def test_scoped_peer_holds_do_not_remove_the_kmr_base_readiness_obligation():
+    from cais_spade_llm.recovery_framework.kmr_outline_evidence import _holds
+
+    physical, _, _ = motion_fixture()
+    with pytest.raises(ValueError, match='base'):
+        _holds(physical, robot_description='<robot name="recorded"/>')
 
 
 def test_offline_preview_never_falls_back_to_live_interfaces(monkeypatch):

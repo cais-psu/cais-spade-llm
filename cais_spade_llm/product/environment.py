@@ -1,6 +1,6 @@
-"""Product-owned requirements, environmental bids, and acknowledged state."""
-
 from __future__ import annotations
+
+"""Product-owned requirements, environmental bids, and acknowledged state."""
 
 import hashlib
 import json
@@ -673,7 +673,14 @@ class EnvironmentProductContext:
 
     @admission_transaction
     def acknowledge(self, acknowledgement: dict) -> bool:
-        """Commit exactly matching acknowledged effects once, atomically."""
+        """Commit exactly matching acknowledged effects once, atomically.
+
+        Args:
+            acknowledgement: Exact resource task acknowledgement and status.
+
+        Returns:
+            Whether this acknowledgement committed a new transition.
+        """
         task_id = acknowledgement.get("task_id")
         if task_id in self.acknowledgements:
             if fingerprint(acknowledgement) != fingerprint(self.acknowledgements[task_id]):
@@ -709,7 +716,7 @@ class EnvironmentProductContext:
         record = {
             "acknowledgement": deepcopy(acknowledgement),
             "before": before,
-            "after": after,
+            "after": deepcopy(after),
             "product_before": deepcopy(self.part_tracker),
             "product_after": deepcopy(products),
         }

@@ -8,12 +8,14 @@ import json
 import math
 import shutil
 import time
+import xml.etree.ElementTree as ET
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
-from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
 from cais_spade_llm.recovery_framework.diagnostics import read_object, write_record
 
 RECORDS = ROOT / "cais_spade_llm/monitor/environment_runs/recovery"
@@ -236,6 +238,50 @@ def checkpoint_fact_fingerprint(observations: dict) -> str:
     return fingerprint(facts)
 
 
+def _checkpoint_root_motion(declaration: dict, description: str | None) -> dict:
+    """Keep mobile roots exact and use declared stationary bounds for fixed roots."""
+    result = {"root_link": declaration["root_link"], "fixed_to_world": False,
+              "linear_speed_max": 0., "angular_speed_max": 0.}
+    if description is None:
+        return result
+    try:
+        robot = ET.fromstring(description)
+    except ET.ParseError as exc:
+        raise ValueError("Checkpoint root has an invalid physics robot description") from exc
+    joints = robot.findall("joint")
+    link_rows = robot.findall("link")
+    links = {row.get("name") for row in link_rows}
+    if (robot.tag != "robot" or len(links) != len(link_rows) or None in links
+            or declaration["root_link"] not in links
+            or any(row.find("parent") is None or row.find("child") is None
+                   or row.find("parent").get("link") not in links
+                   or row.find("child").get("link") not in links for row in joints)):
+        raise ValueError("Checkpoint root needs a complete physics robot description")
+    parents = {row.find("child").get("link"): row for row in joints}
+    if len(parents) != len(joints) or None in parents:
+        raise ValueError("Checkpoint root has ambiguous parent joints")
+    result.update(description_sha256=hashlib.sha256(description.encode()).hexdigest(),
+                  description_node=declaration.get("physics_description_node", declaration.get("description_node")))
+    link, visited = declaration["root_link"], set()
+    while link in parents:
+        if link in visited:
+            raise ValueError("Checkpoint root has a cyclic parent chain")
+        visited.add(link)
+        joint = parents[link]
+        if joint.get("type") != "fixed":
+            return result
+        link = joint.find("parent").get("link")
+    if link != "world":
+        return result
+    for field in ("linear_speed_max", "angular_speed_max"):
+        value = declaration.get("stationary_" + field)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError("Fixed checkpoint root lacks declared stationary_" + field)
+        result[field] = value
+    result["fixed_to_world"] = True
+    return result
+
+
 async def _cancel_checkpoint_motion(runtime, reader, directory: Path) -> dict:
     """Cancel owned handling motion without stopping or pausing machine jobs."""
     if (runtime.setup.get("execution_mode") != "simulation" or not runtime.stopped
@@ -254,9 +300,15 @@ async def _cancel_checkpoint_motion(runtime, reader, directory: Path) -> dict:
     path = directory / "checkpoint_motion_cancellation.json"
     write_record(path, record)
     try:
+        descriptions = record["robot_descriptions"] = {}
         for rid in moving:
             owner = owners.get(rid)
             row = record["resources"][rid] = {"status": "cancelling"}
+            declaration = moving[rid]
+            node = declaration.get("physics_description_node", declaration.get("description_node"))
+            if node and node not in descriptions:
+                descriptions[node] = await asyncio.to_thread(reader.parameter, node, "robot_description")
+            row["root_motion"] = _checkpoint_root_motion(declaration, descriptions.get(node))
             controller = getattr(owner, "_controller", None)
             cancel = getattr(controller, "_cancel_simulation_goal", None)
             worker = getattr(owner, "workflow_worker", None)
@@ -286,7 +338,9 @@ async def _cancel_checkpoint_motion(runtime, reader, directory: Path) -> dict:
                     for field in ("linear_velocity", "angular_velocity"):
                         values = root.get(field)
                         if (not isinstance(values, list) or len(values) != 3
-                                or any(type(value) not in (int, float) or value != 0 for value in values)):
+                                or any(type(value) not in (int, float) or not math.isfinite(value) for value in values)
+                                or math.hypot(*values) > record["resources"][rid]["root_motion"][
+                                    field.replace("velocity", "speed_max")]):
                             raise ValueError("Handling root has not stopped: " + rid + "/" + field)
             except (ValueError, TimeoutError) as exc:
                 record["last_observation_error"] = str(exc)
@@ -581,6 +635,105 @@ def projection_capture_compatibility(*, physical: dict, task: dict,
             "execution_authorized": False}
 
 
+def recorded_capability_evidence(observations: dict) -> dict:
+    """Extract measured arrivals and their recorded checks, never a recovery route.
+
+    Historical records retain their own scene and payload scope. They are not
+    parameter witnesses for a new proposal or evidence of hardware execution.
+    """
+    result = {}
+    for index, transition in enumerate(observations.get("transitions", [])):
+        acknowledgement = transition.get("acknowledgement") or {}
+        execution = transition.get("observations") or {}
+        observed = execution.get("observations") or {}
+        rid, task = acknowledgement.get("resource_id"), acknowledgement.get("task_id")
+        location = observed.get("resource_location")
+        if not isinstance(rid, str) or not isinstance(location, str):
+            continue
+        ref = f"/transitions/{index}"
+        problems = []
+        for field, expected in (("resource_id", rid), ("task_id", task)):
+            if expected is None or execution.get(field) != expected:
+                problems.append(field)
+        if acknowledgement.get("run_id") != observations.get("run_id"):
+            problems.append("run_id")
+        revision = acknowledgement.get("revision")
+        if (type(revision) is not int or type(observations.get("context_revision")) is not int
+                or revision > observations["context_revision"]):
+            problems.append("revision")
+        after = transition.get("after", {}).get(rid, {})
+        if after.get("resource_location") != location:
+            problems.append("resource_location")
+        measurements, checks = [], []
+        for step_index, step in enumerate(observed.get("primitive_results", [])):
+            outcome = step.get("result") or {}
+            if outcome.get("resource_location") != location:
+                continue
+            if step.get("resource_id") != rid or step.get("task_id") != task:
+                problems.append("measurement identity")
+                continue
+            poses = {key: deepcopy(outcome[key]) for key in ("base_pose", "current_pose")
+                     if isinstance(outcome.get(key), list) and len(outcome[key]) in (3, 7)
+                     and all(type(value) in (int, float) and math.isfinite(value) for value in outcome[key])}
+            if poses and step.get("status") == "completed":
+                measurements.append({"ref": ref + f"/observations/observations/primitive_results/{step_index}/result", **poses})
+            for check_index, check in enumerate(step.get("observations", [])):
+                if check.get("operation") not in {
+                    "validated_transport_sweep", "validated_empty_transport_route", "observed_transport_custody"
+                }:
+                    continue
+                checks.append({key: deepcopy(check[key]) for key in (
+                    "operation", "success", "checked_states", "checked_samples", "sample_step_m",
+                    "collision_checks_bypassed", "allowed_relative_error_m", "relative_error_m"
+                ) if key in check} | {"ref": ref + f"/observations/observations/primitive_results/{step_index}/observations/{check_index}"})
+        completed = acknowledgement.get("status") == execution.get("status") == "completed"
+        record = {"event_name": acknowledgement.get("event_name"), "resource_location": location,
+                  "recorded_execution": bool(completed and measurements and not problems),
+                  "geometric_validation": [row["operation"] for row in checks
+                      if not problems and row.get("success") is True and row.get("collision_checks_bypassed") is not True],
+                  "ref": ref, "run_id": acknowledgement.get("run_id"), "revision": revision,
+                  "source": observations.get("evidence_source"), "current_proposal_validated": False,
+                  "measurements": measurements, "checks": checks,
+                  "source_fingerprint": fingerprint(transition),
+                  "scope": {key: deepcopy(observed[key]) for key in (
+                      "part_name", "scene_fingerprint", "scene_asset_fingerprint", "launch_id",
+                      "attached", "grasp_transform", "carrying_arm_configuration"
+                  ) if key in observed}}
+        if "held_part" in after:
+            record["held_part"] = deepcopy(after["held_part"])
+        if problems:
+            record["conflicts"] = sorted(set(problems))
+        if not measurements:
+            record["missing"] = ["measured arrival"]
+        result.setdefault(rid, []).append(record)
+    return result
+
+
+@lru_cache(maxsize=1)
+def _observed_pose_agreement() -> tuple[float, float]:
+    """Read the configured bounds within which two recorded part poses agree."""
+    configuration = json.loads(SCENE_PATH.read_text(encoding="utf-8"))
+    agreement = configuration.get("safety_preparation", {}).get("observed_pose_agreement") or {}
+    return float(agreement.get("position_m", 0.0)), float(agreement.get("orientation_rad", 0.0))
+
+
+def _same_recorded_pose(first: dict, second: dict) -> bool:
+    """Compare two recorded reads of one part within the configured agreement bounds.
+
+    Separate reads of a resting part differ by simulator noise; any larger
+    difference remains a conflict. Without configured bounds, poses must match.
+    """
+    if fingerprint(first) == fingerprint(second):
+        return True
+    position_m, orientation_rad = _observed_pose_agreement()
+    try:
+        distance = math.dist([first[axis] for axis in "xyz"], [second[axis] for axis in "xyz"])
+        dot = abs(sum(first[key] * second[key] for key in ("qx", "qy", "qz", "qw")))
+    except (KeyError, TypeError):
+        return False
+    return distance <= position_m and 2 * math.acos(min(1.0, dot)) <= orientation_rad
+
+
 def restore_recorded_public_facts(prepared: dict, observations: dict) -> dict:
     """Expose saved measurements and requirements in a new prepared attempt.
 
@@ -588,6 +741,10 @@ def restore_recorded_public_facts(prepared: dict, observations: dict) -> dict:
     from symbolic locations and from later accepted projections.
     """
     sources = {}
+    for rid, records in recorded_capability_evidence(observations).items():
+        jid = observations.get("jids", {}).get(rid)
+        if jid in prepared.get("recovery_resources", {}):
+            prepared["recovery_resources"][jid]["capability_evidence"] = deepcopy(records)
     physical = observations.get("physical_evidence", {})
     for name, record in physical.get("parts", {}).items():
         pose = record.get("pose")
@@ -605,7 +762,7 @@ def restore_recorded_public_facts(prepared: dict, observations: dict) -> dict:
                     if row.get("part_name") == name)
         for row in rows:
             existing = row.get("observed_pose")
-            if existing is not None and fingerprint(existing) != fingerprint(measured):
+            if existing is not None and not _same_recorded_pose(existing, measured):
                 raise ValueError("NEEDS_CONTEXT: conflicting recorded observed_pose for " + name)
         source = {key: deepcopy(record[key]) for key in
                   ("source", "frame", "instance_id", "simulation_time", "observed_monotonic") if key in record}
@@ -656,6 +813,8 @@ def restore_recorded_resource_geometry(physical: dict, inputs: dict) -> dict:
                       "instance_id": native.get("instance_id"), "simulation_time": native.get("simulation_time"),
                       "coverage": "endpoint", "motion_interval_supported": False}
         try:
+            if rid in physical.get("invalidated_geometry", {}).get("resources", {}):
+                raise ValueError("Captured geometry was invalidated by an accepted event; supported projection is required")
             if native.get("attachment_complete") is not True or not native.get("instance_id"):
                 raise ValueError("Complete native attachment identity is required")
             config = configurations[rid]
@@ -755,7 +914,16 @@ def offline_preparation_missing(record: dict) -> list[str]:
 
 
 def capture_observations(runtime, failure: dict, *, include_physical: bool = True) -> dict:
-    """Copy reconciled runtime facts before any potentially failing preparation."""
+    """Copy reconciled runtime facts before any potentially failing preparation.
+
+    Args:
+        runtime: Runtime owning the selected simulation failure.
+        failure: Reconciled failure observations and retained task evidence.
+        include_physical: Whether to collect the current physical observations.
+
+    Returns:
+        Saved resource, product, failure, and safety observations.
+    """
     context = runtime.context
     configuration = runtime.setup["failure_scenario"]
     robot_poses = {}
@@ -792,7 +960,7 @@ def capture_observations(runtime, failure: dict, *, include_physical: bool = Tru
     result["physical_evidence"] = (capture_recovery_physical_evidence(runtime) if include_physical else
                                    {"status": "pending", "reason": "Physical capture awaits nominal_idle"})
     result["resource_evidence"] = capture_resource_evidence(runtime, result["physical_evidence"])
-    if "processing_observations" in failure:
+    if "processing_observations" in failure and configuration["scenario"] != "ur5e-1 breakdown":
         result["processing_observations"] = deepcopy(failure.get("checkpoint_processing_observations", failure["processing_observations"]))
         result["processing_shutdown"] = deepcopy(failure.get("processing_shutdown", {}))
         for rid, record in result["processing_observations"].items():
@@ -1479,6 +1647,18 @@ def copy_generation_records(state: dict, source_directory: Path, directory: Path
     return paths
 
 
+@lru_cache(maxsize=512)
+def _observation_list_summary(path: Path, root: Path, modified_ns: int, size: int) -> tuple[dict, str]:
+    # Cache only display metadata; loading and validation always reread the capture.
+    record = read_observations(path, root=root)
+    item = {key: record.get(key) for key in (
+        "source_path", "run_id", "captured_at", "scenario", "offline_ready", "missing",
+    )}
+    item["missing"] = offline_preparation_missing(record)
+    item["offline_ready"] = not item["missing"]
+    return item, observation_fingerprint(record)
+
+
 def list_observations(*, root: Path = RECORDS) -> list[dict]:
     """List each captured input once, retaining links to its offline attempts."""
     captures: dict[str, list[tuple[dict, int]]] = {}
@@ -1487,15 +1667,12 @@ def list_observations(*, root: Path = RECORDS) -> list[dict]:
         if not path.is_file():
             continue
         try:
-            record = read_observations(path, root=root)
+            stat = path.stat()
+            summary, capture_fingerprint = _observation_list_summary(path, root, stat.st_mtime_ns, stat.st_size)
         except (OSError, ValueError, TypeError):
             continue
-        item = {key: record.get(key) for key in (
-            "source_path", "run_id", "captured_at", "scenario", "offline_ready", "missing",
-        )}
+        item = deepcopy(summary)
         item["saved_run_id"] = directory.name
-        item["missing"] = offline_preparation_missing(record)
-        item["offline_ready"] = not item["missing"]
         run_path = directory / "run.json"
         result_time = 0
         try:
@@ -1507,7 +1684,7 @@ def list_observations(*, root: Path = RECORDS) -> list[dict]:
                 result_time = run_path.stat().st_mtime_ns
         except (OSError, ValueError):
             item["result_available"] = False
-        captures.setdefault(observation_fingerprint(record), []).append((item, result_time))
+        captures.setdefault(capture_fingerprint, []).append((item, result_time))
     records = []
     for copies in captures.values():
         # Offline attempts preserve the input content but add source file metadata.

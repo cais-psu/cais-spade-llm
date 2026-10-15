@@ -629,7 +629,13 @@ def _base_trajectory_record(request: Mapping[str, Any]) -> dict:
     first = points[0]['time_from_start']
     if first != {'sec': 0, 'nanosec': 0}:
         raise ValueError('Base motion must begin at zero time')
-    return copy.deepcopy(trajectory)
+    recorded = copy.deepcopy(trajectory)
+    # ROS serialization fills these optional empty arrays. Preserve every
+    # supplied position, velocity and timestamp when comparing the reply.
+    for point in recorded['points']:
+        point.setdefault('accelerations', [])
+        point.setdefault('effort', [])
+    return recorded
 
 
 def preview_result_record(request: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
@@ -671,7 +677,8 @@ def preview_result_record(request: Mapping[str, Any], result: Mapping[str, Any])
         raise ValueError("Completed preview omitted its trajectory")
     if complete and request.get('mode') == 'base_trajectory':
         expected = _base_trajectory_record(request)
-        if any(joint_trajectory.get(field) != expected.get(field) for field in ('joint_names', 'points')):
+        actual = _base_trajectory_record({**request, 'base_trajectory': joint_trajectory})
+        if any(actual.get(field) != expected.get(field) for field in ('joint_names', 'points')):
             raise ValueError('Base preview changed the owner trajectory or its timing')
     support = _support_departure_record(request)
     if support is not None:

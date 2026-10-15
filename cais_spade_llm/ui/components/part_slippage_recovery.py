@@ -3,12 +3,14 @@ from __future__ import annotations
 """Operator controls and exact prompt captures for the Part slippage run."""
 
 import asyncio
+import json
 from pathlib import Path
 
 from nicegui import ui
 
 from cais_spade_llm.recovery_framework import ROOT
-from cais_spade_llm.ui.components.recovery_turns import RecoveryTurns
+from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
+from cais_spade_llm.ui.components.recovery_turns import RecoveryTurns, render_composition_programs
 from cais_spade_llm.ui.evidence import BackgroundSection
 from cais_spade_llm.ui.recovery_evidence import recovery_turns
 from cais_spade_llm.ui.recovery_setup import FAILURE_SCENARIOS
@@ -18,6 +20,22 @@ from cais_spade_llm.ui.refresh import PageRefresh
 def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C901, PLR0915 - shared page controls
     """Render one bridge-owned workflow; navigation only stops page polling."""
     state = bridge.get_part_slippage_example()
+    default_reader = getattr(bridge, "get_default_recovery_observations", None)
+    default_observations = default_reader() if callable(default_reader) else {}
+    if not isinstance(default_observations, dict):
+        default_observations = {}
+    if (state["status"] == "idle" and not state.get("validation_checks_selected") and not state.get("defer_preparation")
+            and state.get("scenario", "Part slippage") in default_observations):
+        state = bridge.set_failure_example_options(source="offline", scenario=state.get("scenario", "Part slippage"),
+            safety_files=state.get("selected_safety_files", []),
+            observation_path=default_observations[state.get("scenario", "Part slippage")],
+            check_ra_feasibility=False, check_physical_evidence=False, check_cca_safety=False,
+            defer_preparation=True)
+    elif (state.get("source") == "offline" and not state.get("busy") and not state.get("defer_preparation")
+            and state.get("scenario") in default_observations):
+        state = bridge.set_failure_example_options(source="offline", scenario=state["scenario"],
+            safety_files=state.get("selected_safety_files", []), observation_path=default_observations[state["scenario"]],
+            **(state.get("validation_checks") or dict.fromkeys(CHECK_FIELDS, False)), defer_preparation=True)
     refresh = PageRefresh(is_active)
     workflow_label = ui.label("Start failure → Recovery outline → Primitive composition → Execute recovery").classes("text-slate-600")
     safety_badge = ui.badge("Gazebo — safety checks deferred").props("color=amber text-color=black")
@@ -28,20 +46,36 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
     fields = {}
     updating = False
     observed_signature = None
-    saved_options = {}
-    saved_records = {}
+    composition_signature = None
     available_safety = []
+    check_fields = {}
+    loading_saved_result = False
+    worked_available = False
+    selection_revision = state.get("selection_revision", 0)
+    saved_options = {path: f"{scenario} · {Path(path).parent.name} · Verified capture"
+                     for scenario, path in default_observations.items()}
+    saved_records = {path: {"source_path": path, "scenario": scenario}
+                     for scenario, path in default_observations.items()}
 
     async def act(action: str, feedback: str = "") -> None:
+        nonlocal loading_saved_result
+        if loading_saved_result:
+            return
         try:
             if action == "start":
                 await bridge.start_failure_example()
             elif action == "load_offline":
-                bridge.load_offline_recovery()
+                loading_saved_result = True
+                update()
+                await asyncio.to_thread(bridge.load_offline_recovery)
             else:
+                if action == "generate_outline" and fields["source"].value == "offline":
+                    action = "generate_outline_fresh"
                 await bridge.part_slippage_action(action, feedback=feedback)
         except (ValueError, RuntimeError, OSError) as exc:
             ui.notify(str(exc), type="negative")
+        finally:
+            loading_saved_result = False
         update()
 
     with ui.card().classes("w-full"):
@@ -76,6 +110,47 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                                      value=selected_safety, label="Safety specifications").classes("w-full").props("use-chips")
         safety_note = ui.label().classes("text-sm text-amber-700")
 
+    with ui.card().classes("w-full") as check_card:
+        ui.label("Recovery outline checks").classes("text-lg font-semibold")
+        choices = state.get("validation_checks") or dict.fromkeys(CHECK_FIELDS, False)
+        for field, label in zip(CHECK_FIELDS, ("RA feasibility validation", "Physical evidence", "CCA safety validation")):
+            check_fields[field] = ui.checkbox(label, value=choices[field])
+        ui.label("Generate starts a fresh outline with these checks. Previous attempts keep their recorded settings. An enabled check pauses when required evidence is missing.").classes("text-sm text-slate-500")
+
+    with ui.card().classes("w-full"):
+        ui.label("worked — Part slippage").classes("text-lg font-semibold")
+        worked_status = ui.label("Reading the preserved version.").classes("text-sm text-slate-500")
+        worked_content = ui.column().classes("w-full")
+
+    def show_worked(worked: dict) -> None:
+        nonlocal worked_available
+        worked_content.clear()
+        if not isinstance(worked, dict) or not worked:
+            worked_status.text = "No worked archive is available."
+            return
+        worked_available = True
+        worked_status.text = (f"Five outline events · 21 primitives · Outline safety: {worked['outline_safety_status']} · RA: {worked['composition_feasibility']} · "
+                              f"CCA composition: {worked['cca_composition_status']} · Execution authorized: false")
+        with worked_content:
+            ui.label(f"Outline: {worked['outline_run_id']} · Composition: {worked['composition_run_id']}").classes("text-xs text-slate-500")
+            ui.label(f"Code snapshot: {worked['snapshot_at']} · {worked['branch']} · {worked['commit'][:12]}").classes("text-xs text-slate-500")
+            with ui.expansion("Preserved recovery outline").classes("w-full"):
+                ui.table(columns=[{"name": key, "label": label, "field": key} for key, label in (
+                    ("outline_id", "Event"), ("event_name", "Description"), ("resource_jid", "Resource"), ("part_name", "Part"))],
+                    rows=[{key: row.get(key) for key in ("outline_id", "event_name", "resource_jid", "part_name")}
+                          for row in worked["outline"]], row_key="outline_id").classes("w-full").props("wrap-cells")
+            with ui.expansion("Preserved primitive composition").classes("w-full"):
+                render_composition_programs(worked["primitives"])
+            ui.button("Download worked version", icon="download", on_click=lambda: ui.download.file(worked["archive_path"])).props("outline")
+        update()
+
+    worked_reader = BackgroundSection()
+    read_worked = getattr(bridge, "get_worked_recovery_version", None)
+    if callable(read_worked):
+        worked_reader.load(read_worked, show_worked)
+    else:
+        show_worked({})
+
     def options_changed() -> None:
         if updating:
             return
@@ -83,35 +158,31 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             observation_path = fields["observations"].value or ""
             if (observation_path and saved_records.get(observation_path, {}).get("scenario") != fields["scenario"].value):
                 observation_path = ""
+            if fields["source"].value == "offline":
+                observation_path = default_observations.get(fields["scenario"].value, observation_path)
             selected = bridge.set_failure_example_options(
                 source=fields["source"].value, scenario=fields["scenario"].value,
-                safety_files=fields["safety"].value or [], observation_path=observation_path)
-            if selected.get("source") == "offline" and selected.get("selected_observation_path"):
-                bridge.prepare_offline_recovery()
+                safety_files=fields["safety"].value or [], observation_path=observation_path,
+                **{field: bool(control.value) for field, control in check_fields.items()},
+                defer_preparation=fields["source"].value == "offline")
         except (ValueError, OSError) as exc:
             ui.notify(str(exc), type="warning")
         update()
 
     for field in fields.values():
         field.on_value_change(options_changed)
+    for field in check_fields.values():
+        field.on_value_change(options_changed)
 
-    def show_options(values) -> None:
-        nonlocal saved_options, saved_records, available_safety
-        captures, safety = values
-        available_safety = safety
-        saved_records = {path: row for row in captures
-                         for path in row.get("related_observation_paths", [row["source_path"]])}
-        saved_options = {row["source_path"]: (
-            f"{row['scenario']} · {row.get('run_id') or row.get('saved_run_id')} · "
-            f"{row.get('captured_at') or 'capture time not recorded'} · "
-            f"{'Ready to prepare' if row.get('offline_ready') else 'Missing context: ' + ', '.join(row.get('missing') or [])}"
-        ) for row in captures}
+    def show_options(safety) -> None:
+        nonlocal available_safety
+        available_safety = safety if isinstance(safety, list) else []
         update()
 
     option_reader = BackgroundSection()
 
     def load_options() -> None:
-        option_reader.load(lambda: (bridge.list_recovery_observations(), bridge.list_safety_requirement_files()), show_options)
+        option_reader.load(bridge.list_safety_requirement_files, show_options)
 
     def mode_changed() -> None:
         if updating or recovery_mode.value is None:
@@ -141,13 +212,28 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                 controls["use_new_observations"] = ui.button(
                     "Use new observations", on_click=lambda: act("use_new_observations")).props("outline")
             turn_view = RecoveryTurns(ui.column().classes("w-full"))
-            with ui.expansion("Feedback and Regenerate").classes("w-full"):
+            if key == "outline":
+                draft_status = ui.label().classes("text-amber-700")
+                draft_table = ui.table(columns=[
+                    {"name": name, "label": label, "field": name, "align": "left"}
+                    for name, label in (("step", "Step"), ("event_name", "Event"), ("resource_jid", "Resource"),
+                        ("part_name", "Part"), ("expected_end_state", "Proposed end conditions"), ("rationale", "Rationale"))
+                ], rows=[], row_key="step").classes("w-full").props("wrap-cells")
+                draft_download = ui.button("Download draft", icon="download",
+                    on_click=lambda: ui.download.file(bridge.get_part_slippage_example()["draft_path"])).props("flat dense")
+            if key == "primitive":
+                composition_status = ui.label().classes("text-sm font-semibold")
+                composition_programs = ui.column().classes("w-full")
+                composition_download = ui.button("Download composition evidence", icon="download",
+                    on_click=lambda: ui.download.file(Path(bridge.get_part_slippage_example()["artifact_directory"]) / "composition.json")).props("flat dense")
+            with ui.expansion("Feedback and Regenerate").classes("w-full") as feedback_expansion:
                 feedback = ui.textarea("Optional feedback").classes("w-full").props("autogrow")
                 action = "regenerate_outline" if key == "outline" else "regenerate_primitives"
                 controls[action] = ui.button("Regenerate", on_click=lambda action=action, field=feedback: act(action, field.value or "")).props("outline")
             stages[key] = {"status": status, "artifact_stage": artifact_stage,
                            "key": key,
                            "card": stage_card,
+                           "feedback": feedback_expansion,
                            "turn_view": turn_view}
     recovery_mode.on_value_change(mode_changed)
 
@@ -158,18 +244,31 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         execution = ui.label().classes("text-sm whitespace-pre-wrap")
 
     def update(current=None, files=None) -> None:
-        nonlocal updating, observed_signature, capture_path, provenance_path
+        nonlocal updating, observed_signature, capture_path, provenance_path, composition_signature, selection_revision
         current = current if current is not None else bridge.get_part_slippage_example()
+        if current.get("selection_revision", 0) < selection_revision:
+            return
+        selection_revision = current.get("selection_revision", selection_revision)
+        if loading_saved_result:
+            current = {**current, "busy": True, "message": "Loading saved result and verifying its recorded evidence."}
         status = current["status"]
         offline = current.get("source") == "offline"
         validated_outline = current.get("validation_contract_version") == 2
-        outline_only = current.get("outline_only", current.get("scenario") != "Part slippage")
-        workflow_label.text = ("Start failure → Capture observations → Recovery outline → Review"
-                               if outline_only else "Start failure → Recovery outline → Primitive composition → Execute recovery")
+        draft = current.get("outline_draft")
+        review_only = bool(draft) or validated_outline or current.get("composition_validation_version") == 1
+        readiness = current.get("composition_readiness", {})
+        workflow_label.text = "Capture observations → Recovery outline → Primitive composition → Review"
         safety_badge.text = (f"{'Offline' if offline else 'Gazebo'} — outline safety: {current.get('outline_safety_status', 'pending')}; execution validation pending"
                              if validated_outline else "Offline — saved observations; safety checks deferred" if offline else "Gazebo — safety checks deferred")
         safety_note.text = ("Selected specifications are checked against RA-derived outline evidence. Runtime CCA integration is pending."
                             if validated_outline else "Selected specifications are included in the prompt. Formal safety checks are skipped.")
+        if offline and current.get("defer_preparation"):
+            safety_note.text = "Generate runs these selections in a fresh attempt. Previous results keep their recorded checks."
+        if draft:
+            workflow_label.text = "Saved observations → Generate → Review draft"
+            checks = draft.get("checks") or dict.fromkeys(("ra", "physical_evidence", "cca"), "not_checked")
+            safety_badge.text = "Unvalidated outline — " + ", ".join(f"{name}: {value}" for name, value in checks.items())
+            safety_note.text = "Selected specifications are preserved. Only enabled checks run; complete admission remains pending."
         progress.text = current["message"]
         run_id.text = f"Run: {current['run_id']}" if current.get("run_id") else ""
         provenance = current.get("attempt_provenance") or {}
@@ -189,34 +288,41 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         download_provenance.set_visibility(bool(provenance_path))
         available = {
             "start": status == "idle", "stop": status not in {"idle", "stopped", "resetting", "completed"},
-            "load_offline": status in {"idle", "outline_ready", "stopped"} and bool(saved_records.get(current.get("selected_observation_path"), {}).get("result_available")),
+            "load_offline": status in {"idle", "outline_ready", "stopped", "blocked"} and
+                bool(current.get("selected_observation_path")) and worked_available and current.get("scenario") == "Part slippage",
             "prepare": status == "blocked" and bool(current.get("observation_path")),
             "prepare_gazebo_evidence": bool(current.get("can_prepare_gazebo_evidence")),
             "use_new_observations": bool(current.get("new_observation_path")),
-            "test_in_gazebo": status == "offline_completed" and not validated_outline,
+            "test_in_gazebo": status == "offline_completed" and not review_only,
             "reset": status not in {"starting", "resetting"} and not current.get("busy"),
-            "generate_outline": current.get("can_generate_outline", status == "outline_ready"), "continue_outline": status == "outline_review" and not outline_only,
-            "generate_primitives": status == "primitive_ready", "execute": status == "ready_to_execute" and not validated_outline,
+            "generate_outline": current.get("can_generate_outline", status == "outline_ready"),
+            "continue_outline": not offline and status == "outline_review" and readiness.get("ready", False),
+            "generate_primitives": status == "primitive_ready" or status == "outline_review" and readiness.get("ready", False),
+            "execute": status == "ready_to_execute" and not review_only,
             "regenerate_outline": status in {"outline_review", "primitive_ready", "ready_to_execute", "offline_completed", "blocked"} and bool(current.get("artifact_directory")),
             "regenerate_primitives": (status in {"primitive_ready", "ready_to_execute", "offline_completed", "blocked"}
                                       and bool(current.get("outline")) and not current.get("imported_recovery")),
         }
+        if draft:
+            for name in ("continue_outline", "generate_primitives", "regenerate_outline", "regenerate_primitives",
+                         "test_in_gazebo", "execute", "prepare_gazebo_evidence", "use_new_observations", "prepare"):
+                available[name] = False
         for key, button in controls.items():
-            if outline_only and key in {"continue_outline", "generate_primitives", "regenerate_primitives", "execute", "test_in_gazebo"}:
-                available[key] = False
-            button.set_enabled(available[key] and (key == "stop" or not current.get("busy")))
+            button.set_enabled(not loading_saved_result and available[key] and (key == "stop" or not current.get("busy")))
         controls["generate_outline"].set_visibility(offline or current["outline_mode"] == "manual")
-        controls["continue_outline"].set_visibility(not outline_only and (offline or current["outline_mode"] == "manual"))
-        controls["generate_primitives"].set_visibility(outline_only or offline or current["primitive_mode"] == "manual")
+        controls["continue_outline"].set_visibility(not offline and current["outline_mode"] == "manual")
+        stages["outline"]["feedback"].set_visibility(not offline)
+        controls["generate_primitives"].set_visibility(offline or current["primitive_mode"] == "manual")
         controls["start"].set_visibility(not offline)
         controls["load_offline"].set_visibility(offline and available["load_offline"])
         controls["test_in_gazebo"].set_visibility(offline)
         controls["execute"].set_visibility(not offline)
-        controls["prepare"].set_visibility(available["prepare"])
-        controls["prepare_gazebo_evidence"].set_visibility(available["prepare_gazebo_evidence"])
-        controls["use_new_observations"].set_visibility(available["use_new_observations"])
+        controls["prepare"].set_visibility(not offline and available["prepare"])
+        controls["prepare_gazebo_evidence"].set_visibility(not offline and available["prepare_gazebo_evidence"])
+        controls["use_new_observations"].set_visibility(not offline and available["use_new_observations"])
         fields["observations"].set_visibility(offline)
         fields["scenario"].set_visibility(True)
+        check_card.set_visibility(offline)
         updating = True
         fields["source"].value = current.get("source", "gazebo")
         fields["scenario"].value = current.get("scenario", "Part slippage")
@@ -225,6 +331,8 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             selected_observation = saved_records[selected_observation]["source_path"]
         scenario_options = {path: label for path, label in saved_options.items()
                             if saved_records[path].get("scenario") == current.get("scenario")}
+        if not scenario_options and selected_observation:
+            scenario_options = {selected_observation: f"{current['scenario']} · {Path(selected_observation).parent.name}"}
         if selected_observation not in scenario_options:
             selected_observation = None
         if fields["observations"].options != scenario_options or fields["observations"].value != selected_observation:
@@ -245,42 +353,72 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         mode_note.set_visibility(offline or not modes_match)
         for field in fields.values():
             field.set_enabled(not current.get("busy") and status not in {"running_example", "executing", "resuming"})
-        if offline and status == "preparing_outline":
+        if offline and status == "preparing_outline" and not loading_saved_result:
             fields["observations"].set_enabled(True)
             fields["source"].set_enabled(True)
         for key in ("scenario", "safety"):
-            fields[key].set_enabled(status in {"idle", "stopped"} and not current.get("busy"))
+            fields[key].set_enabled(not current.get("busy") and
+                ((offline and current.get("defer_preparation")) or
+                 (status in {"idle", "stopped", "draft_ready", "outline_ready"} and not current.get("outline"))))
+        if offline:
+            fields["observations"].disable()
+        choices = current.get("validation_checks") or dict.fromkeys(CHECK_FIELDS, False)
+        for field, control in check_fields.items():
+            control.value = choices[field]
+            control.set_enabled(not current.get("busy") and not current.get("validation_checks_locked"))
         updating = False
+        draft_status.set_visibility(bool(draft))
+        draft_table.set_visibility(bool(draft))
+        draft_download.set_visibility(bool(draft) and not current.get("busy"))
+        if draft:
+            draft_status.text = f"{draft['message']} Provider calls: {draft['provider_calls']}. Execution authorized: false."
+            draft_table.rows = [{"step": index, **{key: row.get(key) for key in ("event_name", "resource_jid", "part_name", "rationale")},
+                "expected_end_state": json.dumps(row.get("expected_end_state", {}), ensure_ascii=False)}
+                for index, row in enumerate(draft.get("transition_trace", []), 1)]
+            draft_table.update()
         observed = current.get("observations") or {}
         signature = (current.get("observation_path"), current.get("selected_observation_path"),
                      observed.get("offline_ready"), tuple(observed.get("missing") or []), status == "blocked")
         if observed_signature != signature:
             observed_signature = signature
-            capture_path = current.get("observation_path") or ""
+            capture_path = current.get("selected_observation_path") or current.get("observation_path") or ""
             missing = observed.get("missing") or []
             status_text = ("Missing context: " + ", ".join(missing) if missing else
                            "Ready to prepare from saved observations" if observed.get("offline_ready") else
                            "Observations saved" if observed else "No observations captured")
-            capture_status.text = (f"{status_text} · Source run: {observed.get('run_id') or 'not recorded'} · "
+            capture_status.text = (f"Verified capture selected · {Path(capture_path).parent.name}. Generate prepares this input."
+                                  if capture_path and not observed else
+                                  f"{status_text} · Source run: {observed.get('run_id') or 'not recorded'} · "
                                    f"Capture time: {observed.get('captured_at') or 'not recorded'}")
             download_observations.set_visibility(bool(capture_path))
-            if current.get("observation_path"):
-                load_options()
         for key, stage in stages.items():
-            if outline_only and key == "primitive":
-                stage["status"].text = f"Primitive composition is not supported for {current['scenario']} yet. This case stops at outline review."
+            if draft and key == "outline":
+                stage["status"].text = draft["message"]
             elif offline and key == "outline":
                 stage["status"].text = (current.get("outline_generate_reason") or
-                    ("Generate starts a fresh attempt from the selected observations." if status == "stopped" else
+                    ("Generate prepares a fresh outline from the verified capture." if current.get("defer_preparation") else
+                     "Generate starts a fresh attempt from the selected observations." if status == "stopped" else
                      "Input prepared — not sent. Generate starts the LLM call."))
             else:
                 stage["status"].text = current[f"{key}_status"]
             stage["turn_view"].update(current, key, files.get(key, []) if files else [])
+        composition_status.text = ("Composition feasibility: " + current.get("composition_feasibility", "not_checked")
+            + ". Execution authorized: false. " + "; ".join(readiness.get("reasons", [])))
+        signature = repr((current.get("primitives", []), current.get("composition_findings", [])))
+        if signature != composition_signature:
+            composition_signature = signature
+            composition_programs.clear()
+            with composition_programs:
+                render_composition_programs(current.get("primitives", []))
+                for finding in current.get("composition_findings", []):
+                    ui.label(finding.get("reason", str(finding))).classes("text-amber-700 whitespace-pre-wrap")
+        composition_download.set_visibility(current.get("composition_validation_version") == 1 and current.get("primitive_status") == "completed")
         records = current.get("execution") or []
-        execution.text = (f"Recovery execution is not supported for {current['scenario']} yet. This case stops at outline review."
-                          if outline_only else "Outline validation does not authorize execution. Complete composition validation and runtime CCA integration remain pending."
-                          if validated_outline else "\n".join(f"{row['resource_id']} · {row['outline_id']} · {row['status']}" for row in records)
+        execution.text = ("Composition is for review. CCA validation of the composed trace and physical execution remain pending."
+                          if review_only else "\n".join(f"{row['resource_id']} · {row['outline_id']} · {row['status']}" for row in records)
                           or "Ready after both generation stages complete.")
+        if draft:
+            execution.text = "Unvalidated draft: composition and execution are disabled."
 
     update()
     load_options()
@@ -300,6 +438,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             if any(latest.get(key) != current.get(key) for key in (
                 "source", "selected_observation_path", "run_id", "artifact_directory",
                 "outline_artifact_directory", "primitive_artifact_directory",
+                "selection_revision", "validation_checks",
             )):
                 files = {}
             update(latest, files)

@@ -1,6 +1,2614 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
-## Current handoff — October 13, 2026 — read this first
+## Current diagnostic — October 14, 2026 — three unchanged Machining breakdown attempts
+
+The user requested exactly three sequential fresh `Machining breakdown during part processing`
+outline attempts with the current pipeline unchanged, using
+`capture_8beafdb8a01e444894cfaf41d29921fd`, `gpt-5.4`, and `medium`.
+All three outline checks are disabled; formal nominal continuation, primitive
+composition, and execution are not run. Explicit disclosure approval covers
+this saved context and its retrieved facts sent to `https://api.openai.com/v1/`.
+The baseline records hashes for 277 pipeline/configuration files and 632 protected
+capture/result files. Evidence is under
+`cais_spade_llm/monitor/environment_runs/machine_outline_three_attempts_20261014_01a13d5b/`.
+
+Attempt 1, `draft_499cb85bf6824b78944b759a83d7ddcd`, finished with 21 provider
+calls, 18 selected events, 1,637.09 generation seconds, and 239,310 tokens.
+Its status is `draft`, with a proposed handoff; manual inspection finds it
+incorrect. `RECOVERY_SEQ4` removes `RGOCG4-50_Round_4mm` without pausing the
+running M2 job. `RECOVERY_SEQ9` claims `KET4_Square_4mm` completion from a
+start state still naming the running round job and circle program. The sequence
+includes repeated handling and nominal processing. Its final handoff assumes
+M2 `resource_state` and `part_name`. There were no provider errors or context
+retrievals, and all four checks remain `not_checked`; source and pipeline hashes
+are unchanged. The sole intercepted subprocess was the SDK's `uname -p`
+metadata probe, reproduced locally without a provider call; no validator or
+equipment execution was invoked. Exact findings are in `attempt_01/analysis.json`.
+
+Attempt 1 evidence is archived and verified. Its 149 disposable files were
+removed, releasing 7,729,152 net allocated bytes after retaining the archive.
+All 632 protected files remain unchanged; the four official captures remain
+selectable, and the worked Part slippage result still loads.
+
+Attempt 2, `draft_20b60415397741709afc0d5aa1890512`, finished with 12 provider
+calls, 11 selected events, 1,116.95 generation seconds, and 138,810 tokens.
+It is also incorrect. `RECOVERY_SEQ6` places `KET4_Square_4mm` into occupied M2
+and leaves `ur5e-2` holding it. `RECOVERY_SEQ9` claims machining while the part
+is in that gripper and M2 still names the running `RGOCG4-50_Round_4mm` job and
+circle program. `RECOVERY_SEQ10` performs nominal processing inside recovery.
+The final handoff assumes M2 `resource_state` and `part_name`. The first outline
+response did propose M2 `pause_job`, but the comparator selected M1 pickup by
+`smallest_exact_effect_candidate_id`; no pause or stop was ever selected.
+No provider errors or retrievals occurred. All checks remain `not_checked`,
+`execution_authorized=false`, and source/pipeline hashes are unchanged. All
+11 events are assessed in `attempt_02/analysis.json`.
+
+Attempt 2 evidence is archived and verified. Its 86 disposable files were
+removed, releasing 6,004,736 net allocated bytes after retaining the archive.
+The 277 pipeline/configuration files and 632 protected files are unchanged.
+All four captures, the worked Part slippage result, and the earlier unvalidated
+machine draft still load.
+
+Attempt 3, `draft_76486dd8bd604aa8afc96e58011f49af`, finished with 12 provider
+calls, 9 selected events, 958.82 generation seconds, and 134,878 tokens.
+It is incorrect. `RECOVERY_SEQ6` repeats the occupied-M2 placement and omitted
+`held_part` release. `RECOVERY_SEQ7` claims `KET4_Square_4mm` completion from
+M2's running `RGOCG4-50_Round_4mm`/circle start state; `RECOVERY_SEQ8` claims
+nominal processing inside recovery. `RECOVERY_SEQ9` leaves contradictory
+`ur5e-2` custody and `M2 staging tray` location and reaches a handoff by assuming
+M2 `resource_state` and `part_name`. Turn 3 was rejected for duplicate candidate
+`outline_id` values; turn 11's KMR nominal move was `excluded_no_progress`.
+These are generation/selection problems, with no provider errors or retrievals.
+All checks remain `not_checked` and `execution_authorized=false`. All nine
+events are assessed in `attempt_03/analysis.json`.
+
+All three attempts are finished; none is a logically correct complete recovery
+outline. Their initial grounding prompt SHA-256 is identical. Total usage is
+45 provider calls and 512,998 tokens: 337,169 prompt tokens and 175,829 completion
+tokens, including 159,804 reasoning tokens. The comparison retains both the
+application generation timer and wall time per attempt (1,732.18, 1,179.27,
+and 1,015.17 seconds). All three attempts stopped at a proposed handoff.
+
+The comparison is saved in `comparison.txt` and `comparison.json` under the
+batch directory above. They contain every exact selected event, its manual
+assessment, provider/time/token totals, findings, and recommended fixes.
+`pipeline_inspection.json` traces the omitted current M2 job fields, candidate
+comparison decisions, stale `current_valuation` fallback, and handoff assumptions
+to the unchanged source. No factual retrieval occurred in any attempt.
+The public outline context omits M2's current `job_state` and `selected_program`;
+candidate comparison does not establish operational superiority; tentative
+effects leave omitted custody fields unchanged; unknown owner fields can be
+refilled from the original capture and can satisfy the proposed handoff by
+assumption. These are the recommended areas to repair before another experiment.
+No generation fixes have been applied.
+
+All three exact evidence archives are verified. After explicit deletion lists,
+ownership checks, and unchanged-file checks, 321 disposable files were removed,
+releasing 18,948,096 net allocated bytes after retaining the archives (about
+18.1 MiB). Per-attempt `cleanup_manifest.json`, `host_ownership_check.json`, and
+`cleanup_receipt.json` record the files, archive hashes, ownership scope, and
+released space. Each archived draft reloads through `load_draft`; all 38 selected
+events have a saved manual assessment. `final_evidence_verification.json` records
+the post-cleanup archive/readback checks and comparison hashes.
+All 277 pipeline/configuration files and 632 protected files
+match the baseline; the source SHA-256 remains
+`c05a39c65313aef89e0eabb09720530996134ecf9adc18ecc828ab0078d29447`.
+
+The four official captures remain selectable. The accepted Part slippage
+outline `offline_470087fe7a92421abd624ea721aa2ca1` and composition
+`offline_1bb1efac84d7443aa37238521ead3b68` still load from the verified worked
+archive with five events and 21 primitives. The earlier unvalidated machine
+draft `draft_66b5fc99daab491ea8f25624d1790b5a` also still loads. No new accepted
+recovery outline or primitive composition is established. All newly retained
+outlines are diagnostic evidence with `execution_authorized=false` and all
+four checks `not_checked`; no RA, physical, CCA, formal nominal-continuation,
+primitive-composition, Gazebo, or recovery-execution stage was run. The disabled
+check dispatch functions only returned `not_checked`; the generic exported
+selection summary's `transition_validation=passed` is not a validation result.
+
+Planning verification remains 19 focused tests passed. The interrupted UI
+background-task test remains unresolved; it was not rerun during this experiment.
+Exactly three fresh attempts were run. Existing application changes and unrelated
+working changes were preserved. Further fixes are recommendations only.
+
+## Current setup — October 14, 2026 — simplified Recovery and saved-model preparation
+
+The user requested one Offline outline Generate action, one verified capture per
+selected failure, and lightweight checkbox preferences. Generate must always
+start fresh, with no previous outline or primitive prefix. The existing
+`_DEFAULT_OBSERVATIONS` mapping and the worked Part slippage archive are retained.
+The Offline outline card now has one Generate action. Generate outline only,
+Load draft, Continue, outline Regenerate, and Start fresh are removed from the
+Offline controls. Primitive composition's Generate includes the existing
+Continue preparation and preserves its full-validation admission gate.
+
+`SystemBridge.set_failure_example_options` adds `defer_preparation=False`;
+the new UI passes True and stores preferences without loading observations,
+constructing owners, or writing attempts. `part_slippage_action` forwards the
+new `generate_outline_fresh` action. Loading, detached preparation and provider
+work run outside the UI event loop. Source summaries are cached; polling does
+not rebuild ResourceAgent inputs or scan historical captures. Selections lock
+while generating, then edits apply to the next fresh attempt. Previous records
+keep their original settings. Source and checkbox revision checks discard stale
+poll results. The verified capture can be downloaded before generation.
+
+Blocked attempt `offline_21e13916dd6c4798995a1c341fa0ab99` failed before any
+outline event: new preparation required M1 (`recovery-resource-5@localhost`) to
+provide `recovery_des_model` and `descriptor_fingerprint`, although its original
+Part slippage capture records `{}`. Preparation now preserves unavailable
+descriptors and captured evidence for unrelated resources. A dependent enabled
+check still requires a supported model and returns `NEEDS_CONTEXT`. No empty
+model receives a fabricated fingerprint. Its finished failed stage is included
+in the explicit cleanup manifest after replacement preparation verification.
+
+The first actual full-check preparation probe,
+`offline_57e18fe8769a4de9a80fbfc4960157b7` under `/tmp/recovery/`, passed the
+descriptor step and then correctly stopped at `NEEDS_CONTEXT: conflicting
+recorded observed_pose for gear_small`. Its tracker pose and separate physical
+measurement differ slightly. This is a distinct physical evidence gap; the
+source is not rewritten and the existing strict conflict check is retained.
+Next verification covers the default unchecked preparation for all four
+captures and records the independent full-check evidence status. The probe
+made no LLM or execution request. Its seven disposable files (45,709,084 bytes)
+are listed with exact hashes and ownership in `simplification_probe_finding.json`
+beside the worked archive; source observations and accepted results are protected.
+
+`ui_simplification_verification.json` records the actual NiceGUI components and
+SystemBridge for all four failures: one verified source each, no eager
+preparation or attempt creation, the worked-card download, and twelve checkbox
+changes per case taking 7.0–8.3 milliseconds total in the component checks.
+These are server-side component timings, not remote browser latency measurements.
+The historical selector's first full scan took 20.618 seconds; it is no longer
+called by the new Recovery view. All three checkboxes start unchecked.
+
+All four real captures prepared as `draft_ready` under the default unchecked
+selections. Full preparation reached `outline_ready` for Machining breakdown
+during part processing, Conveyor breakdown, and ur5e-1 breakdown. Part slippage
+passed the descriptor step and retained the separate conflicting-pose evidence
+gap. The new UI's full preparation now reports this as `NEEDS_CONTEXT` without
+an error traceback or advancing an outline. The checked source is not claimed
+to have sufficient physical evidence merely because its historical worked
+outline and composition are retained. Generation and execution were guarded:
+`llm_calls=[]`, no outline/primitive output, and execution authorization false.
+
+871 focused regressions passed, covering all eight check combinations, fresh
+prefixes, immutable attempt choices, background preparation, strict missing
+descriptors, controlled NEEDS_CONTEXT, rapid toggles/stale polling, one capture,
+and primitive composition gates. The final UI/context-label recheck passed
+113 tests. Poetry, compilation, UI CLI help, and `git diff --check` passed;
+Poetry emitted existing metadata deprecations. The UI uses `reload=False`, so
+restart it to load these changes. This task starts no UI server, LLM attempt,
+ROS/Gazebo recovery, or equipment command.
+
+`simplification_cleanup_manifest.json` lists 42 disposable files: the original
+blocked descriptor attempt, private capture-preparation verification outputs,
+and the temporary verification script (611,482,710 logical bytes;
+611,614,720 allocated bytes). Official inputs, accepted results, the worked
+archive, prior retained preparation evidence, regression coverage, and other
+chats' work are excluded. Ownership, hashes, recent changes, tracked state, and
+open handles were rechecked before deletion. All 42 files were removed; the
+cleanup receipt records the retained-result loading check. The earlier seven-file
+probe cleanup released another 45,709,084 logical bytes. Both accepted original
+results still load, all 287 accepted JSON hashes match the worked archive, and
+all four official source hashes remain unchanged after cleanup.
+
+## Part slippage all-unchecked diagnostic — October 14, 2026 — three fresh attempts, no handoff
+
+The user requested three fresh Part slippage outlines with all validation
+bypassed. Each ran `OutlineDraft` (all three checks false) on
+`capture_f923020bf9ce496eb443826291f8f2c2`, the same path as the UI Generate
+action, with `gpt-5.4` / `medium`, in parallel, without a prefix.
+
+| Attempt | Identifier | LLM calls | Selected events | Outcome |
+| --- | --- | ---: | ---: | --- |
+| 1 | `draft_618ab0ba826d465988c93ae6c2b8eed5` | 16 | 9 | `draft_incomplete`, no progressing candidate |
+| 2 | `draft_4039044deb8b4b9c88104e9b79d7242a` | 12 | 6 | `draft_incomplete`, no progressing candidate |
+| 3 | `draft_3483bcb3d6b14435bb604a0dd75255ef` | 8 | 4 | `draft_incomplete`, no progressing candidate |
+
+Failure reason: `multi_turn_diagnostic.handoff` requires each `recovery_replaced`
+task to be claimed by an event whose end state equals that task's owner updates.
+`environment_9` (`place_approach`) needs `positioned`/`in_transit`; the LLM
+always wrote `in_gripper`, and once gear_small is assembled the intermediate
+state cannot recur. Replaying the claim rule on accepted Attempt 17 claims only
+`_pending_2`, so even that outline cannot reach the diagnostic handoff. Attempt 2
+reached the intended state after three events (gear_small assembled by ur5e-4,
+ur5e-4 retreated, ur5e-3 still holding KET4 at `picked`), but the loop continued.
+Secondary: the diagnostic clears `goal_conditions` (`Recovery Goals (none)`);
+feedback is only `no_progressing_candidate`; the diagnostic progress override
+treats KET4's `ur5e-3` versus JID `part_location` as progress, so ur5e-3
+nominal insertion of KET4 was selected and broke the nominal entry in all three;
+unchecked guards admitted a failed-robot pick and an unpicked `place_insert`.
+Both safety rules were in the prompt text; precedence held, mutex was violated in
+attempts 1 and 3 (CCA unchecked).
+
+Next step: make the diagnostic handoff use the recorded `recovery_replaced`
+goal conditions (or only the suffix's final task), name open obligations in
+feedback, and exclude nominal-suffix work before further API retries. Compact
+evidence is under `part_slippage_multiturn_diagnostic_20261014/`; 249 files
+(6,588,643 bytes) were removed per its manifest and receipt. Capture and both
+accepted Part slippage results keep their hashes.
+
+Follow-up, same day: a generic bypass-mode repair was made in an isolated copy,
+not yet in this checkout, because the concurrent machine batch
+`machine_outline_three_attempts_20261014_01a13d5b` fails closed on any package
+change. The patch is `part_slippage_multiturn_diagnostic_20261014/fixed_pipeline/pipeline_fix.patch`.
+Handoff completes when the capture's `marked_reentry_conditions` hold (legacy
+task claims only when none are recorded), selected shared-area rules hold for
+the resume state, and nominal entries are enabled; obligations are the recorded
+`unmet_reentry_conditions`. Custody rejects handling a part held elsewhere or a
+second part. The prompt drops the tuned event-count sentence and adds recorded
+handoff conditions with `holds`, region bounds, declared `gripper_reach`, and the
+interrupted event. Instruction text is identical across all four captures and no
+accepted-outline names occur. Offline replay: Attempt 17 completes at event 5;
+without ur5e-4 leaving it is held by `SAFE_shared_area_mutex`. Tests: 915 passed
+in the copy; 2 copy-only failures (missing `ros2` meshes and `writing/`) pass here.
+
+Three fresh API attempts on the repaired copy (`draft_cdd97f0bfafe4f0f9a5dff423d0cf115`,
+`draft_bb69059cedd54941b1717f2d474eddc4`, `draft_2f70891f4e9e4fff8fad626e21814a5c`)
+each reached a proposed handoff in 4–5 events, but none is correct: ur5e-4,
+outside its declared reach of gear_small, places it in all three. The LLM stated
+that only ur5e-3 reaches the gear, yet listed ur5e-4 alternatives; with RA
+bypassed the comparator preferred them because they clear obligations sooner,
+and once restored the nominal entry over picking the gear.
+
+The user chose option A: with all three checks off, the LLM returns exactly one
+chosen event (schema `maxItems=1`); any enabled check keeps the unchanged
+five-candidate comparison. Patch: `option_a_llm_selects/pipeline_fix_option_a.patch`;
+917 tests passed in the copy, same 2 copy-only failures. Three API attempts:
+`draft_6b9893f3c41c45a1a04f65a4c06c8777` and `draft_d901c905e6654d8cbf7e15c663ecb0e2`
+chose ur5e-4 (outside declared reach) to re-pick gear_small, then stopped
+`draft_incomplete` after `place_approach` was rejected three times as
+`no_progressing_candidate`. `draft_1fbc3e148f744dd98e49c0c9cc45b342` used ur5e-3
+(KET4 to Buffer, pick gear, insert, re-pick KET4) but cleared ur5e-4 only after
+the handoff block, so the insertion violates `SAFE_shared_area_mutex`. None is
+correct. Findings: LLM-only selection is unreliable on reach and ordering; the
+progress rule also rejects legitimate approach steps. The patch is not applied
+here while the machine batch runs; apply it once that batch finishes.
+
+Full-check blocker measured: the gear_small `conflicting recorded observed_pose`
+in `capture_f923020bf9ce496eb443826291f8f2c2` is a 1.86e-08 m position and
+1.72e-06 rad orientation difference between the tracker pose and the
+GETRECOVERYSTATE pose of the same resting part; `restore_recorded_public_facts`
+requires exact equality. In the isolated copy, a probe-only 1 mm / 1 mrad
+agreement check let full-check preparation reach `outline_ready` with no LLM
+call; larger disagreements still return `NEEDS_CONTEXT`.
+
+Applied in this checkout after the machine batch completed (all eight files were
+unchanged since the copy; `applied_patch.diff` in the diagnostic folder). The
+pose agreement is `safety_preparation.observed_pose_agreement` (0.001 m, 0.001 rad)
+in `recovery_framework_gazebo.json`. Verification: 1200 focused tests passed,
+`poetry check` (existing deprecations), compileall and `git diff --check`.
+A read-only audit found no other two-measurement exact comparison on the offline
+path; live re-observation checks (saved_recovery_execution.py:116,
+gazebo_safety_preparation.py:378/1323-1340, outline_gazebo_evidence.py:51/58,
+kmr_safety_execution.py:83/104, resource_safety_preparation.py:2029-2033) remain
+exact, several by documented intent, and matter only for Gazebo work.
+
+Validated full-check attempts from the isolated copy, `offline_49c715da70194d6396a5d7333048b688`
+and `offline_a8d51387bae24cf2995e254e3edfdae1`, both stopped `NEEDS_CONTEXT` in
+about two minutes; the third was not run because the block is deterministic.
+The LLM proposed ur5e-4 to home (RA `FEASIBLE`) and ur5e-3 stowing KET4, but
+endpoint evidence calls `environment_models.owners()`, which rejects the whole
+recorded plant valuation: ur5e-4 `resource_state="failed"` is outside the
+recorded environment-model domain `[idle, at_pick, picked, positioned, placed]`
+(robot domains derive from task events; failure injection sets `failed`
+directly). Every robot event in this capture is therefore blocked. Accepted
+Attempt 17 predates the endpoint policy. Next step (pending user decision):
+declare the injected fault state in the plant model, and decide whether
+existing captures are re-captured or extended at preparation.
+
+## Previous setup — October 14, 2026 — worked Part slippage and incremental Recovery checks
+
+The worked Part slippage version is preserved separately at
+`cais_spade_llm/monitor/environment_runs/recovery_worked/Part slippage/worked.zip`.
+Its external `manifest.json` and the manifest inside the ZIP map recorded paths
+to archived entries and record hashes, branch, commit, and working changes.
+The archive contains 1,273 files, including the accepted outline
+`offline_470087fe7a92421abd624ea721aa2ca1` (five events), accepted composition
+`offline_1bb1efac84d7443aa37238521ead3b68` (21 ordered primitives), their
+observations, native models, provider records, validation evidence, and original
+nominal-continuation proof. Original accepted records and official captures
+remain retained in their existing locations.
+
+The code snapshot was taken at **2026-10-14T20:31:34.198776+00:00** on
+`recovery-framework-journal`, commit
+`b120660d35bddb6d9c36678a67ccd660fa8c22d3`, before these Recovery control changes.
+It preserves the then-current application and ROS2 source, configuration,
+dependency files, relevant tests, and working patch. This snapshot time is
+separate from the original generation times retained in the original artifacts
+and metadata; it does not claim to reproduce the historical generation code.
+Credentials, `.env`, caches, and unrelated generated attempts are excluded.
+Four initialization files retain their configuration keys with credential values
+omitted, explicitly recorded in the manifest. Original artifact contents and
+identifiers are unchanged.
+
+Every archived file was read and hash-verified. Compressed size is 695,069,726
+bytes (about 663 MiB); SHA256 is
+`4005c518cd9efd8361a01c3f169d7fc5c7e7018c610e745057bb2ddbb3c997e3`.
+Recovery displays a read-only **worked — Part slippage** card with the preserved
+outline, ordered primitive composition, recorded results, and archive download.
+It reports outline safety `passed`, composition RA `FEASIBLE`, CCA composition
+`not_checked`, and execution authorization `false`.
+
+New Offline Recovery controls are **RA feasibility validation**, **Physical
+evidence**, and **CCA safety validation**. All start unchecked. Select a failure,
+use **Start fresh**, choose checks, then use **Generate** to begin an outline.
+Selections persist across idle scenario changes, are recorded with the attempt,
+and lock when generation starts, including attempts that pause before their
+first admitted event. Use **Start fresh** before changing a generated attempt's
+checks. A fresh attempt has an empty outline and no inherited primitive program,
+worked-result prefix, or earlier rejection history.
+
+| Failure | Default original observations capture | Verified fresh setup record (`draft_ready`, no generation) |
+| --- | --- | --- |
+| Part slippage | `capture_f923020bf9ce496eb443826291f8f2c2` | `draft_2a63ea11c8674e22b08ebf1296c1c875` |
+| Machining breakdown during part processing | `capture_8beafdb8a01e444894cfaf41d29921fd` | `draft_09c80d1e842147d8a0e4005c559052fc` |
+| Conveyor breakdown | `capture_1b3f3d1d729a4701b94cff514c783130` | `draft_7047ad5be52b40078ca4dae56e15bd53` |
+| ur5e-1 breakdown | `capture_0a7fde8074b6426586b204204f2b3417` | `draft_b460316800b74d3192e3af2c4bdadbdb` |
+
+`SystemBridge.set_failure_example_options` accepts optional
+`check_ra_feasibility`, `check_physical_evidence`, and `check_cca_safety` booleans.
+Legacy callers retain full validation. The new UI passes choices explicitly.
+Generation continues through `execute_multi_turn_recovery`, including factual
+retrieval, candidate evaluation, selected-event admission, state propagation,
+and nominal handoff. All unchecked uses the existing diagnostic bypass; partial
+selections apply individual checks in that same pipeline. Disabled checks record
+`not_checked`; structural and identifier checks remain active. No new physical
+projection or physical validation runs when Physical evidence is unchecked.
+Captured facts remain available and are not rewritten by tentative successors.
+
+CCA evidence depends on the selected predicates. Process-order checking can use
+complete, supported owner completion ledgers without spatial geometry. Spatial
+mutex checking needs supported occupancy evidence across the proposed event;
+a captured stopped pose alone does not establish that interval. If enabled CCA
+lacks this evidence, the attempt pauses with `NEEDS_CONTEXT` and retains its
+selected specifications. Failed or unresolved enabled checks do not advance the
+candidate or monitor history. Partial results remain reviewable with individual
+check results and tentative outcomes; they do not become accepted outlines or
+worked versions. Existing composition and execution requirements remain in
+force. Checking an existing outline without generation is not added here.
+
+`ui_verification.json` beside the archive records actual NiceGUI Recovery page
+component and `SystemBridge` verification for all four captures, empty fresh
+attempts, unchecked editable controls, the worked card and download, and
+`llm_calls=[]`. This is component and bridge verification, not browser JavaScript
+verification. `retained_verification.json` records unchanged accepted JSON files,
+the five-event/21-primitive result, and all four captures remaining offline-ready.
+Archive review and setup make no LLM requests and start no ROS/Gazebo execution.
+Recovery outline generation, primitive composition for new attempts, and
+execution remain operator-started and pending.
+
+Verification: **863 focused regression tests passed**, covering all eight check
+combinations, skipped validator calls, process-order checking without spatial
+data, missing mutex evidence, candidate/monitor rollback, nominal handoff gates,
+sequential completion-ledger evidence, locked settings after a paused first
+proposal, archive integrity, and UI behavior. `poetry check`,
+`poetry run python -m compileall -q cais_spade_llm ros2`, the UI CLI help check,
+and `git diff --check` passed. Poetry reports existing metadata deprecations.
+The final saved-file check found and fixed missing directory creation during
+fresh preparation. All **286 affected regression tests passed again**, and
+the four-capture UI audit was repeated with exact persisted-record assertions.
+All four retained fresh records are `draft_ready`, have empty transition traces,
+zero provider calls, and unchecked, unlocked settings.
+NiceGUI checks used a normal local event loop after an owned sandbox test
+process stalled; only that exact verified test process was stopped. This did
+not stop another chat's runtime or start recovery generation or execution.
+
+`setup_cleanup_manifest.json` beside the archive lists four superseded empty
+preparation records and two completed temporary verification scripts. Ownership,
+hashes, modification times, tracked state, process references, and open handles
+were checked before removal: six files, 20,801 bytes released. The four verified
+fresh records, original accepted results, captures, native dependencies, and
+worked archive are retained. No recovery generation attempt was made or removed.
+
+## Recovery result retention — October 13, 2026 — read before running attempts
+
+Keep one accepted recovery outline and one accepted primitive composition for
+each of the four failure scenarios. This is the documented Codex cleanup rule
+in [AGENTS.md](../../AGENTS.md#recovery-result-retention); the Recovery UI does
+not automatically delete failed attempts. Acceptance here refers to saved
+planning results and does not establish execution authorization or completed
+live recovery.
+
+### Current saved results
+
+| Failure scenario | Recovery outline | Primitive composition |
+| --- | --- | --- |
+| Part slippage | Attempt 17 accepted: five events and nominal-continuation proof | `offline_1bb1efac84d7443aa37238521ead3b68`: all five events, 21 primitives, RA `FEASIBLE`; loaded and reopened in Recovery UI |
+| Machining breakdown during part processing | Successful failure capture retained; incomplete 28-event retry chain retired at the user's request to free disk space; no complete accepted outline | Pending |
+| Conveyor breakdown | Verified failure capture `capture_1b3f3d1d729a4701b94cff514c783130` retained and loaded in Recovery Offline; no accepted outline | None accepted |
+| ur5e-1 breakdown | Verified failure capture `capture_0a7fde8074b6426586b204204f2b3417` retained and loaded in Recovery Offline; no accepted outline | Pending |
+
+Attempt 17 is `offline_470087fe7a92421abd624ea721aa2ca1`. Its saved state is
+`status=outline_review`, `outline_status=completed`,
+`outline_safety_status=passed`, `primitive_status=waiting`, and
+`execution_authorized=false`. It contains five outline events and no generated
+primitives. The separate accepted primitive composition below uses those same
+five events. No further primitive generation is needed for this saved-result goal.
+
+For `Machining breakdown during part processing`, capture
+`capture_8beafdb8a01e444894cfaf41d29921fd` records the intended M1 fault with
+both machining jobs unfinished and a synchronized frozen checkpoint at simulation
+time `84.3455`. Capture compatibility, stationary readiness, native model loading,
+and the normal Recovery UI offline preparation all passed. Its setup, seed, and
+two safety specifications match the previous scenario. It is a retained failure
+capture, not a completed recovery solution. The KMR notes below document partial
+planning validation. Their referenced `endpoint_bounds_20261013` replay files
+are not currently present in the retained data and are not a loadable accepted
+recovery outline.
+
+### Retained record identifiers
+
+The following records are under
+`cais_spade_llm/monitor/environment_runs/recovery/`:
+
+| Purpose | Retained record |
+| --- | --- |
+| Accepted Part slippage recovery outline | `offline_470087fe7a92421abd624ea721aa2ca1` |
+| Accepted Part slippage primitive composition | `offline_1bb1efac84d7443aa37238521ead3b68` |
+| Official Part slippage failure capture | `cf647a0930c64f018d672a27904811b0` |
+| Official Machining breakdown during part processing failure capture | `capture_8beafdb8a01e444894cfaf41d29921fd` |
+| Native checkpoint records for the current Machining breakdown capture | `4a6d23fca53a4d4486ba50f9d005203a` |
+| Official ur5e-1 breakdown failure capture | `capture_0a7fde8074b6426586b204204f2b3417` |
+| Native checkpoint records for the current ur5e-1 breakdown capture | Source run `01eeb91143e741c69242142690a5a4be` under `../ur5e-1_capture_20261014T182326Z/capture_04/environment_runs/recovery/` |
+| Retired incomplete Machining breakdown outline prefix | `offline_6157db87c86841609d5d7895e6b7a0b8`: twenty-eight accepted LLM events through turn 48, nominal continuation `not_ready`. The user explicitly requested removal of this attempt and related outputs. This is no longer a prefix to resume. |
+| Retired Machining breakdown retry chain | `attempt_01` through `attempt_18` and `offline_4bed5f73eabd4fb6a6e9ef4ee76984e2`; identifiers and failure findings are recorded in `machine_cleanup_20261014_01a137cc/attempt_history.json`. Official capture and native checkpoint remain protected. |
+| Retained source captures required by the saved results | `capture_f923020bf9ce496eb443826291f8f2c2`, `capture_4862656369764af1b78a86063afe6602` |
+| Attempt 17 audit | `experiments/20261010T213423Z/attempt_17_gpt-5.6-sol/report.json` |
+
+Keep the required observations, native models, accepted-event validation records,
+and other dependencies of these results, plus the small capture/proposal files
+required by existing regression tests. Attempt 17's nominal-continuation proof
+includes `generation_0001/recovery_outline/turns/turn_00008_validation_0003.json`.
+An attempt directory can contain both an accepted stage and a failed stage;
+retention is determined by the required evidence, not only the directory's run
+status. One accepted result can require multiple supporting files or copies.
+
+## ur5e-1 breakdown — October 14, 2026 — failure captured and verified in Recovery Offline
+
+The user requested removal of `safety_ur5e-1_breakdown.txt`. That 77-rule file
+has been deleted. New `ur5e-1 breakdown` selections use only
+`safety_M1_mutex.txt`, containing `SAFE_M1_mutex` over `M1.front_access`,
+`M1.side_access`, and `M1.workholding` with the existing resource-pair pattern.
+The checkpoint name `after_M1_processing_before_pick` is unchanged. It now
+requires acknowledged M1 `machine_part` and ur5e-1 `pick_approach`, and latches
+before `pick_grasp`. The part remains at M1; the robot records `failed` while
+retaining observed recovery motion capability. No home motion is injected.
+
+Retain official capture `capture_0a7fde8074b6426586b204204f2b3417`, source run
+`01eeb91143e741c69242142690a5a4be`, captured at
+`2026-10-14T19:23:35.853589+00:00`. Its `observations.json` contains the full
+acknowledged `machine_part` and `pick_approach` records, twelve remaining nominal
+nodes, resource capability evidence, physical M1 occupancy, and the planning
+scene. Its `native_preview_model/` archive is self-contained and verified.
+
+The stopped scene was frozen at simulation time `52.434`, native instance
+`17891149235950`, checkpoint `94351c8439ec4d27b379384d65d06772`.
+`world_paused=true` and `native_observations_unchanged=true`. The robot is
+`failed` at M1 with `held_part=None`; M1 is `completed` and retains
+`KET4_Square_4mm`. Observed empty attachments and robot occupancy of
+`M1.front_access` and `M1.workholding` are verified; `M1.side_access` is empty
+of ur5e-1. Supported recovery motion remains available.
+The final Gazebo window image is `failure_scene.png`; `failure_scene.json`
+binds it to the same frozen instance and simulation time. The owned runtime
+was stopped after saving this evidence.
+
+Open **Recovery → Offline → ur5e-1 breakdown** and select the saved observations
+from this capture. Actual NiceGUI Recovery page components and `SystemBridge`
+loaded and reopened the capture with the sole M1 mutex selected. Offline
+preparation reached `outline_ready`, observations remained unchanged, and
+**Execute recovery** was disabled. This was component and bridge verification;
+no browser JavaScript check was performed. The isolated capture and UI review
+both used Manual stages with guards against generation and execution:
+`llm_calls=[]`, `recovery_execution_started=false`, and
+`execution_authorized=false`. No outline, primitive composition, CCA approval,
+recovery execution, or nominal-continuation proof has been produced for this
+failure. Recovery generation and execution remain pending.
+
+Keep the successful harness directory
+`cais_spade_llm/monitor/environment_runs/ur5e-1_capture_20261014T182326Z/capture_04/`,
+including its private `recovery_framework_gazebo.json`, raw observations,
+native before/after checkpoints, source-run model files, and report.
+`ui_loading.json`, `attempt_history.json`, cleanup manifests, and receipts in
+the parent directory record verification and retention decisions.
+
+Attempt `ur5e-1_capture_20261014T182326Z/capture_01`, source run
+`b1b222d5c04b43f9a27878802b03559e`, stopped before the requested failure:
+KMR `place_approach` at M1 exceeded the wall timeout while waiting for
+`/KMR/KMR_iiwa_joint_trajectory_controller/follow_joint_trajectory`.
+The trajectory required `9.447576947` simulation seconds; only `7.1`
+simulation seconds elapsed during its `120.084358769` wall seconds.
+No ur5e-1 fault was injected, no observations record was published, and no
+LLM or recovery execution occurred. Its owned launch stopped. The successful
+replacement uses `KMR.arm_motion_wall_timeout_sec=360` in its private capture
+scene, with unchanged task, controller-completion, and physical-observation
+checks. The shared scene and normal controller wall-budget default remain
+unchanged.
+
+The finished `capture_01` diagnostics are retained in `attempt_history.json`;
+its 58 disposable files were removed (8,949,688 logical bytes). Its remaining
+owned embedded XMPP server was identified by its private workspace and stopped
+before deletion. The harness now stops its own XMPP server during cleanup.
+`capture_02` was refused before launch because this task's CLI help verification
+overlapped preflight. No runtime or capture was created; its one log file and
+empty directory were removed after recording the finding. Subsequent capture
+attempts ran sequentially after the completed CLI check.
+
+`capture_03` reached the intended ur5e-1 fault, source run
+`fee200159471412a87bf468093aab35d`. Its real failure observations and native
+model archive were protected until the replacement was verified and loaded.
+Final capture verification found that `EnvironmentProductContext.acknowledge`
+shared its `after` state with current resource valuations. Setting ur5e-1 to `failed`
+rewrote the recorded `pick_approach` successor from `at_pick` to `failed`.
+The acknowledgement and controller observations still match exactly. The
+repair saves an independent `after` snapshot; the strict provenance check
+remains unchanged. Frozen raw observations are now persisted before verification.
+The replacement passed these checks and loaded in Recovery Offline before
+`capture_03` and its log were removed. The stopped UI review duplicate
+`offline_b7872fb687b542f99caf31607986ada8` was also removed; it contained no
+generated outline or primitives. Ownership, modification times, tracked files,
+and open handles were checked against explicit deletion manifests. Retained
+observations and native models verified again after cleanup. This task removed
+159 disposable regular files across attempts and the UI review: 352,495,198
+logical bytes and 353,099,776 allocated bytes (336.74 MiB). Official captures,
+accepted results, successful capture dependencies, regression fixtures, and
+other chats' work were preserved.
+
+The final focused regression run passed all 299 tests for fault handling,
+mutex/default selection, capture, nominal dispatch, and acknowledgement history.
+Offline loading and preparation also passed through the actual Recovery page
+components and `SystemBridge`. `poetry check`, Python compilation, and the UI
+CLI help check passed; Poetry reports existing metadata deprecations.
+Mutex coverage rejects simultaneous occupancy across all nine
+pairs of the three M1 areas, counts the stopped failed robot, and preserves
+`NEEDS_CONTEXT` for missing geometry evidence. These checks validate the saved
+failure and supported recovery inputs, not a generated or executed recovery.
+
+The selector assertion now matches the files present in the shared checkout.
+Legacy machine/conveyor bundle tests still reference files removed by concurrent
+work; those cases were outside this ur5e-1 regression run. Their updates remain
+separate from this capture. `retained_result_verification.json` confirms that
+all four current failure-capture inputs remain selectable and offline-ready,
+and that the accepted Part slippage records remain readable after cleanup.
+
+### Cleanup after recovery work
+
+- After diagnosing a finished failed attempt, record its identifier, concise
+  failure reason, and next step in this handoff. Delete its disposable outputs
+  before starting another attempt or ending the task.
+- Protect active work and the current partial attempt still needed for debugging,
+  including work owned by another chat or process. Delete abandoned attempts
+  once their useful findings are recorded and required dependencies are retained.
+- When primitive composition fails, preserve its accepted recovery outline and
+  shared dependencies. Remove only the failed stage's disposable files; do not
+  delete the containing attempt wholesale.
+- Verify and load a selected replacement before deleting superseded accepted
+  results. An accepted event prefix, `NEEDS_CONTEXT`, or a completed failure
+  capture does not establish a complete accepted solution.
+- Build an explicit deletion list, check file ownership and recent changes,
+  and exclude active or newly changed records and required dependencies.
+  Preserve application code, regression coverage, and unrelated working or
+  staged changes.
+- Confirm retained results still load with their accepted events and required
+  nominal-continuation evidence, and that official failure captures remain
+  selectable. Report the files removed and space released, then update the
+  retained identifiers and stage status above.
+
+## Part slippage primitive composition — October 13, 2026 — accepted and verified in Recovery UI
+
+Retain `offline_1bb1efac84d7443aa37238521ead3b68`, with
+`generation_0002/composition.json`, `proposal.json`, `outline_request.json`,
+`recovery_primitves/`, and the copied `recovery_outline/` nominal-continuation
+proof. Its `primitive_status=completed`, `composition_feasibility=FEASIBLE`,
+`execution_authorized=false`, and `cca_composition_status=not_checked`.
+
+| Original outline event | Ordered primitives | RA result |
+| --- | --- | --- |
+| `clear_failed_robot_from_assembly_board` | 1 | `FEASIBLE` |
+| `stage_ket4_at_buffer` | 5 | `FEASIBLE` |
+| `pick_misplaced_gear_small` | 5 | `FEASIBLE` |
+| `place_gear_small_on_assembly_board` | 5 | `FEASIBLE` |
+| `reacquire_ket4_for_nominal_continuation` | 5 | `FEASIBLE` |
+
+The final LLM revision removed the unsupported perception step and passed all
+unchanged RA checks. Every accepted `primitive_steps` program matches an actual
+recorded provider response exactly. All five events retrieved applicable
+`/capability_decompositions/` context before authoring. The retained provider
+records include the revisions and context requests; they are not additional
+accepted compositions. This is one complete composition containing 21 primitives.
+
+The real Recovery UI, using `SystemBridge`, loaded the result through
+**Load saved result**, displayed every event's ordered primitive table and RA
+evidence, downloaded the composition and original provider input/output, and
+reopened the page with the same five programs. Browser checks reported no page
+errors. The source outline and nominal-continuation proof passed integrity checks;
+185 retained source, capture, and safety files match the original hashes. The
+39 missing files from that initial inventory belonged exclusively to unrelated
+Machining breakdown captures superseded by concurrent work, as recorded in the
+current Machining breakdown handoff; this task did not remove them.
+
+All **265 automated regression tests** passed for composition, Part slippage
+lifecycle, and request records. `poetry check`, Python compilation, and the
+scoped whitespace check passed. Poetry reports existing metadata deprecations.
+These counts describe automated tests, not generated compositions.
+
+Open **Recovery → Offline → Part slippage**, choose the saved Part slippage
+entry that enables **Load saved result**, and select that button. Its observation
+group is `capture_f923020bf9ce496eb443826291f8f2c2/observations.json`, with capture
+time `2026-10-10T17:03:11.848678+00:00`; it resolves to the accepted composition.
+Expand
+the five event programs under **Primitive composition** and use its Input/Output
+and **Download composition evidence** controls. This goal does not include CCA
+composition approval, Gazebo execution, hardware execution, or Continue production.
+
+Audit reports, browser evidence, test logs, cleanup manifests, and archived
+failure findings are retained under `generation_0002/goal_verification/`.
+The verified UI review copy `offline_ea8735865b6c443bb4d51e2d980ef4d2` is
+disposable; it contains the same composition and no new generation. The temporary
+UI server was stopped before cleanup. The four superseded partial attempts
+`offline_02cac3fc894c46dda577ba9cc0f2d7e8`,
+`offline_2c0cb51e112d43e7837cccf23ee6198c`,
+`offline_e33cbd0bf53e4a43bcd74c2b585a5a7b`, and
+`offline_31f19fe0d1a44f459b56a9cf03440fb1`, plus that UI review copy,
+were removed after their provider records were checked byte-for-byte against
+the accepted bundle and their remaining diagnostic evidence was archived.
+The explicit manifest covered 720 files, 20,493,846,660 bytes. Ownership,
+modification times, active processes, and open file handles were checked first.
+The original accepted outline, official Part slippage capture, regression
+fixtures, and unrelated active work were excluded. A fresh Recovery UI load
+passed after this cleanup, including provider downloads, all five ordered
+programs, and reopening. It created only the disposable review copy
+`offline_286a7093ffb84b6499da1c33b96fabef`, with no new generation. Its
+temporary UI server is stopped, its browser evidence is archived, and that
+verified duplicate was removed after ownership/mtime and open-file checks:
+172 files, 3,305,277,648 bytes. Total cleanup during this goal removed
+**1,270 disposable files, 41,122,655,001 bytes (38.30 GiB)**. Per-file manifests,
+process checks, receipts, and archived findings are in `goal_verification/`.
+The accepted composition and Attempt 17 remain retained separately. No temporary
+verification UI or generator is running.
+
+The final retained-result audit passed after all cleanup. The saved-result index
+contains exactly one complete RA-accepted Part slippage composition and selects
+`offline_1bb1efac84d7443aa37238521ead3b68` for its observation group. Both official
+failure captures remain selectable and ready for offline preparation; a failure
+capture itself is not a completed recovery result. See
+`goal_verification/retained_result_selection.json` for the exact paths.
+
+The browser reports contain no JavaScript page errors. NiceGUI also logged a
+nonfatal stale-client warning while the test browser reloaded or closed a view;
+the completed save, fresh load, all five displayed programs, evidence downloads,
+and reopening checks passed. The server logs are retained with the browser audit.
+
+### Earlier attempts and resolved findings
+
+This goal continues Attempt 17 without changing its five accepted events or its
+nominal-continuation proof. It uses the legacy `recovery_primitves/1` context
+retrieval and event-local LLM authoring pipeline, with ordered ResourceAgent
+composition validation and Recovery UI persistence. Execution remains disabled;
+CCA composition validation is a separate, unchecked stage.
+
+The user has now explicitly approved sending the saved Part slippage recovery
+context to `api.openai.com`: the five outline events, robot/part observations,
+primitive contracts, and RA validation feedback, without credentials in prompts.
+That approval resolved the earlier permission blocker below. Generation resumed
+from the saved replay checkpoint with `execution_authorized=false`.
+
+- `offline_31f19fe0d1a44f459b56a9cf03440fb1` revalidated the first two
+  events and accepted `pick_misplaced_gear_small` and
+  `place_gear_small_on_assembly_board`. It stopped on three identical fifth-event
+  rejections: `detect_parts` cannot use the projected buffer placement as a fresh
+  perception observation. All four accepted programs remain retained; this is
+  not a complete composition. Local replay reproduced the finding without API
+  calls. A diagnostic-only variant omitting the unnecessary `detect_parts`
+  passed the unchanged RA validator, while the original response and an
+  unrelated-target variant were rejected. This diagnostic is not a generated
+  accepted result. The prompt now clarifies that projected placement may support
+  `compute_pick_targets` without establishing fresh detection. The legacy pick
+  example also computes targets without `detect_parts`. Resume the fifth event
+  through the configured LLM, preserving actual provider responses and all checks.
+  Retain this four-event checkpoint for the continuation; remove only its
+  disposable `primitive_input_preview.json` after ownership/mtime checks.
+
+- `offline_e33cbd0bf53e4a43bcd74c2b585a5a7b` revalidated the saved first
+  event and accepted `stage_ket4_at_buffer` on its first new LLM revision.
+  It then stopped on three identical `product_geometry` rejections while
+  authoring `pick_misplaced_gear_small`. Seven new provider responses are retained
+  (one for the accepted buffer revision, two context requests and four pick
+  proposals); no complete composition was accepted. The third repeated geometry
+  finding produced `primitive_blocked`; the owned process is terminal.
+  Diagnosis: these geometric parameters are optional, and the composition owner
+  reads recorded geometry internally. The old feedback said only "use recorded
+  inputs", so the LLM kept copying recorded geometry into unsupported explicit
+  overrides. The repair names all unsupported parameters together and explicitly
+  directs the author to omit them, while preserving exactly the same rejection
+  checks. The composition prompt now explains this owner input behavior.
+  All 38 composition tests pass, including a regression that rejects every
+  unsupported override and verifies the omission path. Replay the saved responses
+  locally before resuming the third event; retain both accepted events.
+
+- `offline_b1c7e6943b704d71a71c610c7b66d356` is an abandoned diagnostic
+  copy of the accepted outline. The sandbox prevented a completed background
+  worker from waking the waiting asyncio task. An isolated delayed-worker
+  reproduction timed out in the sandbox and passed outside it. The process was
+  stopped with exit code 130; no LLM request or composition generation occurred.
+  Preparation and asynchronous checks now run outside that sandbox. After
+  verifying 224 protected source and safety files unchanged, the explicit
+  ownership/mtime-checked deletion list removed this disposable copy: 71 files,
+  2,923,398,097 bytes. The original accepted outline and official captures remain.
+- The user explicitly authorized use of the OpenAI API after automatic approval
+  review rejected the initial generation command. The configured destination is
+  `api.openai.com`; current default generation settings are `gpt-5.4` with
+  `medium` reasoning effort. Actual requests began in the attempt below.
+- `offline_1d4f3ff2df4d4fb8990ef7e51d8b0f9e` completed preparation only;
+  no API request was sent. It is a superseded diagnostic copy awaiting final
+  replacement verification and cleanup. The original Attempt 17 is retained.
+- `offline_8b2b23bb172d424281a88fe5c678fbbb` made two recorded OpenAI
+  requests and obtained a FEASIBLE program for
+  `clear_failed_robot_from_assembly_board`. Before the second event, the kernel
+  killed Python for memory exhaustion (3,638,552 kB anonymous resident memory).
+  No second-event request was sent. The active composition was carrying the
+  completed outline's large projected geometry through repeated debug copies.
+  The scoped fix keeps that geometry and monitor context in the unchanged
+  `outline_request.json`, after verifying its nominal proof, and removes them
+  from the active composition checkpoint. Recorded owner inputs remain intact.
+  Local replay verifies the first event's evidence against both contexts;
+  four focused lifecycle/preservation tests pass. The next generation uses this
+  fix; raw responses and first-event evidence remain debugging dependencies.
+- `offline_02cac3fc894c46dda577ba9cc0f2d7e8` again validated the first
+  event with two actual provider responses. It was stopped with exit code 143
+  before another request because the prior batch's full debug session was being
+  nested inside the next batch. The additional scoped fix passes compact history
+  references, excludes historical turns from prompt-input copies, and keeps full
+  substream records in their original artifacts. Thirty-four composition tests
+  pass, including regressions for this copying path. The next attempt replays
+  the saved `need_context` and `primitive_steps_ready` responses through the
+  current responsible ResourceAgent before continuing the four remaining events;
+  it does not ask the LLM to regenerate the first event.
+- `offline_d5ccc1c734e945ae89e1fc0a7af8fc1f` was killed during proof
+  verification before primitive generation or any provider request. The unchanged
+  nominal-continuation artifact is 937 MiB; reading it while new context copies
+  and concurrent tests were resident exceeded available memory. Preparation now
+  verifies the source before allocating a composition copy and excludes inactive
+  outline fields before copying. Heavy checks and generation run sequentially.
+  The replay source remains `offline_02cac3fc894c46dda577ba9cc0f2d7e8`.
+- After the transcript-copy fix, all 261 focused composition, lifecycle, and
+  request-record tests passed. Poetry check and Python compilation passed;
+  Poetry reported existing metadata deprecations.
+- `offline_2c0cb51e112d43e7837cccf23ee6198c` reused the first event's
+  actual responses and made five new provider requests for `stage_ket4_at_buffer`.
+  It was stopped after three repeated `pick_ctx` rejections, before another
+  request. Owner preparation enriches its private `_task_ctx` with placement
+  outputs; comparing that enriched object with the author's unchanged recorded
+  input incorrectly rejected the exact whole-context binding. The validator now
+  compares that binding with the recorded input while retaining the owner target
+  calculation and geometric checks. Thirty-six composition regression tests pass.
+  Replaying the last actual response now reaches a legitimate completion finding:
+  the LLM used `approach_pose` for the final retreat instead of `retreat_pose`.
+  The next revision resumes the served context and current RA feedback, retaining
+  the first validated event and all original responses. The generation loop now
+  stops after three identical composition findings even when proposals change.
+  The stop-limit regression also passes (37 composition tests total). The
+  resumed command was rejected by automatic approval review before execution:
+  explicit approval to send the saved recovery context to `api.openai.com` was
+  pending at that point. No new attempt or provider request was started by that command.
+  The failed stage's disposable input preview was removed with an explicit
+  ownership/mtime-checked list: one file, 8,669,011 bytes. Current replay inputs,
+  actual provider records, validation evidence, and accepted outline dependencies
+  remain protected.
+- Cleanup removed superseded diagnostic copies
+  `offline_1d4f3ff2df4d4fb8990ef7e51d8b0f9e`,
+  `offline_8b2b23bb172d424281a88fe5c678fbbb`, and
+  `offline_d5ccc1c734e945ae89e1fc0a7af8fc1f` after dependency and ownership
+  checks: 231 files and 11,322,723,101 bytes. All 224 protected file hashes
+  matched before deletion. Their failure reasons are recorded above. They are no longer inputs
+  to the replay, which retains `offline_2c0cb51e112d43e7837cccf23ee6198c`
+  and its referenced first-event records in
+  `offline_02cac3fc894c46dda577ba9cc0f2d7e8`.
+- Final local verification after the owner-input and stop-limit repairs:
+  **264 automated tests passed** across composition, Part slippage lifecycle,
+  and request-record coverage. These are tests, not 264 generated compositions.
+  `poetry check` and Python compilation passed with existing Poetry metadata
+  deprecations. The retained partial attempt is explicitly `blocked`, with
+  `primitive_status=failed`; it is not a completed composition. Its
+  `generation_0002/local_revalidation/` directory retains the replayed
+  one-event prefix, the pending `stage_ket4_at_buffer` batch with eight served
+  context entries and current retreat finding, regression logs, cleanup lists,
+  and protected-file fingerprints. No request was sent after the repair.
+  The same external approval blocker persisted across three consecutive goal
+  turns. Goal work was blocked pending the user's answer to the payload-specific
+  permission request at that point; all local fixes, tests, and the exact resume checkpoint
+  are retained. Completion still requires all five RA-validated event programs
+  and verification of the complete saved composition through Recovery UI.
+- The real Recovery UI loaded Attempt 17 and reopened its five-event outline
+  with `execution_authorized=false`. This verifies the retained outline, not a
+  completed primitive composition. The isolated browser's disposable review copy
+  is `offline_2b1ced6d396643e6a049be44a24a58bb`; its report and screenshot are
+  retained under the partial attempt's `generation_0002/local_revalidation/`.
+  The temporary UI server is stopped. The unchanged, owned duplicate was removed
+  after verification: 71 files and 2,923,398,097 bytes. Both official failure
+  captures remain selectable. Cleanup across this goal removed 376 files and
+  17,306,192,671 bytes (about 16.12 GiB); per-file lists and receipts are retained.
+- Initial composition regression checks: 32 passed. The broader offline,
+  Part slippage, and Recovery UI baseline checks passed all 513 cases in
+  72.71 seconds outside the sandbox.
+
+## Current handoff — October 14, 2026 — restore multi_turn diagnostic
+
+The user authorized removal of inactive machine-breakdown retries and the
+standalone `draft_9ec5b77f7de846c1ba2043f63b8b7229`, then exactly three fresh
+attempts through `execute_multi_turn_recovery`. RA, CCA and physical validation
+are bypassed only for the diagnostic; dynamic factual retrieval, candidate
+comparison and session progression remain in the existing pipeline. Target
+approximately five to six task-level recovery events and stop at proposed
+nominal handoff. No formal acceptance or execution is implied.
+
+Cleanup audit: 664 disposable files, 3,321,692,160 allocated bytes, no open-file
+or running-Python ownership found. The explicit file/mtime/inode/uid manifest
+is retained under `machine_multiturn_diagnostic_20261014/cleanup_manifest.json`.
+It covers five inactive machine `offline_` attempts, their
+`legacy_forward_backward_20261014` duplicates and the standalone draft.
+Protected: official capture `capture_8beafdb8a01e444894cfaf41d29921fd`, its native
+model, source run `4a6d23fca53a4d4486ba50f9d005203a`, `capture_04`, both accepted
+Part slippage results and their dependencies. The failed attempts established
+only one accepted M2 pause prefix; missing part bindings, UR parameter conflicts
+and unresolved KMR endpoint search prevented complete machine acceptance.
+The supplied robot pickup replay and a before prompt are preserved compactly.
+The preceding standalone draft used a different loop and is not a framework
+convergence result. `OutlineDraft` now adapts the existing
+`execute_multi_turn_recovery`, phase handlers, candidate comparison and factual
+retrieval. The diagnostic flag defaults off. Missing start fields are retained
+as assumptions only in this diagnostic; normal validation remains unchanged.
+Focused and related regression suites passed: 905 tests. `poetry check`, Python
+compilation and `git diff --check` passed; Poetry emitted existing metadata
+deprecation warnings. All 11 protected hashes match the cleanup manifest, and
+the official capture remains selectable with eight native-model files present.
+
+Exactly three independent fresh API attempts finished with the capture's
+`gpt-5.4`, `medium` settings, without an earlier accepted prefix or rejection
+history. Attempts two and three ran in parallel with attempt one. There were
+42 provider calls in total and no provider errors. The genuine attempts made
+no context requests; dynamic retrieval was exercised through scripted provider
+tests of the same orchestration. No RA, physical, CCA, formal nominal-continuation
+or composition call occurred. Every diagnostic check remains `not_checked`.
+
+| Attempt | Identifier | LLM calls | Selected events | Generation seconds | Outcome |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | `draft_a9e49e5d3e7e47b2928cd342ce10ff51` | 12 | 8 | 931.84 | `selection_unresolved` after three no-progress batches; compact evidence retained, full outputs removed |
+| 2 | `draft_6e6f4844a4d2422891965f16f65c4e3d` | 20 | 15 | 1582.56 | Proposed handoff with assumptions; compact evidence retained, full outputs removed |
+| 3 | `draft_66b5fc99daab491ea8f25624d1790b5a` | 10 | 9 | 687.22 | Selected unvalidated draft; full native prompts, responses, comparisons and draft retained |
+
+Retain the selected draft under
+`cais_spade_llm/monitor/environment_runs/recovery/outline_drafts/draft_66b5fc99daab491ea8f25624d1790b5a/`.
+`SystemBridge.part_slippage_action("load_draft")` reproduced its exact nine rows
+without provider calls. NiceGUI rendering confirmed that `Load draft` is enabled
+and `Continue`, `Test in Gazebo`, and `Execute recovery` are disabled. This was a
+headless UI verification, not a live browser or Gazebo execution. Verification
+records and all three compact summaries are under
+`machine_multiturn_diagnostic_20261014/`. The saved request/response timestamps
+show 52–89 seconds per outline API response in the selected attempt; the 905
+regressions themselves took 199.19 seconds. Codex Fast mode did not alter the
+provider payload's saved model or reasoning settings.
+
+The selected sequence is the actual LLM-generated sequence, without regrouping:
+
+| Event | `event_name` | `resource_jid` | `part_name` | Proposed outcome |
+| --- | --- | --- | --- | --- |
+| `RECOVERY_SEQ1` | `pick_part` | `recovery-resource-1@localhost` | `KET4_Square_4mm` | Held by the resource at M1 |
+| `RECOVERY_SEQ2` | `place_part` | `recovery-resource-1@localhost` | `KET4_Square_4mm` | Released on Conveyor |
+| `RECOVERY_SEQ3` | `pick_part` | `recovery-resource-2@localhost` | `KET4_Square_4mm` | Held by the resource at Conveyor |
+| `RECOVERY_SEQ4` | `place_part` | `recovery-resource-2@localhost` | `KET4_Square_4mm` | Released on M2 staging tray |
+| `RECOVERY_SEQ5` | `pick_part` | `recovery-resource-2@localhost` | `KET4_Square_4mm` | Held by the resource at M2 staging tray |
+| `RECOVERY_SEQ6` | `place_part` | `recovery-resource-2@localhost` | `KET4_Square_4mm` | `part_location=M2`, `part_state=loaded`; `held_part` omitted |
+| `RECOVERY_SEQ7` | `machine_part` | `recovery-resource-6@localhost` | `KET4_Square_4mm` | Square program and completed job |
+| `RECOVERY_SEQ8` | `machine_part` | `recovery-resource-6@localhost` | `RGOCG4-50_Round_4mm` | Circle program and completed job |
+| `RECOVERY_SEQ9` | `place_part` | `recovery-resource-2@localhost` | `KET4_Square_4mm` | Released on M2 staging tray |
+
+The five-to-six-event target was missed in every attempt. The selected draft
+omits pausing/removing the recorded M2 round job before loading KET4, leaves
+`held_part` unchanged at event six despite a claimed load, and includes nominal
+round processing inside recovery. Its proposed handoff assumes M2's
+`resource_state` and `part_name` after the final tentative transfer. Thus it is
+not a correct, accepted recovery or a nominal-continuation proof. Attempts one
+and two additionally select round completion before square completion, contrary
+to the supplied ordering requirement. Attempt one also claims square completion
+with KET4 still on Conveyor. These are generation/selection findings with
+validators bypassed; they do not establish that RA or CCA is too strict.
+
+Next work: repair task-level granularity, the presentation of captured replacement
+objectives and public owner fields, and completed `resume_suffix` feedback before
+further unchanged API retries. Keep this diagnostic separate from validation
+repair and execution. The first fresh outline prompt contains zero `pick_part`
+or `place_part` mentions and excludes `place_release`, `gripper_reach`,
+`additional_bindings`, and `active_job`; the former names came from the LLM.
+`machine_part` and `move_to_resource` remain exact captured pending-task names.
+
+Cleanup of the other two fresh attempts removed 224 additional files and
+9,568,256 allocated bytes after ownership/mtime checks. Total task cleanup:
+888 disposable files, 3,331,260,416 allocated bytes (about 3.10 GiB). The official
+capture, native model and all protected accepted Part slippage dependencies
+retain their original hashes. Separate deletion manifests and receipts record
+each removal. The previously documented 12 failures in other AP/KMR suites were
+not rerun; none of the current 905 focused regressions failed.
+
+## Previous handoff — standalone generation-only draft (superseded)
+
+The immediate user-requested diagnostic is complete. `Generate outline only`
+and `Load draft` are available for saved observations through the existing
+`SystemBridge.part_slippage_action` interface. The separate `OutlineDraft`
+provider loop uses public factual context and filtered retrieval, requests one
+ordered `transition_trace`, and stops at the first well-formed draft. It does
+not instantiate resource owners or call RA, physical projection, CCA, candidate
+comparison, nominal-continuation checking, or primitive composition. It accepts
+missing physical evidence. The six-call budget includes at most one formatting
+repair; diagnostic provider calls disable application and SDK retries. Normal
+provider callers retain their existing retry policy.
+
+Deleted `draft_9ec5b77f7de846c1ba2043f63b8b7229` at the user's request during the
+cleanup above; its concise findings and before prompt remain in the diagnostic
+handoff artifacts. It was a genuine `gpt-5.4`, `medium` response from official capture
+`capture_8beafdb8a01e444894cfaf41d29921fd`, generated in one API call in
+159.28 seconds, with 12 events and no retrieval or formatting-repair turns.
+The exact prompt is 15,116 UTF-8 bytes. Provider usage is 7,606 prompt tokens,
+10,928 completion tokens (including 8,417 reasoning tokens), 18,534 total.
+The draft retains both exact safety requirements, raw provider request and
+response, prompt, model settings, source hash, usage, timing, and UI checks.
+All four checks are `not_checked`; `execution_authorized=false`. This is an
+unvalidated draft, not an accepted recovery outline or nominal-continuation proof.
+
+The proposed order is: pause the M2 round-part job; unload
+`RGOCG4-50_Round_4mm` to `M2 staging tray`; record M2 idle; extract
+`KET4_Square_4mm` from M1 to Conveyor; record M1 stopped/idle; load the square
+part from Conveyor into M2; complete square trim; unload it to Conveyor;
+reload the staged round part; complete circle trim; use KMR to transfer the
+square part from Conveyor to `Buffer For Machined parts`; use `ur5e-3` to
+place it at `assembly_board-v1`. These events are preserved exactly as returned.
+
+Manual reading identifies remaining gaps, without running validators: event 1
+keeps `active_job=environment_23` while paused, whereas the owner pause code
+clears `active_job`; events 3 and 5 are bookkeeping-style state changes rather
+than clearly described physical tasks; no Conveyor transport event connects
+the robot handoffs; event 11 assumes KMR can service Conveyor and
+`Buffer For Machined parts`; event 12 leaves the part `ready` at
+`assembly_board-v1`. Job completion, M2 occupancy, processing continuity and
+nominal continuation remain unproven. Do not revise these outputs by hand or
+promote them to accepted events. No further API request was made after this draft.
+
+Verification: 322 focused draft, provider-record, Recovery workflow and UI
+tests passed. A restricted-sandbox asyncio thread-shutdown hang was reproduced
+with a minimal `asyncio.to_thread` program; the suites passed with normal
+thread wakeups. `Load draft` reproduced the exact record without a provider
+call. NiceGUI Client rendering displayed all 12 rows, enabled both diagnostic
+buttons, and disabled Continue, Test in Gazebo and Execute recovery. This was
+render/control verification, not a browser-driven or live Gazebo test.
+`ui_action_verification.json` records zero forbidden calls and unchanged hashes
+for the official capture, the retained machine accepted prefix and both
+accepted Part slippage stage records. `ui_render_verification.json` records the
+actual rendered controls. `poetry check`, compilation of `cais_spade_llm` and
+`ros2`, and `git diff --check` passed; Poetry emitted only the existing metadata
+warnings. The retained draft and verification logs comprise 10 files using
+143,360 allocated bytes (140 KiB). No failed recovery attempt or duplicated
+capture was created.
+
+The validated-generation work below remains incomplete and separate. Its
+existing 12 reproduced AP/KMR baseline failures are unchanged; no validation
+was relaxed by this diagnostic.
+
+Fresh attempts now use `incremental_candidates_validated`. A later preparation
+override that silently restored `incremental_validated` was removed. Saved
+results keep their recorded mode and policy. Candidate events use detached
+accepted states; only the selected candidate is committed. Comparison ignores
+accumulated monitor observations when detecting repeated modeled states.
+Unresolved candidate batches remain available for validation-only retry.
+
+Policy version 2 retains matched recovery predecessor guards as composition
+prerequisites; exact nominal tasks still enforce them. Machine-owner duration
+calculations can start or resume from proven inactive processing without an
+observed absolute clock. They retain `calculation_clock_sec` and relative-time
+provenance without inventing an observed `simulation_clock_sec`. Program,
+access, custody and duration checks remain. Partial peer geometry can stay
+unknown when selected safety predicates do not need a more precise value;
+stale geometry is invalidated.
+
+The shared `handling_robot_access` calculation and detached correction of
+inherited printer-scene capabilities have regression coverage. Explicit limits
+remain unchanged. The missing preparation import and later overwrite of
+calculated owner evidence were corrected. Public feedback hides operation
+menus and numeric reach limits, including repeated nominal feedback filtering.
+
+Local replay accepted the first two retained machine proposals through RA and
+both safety specifications. The candidate selector also accepted the retained
+pause proposal as progress. These replay checks are not a new complete recovery.
+Official capture `capture_8beafdb8a01e444894cfaf41d29921fd` remains the input;
+the deleted 28-event attempt has not been restored.
+
+The broad six-suite run recorded 1,626 passes and three failed assertions or
+fixtures; their corrections passed focused reruns. The later workflow run
+recorded 1,005 passes and one incomplete test-owner fixture; its correction and
+the partial-projection cases passed together (six tests). The 12 documented
+legacy AP/KMR failures reproduce separately, with their tests and owner code
+matching the before-change hashes. `poetry check`, Python compilation and
+`git diff --check` passed during this work; repeat final static checks after
+any further repair.
+
+Fresh approved API attempt `offline_dd188e10021140579d3c24b4b7e9c29e` stopped
+after its first four-candidate batch, with no accepted events. The corrected
+robot snapshot was being adapted differently on the validator and preparation
+paths (`staging_areas` empty versus omitted). That mismatch is fixed. Current
+candidate batches may return unresolved findings for one proposal revision;
+repeating the same conditions and evidence retains `NEEDS_CONTEXT` and the
+validation-only retry. No missing evidence becomes acceptance.
+
+No-API replay now reaches robot forward checks. The retained pause proposal
+conflicts with the owner's `active_job` update; placement lacks current custody
+and, for `Conveyor`, destination calculation evidence. The KMR proposal does not
+match the actual effects of its matched movement declarations. Preserve exact
+provider requests/responses and compact diagnostics; delete this finished
+attempt's duplicated disposable state before retrying with these findings.
+The next step is a fresh API revision using the corrected owner snapshot and
+candidate feedback, without supplying a replacement event or route.
+
+Attempt `offline_bebf26fc74e140cdaa41622dc97a02b0` generated corrected pause and
+stop alternatives. Its worker selected the pause with RA `FEASIBLE` and CCA
+passed. The run was interrupted to repair repeated calculation cost before
+another API request; the selected worker record is retained for local prefix
+revalidation, separate from the canceled UI session. Pure joint calculation
+reuse is now scoped to one candidate batch, with independent FK/evidence checks
+on every use. Changed geometry invalidates it and the cache does not survive
+the batch (nine focused tests passed).
+
+No-API attempt `offline_83e0abd9096e4e8da260b34c96ff5ea4` stopped before replay:
+the diagnostic runner incorrectly compared a derived `expected_start_state`
+against the raw provider response. It now checks that field against the saved
+RA primitive-support record and preserves the exact provider-authored fields.
+That attempt's disposable preparation was deleted after ownership checks.
+
+Local attempt `offline_59d2957d7039494a9a2d110e954b618b` revalidated the original
+LLM-selected M2 pause with RA and CCA, without an API request. Its retained
+`attempt_04_revalidation/revalidated_session.json` is the current one-event
+prefix. It is not a complete recovery outline.
+
+Robot endpoint projection now uses the recorded robot task declarations,
+`handling_robot_access` calculations, joint limits and custody configuration.
+It retains unknown intervening occupancy instead of requiring a motion program.
+Supplied pickup verification cases for `ur5e-1` at `M1` and `ur5e-2` at `M2`
+both pass RA, endpoint projection and the two unchanged safety specifications
+from the accepted pause state. These cases are not LLM-generated events and
+have not been appended to the accepted prefix. Compact evidence is retained in
+`legacy_forward_backward_20261014/supplied_robot_pipeline_replay.json`.
+
+Attempt `offline_0270fc81a3234d1d805831023ba49619` resumed that prefix and made
+two genuine provider requests. Its first five-candidate batch required revision;
+the following batch reached candidate comparison, which crashed because
+`_infer_outline_macro_signature` converted a projected seven-value
+`current_pose` list directly with `dict()`. The pose-format compatibility repair
+does not change feasibility or safety meanings. Replay the retained second
+batch without another API request. Preserve its provider responses and prefix
+evidence; remove duplicated preparation output after recording the deletion
+list and checking ownership. The original failure capture remains unchanged.
+
+Local attempt `offline_3849da544cb845a88fab41d764054f55` completed that replay
+without API calls in 334.22 seconds. The comparison exception is fixed (13
+focused tests passed). The prefix remains one accepted M2 pause: the retained
+KMR pickup passed independent RA but its endpoint calculation found no joint
+witness; this is unresolved search, not demonstrated unreachability. The KMR
+reposition passed RA/CCA but did not establish comparison progress. Full
+validation of hypothetical follow-up events contributes to comparison cost.
+The next retry uses compact factual feedback for recorded parameter conflicts
+and bounded-search failures (three focused tests passed), without replacement
+events or altered acceptance criteria. Retained rejected outputs are used only
+to render that feedback; they do not become accepted state. Attempt 05 cleanup
+removed its duplicated preparation, releasing 77,496,320 allocated bytes.
+Attempt 06 preparation and bound prefix evidence remain required for reviewed
+reuse and debugging. The source capture hash is unchanged.
+
+Attempt `offline_c618ccdc5de94cb2bfeb359ea3994422` stopped before any API call:
+the diagnostic evidence-reuse helper still indexed legacy `next_transition`
+instead of selecting the recorded `candidate_events` entry. Both formats now
+retain the exact original selected fields. Keep its compact report and remove
+its failed preparation after ownership checks, then retry from attempt 06.
+
+Attempt `offline_1b6bf9369b314de9bd564eb2c3326617` made three genuine API calls
+after strict reuse checks across 51 prepared fields. It returned positioning
+proposals, requested public context, then repeated positioning proposals with
+the same missing `part_name` bindings. No new event was accepted. The worker
+stopped at `NEEDS_CONTEXT`; `report.error=null` does not mean success (the
+recorded result is `blocked`). Retain its provider requests/responses, failed
+candidate evidence and compact worker session for diagnosis. Remove its
+duplicated preparation after ownership checks. Source observations and the
+one-event prefix remain unchanged; no execution or Gazebo request occurred.
+
+Current boundary issue: `_kmr_endpoint` still walks the owner's program and
+checks intermediate parameter/configuration compatibility after RA has checked
+the unordered primitive union independently. A missing bounded-search witness
+there does not undo RA `FEASIBLE`, but currently blocks successor evidence.
+Audit those checks against required forward parameters and the selected APs;
+do not add more endpoint/program requirements to make the outline converge.
+The latest API failure itself was earlier, at RA proposal bindings, not CCA or
+geometry. The offline error message now preserves that distinction instead of
+labeling every `NEEDS_CONTEXT` as endpoint/bounds failure. Hypothetical follow-up
+RA/CCA checks in candidate comparison also remain a cost to examine. No further
+unchanged API retry is warranted. Completion and saved-result loading remain
+outstanding. The latest full outline suite passed 264 tests.
+
+Final retention checks for this continuation: 264 outline tests and three
+focused offline pending-evidence tests passed; `poetry check`, compilation and
+`git diff --check` passed (existing Poetry metadata warnings only). The 12
+previously reproduced AP/KMR baseline failures remain separate. Cleanup of
+attempts 05, 07 and 08 removed 24 disposable files and released 374,824,960
+allocated bytes (357.46 MiB). Both retained Part slippage results loaded through
+`load_offline_result` in temporary review copies, which were removed. The
+official machine capture remains selectable, with its original observation and
+native manifest hashes. See `retained_results_after_cleanup.json` and the
+per-attempt cleanup manifests/receipts. No machine outline has nominal-
+continuation proof yet; the retained one-event prefix is still incomplete.
+
+Verification for the robot repair: 529 workflow tests passed; the endpoint and
+environment suites recorded 672 passes and two invalid machine-state test
+fixtures. Correcting those fixtures produced four passing focused reruns.
+`poetry check`, compilation and `git diff --check` passed. The separately
+reproduced 12 legacy AP/KMR failures remain recorded above.
+
+Its diagnostics are under
+`machine_outline_goal_20261014_01a137cc/legacy_forward_backward_20261014/attempt_01/`.
+The first genuine outline request uses `candidate_events` and contains no
+`gripper_reach`, `additional_bindings`, `max_xy_radius_m`, or
+`execution_primitive_catalog`. It is 28,020 characters; the retained earlier
+first outline prompt is 12,312 characters. Expanded factual context makes the
+new prompt longer. Both prompts, lengths, replay summaries and test logs are
+retained alongside the attempt. A complete accepted outline, nominal-continuation
+proof and saved-result loading are still required. Recovery execution remains
+unauthorized.
+
+## Historical handoff — October 14, 2026 — user-requested machine-attempt cleanup
+
+The user explicitly approved: “Remove the attempt files; keep the live failure
+capture.” This supersedes the earlier instruction to preserve the incomplete
+28-event prefix and its resumed-attempt dependencies. No complete accepted
+Machining breakdown outline or primitive composition existed in this chain.
+
+Retire `attempt_01` through `attempt_18`, their corresponding offline run
+directories, the stopped `offline_4bed5f73eabd4fb6a6e9ef4ee76984e2` preparation,
+and disposable machine-attempt replay and diagnostic outputs. The last attempt
+`offline_6157db87c86841609d5d7895e6b7a0b8` ended at `NEEDS_CONTEXT` for M2
+`machine_part`, with missing projected workholding/access evidence; a subsequent
+owner calculation exposed missing `simulation_clock_sec`. The 28 accepted events
+included 18 `move_to_location` events and did not establish nominal continuation.
+Per-attempt failure findings, exact deletion paths, ownership and dependency
+checks, protected hashes, and the cleanup receipt are recorded under
+`cais_spade_llm/monitor/environment_runs/machine_cleanup_20261014_01a137cc/`.
+Cleanup removed **3,431 files and 778 directories**, releasing
+**117,611,106,304 allocated bytes (109.53 GiB)**. All 644 protected file hashes
+matched afterwards. The official machine capture remains selectable and
+`offline_ready`; its native model loaded with the original manifest hash.
+Both retained Part slippage results passed the actual saved-result loader in
+temporary review sessions, including the bound nominal-continuation proof.
+Those temporary copies were removed. No API, Gazebo, or execution call occurred.
+
+Preserve official capture `capture_8beafdb8a01e444894cfaf41d29921fd`, source
+checkpoint `4a6d23fca53a4d4486ba50f9d005203a`, the capture's native model and
+capture setup records, both safety specifications, all other official captures,
+and accepted Part slippage results. Current code work and its before-change
+snapshot remain under `machine_outline_goal_20261014_01a137cc/legacy_forward_backward_20261014/`.
+Only compact original provider request/response records, the event audit, and
+proposal inputs remain there for the already-authorized local regression and
+prompt comparison; they are not a saved recovery result or resumable prefix.
+
+Next: finish the authorized legacy task-level generation and backward/forward
+feasibility repair, verify locally from the preserved capture and compact
+proposal records, then generate a separate new attempt. The implementation is
+in progress and has not yet passed its required regressions. Recovery execution
+remains unauthorized. Historical sections below describe the now-retired files;
+their old “retain” and “resume” instructions are superseded by this handoff.
+
+Implementation checkpoint after cleanup: candidate generation, public-context
+filtering, and version-2 policy plumbing are partially implemented. The current
+edits also share `handling_robot_access` target calculations with nominal pickup,
+correct the inherited cell capabilities in detached preparation, add a bounded
+robot joint calculation when no explicit `gripper_reach` was recorded, and defer
+nominal resource guards only for version-2 recovery effect projection. These
+changes still need focused regression additions and integration review. Robot
+projection, partial evidence handling, machine processing-time semantics,
+candidate progress selection, and a successful new LLM outline remain unfinished.
+No new API request has been made. `poetry check`, Python compilation and
+`git diff --check` pass; Poetry reports its existing metadata deprecations.
+The first sandboxed baseline was interrupted after 95 passes because a mocked
+threaded observation test stalled; the two corresponding host tests pass.
+The current host regression run finished with **1,689 passed and 23 failed**.
+Eleven failures concern earlier expectations for public limits/reasons or the
+single-event schema; twelve have the previously documented legacy AP/KMR error
+signatures, but baseline equivalence has not yet been independently rerun for
+this change. The full log and the interrupted baseline log are retained in the
+active `legacy_forward_backward_20261014/` directory. Diagnose these failures
+and finish the remaining implementation before any generation retry.
+
+## Historical handoff — October 14, 2026 — capability context and additional calculations
+
+The user requested an audit of the twenty-eight accepted events and their
+granularity. `nominal_goal_20261014/attempt_18_event_review.json` and
+`attempt_18_events.csv` retain the exact accepted records and source hashes.
+Eighteen events are `move_to_location`; accepted indices 2–6, 9–13 and 19–25
+revisit station locations. These are not all necessary arm lift or retreat
+substeps, and accepted-event count must not be reported as recovery progress.
+The actual turn-49 provider request explicitly exposes `move_to_location`,
+`pick_approach`, `pick_part`, `place_approach` and `place_release` through
+`evaluation_support.additional_bindings`; `machine_part` appears in the failure
+context. The inspected request does not contain `primitive_support`,
+`execution_primitive_catalog` or the checked private primitive names. The
+registered event names therefore were not independently invented by the LLM.
+`event_name` remains a free string, while owner support is derived from proposed
+conditions. Prompt vocabulary and supported transition granularity both matter.
+
+The event path appends a locally validated event before evaluating nominal
+continuation; it does not require that event to improve completion or prevent a
+return to an earlier state. Historical rationales alternate between clearing M2
+and restoring nominal preconditions. The current replay already records
+`environment_22` completed at accepted event 9 (`outline_recovery_18`); later
+round trips must not be justified by claiming that task is still unfinished.
+Task-level generation and repeated-state handling require review separately
+from the physical-evidence repairs. Preserve exact identifiers and allow
+legitimate revisits with changed custody, processing, configuration, monitor
+state or new relevant evidence. Do not insert a reference recovery sequence
+into generation. No events were deleted or reclassified by this audit; a
+shortened sequence would require independent replay. No new API request or
+execution occurred during this review.
+
+The latest finished retry is `attempt_18`,
+`offline_6157db87c86841609d5d7895e6b7a0b8`. It revalidated all twenty-seven
+retained events unchanged and accepted the original turn 48 `place_release`,
+retaining **twenty-eight** accepted LLM events. One new API request followed.
+Turn 49 proposes M2 `machine_part` for `KET4_Square_4mm`, with `job_state=completed`
+and `resource_state=completed`. RA returns `NEEDS_CONTEXT`; its primitive
+capability checks identify missing `workholding and access evidence for the
+projected scene at M2`. No physical projection or CCA request occurs. The attempt
+finished at `2026-10-14T12:12:30.242785+00:00`, source unchanged and zero
+execution-interface calls. Nominal continuation remains `not_ready`.
+
+The recorded successor has `KET4_Square_4mm` supported at the M2 workholding
+pose and KMR's release/retreat endpoint. An in-progress machine-owner repair
+calculates workholding and access evidence from these projected facts. The local
+saved-state calculation reports `correct_part_present=true` and
+`robot_access_clear=true`; its conservative KMR and ur5e-2 clearances are
+0.3809782632931921 m and 1.142229512050384 m. This is conditional model evidence,
+not execution evidence or acceptance of turn 49. The subsequent local
+`start_job` calculation returns `NEEDS_CONTEXT: observed simulation_clock_sec`.
+Both results are retained under `nominal_goal_20261014/machine_access/attempt_18/`.
+Finish review and regression of the calculation and processing-time semantics,
+then replay the unchanged provider turn before another API request. Do not treat
+missing evidence as a selected safety-specification violation or change either
+requirement. Attempt 18's redundant `input_preview.json` was removed after the
+recorded deletion and ownership checks, releasing 17,774,295 bytes; retained
+capture, session and preparation checks pass.
+
+The preceding retry is `attempt_17`,
+`offline_841f1a8e3ad64c5fb5ed7763d7e615eb`. It reused twenty-five accepted events,
+revalidated original accepted turn 45 and accepted original pending turn 46,
+retaining **twenty-seven** accepted LLM events. Two new API requests followed.
+Turn 47 requests `part_state=ready` on KMR `place_release`; the owner correctly
+rejects it because the supported effect is `part_state=loaded`. Turn 48 makes
+that revision and passes RA, but physical validation returns `NEEDS_CONTEXT`:
+`KMR release has no supported deposited-part rest: Static support requires at least three distinct contact points`.
+CCA is `not_checked`, with no CCA request. The attempt finished at
+`2026-10-14T11:31:44.477822+00:00`, source unchanged and zero execution-interface
+calls. Nominal continuation remains `not_ready`; retain the original response.
+
+The earlier supplied support diagnosis now matches this actual LLM proposal.
+The initial M2 geometry retirement occurred at accepted event 8, original turn 19
+(`outline_recovery_17`); M1 geometry was similarly retired at accepted event 18,
+turn 34 (`outline_recovery_33`). The shared `pick_part` updates custody while
+the recorded machine body remains static. The policy now preserves that body
+only for a static peer whose declaration names the acting resource, has no
+collection effects, and updates only `inventory.*`, `resource_state` or
+`part_name`. Geometric updates and a different actor still invalidate geometry.
+KMR placement also no longer adds an unrecorded 0.003 m offset above
+`workholding_pose`: both workholding and slots retain their exact destination
+part pose. The separate resting-contact calculation remains required, without
+lowering its contact count or margins. This also changes targets used by the
+shared KMR implementation; native execution has not been performed.
+
+All **27 focused tests** pass across `Storage`, `M1` and `M2`, including custody,
+static-body, changed-actor and geometric-update cases. The full environment,
+KMR-evidence and machine regression passes **325 tests**; records are under
+`nominal_goal_20261014/machine_placement/attempt_17/`. Poetry, compilation, UI
+help, fifteen local runner tests and `git diff --check` also pass. Saved source and accepted
+events remain immutable. Replay the original provider sequence and turn 48
+locally under the repaired projection before another API request. The local
+runner now refuses generation if a retained proposal remains `NEEDS_CONTEXT`.
+The earlier seven-event checkpoint has a different logical session identity;
+do not relabel it to bypass resource-evidence restoration checks.
+
+Attempt 17's redundant preparation preview was removed after its explicit
+deletion list and ownership, mtime, hash, process and open-handle checks,
+releasing **17,774,295 bytes**. The accepted session and prepared state are
+unchanged, and the official capture still loads with its native model and is
+selectable for offline preparation. The completed full replay in `attempt_18`
+preserved all twenty-seven accepted events and validated original turn 48 before
+the single new generation request. Protect its current partial result.
+This is model-based planning validation; no execution is authorized.
+Its unchanged original turns 19 and 34 revalidated through RA,
+physical projection and CCA with `M2` and `M1` static geometry retained.
+`nominal_goal_20261014/machine_placement/attempt_18_projection_comparison.json`
+records both before/after validation hashes and confirms identical LLM proposals.
+The complete attempt additionally validates placement, but nominal continuation
+remains unestablished.
+
+An independent retained-record audit verifies all twenty-seven events in
+`attempt_17`: each matches exactly one original provider response, RA is
+`FEASIBLE`, physical evidence is `projected`, CCA is `passed`, both selected
+specification hashes match, and CCA monitor history is continuous. Its bound
+nominal proof loads and remains `not_ready`. This audits the recorded result;
+the separate `attempt_18` replay establishes validation under the changed code.
+The event table and hashes are in
+`nominal_goal_20261014/machine_placement/attempt_17/retained_event_audit/`.
+`nominal_goal_20261014/audit_outline.py` can require complete acceptance before
+final reporting. The adjacent `recovery_ui.py` and `verify_browser.py` prepare
+the real Recovery UI load/reopen check with generation and execution blocked;
+they compile but have not yet run for a complete Machining breakdown result.
+
+The preceding retry is `attempt_16`,
+`offline_47c47d53a8824405b9ff62fbab018c04`. It retained **twenty-six** accepted
+events through turn 45 and made one new API request. Original turn 46 proposes
+KMR `place_approach` with `resource_state=positioned`; RA is `FEASIBLE`, physical
+validation returns `NEEDS_CONTEXT` (`Projected starting configuration is stale`),
+and CCA is `not_checked` with no CCA request. The attempt finished at
+`2026-10-14T11:09:02.353459+00:00`; source observations are unchanged and no
+execution interface was called. Nominal continuation remains `not_ready`.
+
+Diagnosis: M2 `select_program` changes global projection provenance but does not
+move KMR. The zero-duration machine-control projection now preserves a peer
+endpoint only when its input binding, state and configuration are valid and its
+state, resource model, geometry and all part states remain unchanged. The
+successor retains the preceding endpoint fingerprint and binding. Stale evidence
+is never renewed; execution readiness remains unestablished. This applies to
+unchanged peers without selecting a resource or route. Sixteen machine-control
+cases and fifteen local runner dependency tests pass. Original turns 45 and 46
+both pass RA, physical projection and CCA locally, producing **twenty-seven**
+events without changing source observations or the first twenty-five events.
+This local result is not yet a committed UI attempt. Records are under
+`nominal_goal_20261014/unchanged_peer_endpoint/attempt_16/`.
+
+The local runner can reuse a reviewed shorter accepted prefix, then revalidate
+the affected accepted tail and original pending response. For the next retry,
+reuse the twenty-five-event state from attempt 15, revalidate original accepted
+turn 45, replay original turn 46, and only then request a new event. The source
+attempts remain immutable. All 356 protected source and accepted-result files
+matched their retained hashes before this repair.
+
+Attempt 16's single redundant `input_preview.json` was removed after explicit
+list, ownership, modification-time, hash, process and open-handle checks:
+**17,774,295 bytes** released. Its accepted session and preparation still match
+their hashes, and the official capture remains selectable and compatible with
+its native model. The dependency review for retry 17 is prepared under
+`unchanged_peer_endpoint/attempt_16/accepted_evidence_reuse_review.json`; use
+`--resume attempt_16 --reuse-prefix attempt_15` with that review. Retry 17's
+finished result is recorded above. The unchanged-tail
+replay is local verification only. The full machine/environment regression passes:
+**259 passed**, in `unchanged_peer_endpoint/attempt_16/regression_tests.log`.
+Focused tests, Poetry, compilation, UI help and `git diff --check` also pass.
+
+The preceding retry is `attempt_15`,
+`offline_b9bec2a6d9b5438186772676b47071d1`. It retains **twenty-five** committed
+accepted LLM events through turn 43. Checked reuse preserved twenty-three events,
+and unchanged provider turn 42 passed before generation continued. Three new
+provider responses are retained: turn 43 moves KMR to M2, turn 44 is rejected by
+the resource because the recorded part pose differs from the requested
+workholding location, and turn 45 requests M2 `select_program` from `circle` to
+`square`. Turn 45 initially returned `NEEDS_CONTEXT` for missing
+`simulation_clock_sec`. It remains uncommitted in this saved attempt. Nominal
+continuation is `not_ready`; no recovery execution occurred. The attempt finished
+at `2026-10-14T10:35:09.697966+00:00`, with source observations unchanged and zero
+execution-interface calls. Retain its provider records, accepted state, evidence
+and dependencies for the next retry.
+
+The clock requirement now permits only `select_program` without a current clock
+when every retained job is established inactive. This changes no job time,
+progress or completion. Instantaneous simulated machine controls can preserve
+bound endpoint occupancy under evidence policy 2 when unrelated complete geometry
+is unavailable; stale occupancy is rejected and unknown occupancy remains unknown.
+The previous complete-geometry path remains unchanged. Replaying the initial
+accepted M2 `interrupt_job` produced exactly the same physical projections before
+and after this repair. These changes apply to recorded machine declarations,
+without a preferred resource or sequence. Full machine, environment, validated
+outline and public-context suites pass: **821 passed**. Poetry, compilation and
+`git diff --check` pass, with existing Poetry metadata warnings.
+
+Physical `needs_context` now consistently stops before a CCA request and records
+CCA `not_checked`, with the resource owning the finding. A physical guard mismatch
+is not a safety-specification rejection. Complete physical evidence still goes
+through the unchanged CCA safety checks. Both selected specifications are retained.
+Repair records and unchanged-turn replay are in
+`nominal_goal_20261014/processing_clock/attempt_15/`. A successful local replay is
+not a newly committed accepted event or a completed recovery outline. Resume the
+original turn 45 through checked dependency reuse, then continue generation.
+
+Final unchanged-turn-45 replay passes RA `FEASIBLE`, physical `projected` and CCA
+`passed`, producing a local twenty-six-event prefix with nominal continuation
+still `not_ready`. Its original provider response, source observations and prior
+twenty-five events are unchanged. The reviewed retry is `attempt_16`,
+`offline_47c47d53a8824405b9ff62fbab018c04`; its later result is recorded above.
+The exact accepted-evidence review and dependency hashes are beside the rule-change
+record in `processing_clock/attempt_15/`. Attempt 15's redundant
+`input_preview.json` was removed after ownership, mtime, hash, process and
+open-handle checks, releasing **17,774,295 bytes**. Its accepted session and
+preparation are unchanged; the official capture remains selectable, compatible,
+and loadable with its native model. The local runner keeps compact turn summaries
+while retaining independent full per-turn validation artifacts. Eight local
+reuse/compaction tests pass; no production acceptance rule is changed by this
+storage adjustment.
+
+The preceding retry is `attempt_14`,
+`offline_ac96e80780a149c5b657035473deaf15`. Checked reuse restored twenty-two
+accepted events, and original provider turn 41 passed RA, physical projection
+and CCA, bringing the committed prefix to **twenty-three**. One new API call,
+turn 42, again proposed moving the carried part from M2 to M1. The owned process
+was stopped with SIGINT before further API requests; it exited 130 and finished
+writing at `2026-10-14T10:18:11.738728+00:00`. Turn 42 passed privately but remains
+uncommitted in the authoritative saved session. Retain it for replay. Nominal
+continuation is `not_ready`, its bound proof loads, source observations are
+unchanged, and zero execution interfaces were called. Preserve this partial
+attempt and its source dependencies.
+
+The earlier `attempt_13`,
+`offline_7290bd57e4be4b46a9438634b8887ab8`. It retains **twenty-two** committed
+accepted actual LLM events through turn 40 and uncommitted provider turn 41.
+Two new API calls were made. Turn 40 returns KMR carrying `KET4_Square_4mm`
+from M2 to M1; turn 41 proposes returning to M2. The owned process was stopped
+with SIGINT to prevent further repeated transport. Its in-flight worker
+finished checking turn 41 privately during shutdown; the published saved
+session remains at turn 40. The process exited with code 130 and finished
+writing its records at `2026-10-14T09:47:53.266365+00:00`. Its stale
+`generating_outline` metadata is not evidence of an active process. Nominal
+continuation remains `not_ready`. Source observations and the twenty-one-event
+source prefix are unchanged, and no execution interface was called. Preserve
+this source attempt and its dependencies. Turn 41 was subsequently replayed
+in attempt 14 with the precise historical rejection feedback retained.
+
+The exact destination was omitted when deciding whether existing KMR placement
+declarations supplied an additional binding. Declarations for M1/M2 must not
+suppress evaluation of the proposed `Storage` binding. The corrected selection
+also distinguishes a carried part supplied as movement context from pickup.
+All 20 focused additional-binding tests pass. The diagnosed missing `Storage`
+receiving contract is now implemented as an owner calculation over the exact
+recorded slot and current empty inventory. Its detached binding uses the existing
+KMR placement program and shared target calculator. Recorded slots use their
+exact contact pose; the existing workholding clearance remains unchanged.
+
+Static inventory-only participation no longer discards the peer body's geometry.
+Rigid collision shapes and static supports are retained separately from expired
+contacts, velocities and attachments. Reuse checks geometry, part identity,
+meshes and policy fingerprints; changed support bodies are excluded. This does
+not restore expired observations or establish live tracking/path collision safety.
+The isolated supplied `Storage` approach and release both pass RA, physical
+projection and CCA. Neither is an accepted LLM event or a suggested provider event.
+
+Unchanged provider turn 26 still fails its known guard: `resource_state=carrying`
+instead of the owner's `positioned`. A complete declaration search with only
+demonstrated guard violations now produces a resource rejection and permits an
+LLM revision; incomplete evidence and bounded search retain `NEEDS_CONTEXT`.
+Public feedback names exact public conditions and source fingerprints. CCA is
+`formal_safety_status=not_checked`, with no safety-rule violation claimed.
+Replay, before/after prompts, source copies, supplied verification and the detailed
+rule-change record are in `nominal_goal_20261014/storage_placement/`.
+The unchanged response returns `need_revision`; prompt lengths are 26,545 and
+30,144 characters, including restored production safety context and precise guard
+feedback. All 356 protected-file hashes are unchanged. `attempt_12`,
+`offline_9142187ce2d24273991edf01a95799ca`, revalidated the thirteen-event prefix
+and returned the unchanged turn 26 for revision. Actual new LLM turns 27
+(`place_approach`) and 28 (`place_release`) at `Storage` passed RA, physical
+evidence and CCA. Turn 30 moves KMR to M1, turn 32 establishes the pickup
+approach, and turn 34 picks `KET4_Square_4mm` after exact `part_location`
+feedback. Turn 35 moves the carried part to M2; turns 37 and 38 return to M1
+and M2, bringing the accepted prefix to twenty-one events. The attempt is now
+stopped and nominal continuation remains `not_ready`. Preserve its output. No
+complete machine outline or execution has been established.
+The final environment-recovery, validated-outline and public-context regression
+run passes **712 tests**. The KMR and physical-evidence suites also passed apart
+from a subsequently corrected missing-fixture classification test; its focused
+rerun and all 15 projected-contact cases pass. Poetry, compilation and whitespace
+checks pass. Poetry retains its existing metadata deprecation warnings. This
+validation used local calculations; no Gazebo execution was performed.
+Four additional guard-classification cases pass: demonstrated guard failure,
+missing evidence, incomplete model and bounded-search exhaustion.
+
+The event transaction now avoids sending typed upstream owner/physical failures
+to CCA solely to echo them. It retains the same physical verdict and marks the
+CCA stage `not_checked`, `request_sent=false`, with no monitor change. Passing
+physical evidence still requires actual selected-specification validation.
+The unchanged turn 26 replay makes zero CCA requests and preserves accepted
+state and source observations. All 243 validated-outline regression cases pass,
+including resource attribution, incomplete-evidence handling and actual CCA
+calls for valid physical evidence. Poetry, compilation and whitespace checks
+pass. The sandbox test process stalled after 19 cases and was terminated; the
+complete suite passes with normal loopback access. No baseline test failures
+were identified. Evidence is in `nominal_goal_20261014/cca_upstream_guard/`.
+The stopped `attempt_12` loaded the earlier code; its records remain protected.
+
+Turn 36 exposed a feedback omission: RA's existing `condition_support` showed
+individually supported conditions with an unsupported combination, but the
+handler retained only an empty `mismatches` list. The handler now preserves
+`condition_support` through the existing filtered prompt renderer. Acceptance
+rules and candidate schema are unchanged; no replacement event is supplied.
+The retained turn-36 feedback replay and excerpts are in
+`nominal_goal_20261014/condition_feedback/`. Its new end-to-end regression passes;
+the broader RA/outline run reports **458 passed, 12 failed**, with all 12 failure
+identifiers exactly matching the retained pre-change baseline (five legacy AP
+fixtures, seven KMR execution-provider cases). Poetry, compilation and whitespace
+checks pass. Turn 37 passed all three stages, but was a return to M1 rather
+than a corrected placement proposal. Turn 38 returned to M2. The unchanged
+retained turn 39 still returns `need_revision` at RA: its conditions are
+individually supported but their combination is not. Physical validation and
+CCA are not reached; the twenty-one accepted events remain unchanged.
+
+The prompt now shows changed public conditions from the six most recent
+accepted events, making their destinations visible, and retains exact public
+`domain` and `domain_complete` declarations. Older events remain compact.
+Private fields, unchanged conditions and primitive sequences remain excluded;
+candidate-schema expressiveness and acceptance rules are unchanged. All
+**556** validated-outline and public-context tests pass, including equal
+treatment of robot, machine and conveyor declarations. Poetry, compilation and
+whitespace checks pass with existing Poetry metadata warnings. Retained proof
+loading and all twenty-one per-event RA/physical/CCA records were verified;
+the official machine capture remains selectable and compatible.
+The exact retained-turn prompt comparison grows from 30,112 to 34,079
+characters and contains the shared capability instruction once. Attempt 12's
+redundant `input_preview.json` was removed after ownership, hash, mtime,
+process and open-handle checks, releasing 17,774,295 bytes. The accepted
+prefix, nominal evidence and selectable source capture still load; its
+uncommitted provider response is retained.
+
+`attempt_13` revalidated all twenty-one source events, followed by original
+turn 39 returning `need_revision` at RA. New provider turn 40 passed all three
+stages but repeated transport. Its twenty-two-event prefix and bound nominal
+proof still load, and the official machine capture remains selectable and
+compatible. PID 151480 has exited. This is not a complete accepted outline.
+
+Further diagnosis found that a rejected combination was being interpreted as
+excluding its entire operation, and acceptance cleared the current rejection
+feedback. `nominal_goal_20261014/condition_pairs/` retains the repair: report
+proven incompatible pairs of proposed public conditions, clarify the rejection
+scope, and retain two compact prior rejections tied to their recorded starting
+states. No replacement event, route, private primitive sequence or unrestricted
+validator prose is supplied. Pair checks are bounded diagnostics; omitted or
+incomplete pairs do not prove rejection. Acceptance rules and candidate-schema
+expressiveness are unchanged. Replaying original turn 39 still returns
+`need_revision`, now identifying incompatible pairs involving `approached_part`;
+the source and twenty-one-event prefix remain unchanged. Six focused cases
+pass; the broader run reports **772 passed, 12 failed**, with every failure
+identifier matching the retained pre-change baseline. Final prompt integration
+passes **558** tests after restoring compact rejection summaries at the
+prompt-input boundary. Poetry, compilation and whitespace checks pass with
+existing Poetry metadata warnings. Attempt 13's redundant preparation preview
+was removed after ownership, hash, mtime, process and open-handle checks,
+releasing 17,774,295 bytes; accepted state and provider turn 41 are retained.
+
+The local `offline_attempt.py` runner now has an explicit `--reuse-review` path
+for the reviewed feedback-only changes. It checks all 344 runtime source hashes,
+the exact retained session and preparation, and fifteen preparation dependency
+fingerprints against a fresh Recovery UI preparation. It also verifies provider
+authorship, every retained RA/physical/CCA acceptance record, the bound nominal
+proof, and resource-owned calculation restoration. Any changed dependency stops
+reuse. Original validation artifacts are copied and checked; only the retained
+uncommitted proposal is revalidated. This does not change an acceptance rule.
+Six local positive/negative reuse checks and eighteen existing restoration tests
+pass. Poetry, compilation, UI help and whitespace checks pass. The new path is
+being exercised in `attempt_14`, `offline_ac96e80780a149c5b657035473deaf15`;
+its twenty-two-event prefix was restored and turn 41 passed revalidation.
+The earlier full replay took about 23 minutes in attempt 13.
+Do not regenerate accepted events or retained uncommitted provider responses. Keep
+historical rejection summaries when continuing so an intervening accepted move
+does not hide the earlier failure again.
+`condition_pairs/accepted_evidence_reuse_review.json` records the exact saved
+session/preparation hashes, current runtime source hashes, and the three
+runtime files changed after attempt 13 started. Their reviewed diff is retained
+as `feedback_only_changes.diff`: successful validation paths are unchanged.
+This supports checking reuse; it does not replace fresh preparation, nominal
+proof binding, owner-evidence restoration or provider-authorship verification.
+The final original-turn-39 replay and prompt lengths are retained in
+`condition_pairs/prompt_comparison.json`. Post-cleanup loading again confirms
+all twenty-two committed events and the compatible selectable source capture.
+
+The turn-42 prompt already showed M1 as `unavailable`, but its proposal rationale
+treated the original resource assignment of `environment_21` as the reason to
+return there. The prompt now describes the existing matching product-completion
+rule without naming a resource or route: recorded assignment alone is not a
+goal, accepted matching completion through another resource may satisfy product
+work, and explicit resource goals remain required. Original processing records
+are labelled capture-time observations. This changes presentation only; no
+validator, schema, model or acceptance rule changed. All **560** public-context
+and validated-outline tests pass, along with Poetry, compilation and whitespace
+checks. `condition_pairs/nominal_assignment_context/` retains before/after
+prompts (37,234 / 37,564 characters), exact source hashes, the one-file review,
+and a checked-reuse dependency record for attempt 14. The capability instruction
+appears once. Attempt 14's redundant `input_preview.json` was removed after
+ownership, mtime, hash, process-exit and open-handle checks, releasing 17,774,295
+bytes. Source observations, all accepted events and turn 42 remain retained.
+
+While attempt 13 revalidates the prefix, an isolated supplied placement check
+uses attempt 12's retained state without API calls or execution. Its
+`place_approach` passes RA, physical projection and CCA. Its `place_release`
+passes RA but physical projection returns `needs_context`: no supported resting
+contact is established. These cases never enter an accepted prefix or provider
+prompt. `nominal_goal_20261014/machine_placement/supplied_summary.json` retains
+the stage outcomes. The separate `support_diagnosis.json` varies only two
+supplied inputs: retained static M2 geometry and the existing 0.003 m release
+clearance. Current geometry fails at both heights; supplying unchanged M2
+geometry still fails with the clearance; the exact recorded contact pose with
+that geometry establishes support. This diagnoses separate static-evidence
+retention and release/settling limitations, not an accepted recovery or an
+authorized change to physical limits. No production code was changed for these
+cases. One overly large diagnostic load was killed with exit 137; the reduced
+calculation completed and the owned recovery retry remained live.
+Its complete supplied validation record is retained losslessly as
+`machine_placement/supplied_case.json.gz`. The decompressed SHA-256 matches
+the original. After ownership, mtime, hash and open-handle checks, only the
+redundant uncompressed copy was removed, releasing a net 430,779,586 bytes.
+The scripts, compact stage summary and independent geometry diagnostic remain.
+
+Read-only completion-boundary inspection is retained in
+`nominal_goal_20261014/completion_boundary_diagnosis.json`. The captured
+`goal_part_location` remains `assembly_board-v1` for `KET4_Square_4mm`; completing
+machining alone cannot establish the requested proof. Matching supported product
+completion by another owner is already recognized. Machine command clock gaps
+and the current absence of robot movement endpoints outside KMR are prospective
+limitations, not newly rejected LLM proposals. They have not been bypassed.
+
+Attempt 11's redundant preparation preview was removed after ownership, hash,
+mtime, process and open-handle checks, releasing 17,774,295 bytes. Its thirteen
+events, nominal proof and source capture still load; the original eleven events
+are unchanged. The official machine capture remains the sole selectable capture
+with the same native manifest. Preserve all accepted-prefix and provider records.
+
+The diagnostic resumer also rebuilt the seed and omitted the existing production
+`public_safety_context_version=1`. It now uses the prepared production seed.
+The detached prompt replay shows `resource_state=carrying` and
+`resource_location=Storage` with their sources, without stale undeclared
+`current_state=idle` and `current_location=M2` aliases. Captured declarations,
+accepted events and projected state are unchanged. Prompt lengths are 26,545
+and 29,008 characters; the increase includes the existing safety context.
+Evidence is in `nominal_goal_20261014/public_seed/`.
+
+Machine-owned pickup calculations now support an exact recorded `interrupted`
+job with no active/running job, retaining the machine's configuration, job and
+source bindings. They do not establish geometric access or completed processing.
+The unchanged earlier M1 proposal now reaches its independent contradictory
+end-state finding: proposed `resource_state=idle`, owner effect `at_pick`.
+A separately labelled supplied verification case with the declared value passes
+RA, physical projection and CCA; it is not an accepted LLM event and was not
+supplied to the provider. All 264 machine-job, environment-recovery and KMR
+evidence regressions pass, as do Poetry, compilation and whitespace checks.
+Evidence and source copies are in `nominal_goal_20261014/interrupted_pickup/`.
+
+The preceding retry is `attempt_10`,
+`offline_af826168b57547b98c7010ce7939f88f`. Its saved session retains **eleven**
+accepted LLM events. Original turn 21 passes after the movement parameter-context
+repair. New turn 22 requests release during a supported movement and is correctly
+rejected for contradictory owner effects; this is not a safety violation. Turn 23
+adds another loaded movement to `Storage`. Three new API responses were received,
+with zero forbidden calls and unchanged source observations. The owned runner was
+interrupted after diagnosing repeated movement; it exited 130 and is no longer
+active. Turn 24 has a retained provider response but was not committed to the
+saved session; revalidate that exact proposal after the eleven events. Do not
+count it as accepted or ask the provider to regenerate it.
+
+Nominal checking required `environment_22` again even though accepted turn 20
+already fulfilled its exact `move_to_resource` declaration. The old replacement
+check only considered product completion. Accepted recovery events now retain
+exact nominal-task completion evidence after RA, physical projection and CCA.
+The existing owner-program witness checks every declared effect and parameter;
+endpoint state alone is insufficient. Equivalent validated owner alternatives
+and the same detached calculation model remain available to that check. Records
+are bound to the attempt, accepted prefix, source, owner context, nominal task
+and safety specifications; recorded dependencies and earlier owner tasks must
+already be fulfilled. This rule applies across resources without selecting a
+recovery route or changing either specification.
+
+The saved turn-20 replay now retires only `environment_22`; `environment_21`
+and `environment_23` still block nominal continuation. Source observations,
+accepted events, physical state and monitor history are unchanged. Prompt length
+falls from 26,855 to 26,347 characters by removing the obsolete finding.
+All **571 tests** in the validated-outline, request-record and offline-recovery
+suites pass; Poetry, compilation and whitespace checks pass. Full evidence,
+before/after prompts, rule-change record and source backups are under
+`nominal_goal_20261014/nominal_task_completion/`. Next: resume the retained
+uncommitted proposal with this correction, preserving the eleven-event prefix.
+No complete machine recovery or execution is established.
+
+Attempt 10's duplicate preparation preview was removed using its explicit
+ownership/hash/mtime/open-handle manifest, releasing 17,774,295 bytes. Its eleven
+saved events and nominal proof still load, the original nine events are unchanged,
+and the sole official machine capture remains selectable with the same native
+manifest. All 356 protected-file hashes are unchanged. `attempt_11` resumed this
+prefix and the uncommitted provider response as documented above.
+
+The preceding finished retry is `attempt_09`,
+`offline_48f1383bd8d743419b225f80339aa656`. It retains **nine** accepted actual
+LLM events. The provider corrected turn 18 in turn 19 (`outline_recovery_17`,
+KMR `pick_part`, with `part_location=KMR` and `part_state=in_gripper`) and then
+authored turn 20 (`outline_recovery_18`, loaded movement to `Storage`). Both
+pass RA, physical projection and CCA. Three new API calls were made, with zero
+execution calls and unchanged source observations. Nominal continuation remains
+`not_ready`; the only saved pending nodes are `environment_21`, `environment_22`
+and `environment_23`. The first and third require the unfinished machining work;
+moving KMR between previously visited locations alone does not establish it.
+
+Turn 21 proposes loaded movement back to M2 with `part_name` supplied. Both
+supported owner alternatives failed the private endpoint parameter lookup:
+the proposal's part context was compared as an extra argument to movement
+declarations that do not declare that argument. The lookup now distinguishes
+that exact contextual field while retaining all actual declaration arguments,
+part identities, ambiguity checks and calculation evidence. The unchanged
+proposal passes RA, physical projection and CCA locally. The KMR suite passes
+49 tests, including five new context/argument-conflict cases. Poetry, compilation
+and whitespace checks pass. Evidence and before-source copies are in
+`nominal_goal_20261014/movement_part_binding/`. Resume the retained pending
+proposal; preserve attempt 09 and its attempt-08 dependencies. No complete
+machine outline or execution has been established.
+
+The redundant attempt-09 preparation preview was removed after the explicit
+ownership/hash/open-handle checks, releasing 17,774,295 bytes. Its nine-event
+prefix and nominal proof still load, its original seven events are unchanged,
+and the official machine capture remains the sole selectable capture with the
+same native manifest. `attempt_10` is now stopped as documented above. The replay
+runner uses the existing compact-history
+option while retaining every full per-turn/provider record; RA, physical, CCA
+and final-prefix nominal checks are unchanged.
+
+The preceding retry is `attempt_08`,
+`offline_74cca5c0ae1c48d286fcce007e8f3e06`. It revalidated all six retained
+events and accepted the original turn-17 `pick_approach`, leaving **seven**
+accepted LLM events. One new API request proposed turn-18 `pick_part` for
+`RGOCG4-50_Round_4mm`. Nominal continuation remains `not_ready`; no complete
+machine outline or execution is established. Preserve attempt 08 and its
+attempt-07 source dependencies.
+
+Diagnosis and local repair are retained in
+`nominal_goal_20261014/custody_endpoint/`. Additional M2 bindings were present
+in accepted evidence but the next validation rebuilt only the captured model.
+Reuse now validates their attempt/input/model fingerprints and binds the retained
+calculation model to the new proposal through RA, physical projection and CCA.
+The unchanged turn-18 proposal is correctly rejected: it requests
+`part_state=held` and `part_location=recovery-resource-8@localhost`, while the
+declared effects are `in_gripper` and `KMR`. Feedback reports those exact public
+conditions with `formal_safety_status=not_checked`; this is not a safety-specification
+failure. Its replay returns `need_revision` without changing the seven events,
+projected state, monitor history or source observations.
+
+The existing KMR custody contract now supports conditional attachment/release
+endpoints. It retains exact part identity, transform, gripper joint bounds,
+attachment effects and deposited-part support. Interval part occupancy remains
+unknown across custody changes. Endpoint evidence does not establish finger
+contact dynamics, collision-free motion, continuous support departure or execution.
+The numerical endpoint solver uses bounded `dogbox` and recorded seeds, with
+independent FK and unchanged acceptance tolerances; a supplied lift case now
+converges where the former bounded search was unresolved. A separately labelled
+supplied pickup variant passes RA, physical projection and both CCA specifications;
+it is not an LLM-generated accepted event. The original LLM response remains
+rejected and must be revised by the provider. The focused final suite passes
+29 cases; Poetry, compilation and whitespace checks pass. Full regression
+results and the precise original/replacement rules are retained with the repair.
+The duplicate attempt-08 preparation preview was removed using the explicit
+ownership/hash manifest in `attempt_08_preview_deletion_list.json`, releasing
+17,774,295 bytes. Its seven accepted events and `not_ready` nominal proof still
+load; the sole machine capture and native model remain available. All 356
+protected JSON files are unchanged. The unchanged-proposal prompt changes from
+25,412 to 25,909 characters. An early regression exposed the legacy singular
+`owner_effect_result.field` field, which is preserved alongside the new conflict
+list; all eight affected rechecks pass. The sandbox suite stalled at the offline
+workflow test and was stopped through its owned session; all **456** tests pass
+with local socket access in `regressions_host.log` (255.81 seconds). Attempt 09
+subsequently continued this seven-event prefix as recorded above.
+
+The preceding API retry is `attempt_07`,
+`offline_1eda276787cb418bb0de6fe0cf04258b`. It retains **six** accepted actual
+LLM events: the original four plus turn 15 KMR movement M2 → M1 and turn 16
+KMR movement M1 → M2. The two new movements do not complete recovery; nominal
+continuation remains `not_ready`. Four new API calls were made, no execution
+interface was invoked, and the source observations are unchanged. Turn 14
+correctly bound `part_name` but failed RA's recorded ur5e-1 `gripper_reach`.
+Turn 17 proposed KMR `pick_approach` for `RGOCG4-50_Round_4mm` at M2; it stopped
+at RA `NEEDS_CONTEXT` because location-specific pickup calibration was absent.
+
+The unchanged turn-17 proposal now passes real RA → physical endpoint → CCA
+locally. The owner preserves complete recorded calibration and can additionally
+calculate targets from exact workholding/docking geometry and its recorded
+general pickup settings. Incomplete calibration is not replaced. Bounded inverse
+kinematics supplies candidate joint configurations; independent owner FK and
+unchanged joint limits verify each witness. Target calculations and an already
+open, empty gripper have explicit endpoint effects. This is endpoint evidence,
+not collision-path proof or execution. Native pickup calculations now resolve
+the same exact origin identifier. The regression run passed 443 tests; three additional gripper-configuration
+cases also pass. The unchanged proposal still passes after binding the gripper
+endpoint to its recorded joint configuration, independently of its open label.
+Poetry, compilation, CLI import and diff checks pass; all 356 protected JSON
+files are unchanged. One redundant attempt-07 preview was removed after its
+explicit ownership/hash audit, releasing 17,774,295 bytes; the retained six-event
+prefix, loadable nominal proof, native model and sole machine capture were
+verified afterward. Evidence and the precise rule change are in
+`nominal_goal_20261014/additional_pickup/`. The diagnostic supplied endpoint cases
+in `nominal_goal_20261014/pickup_geometry_diagnostic.json` are not LLM-generated
+recovery, custody, or path proofs. Next, resume attempt 07 and revalidate its
+unchanged pending proposal before further API requests. Keep attempt 07 and its
+source attempt 06; no complete accepted machine outline exists yet.
+
+The turn-13 missing-binding feedback repair is implemented. RA still returns
+`NEEDS_CONTEXT`, but the public finding now names the missing `part_name` and
+allows one LLM revision for the same resource, expected conditions, descriptor,
+and snapshot. Renaming an event does not reset that bound. Private parameter
+references and replacement events remain excluded. The unchanged original
+proposal was replayed locally with API and execution interfaces blocked: it
+returns `need_revision`, preserves all four accepted events, symbolic states,
+monitor context and physical evidence, and leaves source observations unchanged.
+The prompt changes from 24,690 to 24,806 characters (1,830 to 1,842 words).
+Five focused cases and all 515 validated-outline/context tests pass. Poetry,
+compilation, and diff checks pass with existing metadata deprecations.
+Evidence, before/after prompts, and the exact rule change are in `nominal_goal_20261014/parameter_feedback/`. This changes generation
+feedback only; acceptance requirements and both specifications remain unchanged.
+
+The active nominal-continuation goal repaired the turn-11 endpoint ambiguity.
+Policy 2 independently calculates every supported owner declaration and permits
+multiple declarations only when their complete calculated consequences agree;
+it retains each declaration and endpoint proof. Different or incomplete results
+stay `NEEDS_CONTEXT`, and policy 1 remains unchanged. Evidence validation gaps
+explicitly report `formal_safety_status=not_checked`. The unchanged saved turn-11
+proposal passes RA, physical projection, and both CCA specifications. It is now
+retained in `attempt_06`, `offline_bff94739bcd14967835bee4eae750ac8`, together with
+the unchanged original two-event prefix and a fourth actual LLM-generated event
+at turn 12: KMR `move_to_location` to M2. Both specifications and source
+observations remain unchanged. Nominal continuation is still `not_ready`.
+Evidence and the precise rule change are under
+`machine_outline_goal_20261014_01a137cc/nominal_goal_20261014/`.
+The supplied regression case with differing endpoints remains unresolved; the
+initial test fixture incorrectly requested prohibited joint motion and was
+corrected to explicitly supply a configuration that supports that operation.
+Its recheck passed; the other eight focused cases passed on the first run.
+The full environment-recovery and validated-outline suites passed **329 tests**;
+`poetry check`, Python compilation, and `git diff --check` passed, with the
+existing Poetry metadata deprecations. All 356 protected JSON files are unchanged.
+
+Attempt 06 made two new API calls and stopped at turn 13. The LLM proposed
+ur5e-1 `move_to_location` with `part_name=null` and the sole end condition
+`resource_location=M1`. RA returned `NEEDS_CONTEXT`; physical projection and CCA
+were not reached. The successor union is nonempty, despite the generic failure
+message: it includes several declared handling operations, whose required
+`part_name` and dependent parameter evidence are missing. Do not invent the
+part or change this candidate into an accepted result. The next repair should
+expose the missing public proposal binding precisely and allow a bounded LLM
+revision while retaining the unresolved verdict. Existing M1 `interrupted`
+pickup guards, configured UR5e `gripper_reach`, and additional pickup endpoint
+evidence remain separate limitations. No complete machine outline or execution
+has been established. Preserve attempt 06 as the current partial attempt and
+attempt 05 as a source dependency. The generation process exited, with zero
+forbidden execution calls. Diagnostic duplicates are listed in
+`nominal_goal_20261014/diagnostic_deletion_list.json`; their removal released
+28,978,495 bytes while the full independent two-declaration validation remains.
+The redundant attempt-06 input preview is separately listed in
+`attempt_06_preview_deletion_list.json` and `attempt_06_preview_cleanup.json`.
+Together these remove three files and release 46,752,790 bytes (44.6 MiB).
+`attempt_06/retained_verification.json` confirms four independently accepted
+events, the unchanged original prefix, a loadable `not_ready` nominal proof,
+and the sole selectable official machine failure capture with its native model.
+
+The capability-information repair is implemented across resource types. The
+complete resource index retains exact recorded identifiers, declarations,
+conflicts, limits, sources, and implemented evaluation support. Detailed context
+includes every resource whose recorded `reachability` or `reachable_locations`
+intersects relevant locations; automatic inclusion is separate from requested
+retrieval. Historical execution evidence is scoped to its actual recorded
+operation, destination, scene, part, and configuration. It does not validate a
+new proposal. Machines, Conveyor, Storage, and robots retain their resource-owned
+checks; additional support is advertised only where implemented.
+
+KMR can calculate additional movement, pickup, and placement bindings using
+exact recorded geometry and peer access/custody conditions in a detached model.
+The same model and bound evidence pass through RA, physical projection, and
+CCA, with attempt and dependency checks on reuse/reload. Missing evidence stays
+`NEEDS_CONTEXT`; limits, genuinely closed domains, the candidate schema,
+`SystemBridge`, and RA → physical evidence → CCA acceptance remain unchanged.
+Unsupported public conditions are distinguished from unsupported combinations.
+
+Verification artifacts are retained under
+`cais_spade_llm/monitor/environment_runs/machine_outline_goal_20261014_01a137cc/capability_context_20261014/`:
+
+- `before_prompt.txt`, `after_prompt.txt`, and `replay_report.json`: the retained
+  machine replay exposes robot context and recorded KMR arrivals at `Storage`,
+  `M1`, and `M2`. The retained turn-8 M2 `unload_part` proposal remains
+  `INFEASIBLE` at RA because its `staging_part` condition is unsupported; CCA is
+  not reached. The shared capability instruction occurs once and has 47 words.
+  The total prompt grows from 17,110 characters / 1,511 words to 28,285
+  characters / 2,108 words because the missing resource and evidence context is
+  now included; facts and capture metadata are deduplicated.
+- `supplied_cases.json` and its referenced records demonstrate additional empty
+  and loaded movement through RA, physical projection, and CCA. These are
+  supplied isolated verification cases, not LLM-generated recovery or Gazebo
+  execution. Separate tests cover pickup, placement, missing evidence, occupied
+  destinations, attempt isolation, reload, and unchanged unsupported operations.
+- `regression_tests_final.log`: **1,147 passed, 12 failed**. All 12 failing test
+  identifiers match the recorded pre-change baseline: five legacy AP fixture
+  cases and seven KMR prepared-execution-provider cases. `poetry check`, Python
+  compilation, and `git diff --check` passed; Poetry reports existing metadata
+  deprecations. No API requests, live captures, or execution occurred.
+- The replay confirms the candidate schema and accepted prefix are unchanged,
+  along with all 356 protected JSON files. `retained_hashes.json` records the
+  protected inputs and results. Both machine safety specifications remain
+  `SAFE_M2_mutex` and
+  `SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing`.
+
+The official machine capture is still
+`capture_8beafdb8a01e444894cfaf41d29921fd`, with native checkpoint
+`4a6d23fca53a4d4486ba50f9d005203a`. The current partial machine attempt
+`offline_bff94739bcd14967835bee4eae750ac8` retains four accepted LLM events:
+M2 `interrupt_job` validated against `pause_job`, and KMR `move_to_location`
+from M2 to M1, then to Storage, then to M2. Nominal continuation remains
+`not_ready`. The earlier two-event `offline_2bcbe6fd3c1b42aab5730aa7ec4d38ee`
+remains a source dependency. The earlier one-event
+attempt `offline_07d7348ec3054f6a81c83a54a56d33fc` remains unchanged as a source
+dependency. The Part slippage outline
+`offline_470087fe7a92421abd624ea721aa2ca1`, composition
+`offline_1bb1efac84d7443aa37238521ead3b68`, and their dependencies remain protected.
+The measured UR5e reach mismatch, current-scene transfer/custody evidence, and a
+complete accepted machine recovery remain separate work. The implementation and
+supplied calculations do not establish completed recovery or execution authority.
+
+The continuation `attempt_05`, `offline_2bcbe6fd3c1b42aab5730aa7ec4d38ee`,
+revalidated both accepted events and replayed the rejected turn-10 pickup using
+the corrected session identifier. One new actual OpenAI request proposed KMR
+`move_to_location` from M1 to Storage at turn 11. RA returned `FEASIBLE`, physical
+projection returned `needs_context`, and CCA returned `unresolved`. Generation
+stopped without adding that event; no safety violation was demonstrated.
+
+The detailed cause is **two supported owner declarations**, not an established
+infeasible movement: `move_to_resource` (event 1) and `move_to_location` (event
+86). `project_bounded_successor` requires exactly one declaration. Its error
+also includes `Guard blocked: KMR.resource_location` from a third, rejected
+M2-origin alternative, which obscures the actual ambiguity. The exact local
+reproduction is `attempt_05/movement_declarations.json`. The next code work
+should evaluate the supported alternatives with a justified evidence rule,
+retain any differing effects, and distinguish owner/physical evidence failures
+from violations of selected safety specifications. Do not simply choose a
+favorable declaration, bypass evidence, or presume movement is unrelated to
+`SAFE_M2_mutex` from its location names. CCA should require only evidence needed
+to establish the selected safety predicates; state/evidence requirements for
+later recovery events and nominal continuation remain separate obligations.
+
+This retry made three new actual API requests across attempts 04 and 05. The
+session-identity repair passed both focused cases and all **622** context,
+environment-recovery, and validated-outline regression tests. `poetry check`,
+Python compilation, and `git diff --check` passed. Both owned generation
+processes exited; forbidden execution calls were zero. `retry_summary.json`
+indexes the result and preservation checks. Attempt 05 retains its partial
+prefix, original provider records, and validation dependencies. Its redundant
+preview cleanup is recorded in `attempt_05_preview_deletion_list.json` and
+`attempt_05_preview_cleanup.json`. No complete machine outline, primitive
+composition, live recovery, or nominal execution has been established.
+
+Retry `attempt_04`, `offline_27c13d69f16b432f94f13f1586e9416c`, made two actual
+OpenAI requests. It independently revalidated the retained M2 pause event and
+accepted the new LLM turn-9 KMR `move_to_location` from M2 to M1 through RA,
+physical evidence, and CCA. The accepted prefix is now two events; nominal
+continuation remains `not_ready`. Turn 10 proposed KMR `pick_approach` for
+`KET4_Square_4mm` at M1 and exposed an integration omission: the production
+multi-turn seed did not carry its existing `recovery_session.session_id` into
+validation. The seed now preserves that identifier; the additional-binding test
+uses the production seed and both empty/loaded cases pass. No identifier is
+invented and missing attempt identity still blocks additional evidence.
+
+`attempt_04/pending_revalidation.json` replays the unchanged turn-10 proposal
+locally after the fix. RA now reports `INFEASIBLE` before physical projection or
+CCA. `pickup_peer_conditions.json` identifies the actual M1 mismatch: nominal
+pickup requires `resource_state=completed`, while recovery pickup requires a
+loaded part with `job_state=paused` or `job_state=stopped`. The captured M1 has
+`resource_state=loaded`, `job_state=interrupted`, and `active_job=null`. None of
+the recorded peer custody contracts matches. Source observations, declarations,
+and the two accepted events remain unchanged. The pending replay made no API
+requests and issued no commands. The current partial result and its evidence
+remain retained; only the redundant `input_preview.json` is listed for cleanup
+in `attempt_04_preview_deletion_list.json` and `attempt_04_preview_cleanup.json`.
+The continuation uses this actual validator feedback without supplying a route
+or replacement event.
+
+The requested retry first created `offline_2acf319c7166404e97d5aa2f0296a9da`
+(`attempt_03`) and stopped before any API request: the diagnostic resume helper
+matched only `outline_id`, which both a rejected turn-2 proposal and the accepted
+turn-3 revision used. The helper now matches all original provider proposal
+fields against the accepted event before its existing independent revalidation.
+The failed preparation has no accepted events or provider records. Its report
+is retained; redundant preparation outputs are listed in
+`attempt_03_deletion_list.json` and `attempt_03_cleanup.json`. The next retry
+continues from the unchanged accepted turn-3 response with the improved context.
+
+## Previous handoff — October 13, 2026 — machine outline goal in progress
+
+The goal is a complete accepted `Machining breakdown during part processing`
+outline with retained nominal-continuation proof, loadable through the Recovery
+UI. Primitive composition and recovery execution remain excluded. The user
+subsequently authorized OpenAI API requests and another live Gazebo failure
+capture if needed. The user also requested deleting obsolete machine failure
+captures and retaining the correct replacement observations. Verify and load
+the replacement and check dependencies before removing the original machine
+capture or its derived copy; other scenarios and regression coverage remain
+protected.
+
+Initial inspection found only the original `4a81d7fc7ccd46d1a18b79740d16add7`
+machine capture and its retained derived observations. Their
+machine records are at simulation times 84.0/84.2, while physical observations
+are at 85.65–85.8665, without `capture_checkpoint`. The current compatibility
+validator reports `NEEDS_CONTEXT`. The later synchronized source and two-event
+replay mentioned below are absent; their documented acceptance is not a
+loadable session. No new provider request was sent against that known gap.
+
+Work and preservation evidence are under
+`cais_spade_llm/monitor/environment_runs/machine_outline_goal_20261014_01a137cc/`.
+The recorded setup, timing seed `4000168541`, and both selected safety files
+remain unchanged. The current Gazebo workspace was built successfully.
+
+- `capture_01`: failed before nominal startup because the runner replaced the
+  sourced ROS `PYTHONPATH`, producing `ros2 imports failed`. Its owned launch
+  stopped, protected file hashes matched, and no failure capture was produced.
+  The corrected invocation preserves the sourced path; controller and native
+  preview imports passed. Its explicit deletion inventory and cleanup receipt
+  record 87 removed entries and 396,081 regular-file bytes released.
+- `capture_02`: the 900-second wall-clock deadline interrupted nominal
+  `RGOCG4-50_Round_4mm` placement at M2 before the failure checkpoint. KMR
+  controllers were progressing; no failure observations or provider requests
+  were produced. All owned processes exited and retained hashes matched.
+  The diagnosis and explicit deletion inventory are in
+  `capture_02_failure.json` and `capture_02_deletion_list.json`. The next
+  capture uses the unchanged setup and seed with an 1800-second window on
+  ROS domain 89 and Gazebo port 11379. LLM, primitive generation, and recovery
+  execution remain disabled during capture.
+  Its cleanup receipt records 90 removed entries and 512,016 regular-file
+  bytes released, without following workspace symlinks.
+- `capture_03` / `3df0234a84214934a027f109b7fe7e22`: reached the intended M1
+  `during_processing` fault, then failed checkpoint preparation with
+  `Handling root has not stopped: ur5e-1/linear_velocity`. The exact-zero
+  check rejected native integration jitter on the fixed UR5e root. Its fallback
+  observations have no `capture_checkpoint` and cannot replace the official
+  source. All owned processes exited. The failure report and original native
+  observation before cancellation are retained separately under the goal
+  directory. Disposable output removal is listed in
+  `capture_03_deletion_list.json`; it also includes the metadata-only
+  `18d84a91b2804d3c9d17658b2d70d497` record left by `capture_02`.
+  The completed cleanup removed 98 entries and 102,251,808 regular-file bytes.
+  All 14 protected source and specification hashes still match.
+- Checkpoint repair records the physics robot description and proves a fixed
+  joint chain to `world` before using the existing declared stationary speed
+  limits. KMR uses its physics description, keeps the zero native velocity
+  requirement, and all controllers still require authoritative idle evidence.
+  Native observations are retained unchanged. Focused checkpoint checks:
+  29 passed. Capture, machine-job, and conveyor-fault regressions: 181 passed.
+  `poetry check`, compileall, and `git diff --check` passed.
+- `capture_04` succeeded, retaining
+  `capture_8beafdb8a01e444894cfaf41d29921fd` and its source checkpoint records
+  `4a6d23fca53a4d4486ba50f9d005203a`. Both machine observations and geometry
+  share simulation time `84.3455`; M2 remains running and unfinished.
+  `replacement_capture_verification.json` records supported compatibility,
+  native-model verification, unchanged setup, and successful saved selection.
+  All owned Gazebo processes exited, protected hashes matched, and capture
+  made no LLM calls or recovery execution.
+  The exported observations retain identical checkpoint, machine, physical,
+  resource, part, failure, and pending-task facts from the source run. Its
+  redundant `observations.json` was removed after verification, releasing
+  73,765,395 bytes. All source `checkpoint_*.json` evidence remains retained.
+  `machine_capture_selection_after_cleanup.json` confirms exactly one machine
+  capture choice, with successful observation and native-archive loading.
+  The file inventory and receipt are
+  `duplicate_capture_observation_deletion_list.json` and
+  `duplicate_capture_observation_cleanup.json`.
+- Offline attempt `offline_510e5db485a647b989c5c8a9f5546a33` ended blocked
+  after 12 actual `gpt-5.4` / `medium` requests. Its owned process exited.
+  `attempt_01/source_preparation.json` verifies normal Recovery UI preparation
+  and both selected specifications. Provider responses, validation history, and
+  the one-event prefix remain required inputs for local revalidation and resume.
+  No complete accepted outline or nominal proof has been established yet.
+- The user-authorized replacement makes `4a81d7fc7ccd46d1a18b79740d16add7` and
+  `derived_4a81d7fc7ccd46d1a18b79740d16add7_20261012` obsolete. The explicit
+  removal inventory is `old_machine_capture_deletion_list.proposed.json`.
+  Neither code nor regression fixtures reference them. The only references
+  outside those directories are historical preservation/selection inventories
+  from the unrelated Part slippage task, which remain untouched. No process
+  held either directory at the pre-deletion ownership check. The cleanup is
+  complete: 46 entries and 255,151,941 regular-file bytes removed. Replacement
+  observation/native-model loading and Recovery UI selection passed again;
+  the other 12 protected source and specification hashes remain unchanged.
+  The receipt is `old_machine_capture_cleanup.json`.
+- The fresh LLM attempt accepted M2 `stop_job`
+  (`outline_stop_m2_preserve_trim_order`, turn 4) through RA, physical evidence,
+  and CCA. Nominal continuation is still `not_ready`. Turns 5 and 6 attempted
+  commands on unavailable M1 and were rejected; this is model feedback, not a
+  reason to change the captured machine availability. The accepted prefix is
+  still a partial result and execution remains disabled.
+- The finished attempt repeated unsupported M2 `unload_part` proposals at turns
+  7, 9, and 11. Turn 12 supplied only a part condition and was reported as
+  `NEEDS_CONTEXT`. The diagnostic runner now counts repeated findings across
+  intervening proposals while the accepted prefix is unchanged, stopping before
+  a fourth request against the same unchanged blocker.
+- Saved-input diagnosis found that context selection omitted KMR's unfinished
+  `M2` to `Storage` task because its exact `source_resource` and
+  `target_resource` fields were not considered, and the affected part's location
+  was not included in dependency closure. The scoped repair exposes KMR's
+  recorded state and declarations without selecting a recovery action.
+  A second repair classifies a part-only `expected_end_state` as `INFEASIBLE`
+  when the recorded declarations are complete; genuinely missing declarations
+  remain `NEEDS_CONTEXT`. The saved turn-12 proposal is now rejected locally.
+  Evidence: `recorded_context_proposal_recheck.json`.
+- Five new focused checks pass. The combined context/feasibility suites report
+  491 passed and 12 failures; all 12 failures reproduce with the pre-repair
+  functions. They concern legacy AP descriptors and unprepared KMR execution
+  fixtures. Their unchanged baseline is recorded in
+  `context_proposal_preexisting_failures.log`. Poetry check, compileall, and
+  diff checks pass. The next attempt revalidates the actual saved grounding and
+  accepted provider response before continuing from the corrected context;
+  no new request was sent before establishing these changes.
+- The continuation launch was rejected by automatic approval review before
+  execution because sending the saved internal recovery context to
+  `api.openai.com` requires payload-specific user approval. The user has been
+  asked to authorize the machine observations, robot/part states and geometry,
+  public declarations, both specifications, accepted events, and validation
+  feedback for the remaining outline requests. No request was sent after this
+  rejection. The exact unsent prompt and parameters are retained in
+  `local_prefix_revalidation/next_request_prompt.txt` and
+  `local_prefix_revalidation/next_request_parameters.json` under the goal
+  directory; `api_payload_approval_pending.json` records the external blocker.
+- Local-only revalidation created
+  `offline_4bed5f73eabd4fb6a6e9ef4ee76984e2`. The unchanged actual grounding
+  response, accepted turn-4 `stop_job` response, and rejected turn-12 response
+  were replayed through the existing phase handlers. The prefix remains exactly
+  one LLM-authored event; the old part-only proposal now returns `need_revision`.
+  Twelve original requests/responses were retained byte-for-byte, and zero new
+  requests were sent. `local_prefix_revalidation/prefix_revalidation.json`
+  records response hashes and validation lineage. The saved `prepared.json`
+  and `session.json` in that directory preserve the revalidated state.
+- After successful replay, an explicit ownership/mtime/hash-checked cleanup
+  removed two redundant previews: the failed attempt's `input_preview.json`
+  and the large duplicate preview containing local-only prompt inputs.
+  Actual provider records, original inputs, exact unsent prompt/parameters, and
+  current debugging dependencies remain. `failed_attempt_preview_cleanup.json`
+  records 19,524,527 bytes released. `retained_load_after_prefix_cleanup.json`
+  confirms one machine capture choice, successful native-model and observation
+  loading, an unchanged prefix, a bound loadable nominal proof with status
+  `not_ready`, and all 12 remaining protected files unchanged.
+- An additional local reproduction isolated the KMR nominal witness gap:
+  recorded `environment_22` (`move_to_resource`, `M2` to `Storage`) passes RA
+  and CCA, but `_exact_nominal_witness` expected the registered robot-task
+  witness format instead of its recorded environment-event contract.
+  `nominal_environment_22_revalidation.json` retains the complete reproduction.
+  The scoped endpoint-policy-2 repair checks the exact owner/model, parameter
+  binding, selected empty/carrying program, every supported program step, and
+  final declared effects. It preserves conditional planning endpoints and all
+  execution obligations. Rechecking the original evidence now passes this
+  witness check (`nominal_environment_22_exact_witness_after_fix.json`).
+  Nineteen focused checks and all 208 outline regression tests pass. The first
+  sandboxed full run stalled at the known asynchronous-worker boundary and was
+  stopped; the host run completed in 11.79 seconds. Required Python checks pass.
+  The complete existing nominal-continuation validator was then rerun locally:
+  it advances through `environment_22`, while `environment_21` remains blocked
+  by unavailable M1 and `environment_23` lacks supported `start_job` capability.
+  Its detailed owner finding is `NEEDS_CONTEXT: workholding and access evidence
+  for the projected scene at M2`; no such evidence was fabricated.
+  `nominal_continuation_after_kmr_witness_fix.json` references the retained
+  `recovery_outline/turns/turn_00012_validation_0001.json` proof in the local
+  revalidation run. Overall status remains `not_ready`, with one accepted
+  recovery event and zero generated primitives. Continue by resolving the
+  recorded M2 access-evidence obligation and obtaining revised LLM proposals
+  once the pending payload approval is answered. All local diagnostic and
+  test processes have exited; no new API request or recovery execution occurred.
+- Local nominal-continuation repair: endpoint policy 2 previously rejected
+  every `machine_part` before reaching the existing owner dwell/completion
+  calculation. It now routes that exact owner declaration to
+  `_project_machine_dwell`, retaining its remaining-job duration, geometry,
+  stationary evidence, and declared-effect checks. Endpoint policy 1 and
+  unmarked behavior are unchanged. The new modern-job regression also verifies
+  both selected specifications: premature `RGOCG4-50_Round_4mm` completion
+  remains unsafe. Focused projection checks: 8 passed; machine jobs: 56 passed.
+  The complete environment projection run had 98 passes and two overly narrow
+  new test assertions about missing-peer wording; the focused rerun corrected
+  those assertions and passed all eight affected cases. No provider-generated
+  complete outline or nominal proof has been obtained yet. The focused nominal
+  regression selection also passed 64 tests; required Python checks passed.
+  The final complete environment projection suite passed all 100 tests.
+- Payload approval was received: "Approve this payload and subsequent revisions
+  for this goal." `api_payload_approval.json` records authorization for the
+  remaining OpenAI outline-generation requests and their revised context.
+  Local owner checks then established that the earlier `stop_job` prefix is
+  unsuitable: `resume_job` requires a paused job, `start_job` rejects restarting
+  this unfinished part, and `pause_job` requires the active running job.
+  `stopped_prefix_control_recheck.json` retains the exact unchanged-state checks.
+  This does not prove that the failure scenario lacks a solution. Attempt 02
+  starts a fresh LLM outline from `capture_8beafdb8a01e444894cfaf41d29921fd`,
+  with factual prior-branch feedback in `fresh_attempt_feedback.json`; it does
+  not import the stopped prefix or prescribe replacement recovery events.
+  The existing provider configuration and three-repeat guard remain in use.
+  The original provider responses and local reproduction inputs remain needed
+  for debugging; redundant failed-attempt previews have already been removed.
+- Attempt 02, `offline_07d7348ec3054f6a81c83a54a56d33fc`, finished after
+  eight actual OpenAI requests/responses in 481 seconds. One grounding turn and
+  seven proposed events produced one accepted event: the exact LLM-authored
+  `interrupt_job` / `outline_recovery_1` at turn 3, validated against the owner's
+  `pause_job` declaration, with `active_job=null` and `job_state=paused`.
+  Its nominal-continuation proof remains `not_ready` at
+  `generation_0001/recovery_outline/turns/turn_00003_validation_0001.json`
+  (SHA-256 `061991ecb9616a3c57cb30aee6e2d97ecbbdc03b0e2de442eb98aabbfabc10ff`).
+  Repeated unsupported M2 end conditions reached the three-repeat guard;
+  turn 9's five provider-wrapper retries were blocked locally before sending.
+  They are request/error records, not five additional API calls. The owned
+  process exited, observations are unchanged, and forbidden execution calls
+  remain zero. Attempt 02 retains its provider records and current debugging
+  inputs under the goal directory's `attempt_02/`.
+  The next step is local diagnosis, not another unchanged API attempt:
+  `recorded_handling_declarations_audit.json` records all four UR5e owner reach
+  checks against both unfinished parts. The nearest robot for each part reports
+  `xy_radius=0.7244 m, max=0.7000 m` (recorded tolerance `0.01 m`), and KMR's
+  recorded pickup declarations bind `origin_resource_location=Storage`.
+  Check the captured robot model and existing handling implementation before
+  deciding whether a scoped correction is supported; do not relax reach limits
+  or add unsupported handling claims merely to accept a proposal.
+  The exact targets from `calculate_recovery_pick_target`, including the
+  recorded TCP offset, now have bounded joint solutions verified by owner FK
+  for both nearest UR5e robots (position residual below `1.5e-14 m`).
+  `recorded_ur5e_pick_targets.json` and
+  `recorded_ur5e_owner_pick_kinematic_diagnosis.json` retain the inputs/results;
+  the accompanying diagnostic script sends no command. The preliminary
+  `recorded_ur5e_kinematic_diagnosis.json` used a raw part-centre tool target
+  without the owner TCP offset and is not a pickup-capability result.
+  Kinematics alone does not establish collision-free pickup or justify changing
+  the declared workspace. Check exact owner endpoints and the source of the
+  scenario's inherited `gripper_reach` before changing its configuration.
+  Further saved-model diagnosis now passes all four native calculations:
+  `ur5e-1` and `ur5e-2`, each from the recorded start to its exact owner pickup
+  joint solution, and each with a separate explicitly hypothetical endpoint
+  check. Results are in `recorded_ur5e_pick_collision_diagnosis.json`; original
+  Goal/Result files and provenance are under `pickup_collision_native/`.
+  All return `PREVIEW_COMPLETE`; the native checker verified model bounds and
+  sampled collisions while retaining the measured stationary joints and declared
+  mounting contacts. These calculations do not prove continuous collision freedom,
+  custody transfer, CCA authorization, or execution readiness. They do not enter
+  the accepted LLM prefix and do not change the recorded `gripper_reach`.
+  The source observation hash remains unchanged and the owned process exited 0.
+  Next, establish a supported configuration correction and the actual M1-to-M2
+  transfer route before another accepted-outline attempt. The Conveyor's recorded
+  normal output is `Buffer For Machined parts`; no M1-to-M2 Conveyor route has
+  been established. The current reach rejection and the missing M2 workholding/
+  access finding are both reported at RA, before separate physical projection
+  and CCA. A full unvalidated LLM draft may aid diagnosis, but must remain distinct
+  from an accepted outline and cannot bypass those acceptance gates.
+  Cleanup removed only this finished attempt's redundant `input_preview.json`
+  (13,387,804 bytes), after ownership and metadata/hash checks. The explicit
+  inventory and receipt are `attempt_02_preview_deletion_list.json` and
+  `attempt_02_preview_cleanup.json`. `retained_load_after_attempt_02_cleanup.json`
+  confirms all 12 protected hashes, one selectable supported machine capture,
+  native model loading, the unchanged paused prefix, and its loadable
+  `not_ready` nominal proof. No additional API calls or execution occurred.
+- Checkpoint verification: `168 passed` across the existing capture, machine
+  jobs, and conveyor fault suites. The first sandboxed test process stalled
+  and was terminated; the completed run used host access. The unrelated
+  Part slippage composition task was left untouched.
+
+## Previous October 13 handoff — exact saved KMR planning validation passes
+
+The unchanged attempt-07 M2 pause_job and KMR move_to_location from M2 to M1
+now both pass the actual validated-event → RA → CCA path and enter the accepted
+prefix. The saved KMR proposal carries no part. This completes the scoped
+planning-validation goal; it does not establish placement into M2, complete
+nominal continuation, or permission to execute the robot.
+
+### Corrections
+
+- New preparations use endpoint_evidence_policy_version=2 while retaining
+  outline_evidence_policy_version=1, validation_contract_version=2, and
+  primitive_support_semantics="successor_primitive_union". Endpoint policy 1
+  and unmarked sessions retain their recorded behavior. The endpoint policy
+  participates in requirement, scene/cache, occupancy, and monitor identities.
+- A declared base endpoint conditions its geometry on successful owner action
+  completion. Missing starting base readiness is retained with scope=execution,
+  blocks_planning=false, and execution_authorized=false. It no longer prevents
+  CCA from checking independently supported predicate bounds. An action that
+  does not establish a base endpoint still requires its existing base evidence;
+  owner capability, arm hold, timing, and selected-predicate checks remain.
+- RA forwards the existing owner state declarations to CCA for complete mutex
+  participant grounding, using the same declaration expansion as the existing
+  owner-ledger path. This does not manufacture task/state ledgers. CCA
+  independently reproduces the declarations with the rest of the projection.
+- The accepted KMR endpoint retains its owner JID, checked against the task,
+  owner model, and physical resource binding. Physical capture rows can omit
+  this identity; dropping it previously broke the next capability validation.
+  Conflicting identities remain unresolved.
+- Full trajectory generation, sampling, and replay remain disabled. Endpoint
+  calculations and conservative Boolean occupancy alternatives provide the
+  selected evidence; supported peer exclusion permits unknown KMR occupancy.
+  No event name, destination label, or safety-rule-specific bypass was added.
+
+### Exact replay and successor verification
+
+Artifacts are under
+cais_spade_llm/monitor/environment_runs/endpoint_bounds_20261013/.
+
+| Check | RA | Physical evidence | CCA / accepted prefix |
+| --- | --- | --- | --- |
+| Exact M2 pause_job | FEASIBLE | Owner job-control effects and selected predicate coverage | Passed; prefix length 1 |
+| Exact KMR M2 → M1, empty | FEASIBLE | Supported endpoint; base (-4.7, 2.2), tool approximately (-5.2, 1.95, 1.16); all 62 required APs covered | Both selected specifications passed; prefix length 2 |
+| Separate M1 → M2 verification branch from the saved accepted prefix | FEASIBLE | Consumed the accepted M1 base pose, not the captured pose; recalculated M2 endpoint (-2.7, 2.2) | Passed; branch prefix length 3; both monitor histories independently rechecked |
+
+replay_goal_final/report.json and turn_1.json/turn_2.json contain the exact
+saved replay. Its source_responses.json matches the earlier saved replay's
+proposal file byte for byte. saved_successor_final/report.json and turn.json
+record the separate successor-consumption check. That third proposal is
+explicitly a verification-only branch; it does not replace or extend the
+original LLM-authored proposal record. Both diagnostics report zero forbidden
+API, live-interface, execution, and trajectory calls. No new capture was made.
+
+The original base-readiness gap remains visible as an execution obligation.
+Projected arrival is not an observation of arrival, and a passed CCA planning
+result does not authorize dispatch. SystemBridge and the execution guards were
+not changed. Earlier unresolved diagnostic artifacts remain unchanged.
+
+### Verification
+
+Final focused regression run: **1,550 passed in 264.02 seconds**, across
+test_environment_recovery.py, test_validated_recovery_outline.py,
+test_recovery_outline_evidence.py, test_recovery_context_retrieval.py,
+test_kmr_outline_evidence.py, test_machine_jobs.py, test_offline_recovery.py,
+and test_recovery_case_safety.py. The new cases cover absent/active base
+readiness, historical policy 1, owner-declared participant populations without
+duplicate geometry flags, identity-free capture rows, conflicting identities,
+and tampered readiness/declarations/policy. Existing negative checks still
+block missing peer exclusion, possible overlap, relevant running jobs, stale
+evidence, and unsupported predicates, while preserving accepted state/history.
+
+poetry check passed with existing metadata deprecation warnings;
+poetry run python -m compileall -q cais_spade_llm ros2 and git diff --check
+passed. See goal_regression_final.log, goal_poetry_check.log, and
+goal_compileall_final.log. goal_immutable_after.json verifies both original
+captures and all eight safety files against immutable_before.json: all 10
+hashes are unchanged. Public bridge, safety files, configuration files, and
+the unrelated concurrent composition/UI work were not edited by this repair.
+
+## Previous October 13 handoff — endpoint policy 1 before readiness separation
+
+The KMR physical-evidence milestone uses owner endpoint calculations and
+conservative occupancy alternatives. New planning validation never requests,
+generates, samples, or replays a full physical trajectory. Robot execution is
+unchanged and remains a separate, unauthorized stage in these checks.
+
+New preparations retain outline_evidence_policy_version=1 and add
+endpoint_evidence_policy_version=1 to their internal physical evidence. The
+new marker, owner facts, exact proposal, starting state, models, and selected
+specifications participate in evidence and cache identities. Sessions without
+the endpoint marker retain their historical validation behavior. Contract
+version 2, successor_primitive_union, SystemBridge, fixed symbols, safety files,
+original captures, and LLM-authored proposals remain unchanged.
+
+### Implemented calculation and validation
+
+- RA resolves a unique supported owner declaration and its actual program
+  variant, then reuses owner parameter calculations and FK. KMR base targets
+  update the model root; arm, tool, component bounds, and attached part poses
+  are calculated in the same world frame. Both declared docks and explicit
+  x/y/yaw targets are supported. This is a conditional result after successful
+  owner action completion, not an observed arrival or execution authorization.
+- The interval carries Boolean occupancy alternatives. KMR can remain
+  [false, true] throughout a movement. Independently checked peer holds and
+  their robot/tool/carried-part bounds can exclude every peer from the bound
+  regions. CCA's existing monitor checks every represented possibility. A
+  possible violation requests more precise owner bounds; no trajectory is the
+  fallback. A captured peer position alone cannot establish a future hold.
+- Requirements still derive from exact AP dependencies. Processing uses exact
+  ledgers and relevant progression; spatial checks retain the complete relevant
+  population. Unknown elapsed time retires unrelated running-job facts and
+  clocks. Relevant unknown progression blocks acceptance.
+- Successful endpoint evidence is returned separately from readiness, timing,
+  and predicate gaps. Accepted successors retain recalculated geometry and
+  supported holds, retire old scene caches and aliases, and preserve original
+  observations as history. CCA independently recalculates the owner result,
+  requirements, and coverage. Failed candidates retain accepted state/history.
+- Offline automatic previews, explicit owner preview entry points, and old
+  rejected/incomplete-motion fallback paths are disabled for marked attempts.
+  The carried move_to_location capability witness now uses the existing
+  carrying variant's attachment argument, without changing the primitive union.
+- The new bounds policy encloses passive-joint observations within eight
+  floating-point steps of a declared limit instead of clipping them or treating
+  rounding as physical overshoot. Larger discrepancies remain unresolved;
+  legacy holds keep their strict comparison. This covers the saved
+  KMR_rg2_finger_width value 0.11000000000000007 against its 0.11 limit.
+
+Implementation starts at recovery_framework/outline_endpoint_evidence.py and
+outline_evidence_policy.py. The existing RA/CCA and shared validated-event path
+use these calculations; this is not only a standalone diagnostic.
+
+### KMR milestone and exact saved replay
+
+Artifacts are under
+cais_spade_llm/monitor/environment_runs/endpoint_bounds_20261013/.
+
+supported_kmr.json records integrated **RA → CCA → accepted successor → next
+geometry-dependent event** checks, empty and carrying, from explicitly supported
+synthetic starting states. They use real SavedRecoveryResource capability
+checks, real owner declarations, CCA monitors, and the normal commit function.
+Both movements pass; the second consumes the first endpoint and resolves M2's
+configured dock. Tests check unchanged arm joints, tool FK, transformed carried
+parts, and coordinate-only destinations without a named dock. The synthetic
+fixtures are separate from the unchanged saved proposals.
+
+replay_verified/report.json records the exact attempt-07 provider responses
+from turns 5 and 16, with API, live interfaces, full trajectory generation,
+sampling, and replay guarded against use. The selected specifications request
+60 resource-region APs plus two processing-completion APs.
+
+| Exact saved proposal | RA capability | Required evidence and projection | CCA / accepted state |
+| --- | --- | --- | --- |
+| M2 pause_job | FEASIBLE | Existing instantaneous owner job control supplies the effect and selected predicate coverage | Passed; one event accepted |
+| KMR move_to_location to M1 | FEASIBLE | Endpoint SUPPORTED; base target (-4.7, 2.2), tool approximately (-5.2, 1.95, 1.16), seven arm joints retained; peer bounds available. Starting base readiness remains unsupported | Unresolved on readiness; accepted prefix and monitor history unchanged |
+
+The exact saved KMR proposal targets M1, not M2. Its missing fact is the
+captured base readiness/command-gate evidence, not a trajectory. No capture was
+edited to mark its active controller idle. No new capture, API generation, or
+robot execution was used. Both replay and supported fixtures have zero
+forbidden calls.
+
+### Verification and remaining scope
+
+Final focused regression run: **1,538 passed in 135.14 seconds**, across
+test_environment_recovery.py, test_validated_recovery_outline.py,
+test_recovery_outline_evidence.py, test_recovery_context_retrieval.py,
+test_kmr_outline_evidence.py, test_machine_jobs.py, test_offline_recovery.py,
+and test_recovery_case_safety.py. poetry check passed with existing metadata
+deprecation warnings. poetry run python -m compileall -q cais_spade_llm ros2
+and git diff --check passed. Live ROS2/hardware testing was excluded.
+
+The focused suites cover processing-only and mixed specifications, held parts,
+missing holds, possible overlapping occupancy, running jobs, unsupported
+predicates, changed bindings, stale aliases/caches, tampered evidence, rollback,
+historical sessions, and exact nominal obligations. Trajectory entry points are
+guarded to fail even for specifications that remain unresolved. See
+focused_tests_final.log, final_policy_tests.log, poetry_check.log, compileall.log,
+and immutable_after.json for the final results.
+
+The immutable check includes both original captures and all eight safety text
+files. Their hashes remain equal to immutable_before.json. The derived capture
+still hashes to 870b2ff445fbc600c8d73fbac5c4c94ad0c66e5107002d73d783c24634676dfd;
+safety_M2_mutex.txt remains
+5f282ecbbfeb83862b6b1958304d4930005163935042c6649145ef905ee1d28f.
+
+Complete recovery and nominal continuation are not established by this milestone.
+The new endpoint path currently calculates supported KMR movement programs and
+instantaneous machine commands. Other owner programs, output-dependent effects,
+missing final joint witnesses, or predicates requiring unavailable timing/state
+facts remain explicit evidence gaps. Preserve exact nominal task/parameter/effect
+obligations; CCA acceptance cannot manufacture task completion. Arbitrary
+specifications need not be decidable from available bounds. Do not restore a
+full-trajectory fallback to address these gaps.
+
+Other composition modules and multi_turn_primitive_generation.py appeared as
+concurrent work during final status inspection; this task did not edit them.
+Keep those changes and the pre-existing worktree changes separate from this
+endpoint-policy milestone.
+
+## Previous October 13 handoff — selective evidence before endpoint bounds
+
+### Implemented: evidence selected by safety predicates
+
+The approved selective-evidence repair is implemented in the school Ubuntu
+checkout on recovery-framework-journal. The scoped repair is complete;
+the machine-breakdown recovery outline and nominal continuation remain incomplete.
+No new KMR movement validator, API request, Gazebo capture, or execution was added.
+
+The current pipeline is:
+
+**Captured facts → authored proposal → RA capability support → owner successor
+effects and selected evidence requirements → CCA coverage and monitor replay →
+commit accepted state → shared nominal-continuation validation.**
+
+New attempts carry outline_evidence_policy_version=1. They retain
+validation_contract_version=2, primitive_support_semantics="successor_primitive_union",
+SystemBridge, exact safety files, and LLM authorship. Sessions without the new
+marker keep the legacy strict projection/monitor path; loading does not upgrade them.
+
+outline_evidence_requirements now has an event-specific form. It uses the
+existing exact AP grounding, complete resource population, owner declarations,
+current facts and interacting jobs. Requirements are not chosen by a proposed
+event name or destination label. Requirements and coverage bind the exact
+proposal, starting snapshot, physical facts, owner model/evidence, and selected
+specification contents/hashes. CCA independently recomputes these records and
+reproduces the selective owner successor before checking its monitors.
+
+For known processing predicates, an unambiguous supported environment movement
+program can preserve exact completion ledgers for any elapsed duration without
+requesting native geometry preview. The implementation reuses
+declared_environment_successors and the existing parameter calculations.
+Neither the proposed end state nor the unordered primitive union establishes a
+physical result. Unknown dependencies, ambiguous effects, other owner programs,
+and independent physical or exact nominal obligations retain the conservative
+owner path.
+
+Spatial predicates still require bound regions, complete relevant resources,
+tool geometry and carried parts. Supported continuous occupancy envelopes can
+cover an AP without another detailed trajectory. A clear endpoint alone cannot
+cover a changing spatial predicate. New CCA checks use per-AP coverage instead of
+an unconditional interval_complete gate. Unsupported predicates do not become
+safe through selective checking.
+
+Supported symbolic successor effects are committed even when geometry is
+unnecessary. Uncalculated poses, configurations, bounds, holds and cached scene
+evidence are invalidated; their original observations remain historical.
+Validation input, public retrieval and subsequent nominal checks cannot recover
+those current facts from the original capture. Relevant running job progress
+blocks a processing verdict when unknown. Unrelated unknown progress and elapsed
+clocks are retired explicitly instead of remaining frozen successor facts.
+
+Monitor contexts retain replayable predicate observations and coverage history.
+Changed bindings, region definitions, tampered coverage or replay states fail
+validation. Rejected/unresolved candidates leave accepted state and history
+unchanged. Policy and requirements are included in projection cache identities.
+Projection/request and reuse reasons appear in the existing expandable records.
+
+Nominal continuation uses the same event-validation path. Its registered task,
+parameter, step and effect obligations remain enforced. Selective CCA evidence
+does not create a nominal completion witness or authorize execution.
+
+### Exact saved-proposal replay and remaining blockers
+
+Final evidence is in
+cais_spade_llm/monitor/environment_runs/selective_evidence_20261013/.
+replay_handoff/report.json records RA, required evidence, projection, CCA and
+accepted-state preservation separately. The replay used the unchanged exact
+provider responses from attempt-07 turns 5 and 16. Both requests generated
+62 grounded AP requirements: 60 resource-region bindings for SAFE_M2_mutex
+and two exact processing-completion predicates.
+
+| Saved proposal | RA | Required evidence / projection | CCA | Accepted prefix |
+| --- | --- | --- | --- | --- |
+| M2 pause_job | FEASIBLE | Owner job-control effect and required AP coverage established | Passed both selected specifications | One event |
+| KMR move_to_location | FEASIBLE | Required owner program / occupancy interval evidence missing | Unresolved | Still one event; accepted state/history unchanged |
+
+Final replay: **0 API calls, 0 live-interface calls, 0 forbidden calls**.
+KMR acceptance is not a requirement for this scoped repair. The saved moving
+checkpoint does not establish stopped-start or future route/arrival coverage.
+Another capture alone would not establish the proposed motion. No recapture
+is needed to demonstrate this repair, and none was started.
+
+The existing KMR move_base owner-preview connection still lacks its supported
+continuous base-controller/carried-part motion evidence. Resolving that capability,
+choosing an additional capture, or resuming API generation is separate follow-up
+work. Primitive composition, recovery execution, concurrent runtime recovery
+composition, and observed assembly completion remain unverified. Do not claim
+that this repair establishes the saved attempt's nominal continuation.
+
+### Verification and files for continuation
+
+Final focused regression run: **1,333 passed in 54.61 seconds** across
+test_environment_recovery.py, test_validated_recovery_outline.py,
+test_recovery_outline_evidence.py, test_recovery_context_retrieval.py,
+test_kmr_outline_evidence.py, test_machine_jobs.py, and test_offline_recovery.py.
+See focused_tests_final.log. Added cases cover processing-only movement without
+preview, relevant and unrelated running work, carried parts, mixed/unsupported
+specifications, interval coverage, changed bindings, invalidated geometry, stale
+caches, tampered coverage, history replay, rollback, legacy sessions and nominal
+obligations.
+
+poetry check passed with existing metadata deprecation warnings.
+poetry run python -m compileall -q cais_spade_llm ros2 passed.
+git diff --check passed. Live ROS2/hardware validation was deliberately excluded.
+
+before.json and after.json confirm unchanged SHA-256 values:
+
+- Original derived_dfa4017c0119403088d1d4f353a407d5_20261013_public/observations.json:
+  870b2ff445fbc600c8d73fbac5c4c94ad0c66e5107002d73d783c24634676dfd.
+- safety_M2_mutex.txt:
+  5f282ecbbfeb83862b6b1958304d4930005163935042c6649145ef905ee1d28f.
+- safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt:
+  b3a34b5a8958dad3bec8411f598f1ac35e1395e6025628d2c1b213e0eeee4c76.
+
+Start future inspection with recovery_framework/outline_evidence_policy.py,
+outline_validation.py, resources/environment_recovery.py,
+agents/central_controller/outline_evidence_safety.py, and the shared
+multi_turn_validated_event.py / multi_turn_nominal_evidence.py path.
+replay_selected_policy.py reproduces the final offline replay; it omits the
+historical runner's optional additional preview-preparation action. Keep one
+agent, preserve captures and exact provider records, and diagnose missing owner
+evidence locally before expanding the scope.
+
+## Previous October 13 handoff — historical context
+
+The following handoff predates the selective-evidence repair above. Its proposed
+capture/API next steps are historical and do not authorize new runs in this task.
 
 This section is the starting point for the next chat. Older entries below are
 historical evidence, not the current next-step list. Preserve them. The user
@@ -4909,3 +7517,140 @@ User-observed UI acceptance remains separate.
 
 Evidence: `cais_spade_llm/monitor/environment_runs/kmr_offline_goal_20261013T120213Z/RESULT.md`,
 `RESULT.json`, `local_replay_parameters/report.json`, and `tests_owner_evidence.log`.
+
+## Conveyor breakdown specifications and capture — October 14, 2026 — capture in progress
+
+The Conveyor Recovery example now selects exactly `SAFE_shared_area_mutex`
+at `assembly_board-v1` and `SAFE_KET4_Square_4mm_before_gear_small`. The latter
+requires `gear_small` entry after completed `assembly` of `KET4_Square_4mm`
+at `GMC_Laser_Plate_Virtual/KET4_Square_4mm`; its weak-until formula retains
+strict earlier completion. The opposite Part slippage ordering, both
+Machining breakdown specifications, old broad documents, and existing
+saved results remain unchanged. `SystemBridge` is unchanged.
+
+The Conveyor example retains `after_M1_pick_before_release`, with
+`additional_condition` requiring `ur5e-4` custody of `gear_small` from
+`3D Printing Station`. Either pickup may arrive first. Both robots retain
+their acknowledged parts while waiting; the fault leaves completed
+`KET4_Square_4mm` held by `ur5e-1`, before Conveyor release.
+
+Verification: 381 safety/checkpoint/capture tests and 165 Recovery UI
+lifecycle tests passed. Poetry, compilation, both CLI help checks, and
+scoped whitespace checks passed; Poetry retains existing metadata warnings.
+All 18 protected configuration, safety, source capture, and bridge files
+matched their pre-change hashes.
+
+Capture-only run: `cais_spade_llm/monitor/environment_runs/conveyor_capture_20261014T170217Z/capture_01/`.
+Its ROS domain is 89, Gazebo port is 11379, stages are Manual, and the
+existing example records `diagnostic_cca_bypass=true`. `--scene-image`
+saves only the owned Gazebo window. The user stopped the VS Code UI after
+preflight refused the existing process; the isolated capture then started.
+No LLM or recovery-execution call is permitted. An official Conveyor
+failure capture is not yet retained; finish observation/native-model
+verification and image saving before recording a retained identifier.
+
+Conveyor capture_01 ended before nominal execution: Nav2 controller_server exited with SIGSEGV during configure; controller discovery failed and map activation did not complete. No failure checkpoint or observation capture was produced.
+The failed stage has no retained failure capture and is disposable after
+ownership and active-process checks. Diagnostic reports and logs are archived
+under cais_spade_llm/monitor/environment_runs/conveyor_capture_20261014T170217Z/capture_01_diagnosis.
+Next: a fresh launch on unused endpoints; retain the configured scene,
+two-part order, both pickup conditions, and actual readiness requirements.
+
+Conveyor `capture_01` disposable outputs were removed after the ownership
+audit: 81 files, 894,328 regular-file bytes; archived diagnosis and original
+failure captures remain retained.
+
+Conveyor `capture_02` passed Nav2, scene, and joint-state readiness, then
+failed while KMR loaded M1: `place_approach` exceeded the 120-second
+wall-clock arm-action timeout. The observed Gazebo GUI real-time factor
+was approximately 0.06. No failure checkpoint or observations were produced;
+protected files matched and the owned ROS launch stopped. Its separately
+owned embedded XMPP group was verified and stopped.
+
+Diagnosis is retained under
+`cais_spade_llm/monitor/environment_runs/conveyor_capture_20261014T170217Z/capture_02_diagnosis/`;
+the explicit cleanup inventory is `capture_02_deletion_list.json` in its
+parent. Next: retain headless nominal preparation and open the owned GUI
+only at the stopped failure checkpoint. Six focused GUI tests cover
+checkpoint gating, image provenance, ownership rejection, and cleanup.
+
+The stopped nominal runtime record from Conveyor `capture_02` is
+`113eb048c6694ed9b53f3c5956e91741`. It contains the same KMR timeout,
+no failure, no observations, and no outline or primitive composition.
+Its two records are archived losslessly under `capture_02_diagnosis/`;
+`capture_02_runtime_deletion_list.json` records their ownership, times,
+sizes, and hashes before removal. Conveyor `capture_03` remains active
+and excluded from cleanup, as are all other chats' records.
+
+Conveyor `capture_03` reached and verified the failure with both pickups,
+unfinished assemblies, unavailable Conveyor, stationary unheld parts, and
+`gear_small` outside `assembly_board-v1`. Its valid observations and verified
+native companion are retained as `capture_2219b78844c34a2c9664aced794f2883`,
+source run `53c715b9e11245b3be7f5260b312691c`; no LLM or recovery execution
+calls occurred. Owned ROS and embedded XMPP processes stopped and protected
+files matched. This successful failure data is excluded from cleanup.
+
+The image failed visual acceptance: its owned Gazebo window was still black
+five seconds after mapping. `capture_03/image_check.json` records this result;
+the image is diagnostic, not the requested final scene. Next: repeat headless
+capture, require nonblank rendered content stable for five seconds before
+saving the image, then verify Offline UI loading. The harness now also directs
+nominal reports to its private attempt directory and fingerprints the shared
+latest reports, so the replacement cannot overwrite another chat's status.
+
+## Conveyor breakdown handoff — October 14, 2026 — capture verified
+
+Selected capture: `capture_1b3f3d1d729a4701b94cff514c783130` under
+`cais_spade_llm/monitor/environment_runs/recovery/`; source run
+`d49d4e9e71354325b11328a1cee4a5ce`. `observations.json` retains the two
+acknowledged pickups, completed M1 before pickup, unfinished assemblies,
+unavailable Conveyor transport, `gear_small` outside `assembly_board-v1`,
+13 unfinished planner nodes, monitor history, complete physical evidence,
+and planning-scene data. `native_preview_model/manifest.json` verifies the
+bound native models. Recovery stages are Manual and
+`diagnostic_cca_bypass=true`; LLM and recovery execution calls are zero.
+
+`failure_scene.png` is the visually checked 1908×999 owned Gazebo window,
+showing the red `Conveyor breakdown` marker, M1, the printer, and the
+assembly area. `failure_scene.json` binds its SHA256, source observations,
+run, window PID, physical fingerprint, and acquisition recovery. The
+original parent exited on an X11 `BadMatch` while the window was mapping;
+the same owned Gazebo instance remained alive. Read-only native observations
+before and after image acquisition confirmed idle controllers, both fixed
+gripper attachments, and all captured part positions within 0.002 m.
+Those independent native records and the image recovery script are retained
+under `conveyor_capture_20261014T170217Z/capture_04/`. The GUI group was
+stopped separately after the process registry discarded its entry. All
+recorded owned launch, GUI, and XMPP groups are stopped. The harness now
+confines X11 reads to a child process and retries mapping failures.
+
+The real Recovery page loaded this capture through Offline → Conveyor
+breakdown → Saved observations, with exactly `SAFE_shared_area_mutex` and
+`SAFE_KET4_Square_4mm_before_gear_small`. Browser reload passed, custody was
+retained, all 12 resources were detached `SavedRecoveryResource` instances,
+and generation/execution remained zero. Browser report and screenshot are
+under `conveyor_capture_20261014T170217Z/ui_verification/capture_04/`.
+The temporary verification session `offline_aa7126b2b0c942648a092c8595bf586e`
+has no outline or primitive composition; its useful metadata is archived
+there and its explicit cleanup inventory is `ui_review_deletion_list.json`.
+The selected capture, its native companion, and all official earlier failure
+captures are excluded from this cleanup.
+
+Final focused suites: 414 passed, including concurrent `ur5e-1 breakdown`
+coverage; the earlier 165 Recovery UI lifecycle tests also passed. All
+protected files matched at capture completion. A later concurrent change
+replaced the `ur5e-1 breakdown` broad document/default with
+`safety_M1_mutex.txt`; this Conveyor work preserves that change. The other
+17 protected source, configuration, safety, and bridge files still match.
+There is no accepted Conveyor recovery outline or primitive composition.
+Next stages remain recovery generation, CCA authorization, and execution.
+
+Final cleanup removed 172 explicitly inventoried disposable files totaling
+175,212,797 regular-file bytes, including the temporary UI review copy.
+No official failure capture was removed. `retained_captures_after_cleanup.json`
+confirms that both Conveyor captures, the original Machining breakdown capture,
+and the original Part slippage capture remain selectable and offline-ready.
+Image/source hashes match and no owned runtime process remains. Final Poetry,
+compilation, capture CLI help, and scoped whitespace checks passed; Poetry
+reported only the existing metadata deprecations. The task-level report is
+`conveyor_capture_20261014T170217Z/implementation_verification.json`.

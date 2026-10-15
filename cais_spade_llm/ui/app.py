@@ -53,6 +53,7 @@ _PROJECT_ITEMS = [
             ("setup", "/recovery-framework?tab=setup", "settings"),
             ("results", "/recovery-framework?tab=results", "assessment"),
             ("recovery", "/recovery-framework?tab=recovery", "restore"),
+            ("experiments", "/recovery-framework?tab=experiments", "science"),
         ],
     ),
     (

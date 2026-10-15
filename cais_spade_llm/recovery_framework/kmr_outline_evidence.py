@@ -9,7 +9,9 @@ native result against its exact private starting scene.
 
 from copy import deepcopy
 from fractions import Fraction
+import hashlib
 import math
+import xml.etree.ElementTree as ET
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint as fingerprint
 
@@ -97,13 +99,21 @@ def _initial_state(task: dict, model: dict, evidence: dict, physical: dict, snap
     values["snapshot"] = {**deepcopy(snapshot), **deepcopy(physical["snapshot"]["resources"]["KMR"]),
                           "base_pose": _base_pose(physical)}
     values["observed_parts"] = {part: {"current_pose": deepcopy(row["current_pose"])}
-                                for part, row in physical["snapshot"]["parts"].items()}
+                                for part, row in physical["snapshot"]["parts"].items() if row.get("current_pose") is not None}
     calculated = prepare_kmr_primitive_parameters(task=task, recovery_des_model=model,
         recovery_snapshot=values["snapshot"], resource_evidence=values, resource_jid=task["resource_jid"])
-    matches = [row for row in calculated["parameter_calculations"]
-               if row["event_name"] == declared["task"]["event_name"]
-               and fingerprint(row.get("resolved_parameter_bindings", row["parameter_bindings"]))
-               == fingerprint(declared["task"]["parameters"])]
+    parameter_names = _program(declared, evidence, physical).get("parameter_bindings", {})
+    matches = []
+    for row in calculated["parameter_calculations"]:
+        parameters = deepcopy(row.get("resolved_parameter_bindings", row["parameter_bindings"]))
+        # A proposal can bind the carried part without adding an argument to a
+        # movement declaration. Keep that context in the calculation audit.
+        if ("part_name" not in parameter_names and "part_name" not in declared["task"]["parameters"]
+                and parameters.get("part_name") == task.get("part_name")):
+            parameters.pop("part_name", None)
+        if (row["event_name"] == declared["task"]["event_name"]
+                and fingerprint(parameters) == fingerprint(declared["task"]["parameters"])):
+            matches.append(row)
     conflicts = [row for row in calculated["conflicts"]
                  if row.get("event_name") == declared["task"]["event_name"]
                  and any(fingerprint(row.get("parameter_bindings")) == fingerprint(match['parameter_bindings'])
@@ -126,18 +136,19 @@ def _resolve_step(step: dict, declared: dict, state: dict, outputs: dict, eviden
 
 
 def _calculation(step: dict, params: dict, declared: dict, physical: dict, evidence: dict) -> dict | None:
-    from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets, place_targets
+    from cais_spade_llm.recovery_framework.kmr_recovery import pick_targets, place_targets, recorded_location
 
     owner, scene = physical["snapshot"]["resources"]["KMR"], evidence["inputs"]["scene"]
     bindings = declared["task"]["parameters"]
     if step["op"] == "compute_pick_targets":
         part = bindings["part_name"]
         return pick_targets(scene, part, physical["snapshot"]["parts"][part]["current_pose"],
-            owner["current_pose"], _base_pose(physical), initial=params.get("initial"))
+            owner["current_pose"], _base_pose(physical), initial=params.get("initial"),
+            location=bindings['origin_resource_location'])
     if step["op"] == "compute_place_targets":
-        machine = next(row for row in scene["machines"] if row["resource_id"] == bindings["destination_location"])
+        machine, _ = recorded_location(scene, bindings["destination_location"])
         return place_targets(scene, machine, owner["grasp_transform"], owner["current_pose"],
-                            _base_pose(physical), machine["workholding_pose"])
+                            _base_pose(physical), machine.get("workholding_pose"), part_name=bindings['part_name'])
     return None
 
 
@@ -201,9 +212,18 @@ def _motion_request(step: dict, params: dict, physical: dict, evidence: dict) ->
               "orientation": dict(zip(("x", "y", "z", "w"), p[3:], strict=True))} for p in points]}
 
 
-def _holds(physical: dict) -> dict:
+def _holds(physical: dict, *, robot_description: str | None = None) -> dict:
     from cais_spade_llm.resources.recovery_geometry import commanded_hold_evidence
 
+    if robot_description is not None:
+        from cais_spade_llm.agents.central_controller.recovery_case_evidence import recorded_base_hold
+
+        # Scoped peer holds cannot hide the moving owner's own readiness check.
+        recorded_base_hold(resource_id="KMR", physical_evidence=physical,
+                           model=physical["resource_models"]["KMR"]["configuration"])
+        if (physical["snapshot"]["resources"]["KMR"].get("base_pose")
+                != physical["resources"]["KMR"]["base_hold_evidence"]["root_pose"]):
+            raise ValueError("KMR base readiness differs from the projected starting pose")
     holds = {}
     for rid, state in physical["snapshot"]["resources"].items():
         if rid == "KMR" or physical["resources"][rid].get("model_static") is True:
@@ -211,7 +231,7 @@ def _holds(physical: dict) -> dict:
         row = physical["resources"][rid]
         if "controller_hold_model" in row or row.get("idle") is not True:
             result = commanded_hold_evidence(resource_id=rid, state=state,
-                model=physical["resource_models"][rid], physical=row)
+                model=physical["resource_models"][rid], physical=row, robot_description=robot_description)
             if result.get("status") != "supported":
                 raise ValueError("KMR interval lacks supported peer hold: " + rid + ": " + result.get("reason", ""))
             holds[rid] = result
@@ -225,7 +245,61 @@ def _holds(physical: dict) -> dict:
     return holds
 
 
-def _scene_request(task: dict, physical: dict, evidence: dict, scene_capture: dict, motion: dict) -> dict:
+def _project_base_state(scene_capture: dict, physical: dict, projected: dict) -> None:
+    """Set the private planning base joints from the bound physical root pose.
+
+    The planning scene's last joint-state publication can predate the frozen
+    physical checkpoint. Its mobile root must not override that checkpoint.
+    Only the owner's declared world x/y/yaw chain is supported here.
+    """
+    configuration = physical["resource_models"]["KMR"]["configuration"]
+    description = scene_capture["robot_description"]
+    if (not isinstance(description, str)
+            or hashlib.sha256(description.encode()).hexdigest() != configuration["description_sha256"]):
+        raise ValueError("KMR base projection differs from its recorded planning description")
+    pose = _base_pose(physical)
+    if (any(type(value) not in (int, float) or not math.isfinite(value) for value in pose)
+            or any(abs(value) > 1e-12 for value in pose[2:5])
+            or not math.isclose(pose[5] ** 2 + pose[6] ** 2, 1., abs_tol=1e-12, rel_tol=0.)):
+        raise ValueError("KMR base projection requires a finite planar world pose")
+    try:
+        joints = ET.fromstring(description).findall("joint")
+    except ET.ParseError as exc:
+        raise ValueError("KMR base projection has an invalid recorded planning description") from exc
+    parents = {joint.find("child").get("link"): joint for joint in joints if joint.find("child") is not None}
+    if len(parents) != len(joints):
+        raise ValueError("KMR base projection requires an unambiguous parent chain")
+    child, chain = configuration["root"], []
+    for name, kind, axis in reversed((
+        ("KMR_base_x_joint", "prismatic", [1., 0., 0.]),
+        ("KMR_base_y_joint", "prismatic", [0., 1., 0.]),
+        ("KMR_base_yaw_joint", "continuous", [0., 0., 1.]),
+    )):
+        joint = parents.get(child)
+        if (joint is None or joint.get("name") != name or joint.get("type") != kind
+                or joint.find("parent") is None or joint.find("axis") is None or joint.find("mimic") is not None
+                or [float(value) for value in joint.find("axis").get("xyz", "").split()] != axis):
+            raise ValueError("KMR base projection lacks its declared world x/y/yaw joints")
+        origin = joint.find("origin")
+        if origin is not None and any([float(v) for v in origin.get(field, "0 0 0").split()] != [0., 0., 0.]
+                                      for field in ("xyz", "rpy")):
+            raise ValueError("KMR base projection has an unsupported joint origin")
+        chain.append(name)
+        child = joint.find("parent").get("link")
+    if child != physical["snapshot"]["frame"] or child != "world":
+        raise ValueError("KMR base projection requires the recorded world frame")
+    values = dict(zip(reversed(chain), (pose[0], pose[1], math.atan2(2 * pose[6] * pose[5],
+                                                                  1 - 2 * pose[5] ** 2)), strict=True))
+    for state in (projected["start_state"], projected["planning_scene"]["robot_state"]):
+        names, positions = state["joint_state"]["name"], state["joint_state"]["position"]
+        if len(names) != len(set(names)) or len(names) != len(positions) or not set(values).issubset(names):
+            raise ValueError("KMR base projection lacks complete private-scene joint identities")
+        for name, value in values.items():
+            positions[names.index(name)] = value
+
+
+def _scene_request(task: dict, physical: dict, evidence: dict, scene_capture: dict, motion: dict,
+                   *, project_base: bool = False) -> dict:
     from cais_spade_llm.recovery_framework.recovery_motion_preview import (
         apply_declared_mounting_contacts, prepare_recorded_root_transforms, preview_scene_fingerprint,
         project_preview_scene,
@@ -234,6 +308,8 @@ def _scene_request(task: dict, physical: dict, evidence: dict, scene_capture: di
     configured = evidence["inputs"]["scene"]
     settings, kmr = configured["safety_preparation"]["outline_preview"], configured["KMR"]["task_execution"]
     projected = project_preview_scene(scene_capture, physical)
+    if project_base:
+        _project_base_state(scene_capture, physical, projected)
     if "planning_scene_mounting_contacts" in configured:
         mounted = apply_declared_mounting_contacts(projected["planning_scene"],
             robot_description=scene_capture["robot_description"], robots=configured["robots"],
@@ -261,7 +337,8 @@ def _scene_request(task: dict, physical: dict, evidence: dict, scene_capture: di
     return request
 
 
-def _apply_motion(task: dict, physical: dict, request: dict, response: dict, time: float) -> tuple[dict, list, dict]:
+def _apply_motion(task: dict, physical: dict, request: dict, response: dict, time: float,
+                  *, robot_description: str | None = None) -> tuple[dict, list, dict]:
     from cais_spade_llm.recovery_framework.recovery_motion_preview import preview_result_record, validate_preview_request
     from cais_spade_llm.resources.recovery_geometry import _checkpoint, _motion_checkpoint, _prepared_motion
 
@@ -277,7 +354,7 @@ def _apply_motion(task: dict, physical: dict, request: dict, response: dict, tim
     stamp = trajectory["points"][-1]["time_from_start"]
     trajectory["duration_ns"] = stamp["sec"]*1_000_000_000 + stamp["nanosec"]
     snapshot, models, geometry = physical["snapshot"], physical["resource_models"], physical["geometry"]
-    holds = _holds(physical)
+    holds = _holds(physical, robot_description=robot_description)
     free = sorted(set(snapshot["parts"]) - {r.get("held_part") for r in snapshot["resources"].values()})
     interval = {"joint_trajectory": trajectory, "stationary_resources": sorted(set(snapshot["resources"])-{"KMR"}),
         "stationary_parts": free, "stationary_resource_evidence": holds,
@@ -326,7 +403,8 @@ def _apply_motion(task: dict, physical: dict, request: dict, response: dict, tim
     return successor, [during, after], interval
 
 
-def _apply_custody(step: dict, params: dict, declared: dict, physical: dict, time: float) -> tuple[dict, list, dict] | None:
+def _apply_custody(step: dict, params: dict, declared: dict, physical: dict, time: float,
+                   *, robot_description: str | None = None) -> tuple[dict, list, dict] | None:
     from cais_spade_llm.resources.resource_safety_preparation import _outline_custody_evidence
     from cais_spade_llm.resources.recovery_geometry import (
         _checkpoint, _configuration_after, _custody, projected_part_support,
@@ -357,7 +435,7 @@ def _apply_custody(step: dict, params: dict, declared: dict, physical: dict, tim
                 raise ValueError("KMR gripper change lacks complete joint bounds")
             joint.pop("frozen_position", None)
             joint["frozen_interval"] = deepcopy(contract["joint_bounds"][joint["name"]])
-    _holds(physical)
+    _holds(physical, robot_description=robot_description)
     interval_models = {**physical["resource_models"], "KMR": interval_model}
     during = _checkpoint(state, physical["geometry"], interval_models, index=time)
     during.update(phase="between", continuous_interval=[str(time), str(time)])
@@ -415,7 +493,8 @@ def _apply_custody(step: dict, params: dict, declared: dict, physical: dict, tim
 def _case_evidence(points: list[dict], *, physical: dict, evidence: dict,
                    declared: dict, trajectory: dict | None = None,
                    stage_start: float = 0., planning_scene: dict | None = None,
-                   recorded_initial: bool = False, custody_source: dict | None = None) -> None:
+                   recorded_initial: bool = False, custody_source: dict | None = None,
+                   robot_description: str | None = None) -> None:
     from cais_spade_llm.agents.central_controller.recovery_case_evidence import calculate_case_resource_evidence
 
     source = physical if recorded_initial or trajectory is not None else {
@@ -425,7 +504,7 @@ def _case_evidence(points: list[dict], *, physical: dict, evidence: dict,
     targets = {bindings[field] for field in ("origin_resource_location", "destination_location", "target_resource")
                if field in bindings}
     docking_target = next(iter(targets)) if len(targets) == 1 else None
-    holds = _holds(physical) if trajectory is not None else None
+    holds = _holds(physical, robot_description=robot_description) if trajectory is not None else None
     for point in points:
         raw = calculate_case_resource_evidence(resource_id="KMR", observation=point,
             physical_evidence=source, configuration=configuration["KMR"],
@@ -451,12 +530,15 @@ def _replay(record: dict, *, task: dict, recovery_snapshot: dict, recovery_des_m
 
     event = _program(declared, resource_evidence, physical)
     binding = outline_event_binding(task, recovery_snapshot, recovery_des_model, physical)
-    if (type(record.get("version")) is not int or record["version"] != 2
+    if (type(record.get("version")) is not int or record["version"] not in {2, 3}
             or fingerprint(record.get("binding")) != fingerprint(binding)
             or record.get("owner_declaration_fingerprint") != fingerprint(event)
             or record.get("resource_evidence_fingerprint") != fingerprint(resource_evidence)
             or fingerprint(record.get("declared_task")) != fingerprint(declared["task"])):
         raise ValueError("KMR private event evidence has changed source, task, model, or physical start")
+    robot_description = record["planning_scene_capture"]["robot_description"] if record["version"] == 3 else None
+    if record["version"] == 3 and (not isinstance(robot_description, str) or not robot_description):
+        raise ValueError("KMR scoped hold evidence requires the captured robot description")
     scene, outputs = deepcopy(physical), {}
     state = _initial_state(task, recovery_des_model, resource_evidence, physical, recovery_snapshot, declared)
     observations = [_checkpoint(scene["snapshot"], scene["geometry"], scene["resource_models"], index=0)]
@@ -475,7 +557,7 @@ def _replay(record: dict, *, task: dict, recovery_snapshot: dict, recovery_des_m
         else:
             params = resolved["params"]
             output = _calculation(step, params, declared, scene, resource_evidence)
-            custody = _apply_custody(step, params, declared, scene, time)
+            custody = _apply_custody(step, params, declared, scene, time, robot_description=robot_description)
             if custody is not None:
                 _case_evidence(custody[1][:-1], physical=scene, evidence=resource_evidence,
                     declared=declared, custody_source=custody_source)
@@ -488,14 +570,17 @@ def _replay(record: dict, *, task: dict, recovery_snapshot: dict, recovery_des_m
                 observations.extend(points)
             motion = _motion_request(step, params, scene, resource_evidence)
             if motion is not None:
-                request = _scene_request(task, scene, resource_evidence, record["planning_scene_capture"], motion)
+                request = _scene_request(task, scene, resource_evidence, record["planning_scene_capture"], motion,
+                                         project_base=record["version"] == 3)
                 if fingerprint(row.get("request")) != fingerprint(request):
                     raise ValueError("KMR physical preview has a different projected scene or motion target")
                 before_motion = scene
-                scene, points, interval = _apply_motion(task, scene, request, row["response"], time)
+                scene, points, interval = _apply_motion(task, scene, request, row["response"], time,
+                                                      robot_description=robot_description)
                 _case_evidence(points, physical=before_motion, evidence=resource_evidence,
                     declared=declared, trajectory=interval["joint_trajectory"], stage_start=time,
-                    planning_scene=request["planning_scene"], custody_source=custody_source)
+                    planning_scene=request["planning_scene"], custody_source=custody_source,
+                    robot_description=robot_description)
                 observations.extend(points)
                 time = float(Fraction(interval["end_time_exact"]))
                 intervals.append(interval)
@@ -558,6 +643,8 @@ async def prepare_kmr_event_evidence(owner, *, task: dict, recovery_snapshot: di
         recovery_des_model: dict, physical_evidence: dict, resource_evidence: dict,
         observations: dict, preview_call=None, allow_live_capture: bool = True, cancel_event=None) -> dict:
     """Prepare and retain native KMR previews without dispatch or scene mutation."""
+    if physical_evidence.get("endpoint_evidence_policy_version") in (1, 2):
+        raise ValueError("Endpoint policy disables KMR trajectory previews; use owner endpoints and bounds")
     from cais_spade_llm.recovery_framework.outline_gazebo_evidence import (
         _check_cancelled, _saved_planning_scene, _prepare_scene_object_bindings,
     )
@@ -588,7 +675,7 @@ async def prepare_kmr_event_evidence(owner, *, task: dict, recovery_snapshot: di
     physical["scene_object_bindings"] = bindings['scene_object_bindings']
     failures = []
     for declared in _declarations(task, recovery_des_model, resource_evidence, physical, failures):
-        record = {"version": 2, "source": "KMR declared owner program preview", "command_sent": False,
+        record = {"version": 3, "source": "KMR declared owner program preview", "command_sent": False,
             "execution_authorized": False, "planning_scene_capture": deepcopy(scene_capture),
             "binding": outline_event_binding(task, recovery_snapshot, recovery_des_model, physical),
             "resource_evidence_fingerprint": fingerprint(resource_evidence), "declared_task": deepcopy(declared["task"]), "steps": []}
@@ -606,17 +693,19 @@ async def prepare_kmr_event_evidence(owner, *, task: dict, recovery_snapshot: di
                 if resolved["status"] == "resolved":
                     params = resolved["params"]
                     output = _calculation(step, params, declared, scene, resource_evidence)
-                    custody = _apply_custody(step, params, declared, scene, time)
+                    custody = _apply_custody(step, params, declared, scene, time,
+                                             robot_description=scene_capture["robot_description"])
                     if custody is not None and step["op"] == "move_to_named_pose":
                         scene, _, _ = custody
                     motion = _motion_request(step, params, scene, resource_evidence)
                     if motion is not None:
-                        request = _scene_request(task, scene, resource_evidence, scene_capture, motion)
+                        request = _scene_request(task, scene, resource_evidence, scene_capture, motion, project_base=True)
                         response = await (preview_call or preview_recovery_motion)(request, execution_mode="simulation",
                             action_name=settings["action_name"], timeout_seconds=settings["timeout_seconds"], cancel_event=cancel_event)
                         row.update(request=deepcopy(request), response=deepcopy(response))
                         _check_cancelled(cancel_event)
-                        scene, _, interval = _apply_motion(task, scene, request, response, time)
+                        scene, _, interval = _apply_motion(task, scene, request, response, time,
+                                                          robot_description=scene_capture["robot_description"])
                         time = float(Fraction(interval["end_time_exact"]))
                         output = {"tcp_pose": deepcopy(scene["snapshot"]["resources"]["KMR"]["current_pose"])}
                     elif custody is not None:

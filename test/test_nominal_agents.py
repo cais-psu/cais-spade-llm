@@ -1,6 +1,6 @@
-"""PA/RA planning, acknowledged custody, and configured operator views."""
-
 from __future__ import annotations
+
+"""PA/RA planning, acknowledged custody, and configured operator views."""
 
 import asyncio
 import json
@@ -426,6 +426,9 @@ def test_complete_pages_read_models_and_saved_runs_without_dispatch(
 
         def get_robot_states(self):
             return {}
+
+        def get_conveyor_fault(self):
+            return {"status": "disabled", "ready": False}
 
         def get_part_tracker(self):
             return {}

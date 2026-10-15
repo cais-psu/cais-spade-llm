@@ -3,6 +3,7 @@ from __future__ import annotations
 """Pure geometric projection of resource-owned recovery evidence."""
 
 from copy import deepcopy
+import hashlib
 import math
 import xml.etree.ElementTree as ET
 from fractions import Fraction
@@ -321,6 +322,70 @@ def gravity_supported_part(*, model_name: str, physics: dict, policy: dict,
         return {**result, "reason": str(exc)}
 
 
+def retain_part_support_geometry(evidence: dict) -> None:
+    """Retain rigid geometry for later calculations, without retaining observations.
+
+    Args:
+        evidence: Attempt-local physical evidence before old observations retire.
+    """
+    if 'part_support_geometry' in evidence or not evidence.get('physics_evidence'):
+        return
+    physics = evidence['physics_evidence']
+    models, parts, resources = {}, {}, {}
+    for part, row in evidence.get('snapshot', {}).get('parts', {}).items():
+        name = row.get('model_name')
+        model = physics.get('models', {}).get(name)
+        geometry = evidence.get('geometry', {}).get('parts', {}).get(part)
+        if model is not None and geometry is not None and len(model.get('links', {})) == 1:
+            models[name] = deepcopy(model)
+            parts[part] = {'model_name': name, 'geometry_fingerprint': recovery_validation_fingerprint(geometry)}
+    for name, model in physics.get('models', {}).items():
+        geometry = evidence.get('geometry', {}).get('resources', {}).get(name)
+        pose = evidence.get('snapshot', {}).get('resources', {}).get(name, {}).get('current_pose')
+        if (model.get('static') is True and geometry is not None and isinstance(pose, list)
+                and len(pose) == 7 and pose == model.get('pose')):
+            models[name] = deepcopy(model)
+            resources[name] = {'current_pose': deepcopy(pose),
+                'geometry_fingerprint': recovery_validation_fingerprint(geometry)}
+    for model in models.values():
+        for link in model.get('links', {}).values():
+            for key in ('linear_velocity', 'angular_velocity', 'linear_speed', 'angular_speed', 'enabled'):
+                link.pop(key, None)
+    body = {'version': 1, 'physics': {key: deepcopy(physics[key]) for key in
+        ('version', 'instance_id', 'simulation_time', 'physics_engine', 'physics_configuration',
+         'gravity', 'contact_surface_layer') if key in physics},
+        'parts': parts, 'resources': resources,
+        'physics_source_fingerprint': recovery_validation_fingerprint(physics),
+        'policy_fingerprint': recovery_validation_fingerprint(evidence.get('part_support_policy')),
+        'meshes_fingerprint': recovery_validation_fingerprint(evidence.get('physics_meshes'))}
+    body['physics'].update(models=models, contacts=[])
+    body['fingerprint'] = recovery_validation_fingerprint(body)
+    evidence['part_support_geometry'] = body
+
+
+def _part_support_geometry(evidence: dict, state: dict, part_name: str) -> dict:
+    record = evidence['part_support_geometry']
+    body = {key: value for key, value in record.items() if key != 'fingerprint'}
+    if (record.get('version') != 1 or record.get('fingerprint') != recovery_validation_fingerprint(body)
+            or record['policy_fingerprint'] != recovery_validation_fingerprint(evidence.get('part_support_policy'))
+            or record['meshes_fingerprint'] != recovery_validation_fingerprint(evidence.get('physics_meshes'))):
+        raise ValueError('Recorded support geometry dependencies changed')
+    part = record['parts'][part_name]
+    if (part['model_name'] != state['parts'][part_name]['model_name'] or part['geometry_fingerprint']
+            != recovery_validation_fingerprint(evidence['geometry']['parts'][part_name])):
+        raise ValueError('Recorded part geometry changed')
+    resources = {name for name, source in record['resources'].items()
+        if source['current_pose'] == state['resources'].get(name, {}).get('current_pose')
+        and source['geometry_fingerprint'] == recovery_validation_fingerprint(evidence['geometry']['resources'].get(name))}
+    physics = deepcopy(record['physics'])
+    # Other dynamic parts and all old contacts/attachments are outside this
+    # calculation. This reference supplies shapes, never current observations.
+    physics['models'] = {name: row for name, row in physics['models'].items()
+                         if name == part['model_name'] or name in resources}
+    physics['excluded_support_resources'] = sorted(set(record['resources']) - resources)
+    return physics
+
+
 def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> dict:
     """Calculate resting contact for a proposed deposit from exact collision shapes.
 
@@ -332,7 +397,9 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> di
 
     result = {"status": "NEEDS_CONTEXT", "physical_execution_verified": False}
     try:
-        physics = deepcopy(evidence["physics_evidence"])
+        physics = (deepcopy(evidence['physics_evidence']) if evidence.get('physics_evidence')
+                   else _part_support_geometry(evidence, state, part_name))
+        physics_fingerprint = recovery_validation_fingerprint(physics)
         policy = evidence["part_support_policy"]
         if physics.get("physics_engine") != "ode":
             raise ValueError("Projected support requires recorded ODE contact settings")
@@ -461,7 +528,10 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> di
         supported = gravity_supported_part(model_name=name, physics=physics, policy=policy, owners_idle=True)
         supported.update(current_pose=deepcopy(recorded_pose), part_name=part_name,
             source={"kind": "projected", "calculation": "recorded rigid collision geometry and static support",
-                    "physics_fingerprint": recovery_validation_fingerprint(evidence["physics_evidence"]),
+                    "physics_fingerprint": physics_fingerprint,
+                    "recorded_geometry_reference_fingerprint": (None if evidence.get('physics_evidence')
+                        else evidence['part_support_geometry']['fingerprint']),
+                    "excluded_support_resources": physics.get('excluded_support_resources', []),
                     "part_pose": deepcopy(recorded_pose), "policy_fingerprint": recovery_validation_fingerprint(policy),
                     "contact_margins": contact_margins},
             physics_evidence=physics)
@@ -470,12 +540,84 @@ def projected_part_support(*, part_name: str, state: dict, evidence: dict) -> di
         return {**result, "reason": str(exc)}
 
 
-def commanded_hold_evidence(*, resource_id: str, state: dict, model: dict, physical: dict) -> dict:
+def _hold_controller_activity(physical: dict, configuration: dict, robot_description: str) -> tuple[dict, dict]:
+    """Scope a fixed root's hold to controllers that can change its joint tree.
+
+    Unknown controller interfaces retain the global check. A mobile root also
+    retains it; a fixed root is established from the bound complete description,
+    never from a resource name or a captured pose alone.
+    """
+    if hashlib.sha256(robot_description.encode()).hexdigest() != configuration.get("description_sha256"):
+        raise ValueError("Hold controller scope differs from the captured robot description")
+    robot = ET.fromstring(robot_description)
+    declarations = robot.findall("joint")
+    joints = {joint.get("name"): joint for joint in declarations}
+    if (robot.tag != "robot" or len(joints) != len(declarations) or None in joints
+            or any(joint.find("child") is None or joint.find("parent") is None for joint in declarations)):
+        raise ValueError("Hold controller scope needs an unambiguous complete joint tree")
+    parents = {joint.find("child").get("link"): joint for joint in declarations}
+    if len(parents) != len(declarations) or None in parents:
+        raise ValueError("Hold controller scope has ambiguous child links")
+    link, visited = configuration["root"], set()
+    activity = physical["controller_hold_activity"]
+    while link in parents:
+        if link in visited:
+            raise ValueError("Hold controller scope has a cyclic root chain")
+        visited.add(link)
+        joint = parents[link]
+        if joint.get("type") != "fixed":
+            return activity, {}
+        link = joint.find("parent").get("link")
+    if link != "world" or "base_pose" in physical.get("observation_state", {}):
+        return activity, {}
+    owned = {joint["name"] for joint in configuration["joints"]}
+    if not owned.issubset(joints):
+        raise ValueError("Hold controller scope omits declared owner joints")
+    selected, excluded = {}, {}
+    for source, record in activity.items():
+        names = record.get("joint_names")
+        if isinstance(names, list) and names and len(set(names)) == len(names) and set(names).issubset(joints):
+            if owned.intersection(names):
+                selected[source] = record
+            else:
+                excluded[source] = "Controller joints are outside the owner's fixed-root joint tree"
+        elif record.get("navigation_enabled") is True and not names:
+            # Base navigation cannot move a root connected to world solely by
+            # fixed joints in this model. It still needs its own motion checks.
+            excluded[source] = "Base navigation does not actuate the owner's fixed-root joint tree"
+        else:
+            selected[source] = record
+    controller = physical["controller_hold_observation"]
+    if not any(row.get("controller") == controller.get("controller")
+               and row.get("instance_id") == controller.get("instance_id")
+               and row.get("joint_names") == configuration["joint_names"] for row in selected.values()):
+        raise ValueError("Hold controller scope lacks the recorded owner's controller")
+    return selected, {"description_sha256": configuration["description_sha256"],
+        "fixed_root": configuration["root"], "checked_controllers": sorted(selected),
+        "excluded_controllers": excluded}
+
+
+def commanded_hold_evidence(*, resource_id: str, state: dict, model: dict, physical: dict,
+                            robot_description: str | None = None, include_observation_roundoff: bool = False) -> dict:
     """Bound a conditional model hold using saved commands and declared geometry.
 
     MoveIt's start tolerance is reused only as the existing model assumption;
     it is not a controller tracking guarantee. Observed motion is not relabelled
     idle, and the recorded state must lie inside the assumed envelope.
+
+    Args:
+        resource_id: Exact recorded owner identifier.
+        state: Starting physical resource state.
+        model: Recorded owner geometry and joint declarations.
+        physical: Recorded observations and commanded hold contract.
+        robot_description: Optional bound description for fixed-root controller
+            scoping. Omitting it preserves the legacy global activity check.
+        include_observation_roundoff: Enclose passive observations within eight
+            representable floating-point steps of a limit. Defaults to legacy
+            strict comparison; no observed value is clipped to a limit.
+
+    Returns:
+        Independently calculated conditional bounds or missing-evidence reasons.
     """
     result = {"status": "NEEDS_CONTEXT", "resource_id": resource_id,
               "physical_execution_verified": False, "future_execution_tracking": "not_established"}
@@ -488,6 +630,10 @@ def commanded_hold_evidence(*, resource_id: str, state: dict, model: dict, physi
         activity = physical["controller_hold_activity"]
         if not isinstance(activity, dict) or not activity:
             raise ValueError("Complete recorded controller activity is unavailable")
+        if robot_description is not None:
+            activity, scope = _hold_controller_activity(physical, model["configuration"], robot_description)
+            if scope:
+                result["controller_activity_scope"] = scope
         for record in activity.values():
             if ("command_gate" in record or "command_gate_evidence" in record
                     or "owned_activity" in record or record.get("navigation_enabled") is True):
@@ -556,8 +702,14 @@ def commanded_hold_evidence(*, resource_id: str, state: dict, model: dict, physi
             if not isinstance(declared, list) or len(declared) != 2:
                 raise ValueError("Passive joint has no declared position bounds: " + joint["name"])
             low, high = interval(*declared)
-            if not low <= joint["frozen_position"] <= high:
-                raise ValueError("Passive joint observation exceeds declared position bounds: " + joint["name"])
+            observed = joint["frozen_position"]
+            if not low <= observed <= high:
+                rounding = 8 * math.ulp(max(abs(low), abs(high))) if include_observation_roundoff else 0.
+                if not low - rounding <= observed <= high + rounding:
+                    raise ValueError("Passive joint observation exceeds declared position bounds: " + joint["name"])
+                result.setdefault("observation_roundoff", {})[joint["name"]] = {
+                    "declared_bounds": [low, high], "observed": observed, "rounding_bound": rounding}
+                low, high = min(low, math.nextafter(observed, -math.inf)), max(high, math.nextafter(observed, math.inf))
             bounds[joint["name"]] = [low, high]
         result.update(status="supported", joint_intervals=bounds, joint_names=deepcopy(names),
             start_joint_positions=deepcopy(state["joint_positions"]), command_source=command_source,
@@ -1035,13 +1187,14 @@ def outline_event_binding(task: dict, recovery_snapshot: dict,
     scene["stationary_parts"] = evidence.get("stationary_parts")
     scene["stationary_part_evidence"] = evidence.get("stationary_part_evidence")
     for field in ("physics_evidence", "physics_meshes", "part_support_policy", "environment_models", "environment_valuation",
-                  "products", "requirements", "product_name", "physical_preview_contract_version"):
+                  "products", "requirements", "product_name", "physical_preview_contract_version",
+                  "endpoint_evidence_policy_version", "endpoint_robot_description", "endpoint_occupancy"):
         if field in evidence:
             scene[field] = evidence[field]
     scene["stationary_resources"] = {rid: {field: row[field] for field in
         ("model_static", "idle", "stationary_contract", "launch_id", "controller_identity",
          "controller_hold_model", "controller_hold_observation", "controller_hold_activity",
-         "projected_controller_hold", "validated_pickup_target_calculation") if field in row}
+         "projected_controller_hold", "projected_endpoint", "validated_pickup_target_calculation") if field in row}
         for rid, row in (evidence.get("resources") or {}).items()}
     return {
         "version": 1,

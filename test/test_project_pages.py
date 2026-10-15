@@ -36,6 +36,68 @@ def _finish_reads(client) -> None:
     asyncio.run(finish())
 
 
+def test_outline_draft_ui_shows_table_without_enabling_composition_or_execution():
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock(system_running=False)
+    example = PartSlippageExample(bridge)
+    example.source = "offline"
+    state = example.snapshot()
+    state.update(status="draft", message="Unvalidated draft", can_generate_outline_only=True, can_load_draft=True,
+        outline_draft={"message": "Unvalidated draft", "provider_calls": 1, "transition_trace": [{
+            "event_name": "Arbitrary task event", "resource_jid": "owner", "part_name": "KET4_Square_4mm",
+            "expected_end_state": {"active_job": None}, "rationale": "Supplied UI test"}]})
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_recovery_observations.return_value = []
+    bridge.list_safety_requirement_files.return_value = []
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    assert not any(isinstance(item, ui.button) and item.text in {"Generate outline only", "Load draft", "Start fresh"}
+                   for item in client.elements.values())
+    for item in client.elements.values():
+        if isinstance(item, ui.button) and item.text in {"Continue", "Execute recovery", "Test in Gazebo"}:
+            assert not item.enabled
+    table = next(item for item in client.elements.values() if isinstance(item, ui.table)
+                 and item.rows and item.rows[0].get("event_name") == "Arbitrary task event")
+    assert table.rows[0]["expected_end_state"] == '{"active_job": null}'
+    assert table.visible
+    assert any(isinstance(item, ui.label) and "Execution authorized: false" in item.text
+               for item in client.elements.values())
+    bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+def test_composition_review_shows_authored_resolved_effects_and_lazy_evidence(monkeypatch):
+    from cais_spade_llm.ui.components.recovery_turns import render_composition_programs
+
+    monkeypatch.setattr(ui, "run_javascript", lambda *_: None)
+
+    evidence = {"feasibility_status": "FEASIBLE", "evidence_fingerprint": "bound",
+        "trace": [{"resolved_params": {"count": 3}}], "derived_end_state": {"quality": "checked"},
+        "findings": [], "reason": "All declared postconditions established", "private_detail": "EXPAND_ONLY"}
+    program = [{"outline_id": "event", "resource_jid": "unfamiliar_owner",
+        "primitive_steps": [{"primitive": "qualify", "params": {"count": {"context_ref": "/limit"}}}],
+        "composition_validation": evidence}]
+    client = Client(context.client.page)
+    with client:
+        render_composition_programs(program)
+    table = next(item for item in client.elements.values() if isinstance(item, ui.table))
+    assert json.loads(table.rows[0]["authored"])["count"] == {"context_ref": "/limit"}
+    assert json.loads(table.rows[0]["resolved"])["count"] == 3
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    assert "Achieved postconditions" in labels and "RA validation findings" in labels
+    assert not any("EXPAND_ONLY" in text for text in labels)
+    with client:
+        next(item for item in client.elements.values() if isinstance(item, ui.expansion)
+             and item.text == "Complete RA evidence").value = True
+    _finish_reads(client)
+    assert any(isinstance(item, ui.label) and "EXPAND_ONLY" in item.text for item in client.elements.values())
+    client.delete()
+
+
 def _write(root: Path, name: str, payload: object) -> Path:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -318,7 +380,7 @@ def test_offline_generate_visible_in_both_modes_and_reconnection_does_not_start_
         assert "Start offline test" not in [element.text for element in buttons]
         outline_generate = next(element for element in buttons if element.text == "Generate")
         assert outline_generate.visible and outline_generate.enabled
-        assert all(element.visible for element in buttons if element.text in {"Generate", "Continue"})
+        assert all(not element.visible for element in buttons if element.text == "Continue")
         toggle = next(element for element in client.elements.values()
                       if isinstance(element, ui.toggle) and element.options == {"auto": "Auto", "manual": "Manual"})
         assert not toggle.enabled and toggle.value == "manual"
@@ -352,7 +414,7 @@ def test_offline_disabled_generate_shows_the_actual_reason(status, reason):
     client.delete()
 
 
-def test_selecting_saved_observations_only_prepares_the_input():
+def test_selecting_saved_observations_only_defers_the_input():
     from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
     from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
 
@@ -367,9 +429,72 @@ def test_selecting_saved_observations_only_prepares_the_input():
         selected = next(element for element in client.elements.values()
                         if isinstance(element, ui.select) and element._props.get("label") == "Saved observations")
         selected.set_options({"capture": "Part slippage · source · captured time · Ready to prepare"}, value="capture")
-    bridge.prepare_offline_recovery.assert_called_once_with()
+    bridge.prepare_offline_recovery.assert_not_called()
+    assert bridge.set_failure_example_options.call_args.kwargs["defer_preparation"] is True
     bridge.start_offline_recovery.assert_not_called()
     bridge.part_slippage_action.assert_not_called()
+    client.delete()
+
+
+def test_saved_result_stays_loadable_when_new_outline_preparation_is_blocked(monkeypatch):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state.update(source="offline", status="blocked", selected_observation_path="capture",
+                 message="NEEDS_CONTEXT: owner descriptor missing")
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_recovery_observations.return_value = [{
+        "source_path": "capture", "scenario": "Part slippage", "run_id": "source",
+        "result_available": True, "offline_ready": True}]
+    bridge.list_safety_requirement_files.return_value = []
+    bridge.get_worked_recovery_version.return_value = {
+        "outline_safety_status": "passed", "composition_feasibility": "FEASIBLE", "cca_composition_status": "not_checked",
+        "outline_run_id": "outline", "composition_run_id": "composition", "snapshot_at": "recorded",
+        "branch": "recovery-framework-journal", "commit": "recorded", "outline": [], "primitives": [],
+        "archive_path": "worked.zip"}
+    callbacks = {}
+    original_click = ui.button.on_click
+
+    def capture_click(button, callback):
+        callbacks[button.text] = callback
+        return original_click(button, callback)
+
+    monkeypatch.setattr(ui.button, "on_click", capture_click)
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    load = next(item for item in client.elements.values() if isinstance(item, ui.button)
+                and item.text == "Load saved result")
+    assert load.visible and load.enabled
+    bridge.load_offline_recovery.assert_not_called()
+    bridge.prepare_offline_recovery.assert_not_called()
+
+    async def exercise():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def read_in_background(reader):
+            assert reader is bridge.load_offline_recovery
+            started.set()
+            await release.wait()
+            return reader()
+
+        monkeypatch.setattr(asyncio, "to_thread", read_in_background)
+        with client:
+            operation = asyncio.create_task(callbacks["Load saved result"]())
+            await started.wait()
+            assert not load.enabled
+            assert any(isinstance(item, ui.label) and item.text.startswith("Loading saved result")
+                       for item in client.elements.values())
+            await callbacks["Load saved result"]()
+            release.set()
+            await operation
+        assert load.enabled
+        bridge.load_offline_recovery.assert_called_once_with()
+
+    asyncio.run(exercise())
     client.delete()
 
 
@@ -379,6 +504,8 @@ def test_saved_observation_selection_survives_an_older_poll(monkeypatch):
 
     bridge = MagicMock()
     state = PartSlippageExample(bridge).snapshot()
+    state["validation_checks_selected"] = True
+    bridge.get_default_recovery_observations.return_value = {"Part slippage": "capture"}
     bridge.get_part_slippage_example.side_effect = lambda: dict(state)
     bridge.list_recovery_observations.return_value = [{
         "source_path": "capture", "scenario": "Part slippage", "run_id": "source",
@@ -387,7 +514,9 @@ def test_saved_observation_selection_survives_an_older_poll(monkeypatch):
     bridge.list_safety_requirement_files.return_value = []
 
     def select(**options):
-        state.update(source=options["source"], selected_observation_path=options["observation_path"])
+        state.update(source=options["source"], selected_observation_path=options["observation_path"],
+                     can_generate_outline=bool(options["observation_path"]), defer_preparation=True,
+                     selection_revision=state.get("selection_revision", 0) + 1)
         return dict(state)
 
     def prepare():
@@ -429,7 +558,7 @@ def test_saved_observation_selection_survives_an_older_poll(monkeypatch):
                         if isinstance(item, ui.button) and item.text == "Generate").enabled
 
     asyncio.run(exercise())
-    bridge.prepare_offline_recovery.assert_called_once_with()
+    bridge.prepare_offline_recovery.assert_not_called()
     bridge.part_slippage_action.assert_not_called()
     client.delete()
 
@@ -441,6 +570,9 @@ def test_saved_observation_refresh_restores_current_selection_without_preparing(
     bridge = MagicMock()
     state = PartSlippageExample(bridge).snapshot()
     state["source"] = "offline"
+    state["selected_observation_path"] = "capture"
+    state["defer_preparation"] = True
+    bridge.get_default_recovery_observations.return_value = {"Part slippage": "capture"}
     bridge.get_part_slippage_example.side_effect = lambda: dict(state)
     reader = Mock()
     monkeypatch.setattr(part_slippage_recovery, "BackgroundSection", lambda: reader)
@@ -452,17 +584,66 @@ def test_saved_observation_refresh_restores_current_selection_without_preparing(
         part_slippage_recovery.render_part_slippage(bridge)
         selected = next(item for item in client.elements.values()
                         if isinstance(item, ui.select) and item._props.get("label") == "Saved observations")
-        state["selected_observation_path"] = "attempt/observations.json"
         show_options = reader.load.call_args.args[1]
-        show_options((captures, []))
+        show_options([])
         assert selected.value == "capture"
         assert len(selected.options) == 1
         unchanged = Mock(wraps=selected.set_options)
         monkeypatch.setattr(selected, "set_options", unchanged)
-        show_options((captures, []))
+        show_options([])
         unchanged.assert_not_called()
     bridge.set_failure_example_options.assert_not_called()
     bridge.prepare_offline_recovery.assert_not_called()
+    client.delete()
+
+
+def test_rapid_outline_checks_survive_pending_poll_without_preparing(monkeypatch):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+    from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
+
+    bridge = MagicMock(system_running=False)
+    example = PartSlippageExample(SimpleNamespace(system_running=False))
+    bridge.get_part_slippage_example.side_effect = example.snapshot
+    bridge.set_failure_example_options.side_effect = example.set_options
+    bridge.get_default_recovery_observations.return_value = {"Part slippage": "capture"}
+    bridge.list_safety_requirement_files.return_value = []
+    bridge.get_worked_recovery_version.return_value = {}
+    bridge.list_recovery_observations.side_effect = AssertionError("A preference change scanned history")
+    bridge.prepare_offline_recovery.side_effect = AssertionError("A preference change prepared an attempt")
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed(reader):
+            entered.set()
+            await release.wait()
+            return reader()
+
+        monkeypatch.setattr(asyncio, "to_thread", delayed)
+        with client:
+            checks = [item for item in client.elements.values() if isinstance(item, ui.checkbox)]
+            timer = next(item for item in client.elements.values() if isinstance(item, ui.timer)
+                         and item.callback.__qualname__.startswith("PageRefresh.timer."))
+            pending = asyncio.create_task(timer.callback())
+            await entered.wait()
+            for check in checks:
+                check.value = True
+            assert all(check.value is True for check in checks)
+            release.set()
+            await pending
+            assert all(check.value is True and check.enabled for check in checks)
+            assert example.validation_checks == dict.fromkeys(CHECK_FIELDS, True)
+            assert example._offline is None and example._draft is None
+            assert not example.snapshot().get("run_id")
+    asyncio.run(exercise())
+    bridge.list_recovery_observations.assert_not_called()
+    bridge.prepare_offline_recovery.assert_not_called()
+    bridge.part_slippage_action.assert_not_called()
     client.delete()
 
 
@@ -532,7 +713,8 @@ def test_selecting_part_slippage_updates_safety_defaults_without_starting_work()
 
 
 @pytest.mark.parametrize("scenario", ["Conveyor breakdown", "ur5e-1 breakdown", "Machining breakdown during part processing"])
-def test_offline_case_selection_filters_captures_and_stops_at_outline_review(scenario):
+@pytest.mark.parametrize("ready", [True, False])
+def test_offline_case_selection_filters_captures_and_uses_contract_readiness(scenario, ready):
     from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
     from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
 
@@ -541,6 +723,9 @@ def test_offline_case_selection_filters_captures_and_stops_at_outline_review(sce
     example.set_options(source="offline", scenario=scenario, safety_files=[])
     state = example.snapshot()
     state.update(status="outline_review", validation_contract_version=2, outline_status="completed", outline=[{"outline_id": "retained"}])
+    state.update(selected_observation_path="selected", defer_preparation=True)
+    bridge.get_default_recovery_observations.return_value = {scenario: "selected"}
+    state["composition_readiness"] = {"ready": ready, "reasons": [] if ready else ["Owner contract is missing"]}
     bridge.get_part_slippage_example.return_value = state
     bridge.list_safety_requirement_files.return_value = []
     bridge.list_recovery_observations.return_value = [
@@ -560,10 +745,12 @@ def test_offline_case_selection_filters_captures_and_stops_at_outline_review(sce
     for item in client.elements.values():
         if isinstance(item, ui.button) and item.text in {"Continue", "Execute recovery", "Test in Gazebo"}:
             assert not item.enabled
+        if isinstance(item, ui.button) and item.text == "Generate" and item is not next(
+                element for element in client.elements.values() if isinstance(element, ui.button) and element.text == "Generate"):
+            assert item.enabled is ready
     labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
-    assert "Start failure → Capture observations → Recovery outline → Review" in labels
-    assert f"Primitive composition is not supported for {scenario} yet. This case stops at outline review." in labels
-    assert f"Recovery execution is not supported for {scenario} yet. This case stops at outline review." in labels
+    assert "Capture observations → Recovery outline → Primitive composition → Review" in labels
+    assert not any("not supported for" in label for label in labels)
     for item in client.elements.values():
         if isinstance(item, ui.button) and item.text == "Test in Gazebo":
             assert item.visible and item.parent_slot.parent.visible
@@ -904,6 +1091,7 @@ def test_sidebar_project_folders_expose_existing_views_and_recovery_placeholder(
         [
             "/recovery-framework?tab=run", "/recovery-framework?tab=setup",
             "/recovery-framework?tab=results", "/recovery-framework?tab=recovery",
+            "/recovery-framework?tab=experiments",
         ],
         [
             "/spec2primitives?tab=run", "/spec2primitives?tab=setup",
@@ -918,7 +1106,7 @@ def test_sidebar_project_folders_expose_existing_views_and_recovery_placeholder(
     assert [
         element.text for element in client.elements.values() if isinstance(element, ui.label)
     ] == [
-        "Navigation", "dashboard", "setup", "results", "recovery", "dashboard", "setup",
+        "Navigation", "dashboard", "setup", "results", "recovery", "experiments", "dashboard", "setup",
         "results", "products", "resources", "safety", "control", "perception",
     ]
     client.delete()
@@ -1076,6 +1264,7 @@ def test_header_deletion_cancels_actual_nicegui_timers_without_callback_error(mo
 @pytest.mark.parametrize(("query", "expected"), [
     (b"", "run"), (b"tab=run", "run"), (b"tab=setup", "setup"),
     (b"tab=results", "results"), (b"tab=recovery", "recovery"),
+    (b"tab=experiments", "experiments"),
     (b"tab=", "run"), (b"tab=unknown", "run"),
 ])
 def test_recovery_direct_links_build_only_the_selected_view(query, expected, monkeypatch):
@@ -1110,7 +1299,8 @@ def test_recovery_direct_links_build_only_the_selected_view(query, expected, mon
                            for element in client.elements.values())
             assert not any(isinstance(element, ui.expansion) and element.text == "Details"
                            for element in client.elements.values())
-        assert all(call[0] == "get_part_slippage_example" for call in bridge.mock_calls)
+        assert all(call[0] in {"get_part_slippage_example", "get_default_recovery_observations"}
+                   for call in bridge.mock_calls)
     client.delete()
 
 
@@ -1137,7 +1327,7 @@ def test_recovery_tabs_default_to_run_and_build_run_once(tmp_path, monkeypatch):
         tabs = next(element for element in client.elements.values() if isinstance(element, ui.tabs))
         assert tabs.value == "run"
         assert [tab._props["name"] for tab in tabs.default_slot.children] == [
-            "run", "setup", "results", "recovery",
+            "run", "setup", "results", "recovery", "experiments",
         ]
         assert calls == [bridge]
         assert polling[0]() is True
@@ -1167,6 +1357,47 @@ def test_recovery_tabs_default_to_run_and_build_run_once(tmp_path, monkeypatch):
         assert calls == [bridge]
         assert vars(bridge) == before
         assert list(tmp_path.iterdir()) == []
+    client.delete()
+
+
+def test_experiments_placeholder_keeps_one_view_and_downloads_design(monkeypatch):
+    """Opening the placeholder and its download never accesses the runtime."""
+    bridge = MagicMock(spec=SystemBridge)
+    render_run = Mock()
+    monkeypatch.setattr(recovery_run, "render", render_run)
+    download = Mock()
+    monkeypatch.setattr(ui.download, "file", download)
+    callbacks = {}
+    original_click = ui.button.on_click
+
+    def capture_click(button, callback):
+        callbacks[button.text] = callback
+        return original_click(button, callback)
+
+    monkeypatch.setattr(ui.button, "on_click", capture_click)
+    request = Request({
+        "type": "http", "path": "/recovery-framework", "headers": [],
+        "query_string": b"tab=experiments",
+    })
+    client = Client(context.client.page, request=request)
+    with client:
+        recovery_framework.render(bridge)
+        tabs = next(item for item in client.elements.values() if isinstance(item, ui.tabs))
+        badge = next(item for item in client.elements.values() if isinstance(item, ui.badge))
+        assert badge.text == "Coming soon"
+        labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+        assert "Experiments" in labels
+        assert "Experiment configuration and results will be added here." in labels
+        assert not any(isinstance(item, ui.timer) for item in client.elements.values())
+        callbacks["Download experiment design"]()
+        download.assert_called_once_with(recovery_framework._EXPERIMENT_DESIGN)
+        assert recovery_framework._EXPERIMENT_DESIGN.is_file()
+        tabs.value = "run"
+        tabs.value = "experiments"
+        assert [item for item in client.elements.values() if isinstance(item, ui.badge)] == [badge]
+        assert len([item for item in client.elements.values() if isinstance(item, ui.button)]) == 1
+        render_run.assert_called_once()
+        assert bridge.mock_calls == []
     client.delete()
 
 

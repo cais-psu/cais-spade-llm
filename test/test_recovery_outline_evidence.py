@@ -33,6 +33,99 @@ def _placement_arrival_model():
     return {"events": [{"event_name": "place_approach", "composition_contract": {"steps": steps}}]}
 
 
+@pytest.mark.parametrize('resource_id', ['ur5e-1', 'ur5e-2'])
+def test_recovery_uses_the_nominal_handling_robot_access_calculation(resource_id):
+    from cais_spade_llm.recovery_framework import SCENE_PATH
+    from cais_spade_llm.resources.robot.target_calculations import handling_robot_access_poses
+    from cais_spade_llm.resources.robot.recovery_capability import calculate_recovery_pick_target
+
+    machine = next(row for row in json.loads(SCENE_PATH.read_text())['machines']
+                   if row['handling_robot_access']['resource_id'] == resource_id)
+    access = machine['handling_robot_access']
+    pose = [*machine['workholding_pose'][:3], 0., 1., 0., 0.]
+    part = 'recorded-part'
+    evidence = {'resource_id': resource_id, 'execution_mode': 'simulation', 'frame': 'world', 'observed_parts': {part: {
+        'current_pose': pose, 'location': machine['resource_id']}},
+        'inputs': {'scene': {'machines': [machine]}}, 'pick_geometry': {part: {'part_height_m': .05}}}
+    snapshot = {'current_pose': dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), pose, strict=True))}
+    before = deepcopy((evidence, snapshot))
+    result = calculate_recovery_pick_target(task={'resource_jid': resource_id+'@localhost', 'part_name': part},
+        recovery_snapshot=snapshot, resource_evidence=evidence)
+    expected = handling_robot_access_poses(access, access['tcp_offset_z_m'], tuple(pose[:2]),
+                                          access.get('grasp_orientation_xyzw'))
+    assert result['status'] == 'calculated', result
+    assert (result['approach_pose'], result['target_pose']) == expected
+    assert result['access_retreat_pose'] == expected[0]
+    assert (evidence, snapshot) == before
+
+
+@pytest.mark.parametrize('defect', [None, 'missing_limits', 'no_witness', 'wrong_witness'])
+def test_robot_joint_calculation_requires_bounded_independently_verified_endpoint(monkeypatch, defect):
+    from test_kmr_outline_evidence import motion_fixture
+    from cais_spade_llm.resources.robot.recovery_capability import _cartesian_joint_witness
+
+    physical, _, _ = motion_fixture()
+    physical['jids'] = {'KMR': 'owner@localhost'}
+    state = physical['snapshot']['resources']['KMR']
+    pose = dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), state['current_pose'], strict=True))
+    if defect == 'missing_limits':
+        physical['resource_models']['KMR']['configuration']['joints'][0].pop('position_bounds')
+    elif defect in {'no_witness', 'wrong_witness'}:
+        monkeypatch.setattr('cais_spade_llm.recovery_framework.kmr_recovery._calculate_cartesian_joints',
+            lambda *args: None if defect == 'no_witness' else {'joint_positions': [.1]*7})
+    before = deepcopy(physical)
+    result = _cartesian_joint_witness(pose=pose, resource_jid='owner@localhost',
+        recovery_snapshot=state, resource_evidence={}, physical_evidence=physical)
+    assert result['feasibility_status'] == ('FEASIBLE' if defect is None else 'NEEDS_CONTEXT')
+    assert physical == before and result['evidence']['execution_authorized'] is False
+
+
+def test_candidate_joint_calculation_cache_rechecks_evidence_and_changed_geometry(monkeypatch):
+    import scipy.optimize
+    from test_kmr_outline_evidence import motion_fixture
+    from cais_spade_llm.recovery_framework.kmr_recovery import _cartesian_joint_calculation_cache
+    from cais_spade_llm.resources.robot.recovery_capability import _cartesian_joint_witness
+
+    solver = scipy.optimize.least_squares
+    calls = []
+
+    def solve(*args, **kwargs):
+        calls.append(True)
+        return solver(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.optimize, 'least_squares', solve)
+    physical, _, _ = motion_fixture()
+    physical['jids'] = {'KMR': 'owner@localhost'}
+    state = physical['snapshot']['resources']['KMR']
+    pose = dict(zip(('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'), state['current_pose'], strict=True))
+
+    def check():
+        return _cartesian_joint_witness(pose=pose, resource_jid='owner@localhost',
+            recovery_snapshot=state, resource_evidence={}, physical_evidence=physical)
+
+    token = _cartesian_joint_calculation_cache.set({})
+    try:
+        first = check()
+        assert first['feasibility_status'] == 'FEASIBLE'
+        count = len(calls)
+        state['resource_state'] = 'changed'
+        again = check()
+        assert again['feasibility_status'] == 'FEASIBLE' and len(calls) == count
+        assert first['evidence']['starting_snapshot_fingerprint'] != again['evidence']['starting_snapshot_fingerprint']
+        first['evidence']['joint_positions'][0] = 999
+        assert check()['evidence']['joint_positions'][0] != 999
+        physical['resource_models']['KMR']['configuration']['root_xyz'][0] += .02
+        changed = check()
+        assert changed['feasibility_status'] == 'NEEDS_CONTEXT' and len(calls) > count
+        physical['resource_models']['KMR']['configuration']['root_xyz'][0] -= .02
+    finally:
+        _cartesian_joint_calculation_cache.reset(token)
+    assert _cartesian_joint_calculation_cache.get() is None
+    count = len(calls)
+    assert check()['feasibility_status'] == 'FEASIBLE'
+    assert len(calls) > count
+
+
 @pytest.mark.parametrize("release", [False, True])
 def test_outline_place_arrival_uses_declared_approach_and_recorded_insertion_depth(release):
     from cais_spade_llm.resources.resource_safety_preparation import _outline_place_arrival
@@ -580,6 +673,100 @@ def _validate(projection, *, all_rules=False, **kwargs):
                                             requirement_scopes=document["requirement_scopes"], **kwargs)
 
 
+def _selected_occupancy_projection(case):
+    from cais_spade_llm.recovery_framework.outline_evidence_policy import event_evidence_requirements, evidence_coverage
+    from cais_spade_llm.recovery_framework.outline_validation import load_outline_specifications
+
+    projection = project_recovery_geometry(**case)
+    assert projection['status'] == 'projected', projection.get('unresolved')
+    if 'joint_trajectory' in case['step_evidence'][0]:
+        from cais_spade_llm.resources.recovery_geometry import _motion_checkpoint, _prepared_motion
+
+        motion = _prepared_motion(case['snapshot'], case['resource_id'], case['resource_models'], case['step_evidence'][0])
+        middle = _motion_checkpoint(case['snapshot'], case['geometry'], case['resource_models'],
+            index=.5, moving=(case['resource_id'], motion, 0, motion.duration))
+        projection['observations'][1] = middle
+        projection['observations'][-1].update(time=motion.duration, time_exact=str(motion.duration))
+    root = Path(__file__).resolve().parents[1]
+    selected = load_outline_specifications(
+        ['cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt'], root)
+    physical = {key: deepcopy(case[key]) for key in ('snapshot', 'geometry', 'resource_models')}
+    physical['jids'] = {rid: rid + '@localhost' for rid in case['snapshot']['resources']}
+    required = event_evidence_requirements(task={}, snapshot={}, model={},
+        physical_input={'physical_evidence': physical}, specifications=selected)
+    assert not required['unresolved']
+    projection.update(outline_evidence_policy_version=1, evidence_requirements=required,
+        successor_evidence={'snapshot': deepcopy(projection['projected_snapshot'])})
+    # Occupancy already has supported conservative bounds. A second detailed
+    # trajectory is unnecessary even without the old global completeness flag.
+    projection['interval_complete'] = False
+    projection['evidence_coverage'] = evidence_coverage(requirements=required, projection=projection)
+    return projection
+
+
+def test_selected_region_exclusion_reuses_supported_motion_envelopes():
+    case = _case()
+    _motion(case, .2)
+    projection = _selected_occupancy_projection(case)
+    assert projection['evidence_coverage']['status'] == 'covered'
+    assert all(observation['region_occupancy']['assembly_board-v1']['ur5e-3'] is False
+               for observation in projection['observations'])
+    checked = _validate(projection, prospective_activation=True)
+    assert checked['is_safe'], checked['reason']
+    assert not projection['interval_complete']
+    from cais_spade_llm.recovery_framework.outline_evidence_policy import check_monitor_evidence
+    check_monitor_evidence(checked['monitor_context'])
+
+
+@pytest.mark.parametrize('tamper', ['remove_interval', 'gap', 'carried_part', 'coverage'])
+def test_selected_spatial_coverage_cannot_be_replaced_by_clear_endpoints(tamper):
+    from cais_spade_llm.recovery_framework.outline_evidence_policy import evidence_coverage
+
+    case = _case()
+    _motion(case, .2)
+    projection = _selected_occupancy_projection(case)
+    if tamper == 'remove_interval':
+        projection['observations'] = [row for row in projection['observations'] if row['phase'] == 'at']
+        projection['interval_complete'] = True
+    elif tamper == 'gap':
+        middle = next(row for row in projection['observations'] if row['phase'] == 'between')
+        middle['continuous_cells'][0]['interval'][0] = '0.1'
+    elif tamper == 'carried_part':
+        middle = next(row for row in projection['observations'] if row['phase'] == 'between')
+        # A missing complete resource envelope cannot be filled by its TCP.
+        middle['continuous_cells'][0]['occupancy_possibilities']['assembly_board-v1'].pop('ur5e-3')
+    else:
+        projection['evidence_coverage']['aps'][0]['binding']['region'] = 'unselected'
+    if tamper != 'coverage':
+        projection['evidence_coverage'] = evidence_coverage(requirements=projection['evidence_requirements'], projection=projection)
+    checked = _validate(projection, prospective_activation=True)
+    assert not checked['is_safe']
+    assert 'coverage' in checked['reason']
+
+
+def test_selected_history_replays_coverage_and_rejects_changed_region():
+    from cais_spade_llm.recovery_framework.outline_evidence_policy import check_monitor_evidence
+
+    case = _case()
+    _motion(case, .2)
+    projection = _selected_occupancy_projection(case)
+    checked = _validate(projection, prospective_activation=True)
+    assert checked['is_safe'], checked['reason']
+    context = deepcopy(checked['monitor_context'])
+    context['evidence_history'][0]['coverage']['aps'][0]['status'] = 'missing'
+    with pytest.raises(ValueError, match='coverage'):
+        check_monitor_evidence(context)
+    case['snapshot'] = deepcopy(projection['projected_snapshot'])
+    _motion(case, .3, start=.2)
+    following = _selected_occupancy_projection(case)
+    checked_next = _validate(following, monitor_context=checked['monitor_context'])
+    assert checked_next['is_safe'], checked_next['reason']
+    following['geometry']['regions']['assembly_board-v1']['bounds'][0] = [9, 10]
+    rejected = _validate(following, monitor_context=checked['monitor_context'])
+    assert not rejected['is_safe']
+    assert 'changed' in rejected['reason']
+
+
 def _event_case():
     case = _case()
     scene = {key: deepcopy(case[key]) for key in ("snapshot", "geometry", "resource_models")}
@@ -878,6 +1065,27 @@ def _commanded_hold_case():
     return scene, rid, state, model, physical
 
 
+def test_endpoint_hold_encloses_numeric_roundoff_without_relaxing_legacy_limits():
+    from cais_spade_llm.resources.recovery_geometry import commanded_hold_evidence
+
+    _, rid, state, model, physical = _commanded_hold_case()
+    configuration = model['configuration']
+    parent = configuration['joints'][-1]['child']
+    configuration['joints'].append({'name': 'passive', 'parent': parent, 'child': 'passive_link',
+        'type': 'prismatic', 'axis': [0., 0., 1.], 'xyz': [0., 0., 0.], 'rpy': [0., 0., 0.],
+        'position_bounds': [.015, .11], 'frozen_position': .11000000000000007})
+    original = deepcopy(model)
+    inputs = dict(resource_id=rid, state=state, model=model, physical=physical)
+    assert commanded_hold_evidence(**inputs)['status'] == 'NEEDS_CONTEXT'
+    bounded = commanded_hold_evidence(**inputs, include_observation_roundoff=True)
+    assert bounded['status'] == 'supported', bounded.get('reason')
+    assert bounded['joint_intervals']['passive'][1] > .11000000000000007
+    assert bounded['observation_roundoff']['passive']['declared_bounds'] == [.015, .11]
+    assert model == original
+    configuration['joints'][-1]['frozen_position'] = .11001
+    assert commanded_hold_evidence(**inputs, include_observation_roundoff=True)['status'] == 'NEEDS_CONTEXT'
+
+
 @pytest.mark.parametrize("change", [None, "active", "pending", "target_missing", "outside_bound",
     "empirical_error", "other_controller_active", "passive_missing", "stale_projection"])
 def test_commanded_hold_is_conditional_and_preserves_observed_motion(change):
@@ -966,6 +1174,55 @@ def test_commanded_hold_mobile_base_requires_independent_physical_hold(change):
     assert result['status'] == ('supported' if change is None else 'NEEDS_CONTEXT')
     if change is None:
         assert result['base_hold']['base_velocity_bounds'] == {axis: [0., 0.] for axis in ('x','y','yaw')}
+
+
+@pytest.mark.parametrize('change', [None, 'owner_active', 'overlapping_active', 'unknown_active',
+    'unknown_joints', 'description', 'mobile_root', 'missing_owner', 'duplicate_child'])
+def test_fixed_root_hold_uses_bound_joint_ownership_without_requiring_unrelated_navigation_idle(change):
+    from cais_spade_llm.resources.recovery_geometry import commanded_hold_evidence
+
+    _, rid, state, model, physical = _commanded_hold_case()
+    configuration = model['configuration']
+    configuration['root'] = 'owner_base'
+    description = ('<robot name="recorded"><link name="world"/><link name="owner_base"/>'
+        '<joint name="mount" type="fixed"><parent link="world"/><child link="owner_base"/></joint>'
+        '<joint name="slide" type="prismatic"><parent link="owner_base"/><child link="body"/></joint>'
+        '<joint name="other_slide" type="prismatic"><parent link="world"/><child link="other_body"/></joint></robot>')
+    controller = physical['controller_hold_observation']
+    controller['controller'] = '/owner'
+    activity = {'owner': deepcopy(controller),
+        'other': {'joint_names': ['other_slide'], 'holding': False, 'has_active_goal': True, 'has_pending_goal': False},
+        'base': {'navigation_enabled': True, 'holding': False, 'has_active_goal': True}}
+    physical['controller_hold_activity'] = activity
+    if change == 'owner_active':
+        controller['has_active_goal'] = True
+    elif change == 'overlapping_active':
+        activity['other']['joint_names'] = ['slide']
+    elif change == 'unknown_active':
+        activity['unknown'] = {'has_active_goal': True}
+    elif change == 'unknown_joints':
+        activity['other']['joint_names'] = ['not_in_description']
+    elif change == 'mobile_root':
+        description = description.replace('name="mount" type="fixed"', 'name="mount" type="prismatic"')
+    elif change == 'missing_owner':
+        activity.pop('owner')
+    elif change == 'duplicate_child':
+        description = description.replace('child link="other_body"', 'child link="owner_base"')
+    configuration['description_sha256'] = hashlib.sha256(description.encode()).hexdigest()
+    if change == 'description':
+        description += ' '
+    original = deepcopy(physical)
+    legacy = commanded_hold_evidence(resource_id=rid, state=state, model=model, physical=physical)
+    result = commanded_hold_evidence(resource_id=rid, state=state, model=model, physical=physical,
+                                     robot_description=description)
+    assert legacy['status'] == 'NEEDS_CONTEXT'
+    assert result['status'] == ('supported' if change is None else 'NEEDS_CONTEXT')
+    assert physical == original
+    if change is None:
+        assert result['controller_activity_scope']['checked_controllers'] == ['owner']
+        assert set(result['controller_activity_scope']['excluded_controllers']) == {'base', 'other'}
+        assert result['observed_idle'] is False
+        assert result['physical_execution_verified'] is False
 
 
 def test_peer_hold_encloses_tool_and_carried_part_and_retains_projected_command():
@@ -1793,6 +2050,51 @@ def _nominal_program_case():
     ]
     model["events"][0]["composition_contract"] = {"params": {}, "steps": steps}
     return scene, snapshot, model, task, evidence
+
+
+@pytest.mark.parametrize("defect", [None, "missing_limits", "custody", "gripper_limit", "explicit_reach"])
+def test_robot_bounded_pickup_uses_owner_endpoints_without_motion_program(monkeypatch, defect):
+    from cais_spade_llm.resources.robot import recovery_capability
+
+    scene, snapshot, model, task = _custody_event_case(True)
+    rid, part = "ur5e-3", task["part_name"]
+    scene["endpoint_evidence_policy_version"] = 2
+    configuration = scene["resource_models"][rid]["configuration"]
+    configuration["joints"][0]["position_bounds"] = [-2., 2.]
+    scene["snapshot"]["parts"][part].update(observed_pose=[0., 0., 0., 0., 0., 0., 1.], observed_pose_current=True)
+    if defect == "missing_limits":
+        configuration["joints"][0].pop("position_bounds")
+    elif defect == "custody":
+        scene["resource_models"][rid]["primitive_model"]["configuration"].pop("custody")
+    elif defect == "gripper_limit":
+        scene["resource_models"][rid]["primitive_model"]["configuration"]["custody"]["joint_positions"]["closed"]["finger"] = 5.
+    elif defect == "explicit_reach":
+        scene["resource_models"][rid]["static_capabilities"] = {"gripper_reach": {
+            "frame": "world", "origin_pose": {"x": 2., "y": 2., "z": 0.},
+            "max_xy_radius_m": .1, "tolerance_m": 0., "z_min_m": -1., "z_max_m": 2.}}
+    pose = dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"), [0., 0., 0., 0., 0., 0., 1.]))
+    monkeypatch.setattr(recovery_capability, "calculate_recovery_pick_target", lambda **_: {
+        "status": "calculated", "part_name": part, "target_pose": pose, "approach_pose": pose,
+        "travel_z": .2, "source": {"kind": "supplied_verification_case"}})
+    monkeypatch.setattr("cais_spade_llm.resources.resource_safety_preparation._outline_nominal_program",
+                        lambda **_: pytest.fail("Endpoint feasibility must not require a complete motion program"))
+    evidence = {"controller_config": {"move_group": {"frame_id": "world"}}}
+    original = deepcopy((scene, snapshot, model, task, evidence))
+    kwargs = dict(task=task, recovery_snapshot=snapshot, recovery_des_model=model,
+                  resource_evidence=evidence, physical_evidence=scene)
+    if defect:
+        with pytest.raises(ValueError):
+            recovery_capability.project_robot_outline_endpoint(**kwargs)
+    else:
+        endpoint, checks, contract = recovery_capability.project_robot_outline_endpoint(**kwargs)
+        assert endpoint["snapshot"]["resources"][rid]["held_part"] == part
+        assert endpoint["snapshot"]["parts"][part]["current_pose"][2] == pytest.approx(.2, abs=1e-5)
+        assert "observed_pose" not in endpoint["snapshot"]["parts"][part]
+        assert endpoint["snapshot"]["parts"][part]["observed_pose_current"] is False
+        assert [row["step"]["op"] for row in checks] == ["move_cartesian", "grasp_part", "move_cartesian"]
+        assert contract["pickup_target_calculation"]["part_name"] == part
+        assert endpoint["resources"][rid]["validated_pickup_target_calculation"]["physical_execution_verified"] is False
+    assert (scene, snapshot, model, task, evidence) == original
 
 
 def test_nominal_owner_program_skips_declared_insert_and_retains_snap():
@@ -2725,6 +3027,61 @@ def test_projected_deposit_uses_exact_collision_shapes_and_declared_contact_marg
     scene["snapshot"]["parts"][task["part_name"]]["current_pose"][2] += .02
     result = projected_part_support(part_name=task["part_name"], state=scene["snapshot"], evidence=scene)
     assert result["status"] == "NEEDS_CONTEXT"
+
+
+@pytest.mark.parametrize('defect', [None, 'hash', 'part', 'shape', 'support_pose', 'support_geometry', 'policy', 'meshes', 'hover', 'unrelated_support'])
+def test_projected_support_reuses_geometry_without_reviving_retired_observations(defect):
+    from cais_spade_llm.resources.recovery_geometry import projected_part_support, retain_part_support_geometry
+
+    scene, _, _, task = _custody_event_case(False)
+    part = task['part_name']
+    pose = [0., 0., 0., 0., 0., 0., 1.]
+    scene['snapshot']['resources']['table'] = {'current_pose': pose[:]}
+    scene['geometry']['resources']['table'] = {'component_bounds': [{'id': 'table::collision'}]}
+    scene['physics_evidence']['models']['table']['pose'] = pose[:]
+    if defect == 'unrelated_support':
+        scene['snapshot']['resources']['other'] = {'current_pose': pose[:]}
+        scene['geometry']['resources']['other'] = {'component_bounds': [{'id': 'other::collision'}]}
+        scene['physics_evidence']['models']['other'] = deepcopy(scene['physics_evidence']['models']['table'])
+        collision = scene['physics_evidence']['models']['other']['links']['link']['collisions'][0]
+        collision.update(id='other::collision', pose=[10., 10., 10., 0., 0., 0., 1.])
+    retain_part_support_geometry(scene)
+    record = scene['part_support_geometry']
+    assert record['physics']['contacts'] == []
+    assert 'attachments' not in record['physics']
+    assert all('linear_velocity' not in link for row in record['physics']['models'].values()
+               for link in row['links'].values())
+    scene.pop('physics_evidence')
+    scene = json.loads(json.dumps(scene))
+    if defect == 'hash':
+        scene['part_support_geometry']['physics']['gravity'][2] = -1.
+    elif defect == 'part':
+        scene['snapshot']['parts'][part]['model_name'] = 'different'
+    elif defect == 'shape':
+        scene['geometry']['parts'][part]['local_bounds'] = [[-1, 1]] * 3
+    elif defect == 'support_pose':
+        scene['snapshot']['resources']['table']['current_pose'][0] = 1.
+    elif defect == 'support_geometry':
+        scene['geometry']['resources']['table']['component_bounds'] = []
+    elif defect == 'policy':
+        scene['part_support_policy']['stationary_linear_speed_max'] = 1.
+    elif defect == 'meshes':
+        scene['physics_meshes'] = {'changed': {}}
+    elif defect == 'hover':
+        scene['snapshot']['parts'][part]['current_pose'][2] += .003
+    elif defect == 'unrelated_support':
+        scene['snapshot']['resources']['other'].pop('current_pose')
+    original = deepcopy(scene)
+    result = projected_part_support(part_name=part, state=scene['snapshot'], evidence=scene)
+    assert result['status'] == ('NEEDS_CONTEXT' if defect not in (None, 'unrelated_support') else 'supported'), result
+    assert result['physical_execution_verified'] is False
+    assert scene == original
+    if defect is None:
+        assert result['source']['kind'] == 'projected'
+        assert result['source']['recorded_geometry_reference_fingerprint'] == record['fingerprint']
+    elif defect == 'unrelated_support':
+        assert result['source']['excluded_support_resources'] == ['other']
+        assert result['support_collisions'] == ['table::collision']
 
 
 def test_projected_support_keeps_original_pose_through_complete_json_roundtrip():
@@ -3788,6 +4145,7 @@ def test_owner_projection_cache_reuses_only_local_result_and_keeps_cca_independe
 @pytest.mark.parametrize('changed', [
     'proposal', 'snapshot', 'model', 'peer_configuration', 'geometry', 'capability', 'policy',
     'source_revision', 'native_evidence', 'event_evidence', 'missing_versus_null', 'resource_evidence',
+    'evidence_policy', 'evidence_requirements',
 ])
 def test_owner_projection_cache_requires_every_current_input(changed, monkeypatch):
     owner, args, _, count, _ = _owner_projection_cache_case(monkeypatch)
@@ -3815,6 +4173,10 @@ def test_owner_projection_cache_requires_every_current_input(changed, monkeypatc
         altered['physical_input']['outline_event_evidence'] = []
     elif changed == 'resource_evidence':
         altered['physical_input']['resource_evidence'] = {'execution_mode': 'simulation'}
+    elif changed == 'evidence_policy':
+        altered['physical_input']['outline_evidence_policy_version'] = 1
+    elif changed == 'evidence_requirements':
+        altered['physical_input']['evidence_requirements'] = {'fingerprint': 'changed'}
     else:
         altered['recovery_snapshot']['recorded_null'] = None
     owner.project_recovery_outline_event(**altered)

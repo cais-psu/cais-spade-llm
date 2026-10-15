@@ -1,6 +1,6 @@
-"""Recovery prompt artifact writer shared by dry-run and live runtime paths."""
-
 from __future__ import annotations
+
+"""Recovery prompt artifact writer shared by dry-run and live runtime paths."""
 
 import hashlib
 import json
@@ -48,6 +48,7 @@ def nominal_continuation_context_binding(session: dict, prepared: dict) -> str:
         "session": {key: session[key] for key in (
             "accepted_outline_prefix", "symbolic_resources", "symbolic_parts",
             "derived_resource_snapshots", "outline_monitor_context", "validation_resource_context",
+            "nominal_task_completion_records",
         ) if key in session},
         "physical_scene": outline_event_binding({}, {}, {}, physical)["scene_fingerprint"],
         "goal_conditions": {key: value for key, value in prepared.get("llm_input", {}).items()

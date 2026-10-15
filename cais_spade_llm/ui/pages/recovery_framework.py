@@ -18,6 +18,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 _DOCUMENTS = _ROOT / "writing/Journal Paper 2 (recovery framework)"
 _PAPER = _DOCUMENTS / "IMPLEMENTATION_PLAN.md"
 _FORMAL = _DOCUMENTS / "JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md"
+_EXPERIMENT_DESIGN = _DOCUMENTS / "EXPERIMENT_DESIGN_AND_PLAN.md"
 
 
 def _render_setup(bridge: SystemBridge) -> None:
@@ -45,6 +46,20 @@ def _render_setup(bridge: SystemBridge) -> None:
     ui.button("Download paper protocol", icon="download", on_click=lambda: ui.download.file(_PAPER))
 
 
+def _render_experiments() -> None:
+    """Render the Journal 2 experiment placeholder and design download."""
+    with ui.card().classes("w-full gap-3"):
+        with ui.row().classes("items-center gap-3"):
+            ui.icon("science").classes("text-primary text-2xl")
+            ui.label("Experiments").classes("text-xl font-semibold")
+            ui.badge("Coming soon").props("color=blue-grey outline")
+        ui.label("Experiment configuration and results will be added here.").classes("text-slate-600")
+        ui.button(
+            "Download experiment design", icon="download",
+            on_click=lambda: ui.download.file(_EXPERIMENT_DESIGN),
+        ).props("outline")
+
+
 def render(bridge: SystemBridge) -> None:
     """Open run by default and construct its controls once per page client."""
     try:
@@ -52,7 +67,7 @@ def render(bridge: SystemBridge) -> None:
     except RuntimeError:
         request = None
     initial_tab = request.query_params.get("tab", "run") if request is not None else "run"
-    if initial_tab not in {"run", "setup", "results", "recovery"}:
+    if initial_tab not in {"run", "setup", "results", "recovery", "experiments"}:
         initial_tab = "run"
     ui.add_head_html("""<style>
         .recovery-panels, .recovery-panels > .q-panel { overflow: visible !important; }
@@ -60,13 +75,13 @@ def render(bridge: SystemBridge) -> None:
     with ui.column().classes("w-full gap-4 p-6"):
         ui.label("recovery-framework").classes("text-2xl font-bold")
         with ui.tabs().props("no-caps").classes("w-full") as tabs:
-            for name in ("run", "setup", "results", "recovery"):
+            for name in ("run", "setup", "results", "recovery", "experiments"):
                 ui.tab(name).props("no-caps")
         with ui.tab_panels(tabs, value=initial_tab, animated=False, keep_alive=True).classes(
             "w-full recovery-panels"
         ):
             panels = {}
-            for name in ("run", "setup", "results", "recovery"):
+            for name in ("run", "setup", "results", "recovery", "experiments"):
                 with ui.tab_panel(name).classes("p-0") as panel:
                     panels[name] = panel
         built: set[str] = set()
@@ -83,6 +98,8 @@ def render(bridge: SystemBridge) -> None:
                 elif name == "recovery":
                     from cais_spade_llm.ui.pages import recovery
                     recovery.render(root=_ROOT, is_active=lambda: tabs.value == "recovery", bridge=bridge)
+                elif name == "experiments":
+                    _render_experiments()
                 else:
                     ui.label(
                         "Saved results retain their recorded inputs; the current setup is not applied to historical runs."
@@ -95,5 +112,5 @@ def render(bridge: SystemBridge) -> None:
             built.add(name)
 
         tabs.on_value_change(show_tab)
-        bind_project_tabs(tabs, "/recovery-framework", ("run", "setup", "results", "recovery"))
+        bind_project_tabs(tabs, "/recovery-framework", ("run", "setup", "results", "recovery", "experiments"))
         show_tab()

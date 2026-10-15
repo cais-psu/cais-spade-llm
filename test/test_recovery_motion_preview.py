@@ -129,6 +129,38 @@ def test_base_preview_preserves_exact_motion_and_does_not_claim_continuous_or_ex
         preview_result_record(checked, response)
 
 
+@pytest.mark.parametrize('omitted_from', ['request', 'response', 'both'])
+def test_base_preview_accepts_ros_empty_array_defaults_without_mutating_evidence(omitted_from):
+    original = base_request()
+    response = result()
+    response['trajectory']['joint_trajectory'] = copy.deepcopy(original['base_trajectory'])
+    for side, trajectory in (('request', original['base_trajectory']),
+                             ('response', response['trajectory']['joint_trajectory'])):
+        if omitted_from in (side, 'both'):
+            for point in trajectory['points']:
+                point.pop('accelerations')
+                point.pop('effort')
+    before = copy.deepcopy((original, response))
+    captured = preview_result_record(validate_preview_request(original), response)
+    assert captured['joint_trajectory'] == response['trajectory']['joint_trajectory']
+    assert (original, response) == before
+
+
+@pytest.mark.parametrize('defect', ['velocity', 'acceleration', 'effort', 'frame', 'stamp'])
+def test_base_preview_rejects_changed_derivatives_and_time_frame(defect):
+    original = base_request()
+    response = result()
+    trajectory = response['trajectory']['joint_trajectory'] = copy.deepcopy(original['base_trajectory'])
+    if defect in ('frame', 'stamp'):
+        trajectory['header'] = {'frame_id': 'another_frame' if defect == 'frame' else '',
+                                'stamp': {'sec': 1 if defect == 'stamp' else 0, 'nanosec': 0}}
+    else:
+        field = {'velocity': 'velocities', 'acceleration': 'accelerations', 'effort': 'effort'}[defect]
+        trajectory['points'][-1][field] = [.1]
+    with pytest.raises(ValueError):
+        preview_result_record(validate_preview_request(original), response)
+
+
 @pytest.mark.parametrize('defect', ['unknown_joint', 'start', 'velocity', 'nan', 'boolean', 'time',
                                   'other_mode', 'other_motion', 'base_link', 'acceleration'])
 def test_base_preview_requires_complete_unchanged_owner_inputs(defect):

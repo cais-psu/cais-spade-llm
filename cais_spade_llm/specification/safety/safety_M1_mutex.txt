@@ -1,0 +1,124 @@
+{
+  "mode": "predefined",
+  "version": 2,
+  "catalog": {
+    "version": 2,
+    "specifications": [
+      {
+        "id": "SAFE_M1_mutex",
+        "requirement": "At most one resource accessing M1 may occupy its protected area at any time.",
+        "formula": "G !((ap001 | ap002 | ap003) & (ap004 | ap005 | ap006))",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$first_resource\",\"state\":{\"arguments\":{\"region\":\"M1.front_access\"},\"symbol\":\"any\"}}",
+            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$first_resource",
+              "state": {
+                "arguments": {
+                  "region": "M1.front_access"
+                },
+                "symbol": "any"
+              }
+            }
+          },
+          {
+            "label": "ap002",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$first_resource\",\"state\":{\"arguments\":{\"region\":\"M1.side_access\"},\"symbol\":\"any\"}}",
+            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$first_resource",
+              "state": {
+                "arguments": {
+                  "region": "M1.side_access"
+                },
+                "symbol": "any"
+              }
+            }
+          },
+          {
+            "label": "ap003",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$first_resource\",\"state\":{\"arguments\":{\"region\":\"M1.workholding\"},\"symbol\":\"any\"}}",
+            "meaning": "The first bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$first_resource",
+              "state": {
+                "arguments": {
+                  "region": "M1.workholding"
+                },
+                "symbol": "any"
+              }
+            }
+          },
+          {
+            "label": "ap004",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$second_resource\",\"state\":{\"arguments\":{\"region\":\"M1.front_access\"},\"symbol\":\"any\"}}",
+            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$second_resource",
+              "state": {
+                "arguments": {
+                  "region": "M1.front_access"
+                },
+                "symbol": "any"
+              }
+            }
+          },
+          {
+            "label": "ap005",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$second_resource\",\"state\":{\"arguments\":{\"region\":\"M1.side_access\"},\"symbol\":\"any\"}}",
+            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$second_resource",
+              "state": {
+                "arguments": {
+                  "region": "M1.side_access"
+                },
+                "symbol": "any"
+              }
+            }
+          },
+          {
+            "label": "ap006",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"*\",\"product\":\"*\",\"resource\":\"$second_resource\",\"state\":{\"arguments\":{\"region\":\"M1.workholding\"},\"symbol\":\"any\"}}",
+            "meaning": "The second bound resource's configured robot/tool geometry, including any carried part, touches or overlaps the bound shared area. A deposited part does not retain the resource's occupancy.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "*",
+              "product": "*",
+              "resource": "$second_resource",
+              "state": {
+                "arguments": {
+                  "region": "M1.workholding"
+                },
+                "symbol": "any"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "requirement_scopes": [
+    {
+      "specification": "SAFE_M1_mutex",
+      "stationary_only": false
+    }
+  ]
+}

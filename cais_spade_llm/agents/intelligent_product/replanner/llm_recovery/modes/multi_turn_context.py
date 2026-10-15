@@ -23,7 +23,7 @@ _PART_FIELDS = {
     "observed_pose_current", "last_observed_pose", "projected_pose",
 }
 _CAPABILITY_FIELDS = {
-    "resource_type", "reachability", "reachable_locations", "gripper_reach", "staging_areas",
+    "resource_type", "reachability", "reachable_locations", "staging_areas",
     "named_poses", "supports_executable_recovery",
     "supports_manipulator_pick_place", "capabilities", "availability",
     "process_capabilities", "program_options", "current_configuration",
@@ -34,6 +34,7 @@ _PRIVATE_CONTEXT_FIELDS = {
     "nominal_sequence", "route_hints", "delivery_bindings", "primitive_support",
     "execution_primitive_catalog", "primitive_catalog", "private_owner_records",
     "operator_metadata", "operator_feedback", "recovery_feedback",
+    "gripper_reach", "additional_bindings", "max_xy_radius_m", "z_min_m", "z_max_m",
 }
 
 
@@ -123,6 +124,27 @@ def _views(prepared: dict, session: dict) -> tuple[dict, dict]:
         llm_input=prepared.get("llm_input", {}), session_state=session)}
     parts = {row["part_name"]: row for row in _projected_outline_parts(
         llm_input=prepared.get("llm_input", {}), session_state=session)}
+    invalidated = session.get("projected_physical_evidence", {}).get("invalidated_geometry", {})
+    if invalidated:
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import remove_invalidated_pose
+
+        physical = session["projected_physical_evidence"]
+        for rid in invalidated.get("resources", {}):
+            row = resources.get(physical.get("jids", {}).get(rid))
+            if row is not None:
+                remove_invalidated_pose(row)
+        for part in invalidated.get("parts", {}):
+            if part in parts:
+                remove_invalidated_pose(parts[part])
+    physical = session.get("projected_physical_evidence") or {}
+    for rid, job in physical.get("unresolved_processing", {}).items():
+        row = resources.get(physical.get("jids", {}).get(rid), {})
+        for field in ("active_job", "job_state", "resource_state", "current_state"):
+            row.pop(field, None)
+        part = parts.get(job.get("part"), {})
+        for field in ("processCompleted", "processCompleted_evidence"):
+            part.pop(field, None)
+        part["processCompleted_complete"] = False
     return resources, parts
 
 
@@ -141,7 +163,8 @@ def _part_names(value: Any) -> set[str]:
 
 def _task_locations(task: dict) -> set[str]:
     params = task.get("params", task.get("parameters", {}))
-    return {params[key] for key in ("destination_location", "origin_resource_location", "target_location")
+    return {params[key] for key in ("destination_location", "origin_resource_location", "target_location",
+                                   "source_resource", "target_resource")
             if isinstance(params.get(key), str)}
 
 
@@ -167,12 +190,38 @@ def _public_resource_capabilities(entry: dict) -> dict:
     return result
 
 
+def _recorded_locations(entry: dict) -> set[str]:
+    locations = set()
+    for source in ("static_capabilities", "recovery_adapter", "recovery_snapshot"):
+        for field in ("reachability", "reachable_locations"):
+            values = (entry.get(source) or {}).get(field)
+            if isinstance(values, list):
+                locations.update(value for value in values if isinstance(value, str))
+    return locations
+
+
+def _public_capability_evidence(entry: dict) -> list[dict]:
+    records = []
+    for record in entry.get('capability_evidence') or []:
+        row = _fields(record, {'resource_location', 'held_part', 'recorded_execution',
+            'geometric_validation', 'ref', 'run_id', 'revision', 'source', 'source_fingerprint',
+            'current_proposal_validated', 'conflicts', 'missing'})
+        row['scope'] = _fields(record.get('scope') or {}, {'part_name', 'scene_fingerprint', 'scene_asset_fingerprint',
+            'launch_id', 'attached', 'grasp_transform', 'carrying_arm_configuration'})
+        row['checks'] = [_fields(check, {'success', 'checked_states', 'checked_samples', 'sample_step_m',
+            'collision_checks_bypassed', 'allowed_relative_error_m', 'relative_error_m', 'ref'}) for check in record.get('checks', [])]
+        row['measurements'] = [_fields(measurement, {'ref', 'base_pose', 'current_pose'})
+                               for measurement in record.get('measurements', [])]
+        records.append(row)
+    return records
+
+
 def resource_index(prepared: dict) -> list[dict]:
     """List declared alternatives without selecting a recovery action."""
     rows = []
     for jid, entry in sorted(prepared.get("recovery_resources", {}).items()):
         caps = _public_resource_capabilities(entry)
-        detail_fields = {"gripper_reach", "staging_areas", "named_poses", "capabilities",
+        detail_fields = {"staging_areas", "named_poses", "capabilities",
                          "process_capabilities", "program_options", "current_configuration", "processing_observations", "job_control"}
         row = {"resource_jid": jid, "resource_type": entry.get("resource_type"),
                **{name: value for name, value in caps.items() if name not in detail_fields | {"field_sources", "conflicts"}}}
@@ -183,7 +232,25 @@ def resource_index(prepared: dict) -> list[dict]:
         if available:
             row["available_capability_fields"] = available
         if caps.get("conflicts"):
-            row["conflicts"] = sorted(caps["conflicts"])
+            row["conflicts"] = deepcopy(caps["conflicts"])
+        from cais_spade_llm.resources.environment_recovery import public_evaluation_support
+
+        support = _public_fact_value(public_evaluation_support(entry))
+        if support:
+            row["evaluation_support"] = support
+        evidence = _public_capability_evidence(entry)
+        if evidence:
+            summaries = {}
+            for record in evidence:
+                if not record.get('recorded_execution') and not record.get('conflicts'):
+                    continue
+                summary = {key: deepcopy(record[key]) for key in (
+                    "resource_location", "held_part", "recorded_execution", "geometric_validation", "conflicts"
+                ) if key in record}
+                key = recovery_validation_fingerprint(summary)
+                summaries.setdefault(key, {**summary, 'refs': []})['refs'].append(record['ref'])
+            row["capability_evidence"] = list(summaries.values())
+            row["capability_evidence_ref"] = f"/resources/{jid}/capability_evidence"
         rows.append(row)
     return rows
 
@@ -240,7 +307,11 @@ def select_outline_context(prepared: dict, session: dict) -> dict:  # noqa: C901
                       for field in ("predecessors", "successors") for link in task.get(field, []) if isinstance(link, (str, int))}
         locations = set().union(*(_task_locations(task) for jid in selected_resources
                                   for task in entries.get(jid, {}).get("pending_tasks", [])))
-        for jid, row in resources.items():
+        locations.update(parts[name]["part_location"] for name in selected_parts
+                         if isinstance(parts[name].get("part_location"), str))
+        for jid, row in sorted(resources.items()):
+            if _recorded_locations(entries.get(jid, {})) & locations:
+                include("resources", jid, "recorded locations intersect part or pending-task locations")
             held = row.get("held_part")
             if held in selected_parts:
                 include("resources", jid, "held_part")
@@ -306,7 +377,14 @@ def public_resource_snapshot(prepared: dict, session: dict, jid: str) -> dict:
             sources["projected_pose"] = "projected_state"
         snapshot["field_sources"] = {key: source for key, source in sources.items() if key in snapshot}
         return snapshot
-    return _fields({**entry.get("recovery_snapshot", {}), **resources.get(jid, {})}, fields)
+    result = {**entry.get("recovery_snapshot", {}), **resources.get(jid, {})}
+    physical = session.get("projected_physical_evidence") or {}
+    if any(physical.get("jids", {}).get(rid) == jid
+           for rid in physical.get("invalidated_geometry", {}).get("resources", {})):
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import remove_invalidated_pose
+
+        remove_invalidated_pose(result)
+    return _fields(result, fields)
 
 
 def public_part_snapshot(prepared: dict, session: dict, part_name: str) -> dict:
@@ -348,6 +426,9 @@ def public_part_snapshot(prepared: dict, session: dict, part_name: str) -> dict:
     if ("observed_pose" in fields and not snapshot.get("observed_pose")
             and snapshot.get("observed_pose_current") is not False):
         snapshot["observed_pose"] = entry.get("observed_pose") or recorded.get("observed_pose")
+    physical = session.get("projected_physical_evidence") or {}
+    if any(job.get("part") == part_name for job in physical.get("unresolved_processing", {}).values()):
+        snapshot.pop("processCompleted", None)
     return snapshot
 
 
@@ -483,6 +564,12 @@ def _resource_fact(prepared: dict, session: dict, jid: str, field: str, ref: str
         value = snapshot
     elif field == "static_capabilities":
         value = _public_resource_capabilities(entry)
+        physical = session.get("projected_physical_evidence") or {}
+        if (physical.get("elapsed_time_obligations")
+                or any(physical.get("jids", {}).get(rid) == jid for rid in physical.get("unresolved_processing", {}))):
+            value.pop("processing_observations", None)
+    elif field == "capability_evidence":
+        value = _public_capability_evidence(entry)
     elif field == "pending_tasks":
         value = [{**_fields(task, {"id", "function_name", "status", "predecessors", "successors"}),
                   "params": _fields(task.get("params", {}), {"part_name", "destination_location", "origin_resource_location"})}
@@ -515,6 +602,16 @@ def _resource_fact(prepared: dict, session: dict, jid: str, field: str, ref: str
 def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  # noqa: C901, PLR0912 - explicit public reference allowlist
     """Resolve an allowlisted fact reference with recorded provenance."""
     if ref.split("/")[1:2] in (["safety_rules"], ["regions"]):
+        if session.get("outline_diagnostic_bypass"):
+            collection = prepared.get("prompt_safety_rules", []) if ref.startswith("/safety_rules") else prepared.get("diagnostic_regions", {})
+            segments = ref.split("/")
+            if len(segments) == 3:
+                collection = next((row for row in collection if row.get("id") == segments[2]), None) if isinstance(collection, list) else collection.get(segments[2])
+            if collection is None or len(segments) > 3:
+                raise ValueError(f"NEEDS_CONTEXT: {ref} is not recorded")
+            return {"value": _public_fact_value(collection), "source": "saved_context",
+                    "source_run_id": prepared.get("source_observation_run_id"),
+                    "captured_at": prepared.get("source_observation_captured_at")}
         if session.get("public_safety_context_version") != 1:
             raise ValueError("Unsupported context reference")
         return public_safety_context_fact(prepared, session, ref)
@@ -624,7 +721,7 @@ def scope_prompt_input(payload: dict, prepared: dict, session: dict) -> dict:
         state[key] = {name: row for name, row in state.get(key, {}).items() if name in parts}
     payload["recovery_resources"] = {jid: row for jid, row in payload["recovery_resources"].items() if jid in resources}
     payload["outline_context"] = scope
-    if session.get("public_safety_context_version") == 1:
+    if session.get("public_safety_context_version") == 1 and not session.get("outline_diagnostic_bypass"):
         safety_context = public_outline_safety_context(prepared, session)
         payload["outline_safety_context"] = compact_public_safety_context(
             safety_context, resource_jids=resources, part_names=parts)
@@ -632,6 +729,18 @@ def scope_prompt_input(payload: dict, prepared: dict, session: dict) -> dict:
             safety_context, session.get("outline_validation_findings") or [])
     payload["outline_resource_fields"] = {jid: resolve_outline_context(prepared, session, f"/resources/{jid}/state_variables")
                                           for jid in sorted(resources)}
+    # Automatic inclusion has no effect on LLM-requested retrieval history.
+    payload["outline_resource_capabilities"] = {
+        jid: resolve_outline_context(prepared, session, f"/resources/{jid}/static_capabilities")
+        for jid in sorted(resources)}
+    for row in scope["resource_index"]:
+        fact = payload["outline_resource_capabilities"].get(row["resource_jid"])
+        if fact:
+            details = {"named_poses", "staging_areas", "program_options", "processing_observations"}
+            values = {key: deepcopy(value) for key, value in fact["value"].items() if key not in details}
+            values["field_sources"] = {key: value for key, value in values.get("field_sources", {}).items() if key not in details}
+            row.update(values)
+            row["available_capability_fields"] = sorted(details.intersection(fact["value"]))
     payload["outline_observation_source"] = {
         "source_run_id": prepared.get("source_observation_run_id"),
         "captured_at": prepared.get("source_observation_captured_at", prepared.get("prepared_at_utc")),

@@ -966,6 +966,15 @@ class ResourceAgent(LlmAgent):
         from cais_spade_llm.resources.recovery_geometry import project_recovery_outline_event
 
         evidence = physical_input.get("physical_evidence") or {}
+        if evidence.get("endpoint_evidence_policy_version") in (1, 2):
+            from cais_spade_llm.recovery_framework.outline_evidence_policy import event_evidence_requirements
+            from cais_spade_llm.recovery_framework.outline_endpoint_evidence import project_bounded_successor
+
+            required = event_evidence_requirements(task=task, snapshot=recovery_snapshot, model=recovery_des_model,
+                physical_input=physical_input, specifications=physical_input.get(
+                    "outline_safety_specifications", evidence.get("outline_safety_specifications")))
+            return project_bounded_successor(task=task, snapshot=recovery_snapshot, model=recovery_des_model,
+                physical_input=physical_input, requirements=required)
         records = physical_input.get("outline_event_evidence")
         if records is None:
             records = evidence.get("event_evidence", [])
@@ -973,6 +982,8 @@ class ResourceAgent(LlmAgent):
             "task": task, "recovery_snapshot": recovery_snapshot,
             "recovery_des_model": recovery_des_model,
             "physical_evidence": evidence, "outline_event_evidence": records,
+            **({key: deepcopy(physical_input[key]) for key in
+                ("outline_evidence_policy_version", "evidence_requirements") if key in physical_input}),
             **({"resource_evidence": physical_input["resource_evidence"]}
                if "resource_evidence" in physical_input else {}),
         })
@@ -1039,6 +1050,7 @@ class ResourceAgent(LlmAgent):
         union = physical_input.get("primitive_support_semantics") == "successor_primitive_union"
         physical_input = deepcopy(physical_input)
         preparation = {}
+        calculation_record = None
         if union:
             if "resource_evidence" not in physical_input:
                 reader = getattr(self, "get_recovery_resource_evidence", None)
@@ -1059,11 +1071,29 @@ class ResourceAgent(LlmAgent):
                         "context_requests": [f"/resources/{self.jid}/resource_evidence/state"]}
             from cais_spade_llm.resources.recovery_parameter_evidence import projected_resource_evidence
 
+            if recovery_des_model.get("resource_id") == "KMR" and physical_input.get("check_physical_evidence", True):
+                from cais_spade_llm.recovery_framework.kmr_calculation import prepare_calculation
+
+                try:
+                    recovery_des_model, physical_input, calculation_record = prepare_calculation(
+                        task=task, model=recovery_des_model, snapshot=recovery_snapshot, physical_input=physical_input,
+                        session_id=physical_input.get("recovery_session_id", ""))
+                    evidence = physical_input["resource_evidence"]
+                except (KeyError, ValueError, TypeError) as exc:
+                    violation = isinstance(exc, ValueError) and (str(exc).startswith('Recorded peer conditions reject')
+                        or str(exc) in {'Saved KMR carrying height does not clear the picked part',
+                                       'KMR placement requires a downward-facing grasp',
+                                       'KMR is not docked at the declared destination'})
+                    return {"allowed": False, "feasibility_status": "INFEASIBLE" if violation else "NEEDS_CONTEXT",
+                            "reason": str(exc), "context_requests": [] if violation else [f"/resources/{self.jid}/resource_evidence"]}
+
+            calculation_input = deepcopy(physical_input) if calculation_record else None
+
             physical_input["resource_evidence"] = projected_resource_evidence(resource_jid=str(self.jid),
                 resource_evidence=evidence, physical_evidence=physical_input.get("physical_evidence") or {},
                 recovery_snapshot=recovery_snapshot)
             prepare = getattr(self, "prepare_recovery_primitive_parameters", None)
-            if callable(prepare):
+            if callable(prepare) and physical_input.get("check_physical_evidence", True):
                 preparation = prepare(task=task, recovery_des_model=recovery_des_model,
                                       recovery_snapshot=recovery_snapshot, physical_input=physical_input)
                 if preparation.get("calculated_resource_evidence") is not None:
@@ -1110,6 +1140,9 @@ class ResourceAgent(LlmAgent):
                 "model_complete": physical_input.get("model_complete"), "evaluate_condition": evaluate_condition}
                if physical_input.get("primitive_support_semantics") == "successor_primitive_union" else {}),
         )
+        if calculation_record:
+            result.update(additional_binding_record=deepcopy(calculation_record),
+                          calculation_model=deepcopy(recovery_des_model), calculation_physical_input=calculation_input)
         if preparation:
             result["parameter_preparation"] = deepcopy(preparation)
             if result.get("feasibility_status") == "NEEDS_CONTEXT":
@@ -1372,6 +1405,12 @@ class ResourceAgent(LlmAgent):
             ),
         }
 
+    def validate_recovery_primitive_composition(self, **kwargs: Any) -> dict[str, Any]:
+        """Validate an authored composition using this resource's recorded contracts."""
+        from cais_spade_llm.resources.recovery_composition_owner import validate_owner_composition
+
+        return validate_owner_composition(self, **kwargs)
+
     async def generate_recovery_primitives_batch(
         self,
         *,
@@ -1398,6 +1437,7 @@ class ResourceAgent(LlmAgent):
             )
         return await generate_primitive_batch_with_llm_agent(
             llm_agent=self,
+            composition_owner=self,
             prepared_recovery_request=dict(prepared_recovery_request or {}),
             assigned_outline_events=[
                 dict(row) for row in (assigned_outline_events or []) if isinstance(row, dict)

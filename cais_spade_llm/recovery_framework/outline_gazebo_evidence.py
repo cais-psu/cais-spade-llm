@@ -108,6 +108,10 @@ async def prepare_gazebo_evidence(recovery, runtime, *, cancel_event=None) -> di
     Fresh measurements remain a separate capture. Offline validation receives
     saved preview records only after compatibility and revision checks succeed.
     """
+    from .outline_endpoint_evidence import endpoint_policy
+
+    if endpoint_policy(recovery._prepared.get("physical_evidence") or {}):
+        raise ValueError("Endpoint validation requests owner facts and bounds; trajectory preview is disabled")
     if runtime.setup.get("execution_mode") != "simulation":
         raise ValueError("Gazebo outline evidence requires simulation")
     if runtime.conveyor_fault.status != "triggered" or not runtime.stopped:
@@ -317,6 +321,19 @@ async def prepare_owner_event_evidence(owner, *, task: dict, recovery_snapshot: 
     """
     from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 
+    from .outline_endpoint_evidence import endpoint_policy, project_bounded_successor
+
+    if endpoint_policy(physical_evidence):
+        from .outline_evidence_policy import event_evidence_requirements
+
+        inputs = {"physical_evidence": physical_evidence, "resource_evidence": resource_evidence}
+        required = event_evidence_requirements(task=task, snapshot=recovery_snapshot, model=recovery_des_model,
+            physical_input=inputs, specifications=physical_evidence.get("outline_safety_specifications"))
+        projection = project_bounded_successor(task=task, snapshot=recovery_snapshot, model=recovery_des_model,
+            physical_input=inputs, requirements=required)
+        return {"status": "prepared" if projection["status"] == "projected" else "NEEDS_CONTEXT",
+            "geometry_evidence": projection, "reason": "; ".join(projection["unresolved"]),
+            "command_sent": False, "execution_authorized": False}
     if resource_evidence.get("execution_mode", getattr(owner, "execution_mode", None)) != "simulation":
         raise ValueError("Owner outline previews require simulation")
     _check_cancelled(cancel_event)

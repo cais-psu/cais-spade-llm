@@ -278,14 +278,20 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
     base_symbolic_parts = deepcopy(symbolic_parts)
 
     return {
+        "session_id": recovery_session.get("session_id", ""),
         "current_phase": "grounding",
         "validation_contract_version": prepared_recovery_request.get("validation_contract_version"),
+        **({"outline_evidence_policy_version": prepared_recovery_request["outline_evidence_policy_version"]}
+           if "outline_evidence_policy_version" in prepared_recovery_request else {}),
         **({"primitive_support_semantics": prepared_recovery_request["primitive_support_semantics"]}
            if "primitive_support_semantics" in prepared_recovery_request else {}),
         **({"nominal_continuation_semantics": prepared_recovery_request["nominal_continuation_semantics"]}
            if "nominal_continuation_semantics" in prepared_recovery_request else {}),
         "outline_monitor_context": deepcopy(prepared_recovery_request.get("outline_monitor_context") or {}),
         "outline_context_retrieval": bool(recovery_session.get("outline_context_retrieval")),
+        "outline_diagnostic_bypass": recovery_session.get("outline_diagnostic_bypass") is True,
+        **{field: recovery_session[field] for field in
+           ("check_ra_feasibility", "check_physical_evidence", "check_cca_safety") if field in recovery_session},
         "turn_index": 0,
         "max_turns": max_turns,
         "max_observations": max_observations,
@@ -2392,7 +2398,7 @@ def _generated_candidate_start_state(
 
     if not missing_fields:
         return start_state, []
-    return {}, [
+    return start_state, [
         _candidate_schema_finding(
             task=candidate_task,
             reason=(
@@ -2600,7 +2606,8 @@ def _derive_candidate_outline_task(
         state_variables=state_variables,
         declared_fields_only=declared_fields_only,
     )
-    if start_state_findings:
+    diagnostic = session_state.get("outline_diagnostic_bypass") is True
+    if start_state_findings and not diagnostic:
         return None, start_state_findings
 
     validated_task: dict[str, Any] = {
@@ -2613,6 +2620,12 @@ def _derive_candidate_outline_task(
     }
     if part_name_present:
         validated_task["part_name"] = deepcopy(raw_part_name)
+    if start_state_findings:
+        validated_task["diagnostic_assumptions"] = [
+            {"field": name, "reason": "start condition unknown; validation bypassed"}
+            for finding in start_state_findings
+            for name in finding.get("evidence", {}).get("missing_projected_state_fields", [])
+        ]
     return validated_task, []
 
 
@@ -3513,22 +3526,31 @@ def _build_phase_prompt(
             prepared_recovery_request=prepared_recovery_request,
         )
         # Compute the configured candidate budget for this turn.
-        candidate_bound = _compute_enabled_candidate_bound(
-            session_state,
-            prepared_recovery_request,
-        )
+        if session_state.get("outline_diagnostic_bypass"):
+            from .multi_turn_diagnostic import llm_selects_next_event
+
+            # Comparing unvalidated alternatives favours infeasible shortcuts, so
+            # without any validator the LLM proposes only the event it chooses.
+            candidate_bound = 1 if llm_selects_next_event(session_state) else 5
+        else:
+            candidate_bound = _compute_enabled_candidate_bound(session_state, prepared_recovery_request)
         session_state["candidate_bound"] = candidate_bound
 
     prompt_session = session_state
     if session_state.get("validation_contract_version") == 2 and phase in {"grounding", "outline"}:
-        # These records remain in the validation session and saved inputs. The
-        # renderer does not use them; copying prior prompt inputs here embeds
-        # the complete previous session again inside every subsequent turn.
+        # Full records remain in the validation session. Copying prior prompt
+        # inputs here would embed the previous session inside every new turn.
         prompt_session = {key: value for key, value in session_state.items() if key not in {
             "turns", "projected_physical_evidence", "pending_outline_validation",
             "nominal_continuation_evidence", "outline_monitor_context",
             "validation_resource_context", "validation_resource_evidence_captures",
         }}
+        if phase == "outline":
+            prompt_session["turns"] = [{key: deepcopy(turn[key]) for key in (
+                "phase", "turn_index", "decision", "next_transition", "validation_findings") if key in turn}
+                for turn in session_state.get("turns", []) if turn.get("phase") == "outline"
+                and turn.get("decision") in {"need_revision", "need_context"}
+                and turn.get("validation_findings")][-2:]
     prompt_input = build_multi_turn_phase_prompt_input(
         phase=phase,
         llm_input=llm_input,
@@ -3537,6 +3559,11 @@ def _build_phase_prompt(
         world_observation_surface=world_observation_surface,
         current_recovery_blockers=current_recovery_blockers,
     )
+    if session_state.get("outline_diagnostic_bypass"):
+        # Product goals can include final delivery owned by the nominal flow;
+        # the recorded handoff conditions below state the recovery's obligations.
+        prompt_input["llm_input"]["goal_conditions"] = []
+        prompt_input["llm_input"]["relevant_assembly_requirements"] = []
     if phase == "primitive_generation":
         prompt_input.update(
             build_primitive_generation_prompt_context(
@@ -3549,6 +3576,45 @@ def _build_phase_prompt(
 
         prompt_input = scope_prompt_input(prompt_input, prepared_recovery_request, session_state)
     prompt_text = render_multi_turn_phase_prompt(prompt_input)
+    if session_state.get("outline_diagnostic_bypass"):
+        from cais_spade_llm.recovery_framework.outline_checks import selected_checks
+
+        from .multi_turn_diagnostic import condition_holds, handoff_conflicts, recorded_conditions
+
+        outline = phase == "outline"
+        conditions = [{**{key: row.get(key) for key in ("role", "entity_kind", "entity", "field", "expected")},
+                       **({"holds": condition_holds(row, session_state, prepared_recovery_request)} if outline else {})}
+                      for row in recorded_conditions(prepared_recovery_request)]
+        handoff = {"pending_suffix_summary": prepared_recovery_request.get("marked_reentry_context", {}).get("pending_suffix_summary", []),
+                   "pending_tasks": [{key: node[key] for key in ("id", "resource_jid", "function_name", "params") if key in node}
+                                     for node in prepared_recovery_request.get("saved_pending_nodes", [])],
+                   **({"handoff_conditions": conditions} if conditions else {})}
+        choices = selected_checks(session_state)
+        note = ("RA feasibility, CCA safety and physical validation are bypassed." if not any(choices.values()) else
+                "Requested outline checks: " + json.dumps(choices) + ". Enabled checks must pass before an event advances.")
+        blocked = (handoff_conflicts(session_state, prepared_recovery_request)
+                   if outline and conditions and all(row["holds"] for row in conditions) else [])
+        fault = dict(llm_input.get("fault_event") or {})
+        reach = prepared_recovery_request.get("diagnostic_reach") or {}
+        regions = {name: row.get("bounds") for name, row in (prepared_recovery_request.get("diagnostic_regions") or {}).items()
+                   if isinstance(row, dict) and row.get("bounds")}
+        prompt_text += ("\n\nDiagnostic mode: " + note + " "
+            "Selected events and propagated states are tentative. Recovery ends when the recorded handoff conditions hold "
+            "in the projected state; subsequent nominal processing and delivery belong to the nominal flow. "
+            "Owner bookkeeping is not a separate recovery task. "
+            "Unchanged fields need not be repeated.\nRecorded nominal handoff context:\n" + json.dumps(handoff, ensure_ascii=False) +
+            "".join("\nNominal handoff is blocked in the projected state: " + row["reason"] for row in blocked) +
+            (f"\nInterrupted event: {fault['blocked_at_function']} of {fault['focused_resource_jid']} did not complete. "
+             "A resource_location changes only when an event completes; compare it with any recorded current_pose."
+             if fault.get("blocked_at_function") and fault.get("focused_resource_jid") else "") +
+            ("\nSpatial facts (world frame, also used by current_pose and observed_pose). Region bounds as "
+             "[[x_min, x_max], [y_min, y_max], [z_min, z_max]]: " + json.dumps(regions, ensure_ascii=False) if regions else "") +
+            ("\nDeclared gripper_reach: " + json.dumps(reach, ensure_ascii=False) + ". A pose is within gripper_reach when "
+             "its xy distance from origin_pose is at most max_xy_radius_m + tolerance_m and its z lies within "
+             "[z_min_m - tolerance_m, z_max_m + tolerance_m]." if reach else "") +
+            "\nA part with null part_location is located only by its observed_pose; an event that picks it may omit "
+            "resource_location." +
+            "\nSelected safety requirements (CCA not checked):\n" + json.dumps(prepared_recovery_request.get("prompt_safety_rules", []), ensure_ascii=False))
     feedback = prepared_recovery_request.get("recovery_feedback")
     if feedback:
         prompt_input["recovery_feedback"] = feedback
@@ -3591,7 +3657,7 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
             declared_state_variables_by_resource_jid[str(resource_jid)] = (
                 declared_state_variables
             )
-    return multi_turn_phase_response_schema(
+    schema = multi_turn_phase_response_schema(
         phase,
         outline_context_retrieval=bool(session_state.get("outline_context_retrieval")),
         validation_contract_version=session_state.get("validation_contract_version"),
@@ -3610,6 +3676,10 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
             else None
         ),
     )
+    if candidate_bound == 1 and session_state.get("outline_diagnostic_bypass"):
+        # The neurosymbolic schema fixes its own maximum; only this mode narrows it.
+        schema["schema"]["properties"]["candidate_events"]["maxItems"] = 1
+    return schema
 
 
 # ---------------------------------------------------------------------------
@@ -4540,7 +4610,12 @@ def build_multi_turn_recovery_proposal(
     final_output_payload: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a strict executable recovery proposal from canonical multi-turn output."""
+    """Build a versioned composition review or a historical recovery proposal."""
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        from .multi_turn_composition import build_composition_review
+
+        return build_composition_review(final_output_payload=final_output_payload,
+                                        prepared_recovery_request=prepared_recovery_request)
     result: dict[str, Any] = {
         "accepted": False,
         "reason": "",
@@ -4909,6 +4984,13 @@ def _build_final_output_payload(
         "primitive_program_complete": bool(accepted_prefix)
         and len(accepted_program) >= len(accepted_prefix),
     }
+    if (prepared_recovery_request or {}).get("composition_validation_version") == 1:
+        from cais_spade_llm.resources.recovery_composition import composition_program_error
+
+        error = composition_program_error(accepted_prefix, accepted_program,
+            prepared=prepared_recovery_request, session=session_state)
+        final_output_payload.update(composition_validation_version=1,
+            primitive_program_complete=error is None, composition_error=error, execution_authorized=False)
     return final_output_payload
 
 
@@ -4933,7 +5015,7 @@ def _append_final_output_turn(
         stage=stage,
         prepared_recovery_request=prepared_recovery_request,
     )
-    adapter_result = build_multi_turn_recovery_proposal(
+    adapter_result = {"accepted": False, "reason": "Unvalidated multi_turn diagnostic"} if session_state.get("outline_diagnostic_bypass") else build_multi_turn_recovery_proposal(
         final_output_payload=final_output,
         prepared_recovery_request=prepared_recovery_request,
     )
@@ -5034,6 +5116,7 @@ def _write_per_turn_artifact(
                 "context_selection", "context_requests", "served_context", "context_errors", "observations",
                 "validation_stages", "validation_context_exchanges", "nominal_continuation_evidence",
                 "transition_validation", "next_transition", "validation_contract_version",
+                "outline_evidence_policy_version",
             ) if key in turn_entry},
         })
         stamped_paths = {
@@ -5285,7 +5368,7 @@ async def _run_resource_primitive_batch(
     modeled_primitive_rows: list[dict[str, Any]] = []
     llm_outline_events: list[dict[str, Any]] = []
     for outline_event in assigned_outline_events:
-        if str(outline_event.get("candidate_source") or "").strip() != (
+        if prepared_recovery_request.get("composition_validation_version") == 1 or str(outline_event.get("candidate_source") or "").strip() != (
             "robot_task_program"
         ):
             llm_outline_events.append(deepcopy(outline_event))
@@ -5331,14 +5414,22 @@ async def _run_resource_primitive_batch(
     resource_agent = resource_agents.get(resource_jid)
     product_agent = getattr(planner, "product_agent", None)
     batch_fn = getattr(resource_agent, "generate_recovery_primitives_batch", None)
+    carried_turns = session_state.get("turns") or []
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        carried_turns = compact_multi_turn_runtime_session(
+            {"turns": carried_turns}, keep_full_turns=0)["turns"]
     carried_session_state = {
         "turn_index": int(session_state.get("turn_index") or 0),
-        "turns": deepcopy(session_state.get("turns") or []),
+        "turns": deepcopy(carried_turns),
         "observation_store": deepcopy(session_state.get("observation_store") or {}),
         "primitive_authoring_memo": deepcopy(session_state.get("primitive_authoring_memo") or []),
         "symbolic_resources": deepcopy(session_state.get("symbolic_resources") or {}),
         "symbolic_parts": deepcopy(session_state.get("symbolic_parts") or {}),
     }
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        for key in ("base_symbolic_resources", "base_symbolic_parts", "accepted_primitive_program"):
+            carried_session_state[key] = deepcopy(session_state.get(key, {} if key.startswith("base_") else []))
+        carried_session_state["composition_validation_version"] = 1
 
     if callable(batch_fn):
         result = await batch_fn(
@@ -5366,6 +5457,7 @@ async def _run_resource_primitive_batch(
         llm_owner = product_agent
     result = await generate_primitive_batch_with_llm_agent(
         llm_agent=llm_owner,
+        composition_owner=resource_agent,
         prepared_recovery_request=prepared_recovery_request,
         assigned_outline_events=llm_outline_events,
         recovery_session_id=str(
@@ -5491,6 +5583,11 @@ async def _run_resource_owned_primitive_generation_phase(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        from .multi_turn_composition import generate_next_composition_event
+
+        return await generate_next_composition_event(planner=planner, session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request)
     outline_events = [
         deepcopy(row)
         for row in (session_state.get("accepted_outline_prefix") or [])
@@ -5793,6 +5890,9 @@ async def execute_multi_turn_recovery(
     recovery_debug["status"] = "running"
 
     while int(session_state.get("turn_index") or 0) < int(session_state.get("max_turns") or 0):
+        if session_state.get("outline_diagnostic_bypass") and prepared_recovery_request.get("_outline_diagnostic_stop"):
+            session_state["status"] = "stopped"
+            break
         session_state["turn_index"] = int(session_state.get("turn_index") or 0) + 1
         current_phase = str(session_state.get("current_phase") or "grounding").strip().lower()
         turn_idx = int(session_state.get("turn_index") or 0)
@@ -5861,6 +5961,7 @@ async def execute_multi_turn_recovery(
                         prompt=prompt_text,
                         response_format=response_schema,
                         include_agent_instructions=False,
+                        **({"max_attempts": 1, "max_tool_rounds": 0} if session_state.get("outline_diagnostic_bypass") else {}),
                     )
                 )
                 while True:
@@ -5885,6 +5986,9 @@ async def execute_multi_turn_recovery(
                 parsed_response = deepcopy(
                     raw_response if isinstance(raw_response, dict) else {}
                 )
+                if session_state.get("outline_diagnostic_bypass") and prepared_recovery_request.get("_outline_diagnostic_stop"):
+                    session_state["status"] = "stopped"
+                    break
                 llm_request = deepcopy(
                     dict(getattr(product_agent, "_last_structured_request", {}) or {})
                 )
@@ -6041,6 +6145,7 @@ async def execute_multi_turn_recovery(
         "des_deadlock",
         "selection_unresolved",
         "error",
+        "stopped",
     ):
         session_state["status"] = "des_turn_limit"
         recovery_debug["multi_turn_session"] = deepcopy(session_state)

@@ -1,8 +1,9 @@
-"""Shared outline-state helpers used by multi-turn recovery."""
-
 from __future__ import annotations
 
+"""Shared outline-state helpers used by multi-turn recovery."""
+
 from copy import deepcopy
+import math
 from typing import Any
 
 
@@ -74,6 +75,9 @@ def _outline_state_location_token(state: dict[str, Any]) -> str:
 
 def _outline_state_pose_value(state: dict[str, Any]) -> dict[str, Any] | None:
     pose = state.get("position") or state.get("pose") or state.get("current_pose")
+    if (isinstance(pose, list) and len(pose) == 7
+            and all(type(value) in (int, float) and math.isfinite(value) for value in pose)):
+        return dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"), pose, strict=True))
     if not isinstance(pose, dict) or "x" not in pose:
         return None
     return dict(pose)
@@ -651,7 +655,7 @@ def _infer_outline_macro_signature(
     )
     before_resource_pose = (
         _outline_state_pose_value(start_state)
-        or dict(resource_row.get("current_pose") or {})
+        or _outline_state_pose_value(resource_row)
         or None
     )
     after_resource_pose = _outline_state_pose_value(end_state) or before_resource_pose
@@ -746,7 +750,7 @@ def _infer_outline_macro_signature(
         elif before_holder == resource_jid and after_holder != resource_jid:
             after_part_location = explicit_end_location
 
-        before_part_pose = dict(part_row.get("observed_pose") or {}) or None
+        before_part_pose = _outline_state_pose_value({"pose": part_row.get("observed_pose")})
         after_part_pose = _outline_state_pose_value(end_state) or before_part_pose
 
         delta_row: dict[str, Any] = {}
@@ -762,8 +766,7 @@ def _infer_outline_macro_signature(
         if delta_row:
             part_deltas[part_name] = delta_row
             if (
-                isinstance(part_row.get("observed_pose"), dict)
-                and "x" in dict(part_row.get("observed_pose") or {})
+                before_part_pose is not None
                 and before_holder != resource_jid
             ):
                 direct_observed_pickup_parts.append(part_name)
@@ -799,8 +802,7 @@ def _infer_outline_macro_signature(
         if part_intent_without_delta:
             primary_part_row = dict(parts_by_name.get(primary_part_for_intent) or {})
             if (
-                isinstance(primary_part_row.get("observed_pose"), dict)
-                and "x" in dict(primary_part_row.get("observed_pose") or {})
+                _outline_state_pose_value({"pose": primary_part_row.get("observed_pose")}) is not None
                 and str(primary_part_row.get("current_holder_resource_jid") or "").strip()
                 != resource_jid
                 and primary_part_for_intent not in direct_observed_pickup_parts

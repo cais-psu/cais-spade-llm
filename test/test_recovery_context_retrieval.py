@@ -40,6 +40,7 @@ def context():
                                                   "task_ctx.part_name": {"private": True}}},
         "execution_primitive_catalog": [{"name": "move_to_named_pose", "primitive_kind": "actuate", "required_params": ["pose_name"]}],
         "pending_tasks": []} for jid, row in resources.items()}
+    entries[jids[2]]["static_capabilities"]["reachability"] = ["Exit"]
     for jid, name in zip(jids[:2], names[:2], strict=True):
         entries[jid]["pending_tasks"] = [{"id": jid, "function_name": "place_approach", "params": {
             "part_name": name, "destination_location": "assembly_board-v1"}, "status": "pending"}]
@@ -71,6 +72,103 @@ def test_unexpected_disruption_includes_shared_work_and_retains_alternatives(con
     assert prepared == original
 
 
+@pytest.mark.parametrize('resource_type', ['robot', 'kmr', 'resource'])
+@pytest.mark.parametrize('field', ['reachability', 'reachable_locations'])
+def test_matching_capabilities_include_every_owner_without_retrieval_or_ranking(context, resource_type, field):
+    prepared, session, jids, _ = context
+    entry = prepared['recovery_resources'][jids[2]]
+    entry.update(resource_type=resource_type, static_capabilities={field: ['assembly_board-v1']})
+    original = deepcopy((prepared, session))
+    scope = multi_turn_context.select_outline_context(prepared, session)
+    assert scope['resource_jids'] == sorted(jids)
+    prepared['recovery_resources'] = dict(reversed(list(prepared['recovery_resources'].items())))
+    assert multi_turn_context.select_outline_context(prepared, session) == scope
+    assert not session.get('outline_requested_refs')
+    assert (prepared, session) == original
+
+
+def test_conflicting_locations_remain_visible_and_both_participate_in_selection(context):
+    prepared, session, jids, _ = context
+    entry = prepared['recovery_resources'][jids[2]]
+    entry['recovery_snapshot']['reachability'] = ['assembly_board-v1']
+    scope = multi_turn_context.select_outline_context(prepared, session)
+    assert jids[2] in scope['resource_jids']
+    row = next(row for row in scope['resource_index'] if row['resource_jid'] == jids[2])
+    assert row['conflicts']['reachability'] == {'static_capabilities': ['Exit'], 'recovery_snapshot': ['assembly_board-v1']}
+
+
+def test_automatic_capabilities_are_concise_and_do_not_change_candidate_schema(context):
+    prepared, session, jids, _ = context
+    session.update(validation_contract_version=2, current_phase='outline')
+    before = multi_turn_prompts.multi_turn_phase_response_schema('outline', validation_contract_version=2)
+    payload, prompt = multi_turn._build_phase_prompt(prepared, session)
+    assert prompt.count('Use recorded facts and request missing public context.') == 1
+    section = prompt.split('Resource Capabilities\n\n', 1)[1].split('\n\nPublic state declarations', 1)[0]
+    assert all(section.count(jid) == 1 for jid in jids)
+    assert not payload['outline_served_context'] and not session.get('outline_requested_refs')
+    assert payload['outline_resource_capabilities']
+    assert multi_turn_prompts.multi_turn_phase_response_schema('outline', validation_contract_version=2) == before
+
+
+@pytest.mark.parametrize('change', ['valid', 'label_only', 'wrong_resource', 'wrong_run', 'future_revision', 'location_conflict', 'failed_geometry'])
+def test_historical_capabilities_require_measured_consistent_scoped_records(change):
+    from cais_spade_llm.recovery_framework.recovery_observations import recorded_capability_evidence
+
+    record = {'acknowledgement': {'resource_id': 'KMR', 'task_id': 't', 'run_id': 'capture',
+        'revision': 1, 'event_name': 'move_to_resource', 'status': 'completed'},
+        'after': {'KMR': {'resource_location': 'M2', 'held_part': 'part'}},
+        'observations': {'resource_id': 'KMR', 'task_id': 't', 'status': 'completed', 'observations': {
+            'resource_location': 'M2', 'part_name': 'part', 'scene_fingerprint': 'historical-scene',
+            'primitive_results': [{'resource_id': 'KMR', 'task_id': 't', 'status': 'completed',
+                'result': {'resource_location': 'M2', 'base_pose': [1., 2., 3.]},
+                'observations': [{'operation': 'validated_transport_sweep', 'success': True}]}]}}}
+    source = {'run_id': 'capture', 'context_revision': 2, 'evidence_source': 'gazebo', 'transitions': [record]}
+    if change == 'label_only':
+        record['observations']['observations']['primitive_results'] = []
+    elif change == 'wrong_resource':
+        record['observations']['resource_id'] = 'different'
+    elif change == 'wrong_run':
+        record['acknowledgement']['run_id'] = 'different'
+    elif change == 'future_revision':
+        record['acknowledgement']['revision'] = 3
+    elif change == 'location_conflict':
+        record['after']['KMR']['resource_location'] = 'M1'
+    elif change == 'failed_geometry':
+        record['observations']['observations']['primitive_results'][0]['observations'][0]['success'] = False
+    original = deepcopy(source)
+    result = recorded_capability_evidence(source)['KMR'][0]
+    assert result['recorded_execution'] is (change in {'valid', 'failed_geometry'})
+    assert bool(result['geometric_validation']) is (change == 'valid')
+    assert result['current_proposal_validated'] is False
+    assert result['scope']['scene_fingerprint'] == 'historical-scene'
+    assert result['held_part'] == 'part'
+    assert source == original
+
+
+def test_capability_evidence_retrieval_filters_private_records(context):
+    prepared, session, jids, _ = context
+    prepared['recovery_resources'][jids[0]]['capability_evidence'] = [{
+        'ref': '/transitions/1', 'resource_location': 'M1', 'recorded_execution': True,
+        'private_sequence': 'PRIVATE_CAPABILITY', 'scope': {'part_name': 'gear_small', 'replacement_event': 'PRIVATE_CAPABILITY'},
+        'checks': [{'operation': 'validated_transport_sweep', 'success': True, 'program': 'PRIVATE_CAPABILITY'}],
+        'measurements': [{'base_pose': [1., 2., 3.], 'private_pose': 'PRIVATE_CAPABILITY'}]}]
+    fact = multi_turn_context.resolve_outline_context(prepared, session, f'/resources/{jids[0]}/capability_evidence')
+    assert 'PRIVATE_CAPABILITY' not in str(fact)
+    assert fact['value'][0]['scope']['part_name'] == 'gear_small'
+
+
+@pytest.mark.parametrize('rid', ['M1', 'M2', 'Conveyor', 'Storage', 'Buffer For Machined parts', '3D Printing Station'])
+def test_public_condition_evaluation_support_uses_implemented_declarations_for_every_resource(rid):
+    from cais_spade_llm.resources.environment_recovery import public_evaluation_support
+
+    entry = {'recovery_des_model': {'resource_id': rid, 'state_variables': {'resource_state': {'scope': 'resource'}},
+        'events': [{'program_status': 'implemented', 'updates': {'resource_state': {'set': 'ready'}},
+                    'primitive_support': [{'primitive': 'declared'}]}]}}
+    assert public_evaluation_support(entry) == {'public_conditions': True}
+    entry['recovery_des_model']['events'][0]['program_status'] = 'unimplemented'
+    assert public_evaluation_support(entry) == {}
+
+
 def test_resource_index_retains_recorded_resource_id_without_selecting_it(context):
     prepared, session, jids, names = context
     prepared['observation_jids'] = {'ur5e-4': jids[0], 'ur5e-3': jids[1], 'ur5e-2': jids[2]}
@@ -92,11 +190,13 @@ def test_validated_prompt_keeps_recorded_rejections_and_filters_private_evidence
     session["candidate_rejection_feedback"] = [deepcopy(row)]
     session["outline_validation_findings"] = [deepcopy(row)]
     _, prompt = multi_turn._build_phase_prompt(prepared, session)
-    assert prompt.count(reason) == 1
+    assert reason not in prompt and 'gripper_reach' not in prompt
+    assert prompt.count('The calculated target is outside the recorded owner motion capability.') == 1
     assert "PRIVATE_SEQUENCE_SENTINEL" not in prompt
     session["outline_validation_findings"] = []
     _, after_retrieval = multi_turn._build_phase_prompt(prepared, session)
-    assert reason in after_retrieval
+    assert reason not in after_retrieval
+    assert 'The calculated target is outside the recorded owner motion capability.' in after_retrieval
 
 
 def test_captured_requirements_are_visible_without_a_nominal_route(context):
@@ -113,6 +213,41 @@ def test_captured_requirements_are_visible_without_a_nominal_route(context):
     assert 'PRIVATE_ROUTE' not in prompt and 'route_hints' not in prompt
 
 
+@pytest.mark.parametrize('semantics', ['recorded_unfinished_tasks', None])
+def test_nominal_assignment_explanation_preserves_explicit_goals_and_resource_choices(context, semantics):
+    prepared, session, jids, _ = context
+    session.update(validation_contract_version=2, current_phase='outline',
+                   nominal_continuation_semantics=semantics)
+    before = deepcopy((prepared, session))
+    schema = multi_turn._get_response_schema('outline', session)
+    _, prompt = multi_turn._build_phase_prompt(prepared, session)
+    instruction = "A recorded task's resource assignment is not itself a goal;"
+    assert prompt.count(instruction) == int(semantics == 'recorded_unfinished_tasks')
+    if semantics == 'recorded_unfinished_tasks':
+        explanation = prompt[prompt.index(instruction):].split('\n\n', 1)[0]
+        assert 'accepted matching product-completion evidence' in explanation
+        assert 'Explicit resource goals remain required.' in explanation
+        assert all(jid not in explanation for jid in jids)
+    assert 'Respect recorded resource availability.' in prompt
+    assert schema == multi_turn._get_response_schema('outline', session)
+    assert (prepared, session) == before
+
+
+def test_public_guard_feedback_preserves_values_and_excludes_private_conditions():
+    public = multi_turn_prompts._outline_public_evidence({'capability_result': {
+        'feasibility_status': 'INFEASIBLE', 'guard_failures': [
+            {'resource_id': 'KMR', 'field': 'resource_state', 'operator': 'equals',
+             'expected': 'positioned', 'actual': 'carrying', 'declaration_fingerprint': 'source',
+             'private_program': 'PRIVATE_PROGRAM'},
+            {'resource_id': 'KMR', 'field': 'task_ctx.private', 'operator': 'equals',
+             'expected': 'PRIVATE_CONDITION', 'actual': None, 'declaration_fingerprint': 'source'}]}},
+        {'resource_state'})
+    assert public['capability_result']['guard_failures'] == [{'resource_id': 'KMR',
+        'field': 'resource_state', 'operator': 'equals', 'expected': 'positioned',
+        'actual': 'carrying', 'declaration_fingerprint': 'source'}]
+    assert 'PRIVATE_' not in str(public)
+
+
 def test_validated_renderer_retains_discovery_without_unrelated_detailed_states(context):
     prepared, session, jids, names = context
     session.update(validation_contract_version=2, current_phase="outline")
@@ -127,6 +262,44 @@ def test_validated_renderer_retains_discovery_without_unrelated_detailed_states(
     assert fact["value"]["current_pose"] == {"x": 2, "y": 0, "z": 1}
 
 
+def test_condition_pairs_keep_whole_public_counterexamples_without_private_fields():
+    public_pair = [{'field': 'held_part', 'actual': 'gear_small'}, {'field': 'resource_state', 'actual': 'idle'}]
+    evidence = {'condition_support': {
+        'conditions': [{**row, 'supported': True} for row in public_pair],
+        'combination_supported': False,
+        'unsupported_combinations': [
+            [{**row, 'private_program': 'PRIVATE_PROGRAM'} for row in public_pair],
+            [public_pair[0], {'field': 'task_ctx.part_name', 'actual': 'PRIVATE_VALUE'}]],
+        'source': {'descriptor_fingerprint': 'recorded-descriptor'}}}
+    before = deepcopy(evidence)
+    rendered = multi_turn_prompts._outline_public_evidence(evidence, {'held_part', 'resource_state'})
+    assert rendered['condition_support']['unsupported_combinations'] == [public_pair]
+    assert 'PRIVATE_' not in json.dumps(rendered)
+    assert evidence == before
+
+
+def test_validated_prompt_keeps_recent_rejections_after_acceptance_clears_current_feedback(context):
+    prepared, session, jids, _ = context
+    session.update(validation_contract_version=2, current_phase="outline", candidate_rejection_feedback=[],
+        outline_validation_findings=[])
+    session['turns'] = [{'phase': 'outline', 'turn_index': index, 'decision': 'need_revision',
+        'next_transition': {'outline_id': f'rejected_{index}', 'resource_jid': jids[0],
+            'event_name': 'proposed_event', 'expected_end_state': {'resource_state': 'idle'},
+            'private_program': 'PRIVATE_PROGRAM'},
+        'validation_findings': [{'resource_jid': jids[0], 'constraint_code': 'unsupported_successor_condition',
+            'reason': 'PRIVATE_VALIDATOR_PROSE', 'expected_end_state': {'resource_state': 'idle'}}]}
+        for index in (1, 2, 3)]
+    before = deepcopy((prepared, session))
+    _, prompt = multi_turn._build_phase_prompt(prepared, session)
+    history = prompt.split('Recent rejected proposals (checked in their recorded starting states)\n\n', 1)[1]
+    assert 'rejected_1' not in history and 'rejected_2' in history and 'rejected_3' in history
+    assert 'PRIVATE_' not in prompt
+    assert (prepared, session) == before
+    session['candidate_rejection_feedback'] = deepcopy(session['turns'][-1]['validation_findings'])
+    _, current = multi_turn._build_phase_prompt(prepared, session)
+    assert 'Recent rejected proposals (checked in their recorded starting states)' not in current
+
+
 def test_initial_declarations_omit_repeated_provenance_without_losing_fields(context):
     prepared, session, jids, _ = context
     session.update(validation_contract_version=2, current_phase="outline")
@@ -137,11 +310,34 @@ def test_initial_declarations_omit_repeated_provenance_without_losing_fields(con
     prompt = multi_turn_prompts._render_validated_event_prompt(payload, session)
     rendered = json.loads(prompt.split("Public state declarations\n\n", 1)[1].split("\n\nSafety Rules", 1)[0])
     assert set(rendered[jids[0]]) == set(fact["value"])
-    assert rendered[jids[0]]["resource_state"] == {"type": "string", "scope": "resource"}
-    assert "domain" not in rendered[jids[0]]["resource_state"]
+    assert rendered[jids[0]]["resource_state"] == {
+        "type": "string", "scope": "resource", "domain": ["idle", "failed"]}
+    assert "domain_complete" not in rendered[jids[0]]["resource_state"]
     assert multi_turn_context.resolve_outline_context(prepared, session, f"/resources/{jids[0]}/state_variables") == fact
     assert "revision" not in rendered[jids[0]]
     assert fact == original
+
+
+@pytest.mark.parametrize("resource_type", ["robot", "machine", "conveyor"])
+@pytest.mark.parametrize("domain_complete", [False, True])
+def test_recorded_domains_remain_facts_without_restricting_candidate_schema(context, resource_type, domain_complete):
+    prepared, session, jids, _ = context
+    session.update(validation_contract_version=2, current_phase="outline")
+    entry = prepared["recovery_resources"][jids[0]]
+    entry["resource_type"] = resource_type
+    declaration = entry["recovery_des_model"]["state_variables"]["resource_state"]
+    declaration["domain_complete"] = domain_complete
+    entry["recovery_des_model"]["state_variables"]["task_ctx.part_name"]["domain"] = ["PRIVATE_VALUE"]
+    session["recovery_des_models"][jids[0]] = deepcopy(entry["recovery_des_model"])
+    before = deepcopy((prepared, session))
+    schema = multi_turn._get_response_schema("outline", session)
+    _, prompt = multi_turn._build_phase_prompt(prepared, session)
+    rendered = json.loads(prompt.split("Public state declarations\n\n", 1)[1].split("\n\nSafety Rules", 1)[0])
+    assert rendered[jids[0]]["resource_state"]["domain"] == declaration["domain"]
+    assert rendered[jids[0]]["resource_state"]["domain_complete"] is domain_complete
+    assert "PRIVATE_VALUE" not in prompt
+    assert schema == multi_turn._get_response_schema("outline", session)
+    assert (prepared, session) == before
 
 
 def test_validated_prompt_uses_one_index_and_retrieval_list_and_serves_details_once(context):
@@ -158,7 +354,8 @@ def test_validated_prompt_uses_one_index_and_retrieval_list_and_serves_details_o
     payload, initial = multi_turn._build_phase_prompt(prepared, session)
     schema = multi_turn._get_response_schema("outline", session)
     assert initial.count("Resource Capabilities") == 1
-    assert initial.count("resource_jid | resource_type") == 1
+    index = initial.split('Resource Capabilities\n\n', 1)[1].split('\n\nPublic state declarations', 1)[0]
+    assert all(index.count(jid) == 1 for jid in jids)
     assert initial.count("Context retrieval") == 1
     assert initial.count("expected_end_state may contain only the intended conditions") == 1
     assert "currently processing job" in initial
@@ -190,6 +387,7 @@ def test_recorded_processing_summary_moves_to_retrieved_record_without_repetitio
     before = deepcopy(prepared)
     _, initial = multi_turn._build_phase_prompt(prepared, session)
     assert initial.count('"processing_fraction": 0.125') == 1
+    assert initial.count('These are capture-time job records; use Current resource states after accepted events.') == 1
     ref = f"/resources/{jids[0]}/static_capabilities"
     session["outline_requested_refs"] = [ref]
     payload, retrieved = multi_turn._build_phase_prompt(prepared, session)
@@ -299,6 +497,25 @@ def test_explicit_unfinished_task_dependencies_are_selected(context):
     scope = multi_turn_context.select_outline_context(prepared, session)
     assert jids[2] in scope["resource_jids"]
     assert names[2] in scope["part_names"]
+
+
+@pytest.mark.parametrize("field", ["source_resource", "target_resource"])
+def test_unfinished_transport_at_affected_part_location_is_selected(context, field):
+    prepared, session, jids, names = context
+    for row in (prepared["llm_input"]["part_facts"][0], prepared["part_tracker"][names[0]],
+                session["symbolic_parts"][names[0]]):
+        row["part_location"] = "M2"
+    prepared["recovery_resources"][jids[2]]["pending_tasks"] = [{
+        "id": "environment_22", "function_name": "move_to_resource", "status": "pending",
+        "params": {field: "M2", "resource_id": "KMR"}, "predecessors": [], "successors": [],
+    }]
+    original = deepcopy((prepared, session))
+    scope = multi_turn_context.select_outline_context(prepared, session)
+    assert jids[2] in scope["resource_jids"]
+    assert "pending_tasks" in scope["inclusion_reasons"][f"/resources/{jids[2]}"]
+    assert (prepared, session) == original
+    prepared["recovery_resources"][jids[2]]["pending_tasks"][0]["params"][field] = "Exit"
+    assert jids[2] not in multi_turn_context.select_outline_context(prepared, session)["resource_jids"]
 
 
 @pytest.mark.parametrize("ref", ["/evaluator_data", "/recovery_des_models", "/resources/recovery-resource-4@localhost/task_ctx.part_name",
@@ -436,7 +653,7 @@ def test_prompt_retains_all_retrieved_facts_but_displays_repeated_pose_once(cont
     assert "Shared source metadata:" in prompt
     assert payload["outline_served_context"][refs[0]]["value"] == session["symbolic_resources"][jids[0]]["current_pose"]
     assert jids[2] in prompt and names[2] not in prompt
-    assert prompt.count("resource_jid | resource_type") == 1
+    assert prompt.count('"resource_type": "robot"') == len(jids)
 
 
 def test_no_progress_feedback_does_not_instruct_larger_claimed_effects(context):
@@ -1212,13 +1429,13 @@ def test_public_capabilities_keep_recorded_limits_sources_empty_values_and_confl
     values = fact["value"]
     assert values["reachability"] == []
     assert values["reachable_locations"] == ["assembly_board-v1"]
-    assert values["field_sources"]["gripper_reach"] == ["recovery_snapshot"]
+    assert "gripper_reach" not in json.dumps(values)
     assert values["staging_areas"] == entry["static_capabilities"]["staging_areas"]
     assert fact["captured_at"] == prepared["source_observation_captured_at"]
     assert "capabilities" not in values
     index = next(row for row in multi_turn_context.resource_index(prepared) if row["resource_jid"] == jids[2])
     assert "gripper_reach" not in index and "staging_areas" not in index
-    assert index["available_capability_fields"] == ["gripper_reach", "staging_areas"]
+    assert index["available_capability_fields"] == ["staging_areas"]
     assert index["reachability"] == []
     assert prepared == before
     entry["recovery_adapter"] = {"reachable_locations": ["Exit"]}
@@ -1228,7 +1445,7 @@ def test_public_capabilities_keep_recorded_limits_sources_empty_values_and_confl
         "recovery_adapter": ["Exit"], "recovery_snapshot": ["assembly_board-v1"],
     }
     index = next(row for row in multi_turn_context.resource_index(prepared) if row["resource_jid"] == jids[2])
-    assert "reachable_locations" not in index and index["conflicts"] == ["reachable_locations"]
+    assert "reachable_locations" not in index and index["conflicts"] == conflict["conflicts"]
 
 
 def test_outline_feedback_preserves_public_reach_facts_without_execution_internals(context):
@@ -1253,7 +1470,7 @@ def test_outline_feedback_preserves_public_reach_facts_without_execution_interna
     assert "LLM_AUTHORED_EVENT" in prompt and '"candidate_source": "robot_task_program"' in prompt
     assert '"resource_state": "positioned"' in prompt
     assert multi_turn_prompts._inline_json(pose) in prompt
-    assert multi_turn_prompts._inline_json(reach) in prompt
+    assert "gripper_reach" not in prompt and "max_xy_radius_m" not in prompt
     assert "workspace_unreachable" in prompt and "saved_observations" in prompt
     assert session["outline_validation_findings"] == before["outline_validation_findings"]
     assert session["accepted_outline_prefix"] == before["accepted_outline_prefix"]
@@ -1294,8 +1511,8 @@ def test_outline_feedback_rejects_opaque_evidence_and_retains_typed_public_facts
     prompt = multi_turn._build_phase_prompt(prepared, session)[1]
     assert canary not in prompt
     assert "expected_carried_part_location" in prompt and jids[0] in prompt
-    assert "recovery_snapshot.gripper_reach" in prompt and '"max_xy_radius_m": 0.85' in prompt
-    assert '"available": false' in prompt
+    assert "gripper_reach" not in prompt and "max_xy_radius_m" not in prompt
+    assert '"available": false' not in prompt
     assert '"actual": null' in prompt and '"expected": "gear_small"' in prompt
     assert session["outline_validation_findings"] == before["outline_validation_findings"]
     assert session["primitive_escalation_diagnostics"] == before["primitive_escalation_diagnostics"]

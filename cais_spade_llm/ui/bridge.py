@@ -39164,12 +39164,42 @@ class SystemBridge:
         return example_for_bridge(self).start()
 
     def set_failure_example_options(self, *, source: str, scenario: str,
-                                    safety_files: list[str], observation_path: str = "") -> dict[str, Any]:
-        """Select example inputs while preserving runtime ownership."""
+                                    safety_files: list[str], observation_path: str = "",
+                                    check_ra_feasibility: bool = True, check_physical_evidence: bool = True,
+                                    check_cca_safety: bool = True, defer_preparation: bool = False) -> dict[str, Any]:
+        """Select saved inputs and the checks for the next outline attempt.
+
+        Args:
+            source: Existing Gazebo or Offline source selection.
+            scenario: Exact failure scenario.
+            safety_files: Selected specification paths.
+            observation_path: Original saved failure input.
+            check_ra_feasibility: Run ResourceAgent feasibility validation.
+            check_physical_evidence: Run physical evidence calculations.
+            check_cca_safety: Run the selected CCA safety checks.
+            defer_preparation: Store preferences without loading or preparing the capture.
+
+        Returns:
+            The bridge-owned workflow state. Legacy callers retain full validation.
+        """
         from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
 
         return example_for_bridge(self).set_options(source=source, scenario=scenario,
-                                                    safety_files=safety_files, observation_path=observation_path)
+            safety_files=safety_files, observation_path=observation_path,
+            check_ra_feasibility=check_ra_feasibility, check_physical_evidence=check_physical_evidence,
+            check_cca_safety=check_cca_safety, defer_preparation=defer_preparation)
+
+    def get_default_recovery_observations(self) -> dict[str, str]:
+        """Return the four retained failure inputs available for fresh attempts."""
+        from cais_spade_llm.recovery_framework.part_slippage_example import default_observation_paths
+
+        return default_observation_paths()
+
+    def get_worked_recovery_version(self) -> dict[str, Any]:
+        """Read the separate worked Part slippage archive without preparing a run."""
+        from cais_spade_llm.recovery_framework.worked_version import read_worked_version
+
+        return read_worked_version()
 
     async def start_failure_example(self) -> dict[str, Any]:
         """Start the selected simulation failure through the existing coordinator."""

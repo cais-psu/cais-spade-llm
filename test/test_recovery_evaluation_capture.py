@@ -3,8 +3,11 @@ from __future__ import annotations
 """Capture-only isolation and factual readiness for the four existing failures."""
 
 import asyncio
+import ast
+import hashlib
 import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -76,6 +79,95 @@ def test_checkpoint_waits_for_observed_stop_after_cancellation_acknowledgement(t
     assert reader.snapshot.call_count == 2
     assert result["native_observation"] == stopped
     assert "last_observation_error" not in result
+
+
+def test_checkpoint_records_fixed_root_description_and_unmodified_native_motion(tmp_path):
+    from cais_spade_llm.recovery_framework.recovery_observations import _cancel_checkpoint_motion
+
+    runtime, reader, _, machine_worker, _ = checkpoint_motion_fixture()
+    declaration = runtime.context.inputs["scene"]["safety_preparation"]["resources"]["ur5e-2"]
+    declaration.update(description_node="/robot_state_publisher", stationary_linear_speed_max=.001,
+                       stationary_angular_speed_max=.001)
+    description = ('<robot name="fixture"><link name="world"/><link name="ur5e_2_base_link"/>'
+                   '<joint name="fixture_mount" type="fixed"><parent link="world"/>'
+                   '<child link="ur5e_2_base_link"/></joint></robot>')
+    reader.parameter = Mock(return_value=description)
+    native = reader.snapshot.return_value
+    root = native["models"]["dual_robot"]["links"]["ur5e_2_base_link"]
+    # These fixed-root magnitudes reproduce the rejected Gazebo checkpoint.
+    root.update(linear_velocity=[-5.83e-8, -1.04e-7, -3.0827e-6],
+                angular_velocity=[.00037117, .00092689, -1.527e-6])
+    before = deepcopy(native)
+    result = asyncio.run(_cancel_checkpoint_motion(runtime, reader, tmp_path))
+    assert result["status"] == "observed_stopped"
+    assert result["native_observation"] == native == before
+    assert result["robot_descriptions"] == {"/robot_state_publisher": description}
+    assert result["resources"]["ur5e-2"]["root_motion"] == {
+        "root_link": "ur5e_2_base_link", "fixed_to_world": True,
+        "linear_speed_max": .001, "angular_speed_max": .001,
+        "description_sha256": hashlib.sha256(description.encode()).hexdigest(),
+        "description_node": "/robot_state_publisher"}
+    reader.parameter.assert_called_once_with("/robot_state_publisher", "robot_description")
+    machine_worker.cancel.assert_not_called()
+    machine_worker.machine_control.assert_not_called()
+    reader.set_world_paused.assert_not_called()
+
+
+@pytest.mark.parametrize("velocity", [[.0008, .0008, 0.], [.002, 0., 0.],
+                                     [float("nan"), 0., 0.], [False, 0., 0.]])
+def test_checkpoint_fixed_root_still_requires_declared_speed_bound(tmp_path, velocity):
+    from cais_spade_llm.recovery_framework.recovery_observations import _cancel_checkpoint_motion
+
+    runtime, reader, *_ = checkpoint_motion_fixture()
+    configuration = runtime.context.inputs["scene"]["safety_preparation"]
+    configuration["outline_preview"]["timeout_seconds"] = 0.
+    configuration["resources"]["ur5e-2"].update(description_node="/robot_state_publisher",
+        stationary_linear_speed_max=.001, stationary_angular_speed_max=.001)
+    reader.parameter = Mock(return_value=(
+        '<robot name="fixture"><link name="world"/><link name="ur5e_2_base_link"/>'
+        '<joint name="fixture_mount" type="fixed"><parent link="world"/>'
+        '<child link="ur5e_2_base_link"/></joint></robot>'))
+    reader.snapshot.return_value["models"]["dual_robot"]["links"]["ur5e_2_base_link"][
+        "angular_velocity"] = velocity
+    with pytest.raises(ValueError, match="Handling root has not stopped: ur5e-2/angular_velocity"):
+        asyncio.run(_cancel_checkpoint_motion(runtime, reader, tmp_path))
+    assert json.loads((tmp_path / "checkpoint_motion_cancellation.json").read_text())["status"] == "failed"
+
+
+def test_checkpoint_uses_mobile_physics_description_instead_of_planning_mount(tmp_path):
+    from cais_spade_llm.recovery_framework.recovery_observations import _cancel_checkpoint_motion
+
+    runtime, reader, *_ = checkpoint_motion_fixture()
+    configuration = runtime.context.inputs["scene"]["safety_preparation"]
+    configuration["outline_preview"]["timeout_seconds"] = 0.
+    configuration["resources"]["KMR"].update(description_node="/planning_description",
+        physics_description_node="/KMR/robot_state_publisher",
+        stationary_linear_speed_max=.001, stationary_angular_speed_max=.001)
+    reader.parameter = Mock(return_value='<robot name="fixture"><link name="KMR_base_link"/></robot>')
+    reader.snapshot.return_value["models"]["KMR"]["links"]["KMR_base_link"]["linear_velocity"][0] = 1e-9
+    with pytest.raises(ValueError, match="Handling root has not stopped: KMR/linear_velocity"):
+        asyncio.run(_cancel_checkpoint_motion(runtime, reader, tmp_path))
+    reader.parameter.assert_called_once_with("/KMR/robot_state_publisher", "robot_description")
+    result = json.loads((tmp_path / "checkpoint_motion_cancellation.json").read_text())
+    assert result["resources"]["KMR"]["root_motion"]["linear_speed_max"] == 0.
+    assert result["resources"]["KMR"]["root_motion"]["fixed_to_world"] is False
+
+
+@pytest.mark.parametrize("description", [
+    '<robot',
+    '<robot><link name="root"/><link name="root"/></robot>',
+    '<robot><link name="root"/><joint type="fixed"><parent link="world"/><child link="root"/></joint></robot>',
+    '<robot><link name="root"/><joint type="fixed"><parent link="root"/><child link="root"/></joint></robot>',
+    '<robot><link name="root"/><link name="world"/>'
+    '<joint type="fixed"><parent link="world"/><child link="root"/></joint>'
+    '<joint type="fixed"><parent link="world"/><child link="root"/></joint></robot>',
+])
+def test_checkpoint_fixed_root_requires_unambiguous_complete_description(description):
+    from cais_spade_llm.recovery_framework.recovery_observations import _checkpoint_root_motion
+
+    with pytest.raises(ValueError):
+        _checkpoint_root_motion({"root_link": "root", "stationary_linear_speed_max": .001,
+                                 "stationary_angular_speed_max": .001}, description)
 
 
 @pytest.mark.parametrize("defect", ["moving", "missing_velocity", "bool_velocity", "frozen", "active_goal"])
@@ -191,7 +283,8 @@ def test_machine_capture_freezes_after_handling_stop_and_retains_both_times(tmp_
 
 
 @pytest.mark.parametrize('scenario', list(capture.CHECKPOINTS))
-def test_capture_verification_requires_exact_reconciled_checkpoint(scenario):
+def test_capture_verification_requires_exact_reconciled_checkpoint(scenario, monkeypatch):
+    monkeypatch.setattr(capture, '_verify_robot_breakdown_capture', Mock())
     row = {'scenario': scenario, 'run_id': 'owned-run', 'part_tracker': {'recorded-part': {}},
            'setup': {'execution_mode': 'simulation', 'failure_scenario': {
                'scenario': scenario, 'checkpoint': capture.CHECKPOINTS[scenario], 'resource_id': 'recorded-owner'}},
@@ -210,6 +303,180 @@ def test_capture_verification_requires_exact_reconciled_checkpoint(scenario):
             capture.verify_capture(changed, scenario)
 
 
+def _robot_breakdown_capture_record():
+    part = 'KET4_Square_4mm'
+    records = {}
+    for rid, name in (('M1', 'machine_part'), ('ur5e-1', 'pick_approach')):
+        records[name] = {'acknowledgement': {'resource_id': rid, 'event_name': name,
+            'run_id': 'owned-run', 'task_id': name, 'evidence': 'resource',
+            'parameters': {'part_name': part, 'origin_resource_location': 'M1'}},
+            'before': {'M1': {'resource_state': 'completed', 'part_name': part}},
+            'observations': {'controller_result': {'status': 'completed'}}}
+    row = {'scenario': 'ur5e-1 breakdown', 'run_id': 'owned-run', 'context_revision': 3,
+        'setup': {'execution_mode': 'simulation', 'failure_scenario': {
+            'scenario': 'ur5e-1 breakdown', 'checkpoint': 'after_M1_processing_before_pick',
+            'resource_id': 'ur5e-1'}},
+        'failure': {'checkpoint': 'after_M1_processing_before_pick', 'run_id': 'owned-run',
+            'injection_status': 'completed', 'part_name': part, **deepcopy(records),
+            'resource_values_before': {'ur5e-1': {'resource_state': 'at_pick', 'held_part': None}}},
+        'part_tracker': {part: {'location': 'M1'}},
+        'resource_states': {'M1': {'resource_state': 'completed', 'part_name': part},
+                            'ur5e-1': {'resource_state': 'failed', 'held_part': None}},
+        'transitions': list(records.values()), 'unavailable_resources': [], 'pending_nodes': [],
+        'physical_evidence': {'snapshot': {'resources': {'ur5e-1': {'held_part': None}}},
+            'resources': {'ur5e-1': {'custody_complete': True}}, 'geometry': {}, 'resource_models': {},
+            'physics_evidence': {'instance_id': 'world', 'simulation_time': 84., 'world_paused': True}},
+        'capture_checkpoint': {'instance_id': 'world', 'simulation_time': 84., 'world_paused': True,
+                               'native_observations_unchanged': True}}
+    return row
+
+
+@pytest.mark.parametrize('defect', [None, 'state', 'custody', 'physical_custody', 'location', 'origin',
+    'run', 'observations', 'source_record', 'unavailable', 'frozen', 'time', 'mutation', 'occupancy'])
+def test_robot_capture_requires_failed_M1_approach_and_frozen_occupancy(monkeypatch, defect):
+    from cais_spade_llm.recovery_framework.recovery_observations import checkpoint_fact_fingerprint
+    from cais_spade_llm.resources import recovery_geometry
+
+    row = _robot_breakdown_capture_record()
+    approach = row['failure']['pick_approach']
+    if defect == 'state':
+        row['resource_states']['ur5e-1']['resource_state'] = 'idle'
+    elif defect == 'custody':
+        row['resource_states']['ur5e-1']['held_part'] = 'KET4_Square_4mm'
+    elif defect == 'physical_custody':
+        row['physical_evidence']['resources']['ur5e-1']['custody_complete'] = False
+    elif defect == 'location':
+        row['part_tracker']['KET4_Square_4mm']['location'] = 'ur5e-1'
+    elif defect == 'origin':
+        approach['acknowledgement']['parameters']['origin_resource_location'] = 'Storage'
+    elif defect == 'run':
+        approach['acknowledgement']['run_id'] = 'previous-run'
+    elif defect == 'observations':
+        approach['observations'] = {}
+    elif defect == 'source_record':
+        row['transitions'] = []
+    elif defect == 'unavailable':
+        row['unavailable_resources'] = ['ur5e-1']
+    elif defect == 'frozen':
+        row['physical_evidence']['physics_evidence']['world_paused'] = False
+    elif defect == 'time':
+        row['physical_evidence']['physics_evidence']['simulation_time'] = 85.
+    row['capture_checkpoint']['facts_fingerprint'] = checkpoint_fact_fingerprint(row)
+    if defect == 'mutation':
+        row['physical_evidence']['snapshot']['changed'] = True
+    monkeypatch.setattr(recovery_geometry, '_checkpoint', lambda *_args, **_kwargs: {
+        'region_occupancy': {'M1.front_access': {'ur5e-1': defect != 'occupancy'}}})
+    if defect is None:
+        assert capture.verify_capture(row, 'ur5e-1 breakdown')['part_name'] == 'KET4_Square_4mm'
+    else:
+        with pytest.raises(ValueError):
+            capture.verify_capture(row, 'ur5e-1 breakdown')
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_robot_capture_freezes_after_observed_stop_and_rejects_changed_native_facts(tmp_path, monkeypatch, changed):
+    from cais_spade_llm.recovery_framework import recovery_observations
+
+    sequence = []
+    native = {'instance_id': 'world', 'simulation_time': 84., 'world_paused': True,
+              'models': {}, 'observed_monotonic': 1.}
+    after = {**deepcopy(native), 'observed_monotonic': 2.}
+    if changed:
+        after['simulation_time'] = 85.
+    reader = SimpleNamespace(set_world_paused=Mock(side_effect=lambda _paused: sequence.append('freeze') or native),
+                             snapshot=Mock(return_value=after))
+    runtime = SimpleNamespace(stopped=True, nominal_idle=SimpleNamespace(is_set=lambda: True),
+        context=SimpleNamespace(revision=3, run_id='owned-run'),
+        recovery_observation_preparation=SimpleNamespace(reader=reader),
+        part_slippage_recovery=SimpleNamespace(_failure={'part_name': 'KET4_Square_4mm'}))
+
+    async def cancel(_runtime, _reader, _directory):
+        assert _runtime.recovery_checkpoint_capturing is True
+        sequence.append('observed_stop')
+        return {'status': 'observed_stopped'}
+
+    def observe(_runtime, _failure):
+        assert _runtime.recovery_capture_frozen is True
+        sequence.append('observe')
+        return _robot_breakdown_capture_record()
+
+    monkeypatch.setattr(recovery_observations, '_cancel_checkpoint_motion', cancel)
+    monkeypatch.setattr(recovery_observations, 'capture_observations', observe)
+    monkeypatch.setattr(capture, 'stationary_readiness', lambda _row: {'ready': True})
+    original = {'pending_nodes': [{'id': 'unfinished'}], 'additional_observations': {}}
+    if changed:
+        with pytest.raises(ValueError, match='physical checkpoint changed'):
+            asyncio.run(capture._freeze_robot_capture(runtime, original, tmp_path))
+    else:
+        result = asyncio.run(capture._freeze_robot_capture(runtime, original, tmp_path))
+        assert result['pending_nodes'] == original['pending_nodes']
+        assert result['capture_checkpoint']['world_paused'] is True
+        assert result['checkpoint_motion_cancellation']['status'] == 'observed_stopped'
+    assert sequence == ['observed_stop', 'freeze', 'observe']
+    assert runtime.recovery_checkpoint_capturing is False
+
+
+def test_robot_capture_keeps_processing_acknowledgement_separate_from_machine_job_records(monkeypatch):
+    from cais_spade_llm.recovery_framework import recovery_observations
+
+    context = SimpleNamespace(run_id='owned-run', revision=3, inputs={}, part_tracker={},
+        initial_product_states={}, resources={'ur5e-1': SimpleNamespace(valuation={'resource_state': 'failed'})})
+    runtime = SimpleNamespace(context=context, jids={'ur5e-1': 'ur5e-1@localhost'},
+        setup={'failure_scenario': {'scenario': 'ur5e-1 breakdown', 'resource_id': 'ur5e-1'}})
+    failure = {'processing_observations': {'controller_result': {'process_completed': True}},
+               'pick_approach': {'observations': {'controller_result': {'status': 'completed'}}}}
+    monkeypatch.setattr(recovery_observations, 'capture_recovery_physical_evidence', lambda _runtime: {})
+    monkeypatch.setattr(recovery_observations, 'capture_resource_evidence', lambda *_args: {})
+    result = recovery_observations.capture_observations(runtime, failure)
+    assert result['failure'] == failure
+    assert 'processing_observations' not in result
+    assert result['resource_states']['ur5e-1']['resource_state'] == 'failed'
+
+
+def test_robot_capture_wall_budget_override_is_private_and_preserves_other_scenarios(tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import evaluation_conditions
+
+    original = {'KMR': {'arm_controller': '/KMR/arm'}, 'machines': []}
+    source = tmp_path / 'scene.json'
+    source.write_text(json.dumps(original))
+    monkeypatch.setattr(evaluation_conditions, 'ROOT', tmp_path)
+    setup = {'scene_file': 'scene.json', 'simulation': {'speed': 1}}
+    result = evaluation_conditions.condition_setup(setup, 'ur5e-1 breakdown', 'normal', tmp_path)
+    scene = json.loads(Path(result['scene_file']).read_text())
+    assert scene['KMR']['arm_motion_wall_timeout_sec'] == 360.
+    assert json.loads(source.read_text()) == original
+    assert setup == {'scene_file': 'scene.json', 'simulation': {'speed': 1}}
+    assert evaluation_conditions.condition_setup(setup, 'Conveyor breakdown', 'normal', tmp_path) == setup
+    assert evaluation_conditions.condition_setup(setup, 'Machining breakdown during part processing', 'normal', tmp_path) == setup
+
+
+@pytest.mark.parametrize('timeout', [None, 360., 0., float('nan')])
+def test_kmr_arm_wall_budget_preserves_the_trajectory_and_requires_positive_finite_values(timeout):
+    import math
+    from cais_spade_llm.recovery_framework import kmr_gazebo
+
+    tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
+    function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'execute')
+    configuration = {'arm_controller': '/KMR/arm'}
+    if timeout is not None:
+        configuration['arm_motion_wall_timeout_sec'] = timeout
+    action = Mock()
+    namespace = {'kmr': configuration, 'math': math, 'action': action,
+                 'FollowJointTrajectory': SimpleNamespace(Goal=lambda: SimpleNamespace())}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), kmr_gazebo.__file__, 'exec'), namespace)
+    trajectory = SimpleNamespace(joint_trajectory=SimpleNamespace(points=[object()]))
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        with pytest.raises(ValueError, match='finite and positive'):
+            namespace['execute'](trajectory)
+        action.assert_not_called()
+    else:
+        namespace['execute'](trajectory)
+        args, kwargs = action.call_args
+        assert args[1] == '/KMR/arm/follow_joint_trajectory'
+        assert args[2].trajectory is trajectory.joint_trajectory
+        assert kwargs['timeout'] == (120. if timeout is None else timeout)
+
+
 def test_stationary_readiness_does_not_ignore_unresolved_child_evidence():
     row = {'jids': {'ur5e-3': 'owner@localhost'}, 'captured_at': 'recorded', 'context_revision': 4,
            'physical_evidence': {'snapshot': {'resources': {'ur5e-3': {'held_part': None}},
@@ -223,6 +490,59 @@ def test_stationary_readiness_does_not_ignore_unresolved_child_evidence():
     row['physical_evidence']['stationary_part_evidence']['gear_small']['status'] = 'supported'
     row['physical_evidence']['stationary_parts'] = ['gear_small']
     assert capture.stationary_readiness(row)['ready']
+
+
+def _conveyor_capture_record():
+    parts = {'KET4_Square_4mm': 'ur5e-1', 'gear_small': 'ur5e-4'}
+    pickups = {}
+    for part, rid in parts.items():
+        origin = 'M1' if rid == 'ur5e-1' else '3D Printing Station'
+        pickups[rid] = {'acknowledgement': {'run_id': 'owned-run', 'resource_id': rid,
+            'event_name': 'pick_grasp', 'evidence': 'resource',
+            'parameters': {'part_name': part, 'origin_resource_location': origin}},
+            'before': {origin: {'resource_state': 'completed', 'part_name': part}},
+            'observations': {'controller_result': {'status': 'completed'}}}
+    return {'scenario': 'Conveyor breakdown', 'run_id': 'owned-run',
+        'setup': {'execution_mode': 'simulation', 'failure_scenario': {
+            'scenario': 'Conveyor breakdown', 'resource_id': 'Conveyor',
+            'checkpoint': 'after_M1_pick_before_release', 'part_name': 'KET4_Square_4mm',
+            'additional_condition': {'resource_id': 'ur5e-4', 'part_name': 'gear_small'}}},
+        'failure': {'checkpoint': 'after_M1_pick_before_release', 'run_id': 'owned-run',
+            'part_name': 'KET4_Square_4mm', 'injection_status': 'completed', 'pickups': pickups},
+        'resource_states': {rid: {'held_part': part} for part, rid in parts.items()},
+        'part_tracker': {part: {'location': rid, 'processCompleted': []} for part, rid in parts.items()},
+        'unavailable_resources': ['Conveyor'],
+        'inputs': {'scene': {'Conveyor': {'transport_enabled': False}}},
+        'physical_evidence': {'snapshot': {}, 'geometry': {}, 'resource_models': {}}}
+
+
+@pytest.mark.parametrize('defect', [None, 'custody', 'origin', 'run', 'completed', 'available', 'transport', 'assembly', 'inside'])
+def test_conveyor_capture_requires_both_pickups_unfinished_assembly_and_clear_printed_part(monkeypatch, defect):
+    from cais_spade_llm.resources import recovery_geometry
+
+    row = _conveyor_capture_record()
+    peer = row['failure']['pickups']['ur5e-4']['acknowledgement']
+    if defect == 'custody':
+        row['resource_states']['ur5e-4']['held_part'] = None
+    elif defect == 'origin':
+        peer['parameters']['origin_resource_location'] = 'Buffer For Machined parts'
+    elif defect == 'run':
+        peer['run_id'] = 'another-run'
+    elif defect == 'completed':
+        row['failure']['pickups']['ur5e-1']['before']['M1']['resource_state'] = 'processing'
+    elif defect == 'available':
+        row['unavailable_resources'] = []
+    elif defect == 'transport':
+        row['inputs']['scene']['Conveyor']['transport_enabled'] = True
+    elif defect == 'assembly':
+        row['part_tracker']['gear_small']['processCompleted'] = [{'process': 'assembly'}]
+    observed = {'part_region_occupancy': {'assembly_board-v1': {'gear_small': defect == 'inside'}}}
+    monkeypatch.setattr(recovery_geometry, '_checkpoint', lambda *_args, **_kwargs: observed)
+    if defect is None:
+        assert capture.verify_capture(row, 'Conveyor breakdown')['part_name'] == 'KET4_Square_4mm'
+    else:
+        with pytest.raises(ValueError, match='Conveyor capture'):
+            capture.verify_capture(row, 'Conveyor breakdown')
 
 
 def test_stationary_readiness_requires_complete_joint_and_custody_observations():
@@ -494,7 +814,7 @@ def test_capture_publishes_the_scene_from_its_checkpoint(tmp_path, monkeypatch, 
     import cais_spade_llm.ui_main
     from cais_spade_llm.ui import bridge as bridge_module
     from cais_spade_llm.recovery_framework import (
-        evaluation_conditions, outline_gazebo_evidence, part_slippage_example,
+        environment_runtime, evaluation_conditions, outline_gazebo_evidence, part_slippage_example,
         recovery_motion_preview, recovery_observations,
     )
 
@@ -516,7 +836,17 @@ def test_capture_publishes_the_scene_from_its_checkpoint(tmp_path, monkeypatch, 
     async def run_owned(awaitable):
         return await awaitable
 
-    bridge = SimpleNamespace(set_part_slippage_modes=Mock(), start_failure_example=AsyncMock(),
+    shared = tmp_path / 'shared_environment_runs'
+    monkeypatch.setattr(environment_runtime, 'RUN_DIRECTORY', shared)
+    previous = environment_runtime.LatestReport(shared, 'machine-run')
+    previous.save({'retained': True})
+    previous_sha256 = capture.sha256_file(shared / 'latest/run.json')
+
+    async def start_failure():
+        report = environment_runtime.LatestReport(environment_runtime.RUN_DIRECTORY, 'run')
+        report.save({'owned': True})
+
+    bridge = SimpleNamespace(set_part_slippage_modes=Mock(), start_failure_example=AsyncMock(side_effect=start_failure),
         part_slippage_action=AsyncMock(), ros2_stop_all=Mock(), _run_on_agent_runtime=run_owned,
         _ros2_procs={}, system_running=False, last_error='')
     monkeypatch.chdir(tmp_path)
@@ -554,8 +884,137 @@ def test_capture_publishes_the_scene_from_its_checkpoint(tmp_path, monkeypatch, 
     assert result['scene_fingerprint'] == scene['scene_fingerprint']
     assert result['model_fingerprint'] == scene['model_fingerprint']
     assert result['stationary_readiness']['ready'] is stationary
+    assert capture.sha256_file(shared / 'latest/run.json') == previous_sha256
+    assert json.loads((args.output / 'environment_runs/latest/run.json').read_text())['run_id'] == 'run'
     if not stationary:
         assert result['stationary_readiness']['missing'] == ['recorded active owner']
     assert preview.await_count == observe.call_count == (0 if frozen else 1)
     bridge.part_slippage_action.assert_awaited_once_with('stop')
     bridge.ros2_stop_all.assert_called_once_with(reason='owned_fresh_capture_complete')
+
+
+@pytest.mark.parametrize('defect', [None, 'window_owner', 'image_write', 'unrendered', 'x11_error'])
+def test_scene_image_launches_only_owned_gui_at_stopped_checkpoint(tmp_path, monkeypatch, defect):
+    import cv2
+    import numpy as np
+
+    observations = tmp_path / 'observations.json'
+    observations.write_text('{}')
+    recorded = {'run_id': 'run', 'captured_at': 'checkpoint',
+                'physical_evidence': {'evidence_fingerprint': 'physical'}}
+    runtime = SimpleNamespace(stopped=True, nominal_idle=SimpleNamespace(is_set=lambda: True),
+        conveyor_fault=SimpleNamespace(snapshot=lambda: {'visual': {'status': 'completed'}}))
+    process = Mock(pid=1234)
+    process.poll.return_value = None
+    launch = Mock(return_value=process)
+    bridge = SimpleNamespace(_ROS2_ENV='owned-environment; ', _ros2_procs={},
+        _register_ui_process=Mock(), ros2_stop=Mock())
+    frame = np.tile(np.array([[0, 255]], dtype=np.uint8), (120, 80))
+    rendered = np.repeat(frame[:, :, None], 3, axis=2)
+    blank = np.zeros_like(rendered)
+    frames = [blank, blank]
+    if defect == 'x11_error':
+        frames.insert(0, RuntimeError('X11 BadMatch'))
+
+    def scene_frame(*_args):
+        if defect == 'unrendered':
+            return blank
+        value = frames.pop(0) if frames else rendered
+        if isinstance(value, RuntimeError):
+            raise value
+        return value
+
+    frame_reader = Mock(side_effect=scene_frame)
+    clock = iter(range(0, 2000, 100 if defect == 'unrendered' else 1))
+
+    def image_write(path, frame):
+        if defect == 'image_write':
+            return False
+        assert frame.shape == (120, 160, 3)
+        capture.Path(path).write_bytes(b'owned-window-fixture')
+        return True
+
+    monkeypatch.setattr(capture.subprocess, 'Popen', launch)
+    environment = {'GAZEBO_MODEL_PATH': '/owned/models:/owned/share',
+                   'GAZEBO_PLUGIN_PATH': '/owned/lib', 'GAZEBO_MASTER_URI': 'http://127.0.0.1:11381'}
+    monkeypatch.setattr(capture, '_owned_gazebo_environment', lambda _bridge: (2222, environment))
+    monkeypatch.setattr(capture.subprocess, 'check_output', lambda command, **_kwargs:
+        '0xb "Gazebo"' if command[0] == 'xwininfo' else '_NET_WM_PID = 5678')
+    monkeypatch.setattr(capture.os, 'getpgid', lambda pid: 4321 if pid == 1234 or defect != 'window_owner' else 9999)
+    monkeypatch.setattr(capture.time, 'sleep', lambda _seconds: None)
+    monkeypatch.setattr(capture.time, 'monotonic', lambda: next(clock))
+    monkeypatch.setattr(capture, '_capture_gazebo_frame', frame_reader)
+    monkeypatch.setattr(cv2, 'imwrite', image_write)
+    if defect in {None, 'x11_error'}:
+        result = capture.capture_scene_image(bridge, runtime, recorded, observations)
+        assert result['run_id'] == 'run'
+        assert result['source_sha256'] == capture.sha256_file(observations)
+        assert result['window_process_group'] == 4321
+        assert result['server_pid'] == 2222
+        assert result['width'] == 160 and result['height'] == 120
+        assert result['rendering']['verified'] is True
+        assert frame_reader.call_count > 2
+        assert result['physical_evidence_fingerprint'] == 'physical'
+        assert result['execution_authorized'] is False
+        assert json.loads((tmp_path / 'failure_scene.json').read_text()) == result
+    else:
+        error = ValueError if defect == 'window_owner' else TimeoutError if defect == 'unrendered' else RuntimeError
+        with pytest.raises(error):
+            capture.capture_scene_image(bridge, runtime, recorded, observations)
+        assert not (tmp_path / 'failure_scene.png').exists()
+    launch.assert_called_once()
+    assert launch.call_args.kwargs['start_new_session'] is True
+    assert launch.call_args.kwargs['env'] == environment
+    bridge._register_ui_process.assert_called_once()
+    assert bridge._ros2_procs['capture_gazebo_gui'] is process
+    bridge.ros2_stop.assert_called_once_with('capture_gazebo_gui', reason='owned_failure_scene_saved')
+
+
+@pytest.mark.parametrize('return_code', [1, -11])
+def test_scene_frame_child_failure_cannot_exit_capture_process(tmp_path, monkeypatch, return_code):
+    child = Mock(return_value=SimpleNamespace(returncode=return_code, stderr='X11 BadMatch'))
+    monkeypatch.setattr(capture.subprocess, 'run', child)
+    with pytest.raises(RuntimeError, match='Gazebo frame read failed'):
+        capture._capture_gazebo_frame(11, tmp_path / 'frame.png')
+    assert child.call_args.args[0][0] == capture.sys.executable
+    assert child.call_args.kwargs['timeout'] == 10.
+
+
+@pytest.mark.parametrize('defect', ['running', 'busy', 'marker'])
+def test_scene_image_requires_final_checkpoint_before_gui_launch(tmp_path, monkeypatch, defect):
+    runtime = SimpleNamespace(stopped=defect != 'running',
+        nominal_idle=SimpleNamespace(is_set=lambda: defect != 'busy'),
+        conveyor_fault=SimpleNamespace(snapshot=lambda: {'visual': {
+            'status': 'pending' if defect == 'marker' else 'completed'}}))
+    launch = Mock()
+    monkeypatch.setattr(capture.subprocess, 'Popen', launch)
+    with pytest.raises(ValueError):
+        capture.capture_scene_image(SimpleNamespace(), runtime, {}, tmp_path / 'observations.json')
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize('defect', [None, 'missing', 'multiple'])
+def test_scene_gui_inherits_only_the_owned_gazebo_server_environment(tmp_path, monkeypatch, defect):
+    process = Mock(pid=1234)
+    process.poll.return_value = None
+    bridge = SimpleNamespace(_ros2_procs={'gazebo_dual': process})
+    groups = {1234: 4321, 5678: 9999, 2222: 4321, 3333: 4321}
+    monkeypatch.setattr(capture.os, 'getpgid', lambda pid: groups[pid])
+    server_ids = [5678] + ([] if defect == 'missing' else [2222]) + ([3333] if defect == 'multiple' else [])
+    for pid in server_ids:
+        directory = tmp_path / str(pid)
+        directory.mkdir()
+        (directory / 'comm').write_text('gzserver\n')
+        (directory / 'environ').write_bytes(
+            b'GAZEBO_MODEL_PATH=/owned/share:/owned/models\0'
+            b'GAZEBO_PLUGIN_PATH=/owned/lib\0'
+            b'GAZEBO_MASTER_URI=http://127.0.0.1:11381\0')
+    if defect is not None:
+        with pytest.raises(ValueError, match='exactly one owned'):
+            capture._owned_gazebo_environment(bridge, proc_root=tmp_path)
+    else:
+        pid, environment = capture._owned_gazebo_environment(bridge, proc_root=tmp_path)
+        assert pid == 2222
+        assert environment == {'GAZEBO_MODEL_PATH': '/owned/share:/owned/models',
+                               'GAZEBO_PLUGIN_PATH': '/owned/lib',
+                               'GAZEBO_MASTER_URI': 'http://127.0.0.1:11381'}

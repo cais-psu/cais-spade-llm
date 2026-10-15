@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Primitive-generation helpers for the multi-turn recovery.
 
 LLM-authored plan flow:
@@ -11,12 +13,12 @@ LLM-authored plan flow:
   existing trace validator.
 """
 
-from __future__ import annotations
 
 from cais_spade_llm.agents.shared_information.llm_request_records import (
     recorded_structured_call, recovery_request_directory,
 )
 
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -495,6 +497,8 @@ def _primitive_catalog_for_resource(
 ) -> list[dict[str, Any]]:
     recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
     recovery_entry = dict(recovery_resources.get(resource_jid) or {})
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        return deepcopy(recovery_entry.get("execution_primitive_catalog") or [])
     return filter_synthesis_primitive_catalog(
         [
             dict(row)
@@ -954,6 +958,15 @@ def _primitive_resource_start_views(
     prepared_recovery_request: dict[str, Any],
     outline_event: dict[str, Any],
 ) -> dict[str, Any]:
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        from cais_spade_llm.resources.recovery_composition import composition_grounding_context
+
+        context = composition_grounding_context(session=session_state, prepared=prepared_recovery_request,
+                                               task=outline_event)
+        snapshot = context["resource"]
+        return {"executor_snapshot": snapshot["snapshot"], "prompt_snapshot": snapshot,
+                "diagnostics": [], "propagated_resources_by_jid": context["resources"],
+                "propagated_parts_by_name": context["parts"]}
     resource_jid = _outline_resource_jid(outline_event)
     propagated_resources, propagated_parts, fact_producers = _primitive_propagated_outline_entities(
         session_state=session_state,
@@ -1072,6 +1085,11 @@ def _primitive_grounding_context(
     prepared_recovery_request: dict[str, Any],
     outline_event: dict[str, Any],
 ) -> dict[str, Any]:
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        from cais_spade_llm.resources.recovery_composition import composition_grounding_context
+
+        return composition_grounding_context(session=session_state, prepared=prepared_recovery_request,
+                                             task=outline_event)
     start_state_views = _primitive_resource_start_views(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
@@ -1564,6 +1582,18 @@ def _resolve_context_ref(
     head = segments[0]
     rest = segments[1:]
 
+    if prepared_recovery_request.get("composition_validation_version") == 1 and head in {"resources", "parts"}:
+        from cais_spade_llm.resources.recovery_composition import resolve_composition_value
+
+        context = _primitive_grounding_context(session_state=session_state,
+            prepared_recovery_request=prepared_recovery_request, outline_event=outline_event)
+        if head == "parts" and len(rest) == 2 and rest[1] == "snapshot":
+            trimmed = "/parts/" + rest[0]
+        try:
+            return resolve_composition_value({"context_ref": trimmed}, context), None
+        except (KeyError, ValueError) as exc:
+            return None, str(exc)
+
     if head == "outline_event":
         payload = deepcopy(outline_event)
         for key in rest:
@@ -1749,10 +1779,10 @@ def _validate_authored_plan(
     non-empty primitive_steps, only visible-catalog primitives, and proper step
     shape.
     """
-    active_outline_id = str(active_event.get("outline_id") or "").strip()
-    active_resource_jid = _outline_resource_jid(active_event)
-    response_outline_id = str(parsed_response.get("outline_id") or "").strip()
-    response_resource_jid = str(parsed_response.get("resource_jid") or "").strip()
+    active_outline_id = active_event.get("outline_id")
+    active_resource_jid = active_event.get("resource_jid")
+    response_outline_id = parsed_response.get("outline_id")
+    response_resource_jid = parsed_response.get("resource_jid")
     if response_outline_id != active_outline_id:
         return None, f"outline_id must match the active event {active_outline_id!r}"
     if response_resource_jid != active_resource_jid:
@@ -1763,17 +1793,17 @@ def _validate_authored_plan(
         return None, "primitive_steps_ready requires non-empty primitive_steps"
 
     visible_names = {
-        str(entry.get("name") or "").strip()
+        entry["name"]
         for entry in (visible_catalog or [])
-        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
     }
 
     steps: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_steps):
         if not isinstance(raw, dict):
             return None, f"primitive_steps[{index}] must be an object"
-        primitive = str(raw.get("primitive") or "").strip()
-        if not primitive:
+        primitive = raw.get("primitive")
+        if not isinstance(primitive, str) or not primitive:
             return None, f"primitive_steps[{index}] is missing 'primitive'"
         if primitive not in visible_names:
             return None, (
@@ -1781,8 +1811,6 @@ def _validate_authored_plan(
                 "catalog for this resource"
             )
         params = raw.get("params")
-        if params is None:
-            params = {}
         if not isinstance(params, dict):
             return None, f"primitive_steps[{index}].params must be an object"
         step: dict[str, Any] = {
@@ -1795,6 +1823,8 @@ def _validate_authored_plan(
                 f"primitive_steps[{index}] uses legacy field 'store_as'; "
                 "data-producing primitives now publish deterministic event_facts automatically"
             )
+        if set(raw) - {"primitive", "params"}:
+            return None, f"primitive_steps[{index}] has unsupported fields"
         steps.append(step)
     return steps, None
 
@@ -1810,7 +1840,32 @@ def _validate_single_event_primitive_steps(
     prepared_recovery_request: dict[str, Any],
     outline_event: dict[str, Any],
     primitive_steps: list[dict[str, Any]],
+    composition_owner: Any = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if prepared_recovery_request.get("composition_validation_version") == 1:
+        from cais_spade_llm.resources.recovery_composition import composition_start_views
+
+        resource, part = composition_start_views(session=session_state, prepared=prepared_recovery_request,
+                                                task=outline_event)
+        validator = getattr(composition_owner, "validate_recovery_primitive_composition", None)
+        evidence = (validator(task=outline_event, primitive_steps=primitive_steps,
+            prepared=prepared_recovery_request, recovery_snapshot=resource, part_context=part,
+            grounding_context=_primitive_grounding_context(session_state=session_state,
+                prepared_recovery_request=prepared_recovery_request, outline_event=outline_event))
+            if callable(validator) else {"feasibility_status": "NEEDS_CONTEXT",
+                "reason": "The responsible resource has no composition validator"})
+        result = {"outline_id": outline_event["outline_id"], "resource_jid": outline_event["resource_jid"],
+            "start_snapshot": resource, "projected_snapshot": evidence.get("projected_snapshot", {}),
+            "projected_outline_state": evidence.get("derived_end_state", {}),
+            "valid": evidence.get("feasibility_status") == "FEASIBLE", "composition_validation": evidence,
+            "trace_metadata": {"step_results": evidence.get("trace", [])}}
+        feedback = [] if result["valid"] else [{**_primitive_feedback_row(outline_event=outline_event,
+            constraint_code="composition_" + evidence.get("feasibility_status", "NEEDS_CONTEXT").lower(),
+            reason=evidence.get("reason", "Composition evidence is missing"),
+            finding=(evidence.get("findings") or [{}])[0]),
+            "feasibility_status": evidence.get("feasibility_status", "NEEDS_CONTEXT"),
+            "evidence_fingerprint": evidence.get("evidence_fingerprint")}]
+        return result, feedback
     resource_jid = _outline_resource_jid(outline_event)
     start_state_views = _primitive_resource_start_views(
         session_state=session_state,
@@ -1908,17 +1963,13 @@ def _accepted_program_row(
     projected_outline_state: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "outline_id": str(outline_event.get("outline_id") or "").strip(),
-        "des_event_id": str(outline_event.get("outline_id") or "").strip(),
-        "resource_jid": _outline_resource_jid(outline_event),
-        "part_name": _outline_part_name(outline_event) or None,
-        "event_name": str(outline_event.get("event_name") or "").strip(),
+        "outline_id": outline_event.get("outline_id"),
+        "des_event_id": outline_event.get("outline_id"),
+        "resource_jid": outline_event.get("resource_jid"),
+        "part_name": outline_event.get("part_name"),
+        "event_name": outline_event.get("event_name"),
         "description": _outline_description(outline_event),
-        "predecessors": [
-            str(item).strip()
-            for item in (outline_event.get("predecessors") or [])
-            if str(item).strip()
-        ],
+        "predecessors": deepcopy(outline_event.get("predecessors") or []),
         "primitive_steps": deepcopy(primitive_steps),
         "projected_snapshot": deepcopy(projected_snapshot),
         "projected_outline_state": deepcopy(projected_outline_state),
@@ -1958,6 +2009,8 @@ def _primitive_batch_session_state(
         "observation_store": deepcopy(carried.get("observation_store") or {}),
         "base_symbolic_resources": deepcopy(carried.get("base_symbolic_resources") or {}),
         "base_symbolic_parts": deepcopy(carried.get("base_symbolic_parts") or {}),
+        "composition_prefix": deepcopy(carried.get("accepted_primitive_program") or []),
+        "composition_validation_version": carried.get("composition_validation_version"),
         "symbolic_resources": deepcopy(carried.get("symbolic_resources") or {}),
         "symbolic_parts": deepcopy(carried.get("symbolic_parts") or {}),
     }
@@ -1978,8 +2031,10 @@ def _write_primitive_subturn_artifact(
     if not per_turn_debug_dir:
         return {}
 
+    # The synchronous writer only reads these views. Copying the entire saved
+    # outline twice here can exhaust memory before a context response is saved.
     payload = {
-        "prepared_recovery_request": deepcopy(prepared_recovery_request),
+        "prepared_recovery_request": prepared_recovery_request,
         "reasoning_mode": "multi_turn",
         "multi_turn_current_turn": {
             "turn_index": int(turn_entry.get("turn_index") or 0),
@@ -1987,7 +2042,7 @@ def _write_primitive_subturn_artifact(
             "primitive_substream_turns": [deepcopy(turn_entry)],
         },
         "primitive_batch_resume_checkpoint": {
-            "prepared_recovery_request": deepcopy(prepared_recovery_request),
+            "prepared_recovery_request": prepared_recovery_request,
             "assigned_outline_events": [
                 deepcopy(row) for row in (assigned_outline_events or []) if isinstance(row, dict)
             ],
@@ -2050,6 +2105,7 @@ def _write_primitive_subturn_artifact(
 async def generate_primitive_batch_with_llm_agent(
     *,
     llm_agent: Any,
+    composition_owner: Any = None,
     prepared_recovery_request: dict[str, Any],
     assigned_outline_events: list[dict[str, Any]],
     recovery_session_id: str = "",
@@ -2099,13 +2155,21 @@ async def generate_primitive_batch_with_llm_agent(
     start_turn_index = int(session_state.get("turn_index") or 0)
     for turn_index in range(
         start_turn_index + 1,
-        max(1, int(max_turns or 1)) + 1,
+        start_turn_index + max(1, int(max_turns or 1)) + 1,
     ):
+        cancel_event = getattr(llm_agent, "_composition_cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         session_state["turn_index"] = turn_index
+        prompt_session = session_state
+        if prepared_recovery_request.get("composition_validation_version") == 1:
+            # Full request/validation records stay in their artifacts. Embedding
+            # earlier prompt inputs here recursively copies the entire transcript.
+            prompt_session = {key: value for key, value in session_state.items() if key != "turns"}
         prompt_input = build_multi_turn_phase_prompt_input(
             phase="primitive_generation",
             llm_input=llm_input,
-            session_state=session_state,
+            session_state=prompt_session,
             recovery_resources=recovery_resources,
         )
         prompt_input.update(
@@ -2115,6 +2179,33 @@ async def generate_primitive_batch_with_llm_agent(
             )
         )
         prompt_text = render_multi_turn_phase_prompt(prompt_input)
+        if prepared_recovery_request.get("composition_validation_version") == 1:
+            prompt_text += (
+                "\n\nRA composition validation: author an ordered program that establishes every intended "
+                "resource and part postcondition from declared effects. Primitive support is only a union "
+                "of possible contributors, not a sequence or a requirement to use every primitive. "
+                "Use exact primitive identities and explicit {\"context_ref\": \"/path\"} bindings. "
+                "Recorded owner inputs and the recovery_des_model are retrievable under "
+                f"/resources/{resource_jid}/resource_evidence and /resources/{resource_jid}/recovery_des_model. "
+                "Missing facts require need_context; they are different from explicit null. "
+                "Calculated event_facts are available only after their producing step. "
+                "For robot targets, prefer recorded owner inputs with part_name, and destination_location "
+                "for compute_place_targets. In this composition path, the owner reads recorded geometry "
+                "and observed poses internally: omit product_geometry, target_pose, and target_pose_source "
+                "instead of copying those observations into explicit geometric overrides. "
+                "An accepted projected placement can support compute_pick_targets in this model-based "
+                "composition, but cannot serve as a fresh perception observation for detect_parts. "
+                "Include detect_parts only when its outputs or effects are required and recorded "
+                "perception evidence supports it; a capability decomposition does not require every primitive. "
+                "Geometric overrides require exact owner verification. "
+                "The robot target outputs include approach_pose, target_pose, and retreat_pose; bind all "
+                "seven pose coordinates to preserve the calculated orientation. Custody completion requires "
+                "reaching target_pose, grasp_part or release_part, then retreat_pose. For assembly_slot "
+                "placement, release_part.assembly_slot must bind slot_x, slot_y, part_height, board_top_z, "
+                "place_part_origin_z (as part_origin_z), and destination_location from the calculated place targets. "
+                "Validation findings identify the step or missing postcondition to revise. "
+                "This is composition for review; no execution is authorized."
+            )
         feedback = prepared_recovery_request.get("recovery_feedback")
         if feedback:
             prompt_input["recovery_feedback"] = feedback
@@ -2127,6 +2218,8 @@ async def generate_primitive_batch_with_llm_agent(
             response_format=response_schema,
             include_agent_instructions=False,
         )
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         expected_messages = [{"role": "user", "content": prompt_text}]
         llm_request = deepcopy(
             dict(getattr(llm_agent, "_last_structured_request", {}) or {})
@@ -2142,8 +2235,23 @@ async def generate_primitive_batch_with_llm_agent(
             session_state=session_state,
             parsed_response=parsed_response,
             prepared_recovery_request=prepared_recovery_request,
-            planner=None,
+            planner=composition_owner,
         )
+        if (prepared_recovery_request.get("composition_validation_version") == 1
+                and decision == "need_primitive_revision"):
+            # Changed proposals can fail for the same cause. Stop paid retries
+            # by the finding, independent of program and evidence fingerprints.
+            findings = turn_entry.get("primitive_rejection_feedback", [])
+            causes = {json.dumps({key: row.get(key) for key in (
+                "outline_id", "resource_jid", "constraint_code", "reason", "step_index")},
+                sort_keys=True) for row in findings if row.get("reason")}
+            counts = session_state.setdefault("composition_rejection_counts", {})
+            for cause in causes:
+                counts[cause] = counts.get(cause, 0) + 1
+            if any(counts[cause] >= 3 for cause in causes):
+                decision = "primitive_blocked"
+                session_state["status"] = "paused_after_primitive_blocked"
+                turn_entry["composition_same_cause_failures"] = 3
         turn_entry["turn_index"] = turn_index
         turn_entry["phase"] = "primitive_generation"
         turn_entry["decision"] = decision
@@ -2183,7 +2291,7 @@ async def generate_primitive_batch_with_llm_agent(
     }:
         final_decision = "need_primitive_revision"
 
-    if final_decision == "draft_ready":
+    if final_decision == "draft_ready" and prepared_recovery_request.get("composition_validation_version") != 1:
         from .multi_turn import _append_final_output_turn
 
         session_state["turn_index"] = final_output_turn_base
@@ -2398,7 +2506,6 @@ async def _handle_primitive_generation_phase(
     planner: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Handle one event-local turn of primitive generation (LLM-authored plan)."""
-    del planner
     turn_index = int(session_state.get("primitive_generation_turn_index") or 0) + 1
     session_state["primitive_generation_turn_index"] = turn_index
     cursor, active_event, accepted_prefix = _active_primitive_outline_event(session_state)
@@ -2791,6 +2898,7 @@ async def _handle_primitive_generation_phase(
         prepared_recovery_request=prepared_recovery_request,
         outline_event=active_event,
         primitive_steps=primitive_steps,
+        composition_owner=planner,
     )
     turn_entry["per_event_results"] = [deepcopy(per_event_result)]
     if feedback:
@@ -2832,6 +2940,8 @@ async def _handle_primitive_generation_phase(
         projected_outline_state=dict(per_event_result.get("projected_outline_state") or {}),
     )
     accepted_program = list(session_state.get("accepted_primitive_program") or [])
+    if "composition_validation" in per_event_result:
+        accepted_row["composition_validation"] = deepcopy(per_event_result["composition_validation"])
     accepted_program.append(deepcopy(accepted_row))
     session_state["accepted_primitive_program"] = deepcopy(accepted_program)
     session_state["primitive_rejection_feedback"] = []

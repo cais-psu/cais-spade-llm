@@ -357,7 +357,11 @@ class ConveyorFault:
         return scene
 
     async def trigger(self) -> dict:
-        """Capture obligations, stop execution, apply the fault, and display evidence."""
+        """Capture obligations, stop execution, apply the fault, and display evidence.
+
+        Returns:
+            The latched fault snapshot with observed injection and marker evidence.
+        """
         async with self._lock:
             if self.status == "triggered":
                 return self.snapshot()
@@ -397,11 +401,13 @@ class ConveyorFault:
                                 processing[owner.agent_name] = record
                     self.evidence["processing_observations"] = processing
                 actor = context.resources[rid]
-                if scenario != "Part slippage":
+                if scenario not in {"Part slippage", "ur5e-1 breakdown"}:
                     actor.executors.clear()
                     context.unavailable_resources.add(rid)
                 actor.revision += 1
-                actor.evidence = scenario + ("; awaiting observed recovery" if scenario == "Part slippage" else "; unavailable")
+                actor.evidence = scenario + (
+                    "; awaiting observed recovery" if scenario in {"Part slippage", "ur5e-1 breakdown"}
+                    else "; unavailable")
                 context.revision += 1
                 if scenario == "Conveyor breakdown":
                     context.inputs["scene"]["Conveyor"]["transport_enabled"] = False
@@ -458,6 +464,14 @@ class ConveyorFault:
                 from cais_spade_llm.recovery_framework.failure_effects import observe_robot
 
                 self.evidence["robot_pose"] = await observe_robot(runtime, rid)
+                # The failed pick stops nominal work; observed motion capability remains for recovery.
+                with context.admission_lock:
+                    context.resources[rid].valuation["resource_state"] = "failed"
+                    context.resources[rid].revision += 1
+                    for owner in runtime.resource_agents:
+                        if owner.agent_name == rid:
+                            owner._current_state = "failed"
+                    context.revision += 1
             if scenario == "Machining breakdown during part processing" and self.evidence.get("source") != "gazebo_workholding_observation":
                 raise ValueError(self.evidence.get("observation_error", "Machine checkpoint observation was interrupted"))
             self.evidence["injection_status"] = "completed"
@@ -470,7 +484,7 @@ class ConveyorFault:
                                  physical_state_reconciliation_required=True)
             raise
         finally:
-            if scenario == "Part slippage" and self.evidence.get("injection_status") != "completed":
+            if scenario in {"Part slippage", "ur5e-1 breakdown"} and self.evidence.get("injection_status") != "completed":
                 with context.admission_lock:
                     context.unavailable_resources.add(rid)
                     context.revision += 1

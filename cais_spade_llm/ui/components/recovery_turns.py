@@ -21,6 +21,31 @@ def _download(path: str | Path, label: str) -> None:
     ui.button(label, icon="download", on_click=lambda: ui.download.file(path)).props("flat dense")
 
 
+def render_composition_programs(program: list[dict]) -> None:
+    """Display authored steps, resolved bindings and resource validation evidence."""
+    for index, event in enumerate(program, 1):
+        evidence = event.get("composition_validation", {})
+        status = evidence.get("feasibility_status", "Historical result — RA composition validation not recorded")
+        with ui.expansion(f"{index}. {event.get('outline_id')} · {event.get('resource_jid')} · {status}").classes("w-full"):
+            rows = []
+            trace = evidence.get("trace", [])
+            for step_index, step in enumerate(event.get("primitive_steps", [])):
+                validated = trace[step_index] if step_index < len(trace) else {}
+                rows.append({"step": step_index + 1, "primitive": step.get("primitive"),
+                    "authored": json.dumps(step.get("params", {}), ensure_ascii=False),
+                    "resolved": json.dumps(validated.get("resolved_params", "Not recorded"), ensure_ascii=False)})
+            ui.table(columns=[{"name": key, "label": label, "field": key, "align": "left"}
+                for key, label in (("step", "Step"), ("primitive", "Primitive"),
+                                   ("authored", "Authored parameters"), ("resolved", "Resolved parameters"))],
+                rows=rows, row_key="step").classes("w-full").props("flat dense wrap-cells")
+            ui.label("Achieved postconditions").classes("font-semibold")
+            _text(evidence.get("derived_end_state", "Not validated by the current composition validator"))
+            ui.label("RA validation findings").classes("font-semibold")
+            _text(evidence.get("findings") or evidence.get("reason") or "Not recorded")
+            _expansion("Complete RA evidence", f"composition:{event.get('outline_id')}:{evidence.get('evidence_fingerprint')}",
+                       lambda evidence=evidence: evidence, _text)
+
+
 def _messages(messages: list[dict], *, pretty_json: bool = False) -> None:
     for message in messages:
         ui.label(f"role={message.get('role', 'not recorded')}").classes("font-semibold text-sm")
@@ -205,7 +230,8 @@ def _runtime_records(results: list[dict], tab: str, *, state_key: str, exact: bo
                 _text(response)
             evidence = {**payload, **(payload.get("validation_evidence") or {})}
             fields = {key: evidence[key] for key in ("decision", "candidate_evaluation_summary", "validation_stages",
-                        "validation_findings", "selected_transition", "transition_validation", "nominal_continuation_evidence") if key in evidence}
+                        "validation_findings", "selected_transition", "transition_validation", "nominal_continuation_evidence",
+                        "per_event_results", "primitive_rejection_feedback", "accepted_primitive_event") if key in evidence}
             if fields:
                 validations.append({"record": Path(result["path"]).name, **fields})
             nominal = result.get("nominal_continuation_artifact")

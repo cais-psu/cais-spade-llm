@@ -1,6 +1,6 @@
-"""Observed simulation fault custody, availability, lifecycle and reset regressions."""
-
 from __future__ import annotations
+
+"""Observed simulation fault custody, availability, lifecycle and reset regressions."""
 
 import asyncio
 from copy import deepcopy
@@ -86,6 +86,113 @@ def test_setup_supports_only_simulation_conveyor_at_the_documented_checkpoint():
     setup["execution_mode"] = "simulation"
     setup["failure_scenario"]["checkpoint"] = "before_execute"
     assert "execution not integrated" in settings.startup_block_reason(setup)
+
+
+def _printed_pickup(runtime):
+    context = runtime.context
+    context.resources['ur5e-4'].valuation.update(resource_state='picked', held_part='gear_small')
+    context.part_tracker['gear_small'].update(location='ur5e-4', state='in_gripper')
+    context.transitions.append({
+        'acknowledgement': {'resource_id': 'ur5e-4', 'event_name': 'pick_grasp',
+            'task_id': 'printed_pickup', 'run_id': context.run_id, 'evidence': 'resource',
+            'parameters': {'part_name': 'gear_small', 'origin_resource_location': '3D Printing Station'}},
+        'before': {'3D Printing Station': {'resource_state': 'completed'}},
+        'observations': {'controller_result': {'status': 'completed', 'gripper_state': 'closed'}},
+    })
+
+
+def _conveyor_condition(runtime, part):
+    runtime.conveyor_fault.configuration.update(
+        part_name=part, additional_condition={'resource_id': 'ur5e-4', 'part_name': 'gear_small'})
+
+
+def test_conveyor_example_configures_both_observed_pickups():
+    from cais_spade_llm.recovery_framework.part_slippage_example import example_setup
+
+    setup = example_setup(scenario='Conveyor breakdown', outline_mode='manual', primitive_mode='manual')
+    assert setup['failure_scenario']['part_name'] == 'KET4_Square_4mm'
+    assert setup['failure_scenario']['additional_condition'] == {
+        'resource_id': 'ur5e-4', 'part_name': 'gear_small'}
+    assert settings.validate_setup(setup)
+
+
+@pytest.mark.parametrize('condition', [
+    {'resource_id': 'Conveyor', 'part_name': 'gear_small'},
+    {'resource_id': 'ur5e-4', 'part_name': 'KET4_Square_4mm'},
+    {'resource_id': 'ur5e-4', 'part_name': 'unobserved_part'},
+    {'resource_id': 'unconfigured_resource', 'part_name': 'gear_small'},
+])
+def test_conveyor_setup_rejects_invalid_additional_condition(condition):
+    from cais_spade_llm.recovery_framework.part_slippage_example import example_setup
+
+    setup = example_setup(scenario='Conveyor breakdown')
+    setup['failure_scenario']['additional_condition'] = condition
+    with pytest.raises(ValueError, match='Additional condition'):
+        settings.validate_setup(setup)
+
+
+@pytest.mark.parametrize('first', ['ur5e-1', 'ur5e-4'])
+def test_conveyor_waits_for_both_pickups_in_either_order_and_retains_custody(monkeypatch, first):
+    runtime, part = runtime_at_pickup()
+    context = runtime.context
+    _conveyor_condition(runtime, part)
+    primary = context.transitions.pop()
+    context.resources['ur5e-1'].valuation.update(resource_state='idle', held_part=None)
+    context.part_tracker[part]['location'] = 'M1'
+
+    def primary_pickup():
+        context.resources['ur5e-1'].valuation.update(resource_state='picked', held_part=part)
+        context.part_tracker[part]['location'] = 'ur5e-1'
+        context.transitions.append(primary)
+
+    (primary_pickup if first == 'ur5e-1' else lambda: _printed_pickup(runtime))()
+    assert not asyncio.run(runtime.conveyor_fault.after_acknowledgement())
+    assert runtime.conveyor_fault.holds_task({'resource_id': first})
+    peer = 'ur5e-4' if first == 'ur5e-1' else 'ur5e-1'
+    assert not runtime.conveyor_fault.holds_task({'resource_id': peer})
+    assert not runtime.conveyor_fault.holds_task({'resource_id': 'ur5e-3'})
+    (primary_pickup if peer == 'ur5e-1' else lambda: _printed_pickup(runtime))()
+    visual = Mock(return_value={'status': 'completed'})
+    monkeypatch.setattr('cais_spade_llm.recovery_framework.conveyor_fault.marker', visual)
+    assert asyncio.run(runtime.conveyor_fault.after_acknowledgement())
+    assert not asyncio.run(runtime.conveyor_fault.after_acknowledgement())
+    assert context.resources['ur5e-1'].valuation['held_part'] == part
+    assert context.resources['ur5e-4'].valuation['held_part'] == 'gear_small'
+    assert context.part_tracker[part]['location'] == 'ur5e-1'
+    assert context.part_tracker['gear_small']['location'] == 'ur5e-4'
+    assert set(runtime.conveyor_fault.evidence['pickups']) == {'ur5e-1', 'ur5e-4'}
+    assert runtime.conveyor_fault.evidence['injection_status'] == 'completed'
+    assert visual.call_count == 1
+
+
+@pytest.mark.parametrize('change', ['run_id', 'origin', 'part', 'observations', 'evidence', 'later_ack', 'pending', 'primary_part'])
+def test_conveyor_rejects_unacknowledged_or_changed_peer_pickup(change):
+    runtime, part = runtime_at_pickup()
+    _conveyor_condition(runtime, part)
+    _printed_pickup(runtime)
+    peer = runtime.context.transitions[-1]
+    acknowledgement = peer['acknowledgement']
+    if change == 'run_id':
+        acknowledgement['run_id'] = 'another_run'
+    elif change == 'origin':
+        acknowledgement['parameters']['origin_resource_location'] = 'Buffer For Machined parts'
+    elif change == 'part':
+        acknowledgement['parameters']['part_name'] = part
+    elif change == 'observations':
+        peer['observations'] = {}
+    elif change == 'evidence':
+        acknowledgement['evidence'] = 'simulated'
+    elif change == 'later_ack':
+        later = deepcopy(peer)
+        later['acknowledgement']['event_name'] = 'place_approach'
+        runtime.context.transitions.append(later)
+    elif change == 'pending':
+        runtime.context.pending_tasks['moving_peer'] = {'resource_id': 'ur5e-4'}
+    else:
+        runtime.conveyor_fault.configuration['part_name'] = 'gear_small'
+    assert runtime.conveyor_fault.checkpoint() is None
+    assert not asyncio.run(runtime.conveyor_fault.after_acknowledgement())
+    assert not runtime.stopped
 
 
 @pytest.mark.parametrize(
@@ -313,6 +420,19 @@ def runtime_with_failure(scenario, *, robot="ur5e-3"):
                 "success": True, "pose": {"x": -4, "y": 2, "z": 1},
             })),
         ))
+        if scenario == "ur5e-1 breakdown":
+            robot_values = context.resources["ur5e-1"].valuation
+            robot_values.update(resource_state="at_pick", resource_location="M1", held_part=None)
+            context.resources["ur5e-1"].executors.update(move_home=Mock(), pick_grasp=Mock())
+            runtime.resource_agents[0]._current_state = "at_pick"
+            context.transitions.append({
+                "acknowledgement": {"resource_id": "ur5e-1", "event_name": "pick_approach",
+                                    "task_id": "approached", "evidence": "resource",
+                                    "run_id": context.run_id,
+                                    "parameters": {"part_name": part, "origin_resource_location": "M1"}},
+                "before": {"M1": deepcopy(context.resources["M1"].valuation)},
+                "observations": {"controller_result": {"status": "completed"}},
+            })
     runtime.conveyor_fault = ConveyorFault(runtime, setup)
     return runtime, part, setup
 
@@ -390,12 +510,79 @@ def test_robot_breakdown_retains_completed_part_in_M1_and_observed_pose(monkeypa
     monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
                         Mock(return_value={"status": "completed"}))
     before = deepcopy(runtime.context.part_tracker)
+    executors = dict(runtime.context.resources["ur5e-1"].executors)
     asyncio.run(runtime.conveyor_fault.trigger())
     assert runtime.context.part_tracker == before
     assert runtime.context.part_tracker[part]["location"] == "M1"
     assert runtime.context.resources["M1"].valuation["resource_state"] == "completed"
-    assert runtime.context.unavailable_resources == {"ur5e-1"}
+    assert runtime.context.unavailable_resources == set()
+    assert runtime.context.resources["ur5e-1"].valuation["resource_state"] == "failed"
+    assert runtime.resource_agents[0]._current_state == "failed"
+    assert runtime.context.resources["ur5e-1"].executors == executors
+    assert runtime.conveyor_fault.evidence["resource_values_before"]["ur5e-1"]["resource_state"] == "at_pick"
+    assert runtime.conveyor_fault.evidence["pick_approach"]["acknowledgement"]["task_id"] == "approached"
+    assert runtime.conveyor_fault.evidence["machine_part"]["acknowledgement"]["task_id"] == "machined"
+    executors["pick_grasp"].assert_not_called()
+    executors["move_home"].assert_not_called()
     assert runtime.conveyor_fault.evidence["robot_pose"] == {"x": -4, "y": 2, "z": 1}
+
+
+@pytest.mark.parametrize("defect", ["processing_only", "origin", "part", "run", "observations",
+                                  "custody", "state", "pending", "machine_run", "machine_before"])
+def test_robot_breakdown_requires_current_acknowledged_M1_pick_approach(defect):
+    runtime, part, _ = runtime_with_failure("ur5e-1 breakdown")
+    context = runtime.context
+    approach = context.transitions[-1]
+    if defect == "processing_only":
+        context.transitions.pop()
+        context.resources["ur5e-1"].valuation["resource_state"] = "idle"
+    elif defect == "origin":
+        approach["acknowledgement"]["parameters"]["origin_resource_location"] = "Storage"
+    elif defect == "part":
+        approach["acknowledgement"]["parameters"]["part_name"] = "gear_small"
+    elif defect == "run":
+        approach["acknowledgement"]["run_id"] = "previous_run"
+    elif defect == "observations":
+        approach["observations"] = {}
+    elif defect == "custody":
+        context.resources["ur5e-1"].valuation["held_part"] = part
+    elif defect == "state":
+        context.resources["ur5e-1"].valuation["resource_state"] = "picked"
+    elif defect == "pending":
+        context.pending_tasks["grasp"] = {"resource_id": "ur5e-1", "event_name": "pick_grasp"}
+    elif defect == "machine_run":
+        context.transitions[0]["acknowledgement"]["run_id"] = "previous_run"
+    elif defect == "machine_before":
+        approach["before"]["M1"]["resource_state"] = "loaded"
+    assert runtime.conveyor_fault.checkpoint() is None
+    assert not runtime.stopped
+
+
+def test_robot_breakdown_latches_after_approach_before_next_dispatch(monkeypatch):
+    runtime, _, _ = runtime_with_failure("ur5e-1 breakdown")
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
+                        Mock(return_value={"status": "completed"}))
+    assert asyncio.run(runtime.conveyor_fault.after_acknowledgement()) is True
+    assert runtime.stopped
+    assert asyncio.run(runtime.conveyor_fault.after_acknowledgement()) is False
+    runtime.context.resources["ur5e-1"].executors["pick_grasp"].assert_not_called()
+
+
+def test_failed_robot_retains_recorded_home_motion_capability(monkeypatch):
+    from cais_spade_llm.resources.robot.recovery_capability import check_robot_primitive_capability
+
+    runtime, _, _ = runtime_with_failure("ur5e-1 breakdown")
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
+                        Mock(return_value={"status": "completed"}))
+    asyncio.run(runtime.conveyor_fault.trigger())
+    snapshot = {**runtime.context.resources["ur5e-1"].valuation,
+                "named_poses": ["home"], "controller_ready": True}
+    result = check_robot_primitive_capability(primitive="move_to_named_pose", params={"pose_name": "home"},
+        task={}, recovery_snapshot=snapshot, resource_evidence={"source": {"run_id": runtime.context.run_id}},
+        static_capabilities={"named_poses": ["home"]}, primitive_catalog=[], resource_jid="ur5e-1@localhost")
+    assert result["feasibility_status"] == "FEASIBLE"
+    assert result["evidence"]["command_sent"] is False
+    runtime.context.resources["ur5e-1"].executors["move_home"].assert_not_called()
 
 
 @pytest.mark.parametrize("scenario", ["ur5e-1 breakdown", "Machining breakdown during part processing", "Part slippage"])

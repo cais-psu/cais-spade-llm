@@ -1,6 +1,6 @@
-"""Runtime environmental discovery, resource ownership, and v2 acknowledgement evidence."""
-
 from __future__ import annotations
+
+"""Runtime environmental discovery, resource ownership, and v2 acknowledgement evidence."""
 
 import asyncio
 import json
@@ -73,6 +73,23 @@ def inputs():
             "parameters": {},
         }
     return result
+
+
+def test_acknowledged_after_snapshot_survives_a_later_robot_fault():
+    from cais_spade_llm.ui.recovery_setup import default_setup, validate_setup
+
+    inputs = validate_setup(default_setup())
+    context = EnvironmentProductContext(inputs['scene'], inputs['product_order'], inputs['geometry'])
+    event = next(row for row in context.models['ur5e-1']['events'] if row['event_name'] == 'move_home')
+    task = {'resource_id': 'ur5e-1', 'event_id': event['event_id'], 'event_name': event['event_name'],
+            'parameters': {key: rule['equals'] for key, rule in event['parameter_bindings'].items()}}
+    pending = context.prepare(task, simulated=True)
+    assert context.acknowledge({**pending, 'status': 'completed'})
+    recorded = deepcopy(context.transitions[-1])
+    context.resources['ur5e-1'].valuation['resource_state'] = 'failed'
+    assert context.transitions[-1] == recorded
+    assert context.resources['ur5e-1'].valuation['resource_state'] == 'failed'
+    assert context.transitions[-1]['after']['ur5e-1']['resource_state'] == 'idle'
 
 
 @asynccontextmanager

@@ -1,0 +1,497 @@
+{
+  "width": 708.6614173228347,
+  "height": 314.96062992125985,
+  "title": "Case-study flow block diagram",
+  "groups": [
+    {
+      "name": "",
+      "shapes": [
+        {
+          "kind": "line",
+          "name": "Storage \u2192 M1",
+          "x1": 86.61417322834646,
+          "y1": 133.85826771653544,
+          "x2": 228.3464566929134,
+          "y2": 70.86614173228347,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "Storage",
+          "target": "M1",
+          "start_site": 3,
+          "end_site": 1,
+          "middle_x": 200.78740157480314
+        },
+        {
+          "kind": "line",
+          "name": "Storage \u2192 M2",
+          "x1": 86.61417322834646,
+          "y1": 133.85826771653544,
+          "x2": 228.3464566929134,
+          "y2": 196.8503937007874,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "Storage",
+          "target": "M2",
+          "start_site": 3,
+          "end_site": 1,
+          "middle_x": 200.78740157480314
+        },
+        {
+          "kind": "line",
+          "name": "M1 \u2192 Conveyor",
+          "x1": 307.0866141732283,
+          "y1": 70.86614173228347,
+          "x2": 405.51181102362204,
+          "y2": 133.85826771653544,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "M1",
+          "target": "Conveyor",
+          "start_site": 3,
+          "end_site": 1,
+          "middle_x": 389.76377952755905
+        },
+        {
+          "kind": "line",
+          "name": "M2 \u2192 Conveyor",
+          "x1": 307.0866141732283,
+          "y1": 196.8503937007874,
+          "x2": 405.51181102362204,
+          "y2": 133.85826771653544,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "M2",
+          "target": "Conveyor",
+          "start_site": 3,
+          "end_site": 1,
+          "middle_x": 389.76377952755905
+        },
+        {
+          "kind": "line",
+          "name": "Conveyor \u2192 Buffer",
+          "x1": 492.12598425196853,
+          "y1": 133.85826771653544,
+          "x2": 515.748031496063,
+          "y2": 133.85826771653544,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "Conveyor",
+          "target": "Buffer",
+          "start_site": 3,
+          "end_site": 1
+        },
+        {
+          "kind": "line",
+          "name": "Buffer \u2192 Assembly Board",
+          "x1": 555.1181102362204,
+          "y1": 155.51181102362204,
+          "x2": 555.1181102362204,
+          "y2": 228.3464566929134,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "Buffer",
+          "target": "Assembly Board",
+          "start_site": 2,
+          "end_site": 0
+        },
+        {
+          "kind": "line",
+          "name": "Printer \u2192 Assembly Board",
+          "x1": 403.54330708661416,
+          "y1": 255.90551181102364,
+          "x2": 507.8740157480315,
+          "y2": 255.90551181102364,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "Printer",
+          "target": "Assembly Board",
+          "start_site": 3,
+          "end_site": 1
+        },
+        {
+          "kind": "line",
+          "name": "Assembly Board \u2192 Exit",
+          "x1": 602.3622047244095,
+          "y1": 255.90551181102364,
+          "x2": 641.732283464567,
+          "y2": 255.90551181102364,
+          "stroke": "#47657D",
+          "stroke_width": 1.25,
+          "arrow": true,
+          "source": "Assembly Board",
+          "target": "Exit",
+          "start_site": 3,
+          "end_site": 1
+        }
+      ]
+    },
+    {
+      "name": "Storage",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 7.874015748031496,
+          "y": 112.20472440944883,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "fill": "#E6EFF6",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 7.874015748031496,
+          "y": 112.20472440944883,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "text": "Storage",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "M1",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 228.3464566929134,
+          "y": 49.21259842519685,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "fill": "#F0F2F4",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 228.3464566929134,
+          "y": 49.21259842519685,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "text": "M1",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "M2",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 228.3464566929134,
+          "y": 175.1968503937008,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "fill": "#F0F2F4",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 228.3464566929134,
+          "y": 175.1968503937008,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "text": "M2",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "Conveyor",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 405.51181102362204,
+          "y": 112.20472440944883,
+          "w": 86.61417322834646,
+          "h": 43.30708661417323,
+          "fill": "#E6EFF6",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 405.51181102362204,
+          "y": 112.20472440944883,
+          "w": 86.61417322834646,
+          "h": 43.30708661417323,
+          "text": "Conveyor",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "Buffer",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 515.748031496063,
+          "y": 112.20472440944883,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "fill": "#E6EFF6",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 515.748031496063,
+          "y": 112.20472440944883,
+          "w": 78.74015748031496,
+          "h": 43.30708661417323,
+          "text": "Buffer",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "Assembly Board",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 507.8740157480315,
+          "y": 228.3464566929134,
+          "w": 94.48818897637796,
+          "h": 55.118110236220474,
+          "fill": "#FBF0E2",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 507.8740157480315,
+          "y": 228.3464566929134,
+          "w": 94.48818897637796,
+          "h": 55.118110236220474,
+          "text": "Assembly\nBoard",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "Printer",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 320.8661417322835,
+          "y": 234.251968503937,
+          "w": 82.67716535433071,
+          "h": 43.30708661417323,
+          "fill": "#F0F2F4",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 320.8661417322835,
+          "y": 234.251968503937,
+          "w": 82.67716535433071,
+          "h": 43.30708661417323,
+          "text": "Printer",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "Exit",
+      "shapes": [
+        {
+          "kind": "rect",
+          "x": 641.732283464567,
+          "y": 234.251968503937,
+          "w": 55.118110236220474,
+          "h": 43.30708661417323,
+          "fill": "#E6EFF6",
+          "stroke": "#334350",
+          "stroke_width": 1.1805555555555556
+        },
+        {
+          "kind": "text",
+          "x": 641.732283464567,
+          "y": 234.251968503937,
+          "w": 55.118110236220474,
+          "h": 43.30708661417323,
+          "text": "Exit",
+          "size": 12.5,
+          "font": "Arial",
+          "bold": true,
+          "color": "#334350",
+          "align": "center",
+          "valign": "center",
+          "line_spacing": 1.05,
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "KUKA KMR",
+      "shapes": [
+        {
+          "kind": "text",
+          "x": 92.51968503937007,
+          "y": 102.36220472440945,
+          "w": 98.4251968503937,
+          "h": 19.68503937007874,
+          "text": "KUKA KMR",
+          "size": 11.805555555555555,
+          "font": "Arial",
+          "bold": true,
+          "color": "#47657D",
+          "align": "center",
+          "valign": "center",
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "UR5e-1",
+      "shapes": [
+        {
+          "kind": "text",
+          "x": 309.0551181102362,
+          "y": 39.37007874015748,
+          "w": 74.80314960629921,
+          "h": 19.68503937007874,
+          "text": "UR5e-1",
+          "size": 11.805555555555555,
+          "font": "Arial",
+          "bold": true,
+          "color": "#47657D",
+          "align": "center",
+          "valign": "center",
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "UR5e-2",
+      "shapes": [
+        {
+          "kind": "text",
+          "x": 309.0551181102362,
+          "y": 208.66141732283467,
+          "w": 74.80314960629921,
+          "h": 19.68503937007874,
+          "text": "UR5e-2",
+          "size": 11.805555555555555,
+          "font": "Arial",
+          "bold": true,
+          "color": "#47657D",
+          "align": "center",
+          "valign": "center",
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "UR5e-3",
+      "shapes": [
+        {
+          "kind": "text",
+          "x": 568.8976377952756,
+          "y": 181.10236220472441,
+          "w": 74.80314960629921,
+          "h": 19.68503937007874,
+          "text": "UR5e-3",
+          "size": 11.805555555555555,
+          "font": "Arial",
+          "bold": true,
+          "color": "#47657D",
+          "align": "center",
+          "valign": "center",
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    },
+    {
+      "name": "UR5e-4",
+      "shapes": [
+        {
+          "kind": "text",
+          "x": 419.29133858267716,
+          "y": 223.22834645669292,
+          "w": 74.80314960629921,
+          "h": 19.68503937007874,
+          "text": "UR5e-4",
+          "size": 11.805555555555555,
+          "font": "Arial",
+          "bold": true,
+          "color": "#47657D",
+          "align": "center",
+          "valign": "center",
+          "fill": null,
+          "stroke": null
+        }
+      ]
+    }
+  ]
+}

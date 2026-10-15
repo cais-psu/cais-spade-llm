@@ -40,6 +40,18 @@ PART_REFERENCE = {"scope": "resource", "type": ["string", "null"], "reference": 
 PART_PARAMETER = {"required": True, "type": "string", "reference": "part_name"}
 
 
+class ResourceGuardError(ValueError):
+    """Retain the exact recorded condition that blocks a declared transition."""
+
+    def __init__(self, resource_id: str, field: str, operator: str, expected: Any, actual: Any) -> None:
+        super().__init__(f"Guard blocked: {resource_id}.{field}")
+        self.resource_id = resource_id
+        self.field = field
+        self.operator = operator
+        self.expected = deepcopy(expected)
+        self.actual = deepcopy(actual)
+
+
 def build_environment_models(
     scene: dict, parts: list[str] | None = None, *, schema_version: int = 3
 ) -> dict:
@@ -888,7 +900,8 @@ def _process_effects(event: dict, params: dict) -> list[dict]:
 
 
 def _apply_resource_effects(
-    models: dict, valuation: dict, after: dict, event: dict, params: dict
+    models: dict, valuation: dict, after: dict, event: dict, params: dict,
+    *, defer_resource_guards: bool = False,
 ) -> None:
     for participant in event["participants"]:
         peers = [e for e in models[participant]["events"] if e["event_id"] == event["event_id"]]
@@ -899,7 +912,7 @@ def _apply_resource_effects(
             raise ValueError("Shared handoff participants disagree")
         local = peers[0]
         output_guard = local.get("collection_guards", {}).get("output.{part_name}")
-        if output_guard is not None:
+        if output_guard is not None and not defer_resource_guards:
             remaining = [
                 value for field, value in valuation[participant].items()
                 if field.startswith("output.") and field != f"output.{params['part_name']}"
@@ -912,7 +925,7 @@ def _apply_resource_effects(
                 raise ValueError("Invalid printer output collection guard")
             if not allowed:
                 raise ValueError(f"Guard blocked: {participant}.output collection")
-        for field, guard in local["guards"].items():
+        for field, guard in ({} if defer_resource_guards else local["guards"]).items():
             field = _bound(field, params)
             if len(guard) != 1:
                 raise ValueError("Invalid resource guard")
@@ -931,7 +944,7 @@ def _apply_resource_effects(
             if (operator.startswith("not_equals") and equal) or (
                 operator.startswith("equals") and not equal
             ):
-                raise ValueError(f"Guard blocked: {participant}.{field}")
+                raise ResourceGuardError(participant, field, operator, expected, value)
         for field, update in local["updates"].items():
             field = _bound(field, params)
             if set(update) not in ({"set"}, {"set_from_param"}):
@@ -942,9 +955,15 @@ def _apply_resource_effects(
 
 
 def project_transition(
-    models: dict, valuation: dict, products: dict, task: dict, product_name: str, requirements: dict
+    models: dict, valuation: dict, products: dict, task: dict, product_name: str, requirements: dict,
+    *, defer_resource_guards: bool = False,
 ) -> tuple[dict, dict]:
-    """Predict an atomic transition without manufacturing execution evidence."""
+    """Predict declared effects without manufacturing execution evidence.
+
+    Recovery successor-union validation may defer nominal resource guards to
+    primitive composition. Custody conservation, declared effects, and product
+    requirements still apply. Nominal callers retain the default guard checks.
+    """
     before_owners = owners(models, valuation, products, product_name)
     event = _task_event(models, products, task)
     _check_product_requirements(task, products, product_name, requirements, event)
@@ -958,7 +977,8 @@ def project_transition(
             params["part_name"],
             loading["loading_position"],
         )
-    _apply_resource_effects(models, valuation, after, event, params)
+    _apply_resource_effects(models, valuation, after, event, params,
+                            defer_resource_guards=defer_resource_guards)
     if task["event_name"] == "place_release" and params.get("destination_location") == "Conveyor":
         derived = conveyor_load_parameters(
             models["Conveyor"],

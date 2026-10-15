@@ -33,6 +33,97 @@ def _agent():
     return agent
 
 
+def test_single_attempt_disables_sdk_and_application_retries(tmp_path, monkeypatch):
+    create = Mock(side_effect=RuntimeError("transport unavailable"))
+    limited = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    options = Mock(return_value=limited)
+    monkeypatch.setattr(llm_agent, "_client", SimpleNamespace(with_options=options))
+    monkeypatch.setattr(llm_agent.time, "sleep", lambda _: None)
+    async def run():
+        with capture_requests(directory=tmp_path, run_id="draft", stage="outline_draft", turn=1):
+            with pytest.raises(RuntimeError, match="transport unavailable"):
+                await _agent().ask_llm_structured("draft", response_format={"name": "draft", "schema": {}},
+                    include_agent_instructions=False, max_tool_rounds=0, max_attempts=1)
+    asyncio.run(run())
+    options.assert_called_once_with(max_retries=0)
+    create.assert_called_once()
+    assert len(list(tmp_path.glob("requests/*/*_request.json"))) == 1
+
+
+def test_primitive_subturn_preserves_records_without_copying_the_saved_scene(tmp_path):
+    from pathlib import Path
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import _write_primitive_subturn_artifact
+
+    class RecordedScene(dict):
+        def __deepcopy__(self, memo):
+            raise AssertionError("A retrieval record must not duplicate the saved scene")
+
+    scene = RecordedScene({"resource_models": {"owner": {"source": "recorded"}}})
+    prepared = {"recovery_debug": {"per_turn_debug_dir": str(tmp_path)}, "physical_evidence": scene}
+    event = {"outline_id": "RecordedEvent", "resource_jid": "owner@localhost"}
+    response = {"decision": "need_context", "context_requests": ["/primitive_contracts"]}
+    turn = {**event, "turn_index": 1, "primitive_local_turn_index": 1,
+            "decision": "need_context", "prompt_text": "Exact primitive request",
+            "llm_raw_response": response, "raw_response": response}
+    paths = _write_primitive_subturn_artifact(prepared_recovery_request=prepared,
+        session_state={"turn_index": 1}, assigned_outline_events=[event],
+        recovery_session_id="recorded-session", turn_entry=turn)
+    assert "Exact primitive request" in Path(paths["prompt_artifact_path"]).read_text()
+    saved = json.loads(Path(paths["response_artifact_path"]).read_text())
+    assert saved["response"] == response
+    assert prepared["physical_evidence"] is scene
+    assert scene == {"resource_models": {"owner": {"source": "recorded"}}}
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_composition_records_retrieval_rejection_revision_and_cancellation(tmp_path, monkeypatch, cancel):
+    import threading
+    from test_recovery_composition import contract, _prepared, feasible
+    from cais_spade_llm.resources.recovery_composition import validate_recovery_primitive_composition
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_primitive_generation import generate_primitive_batch_with_llm_agent
+
+    case = contract.__wrapped__()
+    prepared = _prepared(case)
+    prepared["recovery_debug"] = {"artifact_directory": str(tmp_path), "per_turn_debug_dir": str(tmp_path)}
+    steps = deepcopy(case["primitive_steps"])
+    steps[1]["params"]["count"] = 3
+    event = case["task"]
+    reply = {"thought": "Contract fixture", "outline_id": event["outline_id"], "resource_jid": event["resource_jid"]}
+    replies = [{**reply, "decision": "primitive_steps_ready", "primitive_steps": list(reversed(steps))},
+               {**reply, "decision": "need_context", "context_requests": ["/resources/owner/recovery_des_model"]},
+               {**reply, "decision": "primitive_steps_ready", "primitive_steps": steps}]
+    agent = _agent()
+    agent._composition_cancel_event = threading.Event()
+    calls = []
+    def create(**kwargs):
+        calls.append(deepcopy(kwargs))
+        if cancel:
+            agent._composition_cancel_event.set()
+        return _response(json.dumps(replies[len(calls) - 1]))
+    monkeypatch.setattr(llm_agent, "_client", SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    def validate(**kwargs):
+        kwargs.pop("prepared")
+        return validate_recovery_primitive_composition(**kwargs, recovery_des_model=case["recovery_des_model"],
+            primitive_catalog=case["primitive_catalog"], validate_primitive=feasible)
+    run = generate_primitive_batch_with_llm_agent(llm_agent=agent,
+        composition_owner=SimpleNamespace(validate_recovery_primitive_composition=validate),
+        prepared_recovery_request=prepared, assigned_outline_events=[event], recovery_session_id="composition-test", max_turns=3)
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run)
+        assert len(calls) == 1
+    else:
+        result = asyncio.run(run)
+        assert result["decision"] == "draft_ready", result
+        assert len(calls) == 3
+        assert result["primitive_events"][0]["composition_validation"]["feasibility_status"] == "FEASIBLE"
+        assert "preconditions" in calls[1]["messages"][0]["content"]
+    requests = list(tmp_path.rglob("*_request.json"))
+    provider = [json.loads(path.read_text()) for path in requests if '"kind": "provider_request"' in path.read_text()]
+    assert len(provider) == len(calls)
+    assert all(record["payload"] in calls for record in provider)
+
+
 @pytest.mark.parametrize("mode", ["single_pass", "incremental", "incremental_validated", "incremental_candidates_validated"])
 @pytest.mark.parametrize("action_horizon", ["1", "k", "full"])
 def test_outline_schema_at_provider_boundary_accepts_retrieval(tmp_path, monkeypatch, mode, action_horizon):

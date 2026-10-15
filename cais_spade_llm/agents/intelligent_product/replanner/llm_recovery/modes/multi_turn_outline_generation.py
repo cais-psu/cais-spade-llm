@@ -467,6 +467,10 @@ def _unresolved_condition_ids(
     session_state: dict[str, Any],
     prepared_recovery_request: dict[str, Any],
 ) -> set[str]:
+    if session_state.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import unresolved_conditions
+
+        return unresolved_conditions(session_state, prepared_recovery_request)
     return {
         _exact_condition_identifier(condition)
         for condition in _shared._active_continuation_conditions(
@@ -817,6 +821,10 @@ def _nominal_reentry_event_rows(
     prepared_recovery_request: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Build private exact nominal events on affected continuation paths."""
+    if session_state.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import nominal_rows
+
+        return nominal_rows(session_state, prepared_recovery_request)
     recovery_resources = dict(prepared_recovery_request.get("recovery_resources") or {})
     pending_task_ids = {
         str(task.get("id") or "").strip()
@@ -1613,6 +1621,10 @@ def _admissible_nominal_reentry_event_ids(
     prepared_recovery_request: dict[str, Any],
     cca_admissible_event_ids: set[str],
 ) -> set[str]:
+    if session_state.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import nominal_entry_ids
+
+        return nominal_entry_ids(session_state, prepared_recovery_request)
     resources_by_jid, parts_by_name = _projected_outline_validation_context(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
@@ -1672,6 +1684,25 @@ async def _agent_filtered_recovery_enabledness(
         "live_safety_dfa_state_fingerprint": "",
     }
     if not instances:
+        return result
+
+    if session_state.get("validation_contract_version") == 2:
+        from .multi_turn_validated_event import validate_event
+
+        for instance in instances:
+            candidate = deepcopy({key: value for key, value in session_state.items()
+                                  if key not in {"turns", "nominal_continuation_evidence", "pending_outline_validation"}})
+            audit = {}
+            ra, cca = await validate_event(task=deepcopy(instance["task"]), session=candidate,
+                prepared=prepared_recovery_request, planner=planner, turn=audit)
+            identity = instance["event_id"]
+            result["event_evaluations"].append({"event_id": identity,
+                "ra_status": ra.get("feasibility_status"), "cca_status": cca.get("validation_status", "not_checked")})
+            if ra.get("allowed") is True:
+                result["ra_admissible_event_ids"].append(identity)
+                if cca.get("is_safe") is True:
+                    for key in ("cca_admissible_event_ids", "admissible_event_ids"):
+                        result[key].append(identity)
         return result
 
     product_agent = getattr(planner, "product_agent", None)
@@ -2111,6 +2142,11 @@ async def _populate_agent_filtered_enabledness(
     prepared_recovery_request: dict[str, Any],
     planner: Any,
 ) -> None:
+    if session_state.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import populate_comparison
+
+        populate_comparison(candidate_evaluations, session_state, prepared_recovery_request)
+        return
     current_unresolved = _unresolved_condition_ids(
         session_state=session_state,
         prepared_recovery_request=prepared_recovery_request,
@@ -2290,6 +2326,10 @@ def _classify_candidate_selection_progress(
         return False, ["no_state_change"]
     if progressing:
         return True, []
+    if evaluation.get("diagnostic_validation_bypass") and set(delta_fields) & {
+        "part_location", "held_part", "job_state", "selected_program", "processCompleted",
+    }:
+        return True, []
     if all(
         field_name in {"resource_state", "current_state", "part_state"}
         for field_name in delta_fields
@@ -2304,6 +2344,8 @@ def _candidate_projected_session(
     evaluation: dict[str, Any],
 ) -> dict[str, Any]:
     projected = deepcopy(session_state)
+    if session_state.get("validation_contract_version") == 2:
+        projected.update(deepcopy(evaluation.get("projected_validation_state") or {}))
     projected["symbolic_resources"] = deepcopy(
         evaluation.get("projected_symbolic_resources") or {}
     )
@@ -4612,10 +4654,12 @@ async def _handle_outline_phase(
 ) -> tuple[str, dict[str, Any]]:
     """Dispatch outline handling according to configured outline mode."""
     if session_state.get("validation_contract_version") == 2:
-        from .multi_turn_validated_event import handle_validated_event
+        from .multi_turn_validated_event import handle_validated_candidates, handle_validated_event
 
-        return await handle_validated_event(session=session_state, prepared=prepared_recovery_request,
-                                            response=parsed_response, planner=planner)
+        handler = (handle_validated_candidates if session_state.get("outline_mode") == "incremental_candidates_validated"
+                   and "next_transition" not in parsed_response else handle_validated_event)
+        return await handler(session=session_state, prepared=prepared_recovery_request,
+                             response=parsed_response, planner=planner)
     if session_state.get("outline_context_retrieval") and parsed_response.get("decision") == "need_context":
         from .multi_turn_context import handle_outline_context
 
@@ -4752,6 +4796,8 @@ async def _try_handle_modeled_continuation(
     planner: Any,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     """Validate and select the next enabled RobotTaskProgram transition."""
+    if session_state.get("outline_diagnostic_bypass"):
+        return None
     if (
         _recovery_selection_mode(session_state) != "neurosymbolic"
         or str(session_state.get("outline_mode") or "").strip().lower()

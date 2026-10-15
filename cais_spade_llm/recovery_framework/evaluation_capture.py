@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -68,7 +69,7 @@ def active_processes() -> list[dict]:
             or ('cais-spade-llm' in text and any('/capture.py' in item for item in argv))))
         launch_match = any(item == 'launch' for item in argv) and any('ros2' in item for item in argv[:2])
         if process_match or python_match or launch_match:
-            matches.append({'pid': int(directory.name), 'comm': comm, 'argv': argv})
+            matches.append({'pid': int(directory.name), 'comm': comm})
     return matches
 
 
@@ -92,7 +93,10 @@ def preflight(port: int, domain: int) -> dict:
 def preserved_files() -> dict[str, str | None]:
     """Record immutable observations and normal UI configuration fingerprints."""
     paths = [ROOT / 'cais_spade_llm/user_verified_plan/index.json',
-             ROOT / 'cais_spade_llm/initialization/tools.json']
+             ROOT / 'cais_spade_llm/initialization/tools.json',
+             ROOT / 'cais_spade_llm/monitor/environment_runs/latest/run.json',
+             ROOT / 'cais_spade_llm/monitor/environment_runs/.latest-owner.json']
+    paths += list((ROOT / 'cais_spade_llm/monitor/environment_runs/latest/processes').glob('*.json'))
     paths += list((ROOT / 'cais_spade_llm/monitor/environment_runs/recovery').glob('capture_*/observations.json'))
     paths += list((ROOT / 'cais_spade_llm/initialization').glob('*.json'))
     paths += list((ROOT / 'cais_spade_llm/specification/products/geometry').glob('*recovery-framework.json'))
@@ -102,7 +106,15 @@ def preserved_files() -> dict[str, str | None]:
 
 
 def verify_capture(captured: dict, scenario: str) -> dict:
-    """Require the selected reconciled checkpoint and preserve its exact facts."""
+    """Require the selected reconciled checkpoint and preserve its exact facts.
+
+    Args:
+        captured: Saved runtime and physical observations.
+        scenario: Exact selected failure scenario.
+
+    Returns:
+        Verified checkpoint identities and their source paths.
+    """
     failure = captured.get('failure')
     setup = captured.get('setup')
     if not isinstance(failure, dict) or not isinstance(setup, dict):
@@ -137,9 +149,294 @@ def verify_capture(captured: dict, scenario: str) -> dict:
                 raise ValueError('M2 is no longer processing at the capture checkpoint')
     if not isinstance(part, str) or part not in captured.get('part_tracker', {}):
         raise ValueError('The checkpoint does not identify a captured affected part')
+    if scenario == 'ur5e-1 breakdown':
+        _verify_robot_breakdown_capture(captured)
+    if scenario == 'Conveyor breakdown' and configured.get('additional_condition') is not None:
+        from cais_spade_llm.resources.recovery_geometry import _checkpoint
+
+        other = configured['additional_condition']
+        pickups = failure.get('pickups', {})
+        machine = pickups.get('ur5e-1', {}).get('before', {}).get('M1', {})
+        if machine.get('resource_state') != 'completed' or machine.get('part_name') != part:
+            raise ValueError('Conveyor capture requires acknowledged pickup from completed M1')
+        for rid, held, origin in (('ur5e-1', configured['part_name'], 'M1'),
+                                  (other['resource_id'], other['part_name'], '3D Printing Station')):
+            acknowledgement = pickups.get(rid, {}).get('acknowledgement', {})
+            if (captured.get('resource_states', {}).get(rid, {}).get('held_part') != held
+                    or captured['part_tracker'].get(held, {}).get('location') != rid
+                    or acknowledgement.get('run_id') != captured['run_id']
+                    or acknowledgement.get('resource_id') != rid
+                    or acknowledgement.get('event_name') != 'pick_grasp'
+                    or acknowledgement.get('evidence') != 'resource'
+                    or acknowledgement.get('parameters', {}).get('part_name') != held
+                    or acknowledgement.get('parameters', {}).get('origin_resource_location') != origin
+                    or not pickups[rid].get('observations')):
+                raise ValueError('Conveyor capture lacks acknowledged retained pickup: ' + rid)
+            if any(row.get('process') == 'assembly'
+                   for row in captured['part_tracker'][held].get('processCompleted', [])):
+                raise ValueError('Conveyor capture requires both assemblies unfinished: ' + held)
+        if (part != configured['part_name'] or 'Conveyor' not in captured.get('unavailable_resources', [])
+                or captured.get('inputs', {}).get('scene', {}).get('Conveyor', {}).get('transport_enabled') is not False):
+            raise ValueError('Conveyor capture does not retain the unavailable transport')
+        physical = captured['physical_evidence']
+        observed = _checkpoint(physical['snapshot'], physical['geometry'], physical['resource_models'], index=0)
+        if observed['part_region_occupancy']['assembly_board-v1'][other['part_name']] is not False:
+            raise ValueError('Conveyor capture requires the printed part observed outside assembly_board-v1')
     return {'checkpoint': failure['checkpoint'], 'run_id': failure['run_id'],
             'part_name': part, 'resource_id': configured['resource_id'],
             'source_paths': ['/failure', '/setup/failure_scenario', '/part_tracker/' + part]}
+
+
+def _verify_robot_breakdown_capture(captured: dict) -> None:
+    """Require the observed failed approach, retained part, and frozen M1 occupancy."""
+    from cais_spade_llm.recovery_framework.recovery_observations import checkpoint_fact_fingerprint
+    from cais_spade_llm.resources.recovery_geometry import _checkpoint
+
+    failure = captured['failure']
+    part = failure['part_name']
+    values = captured.get('resource_states', {})
+    robot, machine = values.get('ur5e-1', {}), values.get('M1', {})
+    if (captured['setup']['failure_scenario']['resource_id'] != 'ur5e-1'
+            or robot.get('resource_state') != 'failed' or robot.get('held_part') is not None
+            or failure.get('resource_values_before', {}).get('ur5e-1', {}).get('resource_state') != 'at_pick'
+            or machine.get('resource_state') != 'completed' or machine.get('part_name') != part
+            or captured['part_tracker'][part].get('location') != 'M1'
+            or 'ur5e-1' in captured.get('unavailable_resources', [])):
+        raise ValueError('Robot breakdown must retain a failed empty-gripper approach and the completed part at M1')
+    for rid, name in (('M1', 'machine_part'), ('ur5e-1', 'pick_approach')):
+        record = failure.get(name, {})
+        task = record.get('acknowledgement', {})
+        if (task.get('resource_id') != rid or task.get('event_name') != name
+                or task.get('run_id') != captured['run_id'] or task.get('evidence') != 'resource'
+                or task.get('parameters', {}).get('part_name') != part or not record.get('observations')
+                or record not in captured.get('transitions', [])):
+            raise ValueError('Robot breakdown lacks its current acknowledged ' + name)
+    approach = failure['pick_approach']
+    if (approach['acknowledgement']['parameters'].get('origin_resource_location') != 'M1'
+            or approach.get('before', {}).get('M1', {}).get('resource_state') != 'completed'
+            or approach['before']['M1'].get('part_name') != part):
+        raise ValueError('Robot breakdown approach must target the completed part at M1')
+    physical = captured['physical_evidence']
+    physical_robot = physical.get('snapshot', {}).get('resources', {}).get('ur5e-1', {})
+    if ('held_part' not in physical_robot or physical_robot['held_part'] is not None
+            or physical.get('resources', {}).get('ur5e-1', {}).get('custody_complete') is not True):
+        raise ValueError('Robot breakdown requires the observed empty attachment inventory')
+    frozen = captured.get('capture_checkpoint', {})
+    native = physical.get('physics_evidence', {})
+    if (not frozen.get('instance_id') or frozen.get('world_paused') is not True
+            or frozen.get('native_observations_unchanged') is not True
+            or native.get('world_paused') is not True
+            or any(native.get(key) != frozen.get(key) for key in ('instance_id', 'simulation_time'))
+            or frozen.get('facts_fingerprint') != checkpoint_fact_fingerprint(captured)):
+        raise ValueError('Robot breakdown requires unchanged observations at the frozen checkpoint')
+    observed = _checkpoint(physical['snapshot'], physical['geometry'], physical['resource_models'], index=0)
+    if not any(observed['region_occupancy'].get(region, {}).get('ur5e-1') is True
+               for region in ('M1.front_access', 'M1.side_access', 'M1.workholding')):
+        raise ValueError('NEEDS_CONTEXT: ur5e-1 has no observed occupancy of the protected M1 area')
+
+
+async def _freeze_robot_capture(runtime, captured: dict, directory: Path) -> dict:
+    """Freeze the owned stopped robot scene and recapture its measured facts."""
+    from cais_spade_llm.recovery_framework.recovery_observations import (
+        _cancel_checkpoint_motion, capture_observations, fingerprint,
+    )
+
+    preparation = getattr(runtime, 'recovery_observation_preparation', None)
+    reader = getattr(preparation, 'reader', None)
+    if reader is None or not runtime.stopped or not runtime.nominal_idle.is_set():
+        raise ValueError('Robot checkpoint requires its stopped runtime and registered observation reader')
+    revision = runtime.context.revision
+    runtime.recovery_checkpoint_capturing = True
+    try:
+        cancellation = await _cancel_checkpoint_motion(runtime, reader, directory)
+    finally:
+        runtime.recovery_checkpoint_capturing = False
+    if runtime.context.revision != revision:
+        raise ValueError('Robot checkpoint changed during motion cancellation')
+    runtime.recovery_capture_frozen = True
+    before = await asyncio.to_thread(reader.set_world_paused, True)
+    write_record(directory / 'checkpoint_native_before.json', before)
+    fresh = await asyncio.to_thread(capture_observations, runtime, runtime.part_slippage_recovery._failure)
+    fresh['pending_nodes'] = deepcopy(captured['pending_nodes'])
+    fresh['additional_observations'] = deepcopy(captured.get('additional_observations', {}))
+    fresh['checkpoint_motion_cancellation'] = cancellation
+    after = await asyncio.to_thread(reader.snapshot, refresh=True)
+    write_record(directory / 'checkpoint_native_after.json', after)
+    unchanged = fingerprint({key: value for key, value in before.items() if key != 'observed_monotonic'}) == \
+        fingerprint({key: value for key, value in after.items() if key != 'observed_monotonic'})
+    if (not unchanged or after.get('world_paused') is not True or runtime.context.revision != revision):
+        raise ValueError('Robot physical checkpoint changed during its frozen capture')
+    fresh['capture_checkpoint'] = {'checkpoint_id': uuid4().hex, 'run_id': runtime.context.run_id,
+        'context_revision': revision, 'instance_id': before['instance_id'],
+        'simulation_time': before['simulation_time'], 'world_paused': True,
+        'native_observations_unchanged': True}
+    readiness = stationary_readiness(fresh)
+    if not readiness['ready']:
+        write_record(directory / 'last_unresolved_capture.json', fresh)
+        raise ValueError('Frozen robot checkpoint lacks stationary evidence: ' + repr(readiness['missing']))
+    write_record(directory / 'checkpoint_observations_raw.json', fresh)
+    return fresh
+
+
+def _owned_gazebo_environment(bridge, *, proc_root: Path = Path('/proc')) -> tuple[int, dict[str, str]]:
+    """Read launch-added model and plugin paths only from the owned server."""
+    groups = {os.getpgid(proc.pid) for proc in bridge._ros2_procs.values() if proc.poll() is None}
+    servers = []
+    for directory in proc_root.iterdir():
+        if not directory.name.isdigit():
+            continue
+        try:
+            if ((directory / 'comm').read_text().strip() != 'gzserver'
+                    or os.getpgid(int(directory.name)) not in groups):
+                continue
+            if directory.stat().st_uid != os.getuid():
+                raise ValueError('Owned Gazebo server has a different process owner')
+            entries = (directory / 'environ').read_bytes().split(b'\0')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        environment = dict(entry.decode(errors='surrogateescape').split('=', 1)
+                           for entry in entries if b'=' in entry)
+        servers.append((int(directory.name), environment))
+    if len(servers) != 1:
+        raise ValueError('Scene image requires exactly one owned Gazebo server')
+    return servers[0]
+
+
+def _capture_gazebo_frame(window: int, path: Path):
+    """Read X11 in a child process because a mapping error can exit Xlib."""
+    import cv2
+
+    code = '''
+import sys
+import cv2
+from cais_spade_llm.recovery_framework.gazebo_recording import X11Capture
+camera = X11Capture()
+try:
+    if camera.window != int(sys.argv[1], 16):
+        raise RuntimeError('Owned Gazebo window changed')
+    if not cv2.imwrite(sys.argv[2], camera.frame()):
+        raise RuntimeError('Gazebo frame was not written')
+finally:
+    camera.close()
+'''
+    result = subprocess.run([sys.executable, '-c', code, hex(window), str(path)],
+                            capture_output=True, text=True, timeout=10., cwd=ROOT)
+    if result.returncode:
+        raise RuntimeError('Gazebo frame read failed: ' + result.stderr[-400:])
+    frame = cv2.imread(str(path))
+    if frame is None:
+        raise RuntimeError('Owned Gazebo frame is unavailable')
+    return frame
+
+
+def capture_scene_image(bridge, runtime, captured: dict, observation_path: Path) -> dict:
+    """Save the final Gazebo window only when it belongs to this capture launch.
+
+    Args:
+        bridge: SystemBridge owning this capture's launch processes.
+        runtime: Stopped runtime at the observed failure checkpoint.
+        captured: Saved observations identifying the failure and physical scene.
+        observation_path: Final saved observation file beside the image.
+
+    Returns:
+        Image provenance bound to the owned window, run, and saved observations.
+    """
+    import cv2
+
+    if not runtime.stopped or not runtime.nominal_idle.is_set():
+        raise ValueError('Scene image requires the stopped, idle owned runtime')
+    if runtime.conveyor_fault.snapshot().get('visual', {}).get('status') != 'completed':
+        raise ValueError('Scene image requires the acknowledged failure marker')
+    frozen = captured.get('capture_checkpoint') if captured.get('scenario') == 'ur5e-1 breakdown' else None
+    if frozen is not None:
+        native = runtime.recovery_observation_preparation.reader.snapshot(refresh=True)
+        if (native.get('world_paused') is not True
+                or any(native.get(key) != frozen.get(key) for key in ('instance_id', 'simulation_time'))):
+            raise ValueError('Scene image no longer matches the frozen robot checkpoint')
+    name = 'capture_gazebo_gui'
+    server_pid, environment = _owned_gazebo_environment(bridge)
+    command = ['gzclient', '--gui-client-plugin=libgazebo_ros_eol_gui.so']
+    window = None
+    frame_path = observation_path.parent / 'failure_scene.frame.png'
+    with (observation_path.parent / 'gzclient.log').open('w') as stream:
+        process = subprocess.Popen(command, stdout=stream, env=environment,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+    bridge._ros2_procs[name] = process
+    try:
+        bridge._register_ui_process(name, process, shlex.join(command))
+        deadline = time.monotonic() + 30.
+        while window is None:
+            if process.poll() is not None:
+                raise RuntimeError('Owned Gazebo GUI exited before its window became available')
+            tree = subprocess.check_output(['xwininfo', '-root', '-tree'], text=True, timeout=5)
+            windows = re.findall(r'(0x[0-9a-f]+) "Gazebo"', tree)
+            if len(windows) == 1:
+                window = int(windows[0], 16)
+            elif time.monotonic() >= deadline:
+                raise RuntimeError('Owned Gazebo window did not become available')
+            else:
+                time.sleep(.1)
+        property_text = subprocess.check_output(
+            ['xprop', '-id', hex(window), '_NET_WM_PID'], text=True, timeout=5)
+        match = re.search(r'=\s*(\d+)', property_text)
+        if match is None:
+            raise ValueError('Gazebo window process ownership is unavailable')
+        pid = int(match.group(1))
+        groups = {os.getpgid(proc.pid) for proc in bridge._ros2_procs.values() if proc.poll() is None}
+        if os.getpgid(pid) not in groups:
+            raise ValueError('Gazebo window belongs to a different launch')
+        # A mapped window can precede scene rendering by many seconds on WSL.
+        deadline = time.monotonic() + 180.
+        rendered_since = None
+        while True:
+            if process.poll() is not None:
+                raise RuntimeError('Owned Gazebo GUI exited before scene rendering')
+            try:
+                frame = _capture_gazebo_frame(window, frame_path)
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                logger.debug('Gazebo frame is not ready: %s', exc)
+                frame = None
+            now = time.monotonic()
+            if frame is not None:
+                height, width = frame.shape[:2]
+                scene = frame[height // 8:7 * height // 8, width // 4:7 * width // 8]
+            if frame is not None and scene.size and (scene > 16).mean() > .05 and scene.std() > 8.:
+                if rendered_since is None:
+                    rendered_since = now
+                if now - rendered_since >= 5.:
+                    break
+            else:
+                rendered_since = None
+            if now >= deadline:
+                raise TimeoutError('Owned Gazebo window did not render the failure scene')
+            time.sleep(.5)
+        temporary = observation_path.parent / 'failure_scene.partial.png'
+        destination = observation_path.parent / 'failure_scene.png'
+        if not cv2.imwrite(str(temporary), frame):
+            raise RuntimeError('Gazebo scene image was not written')
+        temporary.replace(destination)
+        record = {'path': str(destination), 'sha256': sha256_file(destination),
+            'width': frame.shape[1], 'height': frame.shape[0], 'window_id': hex(window),
+            'server_pid': server_pid,
+            'window_pid': pid, 'window_process_group': os.getpgid(pid),
+            'captured_at': datetime.now(timezone.utc).isoformat(), 'run_id': captured['run_id'],
+            'source': str(observation_path), 'source_sha256': sha256_file(observation_path),
+            'observation_captured_at': captured['captured_at'],
+            'physical_evidence_fingerprint': captured['physical_evidence']['evidence_fingerprint'],
+            'rendering': {'verified': True, 'pixel_stddev': float(scene.std()),
+                          'nonblack_fraction': float((scene > 16).mean())},
+            'execution_authorized': False}
+        if frozen is not None:
+            native = runtime.recovery_observation_preparation.reader.snapshot(refresh=True)
+            if (native.get('world_paused') is not True
+                    or any(native.get(key) != frozen.get(key) for key in ('instance_id', 'simulation_time'))):
+                raise ValueError('Robot checkpoint changed while its scene image was captured')
+            record['capture_checkpoint'] = deepcopy(frozen)
+        write_record(observation_path.parent / 'failure_scene.json', record)
+        return record
+    finally:
+        frame_path.unlink(missing_ok=True)
+        bridge.ros2_stop(name, reason='owned_failure_scene_saved')
 
 
 def stationary_readiness(captured: dict) -> dict:
@@ -320,6 +617,7 @@ async def run_capture(args) -> dict:
                       CAIS_KEEP_GAZEBO_ON_EXIT='1')
     import cais_spade_llm.ui_main  # Only import compatibility; never invoke UI startup/cleanup.
     import cais_spade_llm.ui.bridge as bridge_module
+    from cais_spade_llm.recovery_framework import environment_runtime
     from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
     from cais_spade_llm.recovery_framework.recovery_observations import (
         RECORDS, capture_observations, offline_preparation_missing, save_native_preview_model_from_capture,
@@ -336,6 +634,7 @@ async def run_capture(args) -> dict:
     bridge_module._MONITOR = workspace / 'cais_spade_llm/monitor'
     bridge_module._LOG_DIR = workspace / 'cais_spade_llm/log'
     bridge_module._RECOVERY_RUNTIME_DATA_DIR = bridge_module._MONITOR / 'debug/recovery_runtime_data'
+    environment_runtime.RUN_DIRECTORY = directory / 'environment_runs'
     os.chdir(workspace)
     calls = install_capture_guards()
     bridge = bridge_module.SystemBridge()
@@ -359,6 +658,7 @@ async def run_capture(args) -> dict:
               'outline_mode': 'manual', 'primitive_mode': 'manual'}
     write_record(directory / 'report.json', report)
     condition_record = None
+    runtime = None
     try:
         # Repeat after Python imports, immediately before the launch operation.
         preflight(args.gazebo_port, args.ros_domain)
@@ -423,6 +723,8 @@ async def run_capture(args) -> dict:
                 raise TimeoutError('Recorded rest checks did not pass within the observation deadline: ' + repr(readiness['missing']))
             await asyncio.sleep(5)
 
+        if args.scenario == 'ur5e-1 breakdown':
+            captured = await bridge._run_on_agent_runtime(_freeze_robot_capture(runtime, captured, directory))
         if frozen_checkpoint:
             scene = captured['planning_scene_capture']
         else:
@@ -433,6 +735,12 @@ async def run_capture(args) -> dict:
                 timeout_seconds=settings['timeout_seconds'])
             captured['planning_scene_capture'] = {**scene, 'status': 'captured', 'compatibility': 'not_checked',
                 'physical_evidence_fingerprint': captured['physical_evidence']['evidence_fingerprint']}
+        if args.scenario == 'ur5e-1 breakdown':
+            from cais_spade_llm.recovery_framework.recovery_observations import checkpoint_fact_fingerprint
+
+            captured['capture_checkpoint']['facts_fingerprint'] = checkpoint_fact_fingerprint(captured)
+            report['capture_checkpoint'] = deepcopy(captured['capture_checkpoint'])
+            write_record(directory / 'checkpoint_observations_raw.json', captured)
         destination = RECORDS / ('capture_' + uuid4().hex)
         destination.mkdir()
         observation_path = destination / 'observations.json'
@@ -446,6 +754,9 @@ async def run_capture(args) -> dict:
         write_record(observation_path, captured)
         report['native_model_archive'] = await save_native_preview_model_from_capture(
             observation_path, cancel_event=cancelled)
+        if getattr(args, 'scene_image', False):
+            report['scene_image'] = await asyncio.to_thread(
+                capture_scene_image, bridge, runtime, captured, observation_path)
         condition_evidence = verify_capture_condition(captured, args.scenario, args.condition)
         if not isinstance(condition_evidence, dict) or not condition_evidence:
             raise ValueError('Condition verification returned no factual evidence')
@@ -476,9 +787,17 @@ async def run_capture(args) -> dict:
         report.update(status='failed', error_type=type(exc).__name__, reason=str(exc))
     finally:
         try:
-            await bridge.part_slippage_action('stop')
-            await asyncio.to_thread(bridge.ros2_stop_all, reason='owned_fresh_capture_complete')
-            example._restore_settings()
+            try:
+                if args.scenario == 'ur5e-1 breakdown' and getattr(runtime, 'recovery_capture_frozen', False):
+                    reader = runtime.recovery_observation_preparation.reader
+                    await bridge._run_on_agent_runtime(asyncio.to_thread(reader.set_world_paused, False))
+                    runtime.recovery_capture_frozen = False
+            finally:
+                await bridge.part_slippage_action('stop')
+                await asyncio.to_thread(bridge.ros2_stop_all, reason='owned_fresh_capture_complete')
+                if getattr(bridge, '_xmpp_proc', None) is not None:
+                    await bridge._stop_xmpp_server()
+                example._restore_settings()
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, TimeoutError, asyncio.TimeoutError, subprocess.SubprocessError) as exc:
             logger.exception('Owned cleanup failed')
             report['cleanup_error'] = str(exc)
@@ -487,6 +806,8 @@ async def run_capture(args) -> dict:
                       preserved_files_unchanged=before == after, llm_calls=calls,
                       owned_launch_groups_remaining={name: proc.pid for name, proc in bridge._ros2_procs.items()
                                                      if proc.poll() is None})
+        xmpp = getattr(bridge, '_xmpp_proc', None)
+        report['owned_xmpp_server_remaining'] = xmpp.pid if xmpp is not None and xmpp.poll() is None else None
         if implementation is not None:
             try:
                 verify_frozen(implementation)
@@ -496,6 +817,7 @@ async def run_capture(args) -> dict:
                 report['implementation_unchanged'] = True
         if (condition_record is not None and report['status'] == 'captured'
                 and report['preserved_files_unchanged'] and not report['owned_launch_groups_remaining']
+                and not report['owned_xmpp_server_remaining']
                 and 'cleanup_error' not in report):
             write_record(directory / 'condition_record.json', condition_record)
             report['evaluation_row'] = {'scenario': args.scenario, 'condition': args.condition,
@@ -516,6 +838,8 @@ def main() -> None:
     parser.add_argument('--gazebo-port', type=int, default=11379)
     parser.add_argument('--timeout', type=float, default=600.)
     parser.add_argument('--settle-timeout', type=float, default=300.)
+    parser.add_argument('--scene-image', action='store_true',
+                        help='Save an owned Gazebo-window PNG at the final failure checkpoint')
     args = parser.parse_args()
     if not 1 <= args.ros_domain <= 232 or not 1024 <= args.gazebo_port <= 65535:
         parser.error('Use an isolated ROS domain and an unprivileged Gazebo port')

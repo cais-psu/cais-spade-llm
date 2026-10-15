@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_environment_recovery import owner_context as selective_owner_context, selective_movement_case
 from jsonschema import Draft202012Validator
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event as validated
@@ -22,6 +23,38 @@ from cais_spade_llm.recovery_framework.outline_validation import (
 )
 
 JID = "ur5e-3@localhost"
+
+
+@pytest.mark.parametrize("resource_list,part_list", [(False, False), (True, False), (False, True), (True, True)])
+def test_candidate_comparison_accepts_recorded_and_projected_pose_formats(resource_list, part_list):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_state import (
+        _infer_outline_macro_signature,
+    )
+
+    values = [1., 2., 3., 0., 0., 0., 1.]
+    pose = dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"), values, strict=True))
+    resources = {JID: {"current_state": "idle", "current_location": "M2", "held_part": None, "current_pose": pose}}
+    parts = {"part": {"current_state": "ready", "current_location": "M2", "observed_pose": pose}}
+    task = {"resource_jid": JID, "part_name": "part", "expected_end_state": {"held_part": "part"}}
+    expected = _infer_outline_macro_signature(task, resources_by_jid=resources, parts_by_name=parts)
+    if resource_list:
+        resources[JID]["current_pose"] = values
+    if part_list:
+        parts["part"]["observed_pose"] = values
+    before = deepcopy((task, resources, parts))
+    assert _infer_outline_macro_signature(task, resources_by_jid=resources, parts_by_name=parts) == expected
+    assert (task, resources, parts) == before
+
+
+@pytest.mark.parametrize("pose", [None, [], [1., 2., 3.], [1., 2., float("nan"), 0., 0., 0., 1.]])
+def test_candidate_comparison_keeps_incomplete_pose_unknown(pose):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_state import (
+        _infer_outline_macro_signature,
+    )
+
+    result = _infer_outline_macro_signature({"resource_jid": JID, "expected_end_state": {}},
+        resources_by_jid={JID: {"current_pose": pose}}, parts_by_name={})
+    assert result["resource_before"]["current_pose"] is None
 
 
 def _case():
@@ -106,6 +139,84 @@ def test_novel_event_is_appended_only_after_real_ra_and_cca_validation():
     assert prepared == original
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+def test_candidate_batch_isolates_rejected_alternatives_and_commits_only_selected(reverse):
+    prepared, session, planner, event = _case()
+    session['outline_mode'] = 'incremental_candidates_validated'
+    rejected = {**deepcopy(event), 'outline_id': 'rejected',
+                'expected_end_state': {'resource_state': 'unsupported'}}
+    events = [event, rejected]
+    if reverse:
+        events.reverse()
+    before = deepcopy(prepared)
+    decision, audit = asyncio.run(validated.handle_validated_candidates(
+        prepared=prepared, session=session, planner=planner,
+        response={'thought': 'Use recorded facts.', 'candidate_events': events}))
+    assert decision == 'outline_ready'
+    assert len(session['accepted_outline_prefix']) == 1
+    assert session['accepted_outline_prefix'][0]['outline_id'] == event['outline_id']
+    assert session['symbolic_resources'][JID]['resource_state'] == 'idle'
+    assert len(planner.product_agent.cca_requests) == 1
+    rejected_row = next(row for row in audit['candidate_evaluations'] if row['task']['outline_id'] == 'rejected')
+    assert rejected_row['valid'] is False
+    assert prepared == before
+
+
+def test_candidate_state_comparison_ignores_history_length_but_preserves_relevant_changes():
+    _, session, _, _ = _case()
+    session['outline_monitor_context'] = {'spec': {
+        'states': {'SAFE': ['q0']}, 'rules_fingerprint': 'exact-rule', 'observations': [{'time': 0}]}}
+    identity = validated._comparison_state_fingerprint(session)
+    same = deepcopy(session)
+    same['outline_monitor_context']['spec']['observations'].append({'time': 1})
+    same['outline_monitor_context']['spec']['evidence_history'] = [{'projection': 'another record'}]
+    assert validated._comparison_state_fingerprint(same) == identity
+    for field, value in [('held_part', 'gear_small'), ('resource_state', 'picked')]:
+        changed = deepcopy(same)
+        changed['symbolic_resources'][JID][field] = value
+        assert validated._comparison_state_fingerprint(changed) != identity
+    same['outline_monitor_context']['spec']['states']['SAFE'] = ['q1']
+    assert validated._comparison_state_fingerprint(same) != identity
+
+
+def test_unresolved_candidate_batch_is_retained_for_validation_only_retry():
+    prepared, session, planner, event, _ = _union_case()
+    response = {'thought': 'Use recorded facts.', 'candidate_events': [event]}
+    before = deepcopy(session['accepted_outline_prefix'])
+    decision, _ = asyncio.run(validated.handle_validated_candidates(
+        prepared=prepared, session=session, planner=planner, response=response))
+    assert decision == 'need_context'
+    assert session['pending_outline_validation']['kind'] == 'candidates'
+    assert session['pending_outline_validation']['response'] == response
+    assert session['accepted_outline_prefix'] == before
+    again, audit = asyncio.run(validated.retry_pending_event(prepared=prepared, session=session, planner=planner))
+    assert again == 'need_context' and audit['request_sent'] is False
+    assert session['accepted_outline_prefix'] == before
+
+
+def test_current_candidate_policy_allows_revision_without_accepting_missing_evidence():
+    prepared, session, planner, event, _ = _union_case()
+    session['outline_evidence_policy_version'] = 2
+    response = {'thought': 'Use recorded facts.', 'candidate_events': [event]}
+    before = deepcopy(session['accepted_outline_prefix'])
+    decision, audit = asyncio.run(validated.handle_validated_candidates(
+        prepared=prepared, session=session, planner=planner, response=response))
+    assert decision == 'need_revision'
+    assert audit['proposal_revision_available'] is True
+    assert audit['candidate_evaluations'][0]['valid'] is False
+    assert audit['candidate_evaluations'][0]['decision'] == 'need_context'
+    assert session['candidate_rejection_feedback']
+    assert session['accepted_outline_prefix'] == before
+    assert 'pending_outline_validation' not in session
+    response['candidate_events'][0]['outline_id'] = 'same_conditions_different_id'
+    again, audit = asyncio.run(validated.handle_validated_candidates(
+        prepared=prepared, session=session, planner=planner, response=response))
+    assert again == 'need_context'
+    assert audit['proposal_revision_available'] is False
+    assert session['pending_outline_validation']['kind'] == 'candidates'
+    assert session['accepted_outline_prefix'] == before
+
+
 def test_rejection_feedback_survives_retrieval_and_clears_after_accepted_transition(monkeypatch):
     prepared, session, planner, event = _case()
     validate = validated.validate_event
@@ -124,6 +235,44 @@ def test_rejection_feedback_survives_retrieval_and_clears_after_accepted_transit
     monkeypatch.setattr(validated, "validate_event", validate)
     assert _run(prepared, session, planner, event)[0] == "outline_ready"
     assert session["candidate_rejection_feedback"] == []
+
+
+@pytest.mark.parametrize("endpoint_search", [False, True])
+def test_incomplete_feedback_explains_public_conflicts_without_private_programs(monkeypatch, endpoint_search):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import _outline_feedback_for_prompt
+
+    prepared, session, planner, event = _case()
+    before = deepcopy(session)
+    ra = {"allowed": False, "feasibility_status": "NEEDS_CONTEXT", "reason": "private validator prose",
+          "primitive_support": {"primitives": [{"primitive": "private_operation", "parameter_attempts": [{
+              "evidence": {"conflicting_parameters": ["part_name", "task_ctx.private"]},
+              "parameter_witness": {"parameter_bindings": {"part_name": "recorded part", "task_ctx.private": "private binding"},
+                                    "params": {"part_name": None, "task_ctx.private": "private output"}}}]}]}}
+    cca = {}
+    if endpoint_search:
+        ra = {"allowed": True, "feasibility_status": "FEASIBLE", "geometry_evidence": {
+            "status": "needs_context", "owner_alternatives": [{"unresolved": [
+                "Bounded KMR endpoint search found no independently verified joint witness; reachability is unresolved"]}]}}
+        cca = {"is_safe": False, "validation_status": "NEEDS_CONTEXT", "formal_safety_status": "not_checked",
+               "constraint_owner": "resource", "reason": "private endpoint prose"}
+
+    async def incomplete(**kwargs):
+        return deepcopy(ra), deepcopy(cca)
+
+    monkeypatch.setattr(validated, "validate_event", incomplete)
+    assert _run(prepared, session, planner, event)[0] == "need_context"
+    finding = _outline_feedback_for_prompt(session["outline_validation_findings"][0], {"held_part"})
+    assert finding["feasibility_status"] == ra["feasibility_status"]
+    assert "NEEDS_CONTEXT" in finding["reason"]
+    assert "private" not in json.dumps(finding)
+    if endpoint_search:
+        assert finding["evidence"]["solver_summary"]["failure_kind"] == "bounded_search_failed"
+        assert "not a demonstrated constraint violation" in finding["reason"]
+    else:
+        assert finding["evidence"]["parameter_conflicts"] == [
+            {"field": "part_name", "expected": "recorded part", "actual": None}]
+    for field in ("accepted_outline_prefix", "symbolic_resources", "symbolic_parts", "outline_monitor_context"):
+        assert session.get(field) == before.get(field)
 
 
 def test_existing_projected_scene_does_not_copy_the_unused_capture(monkeypatch):
@@ -145,6 +294,51 @@ def test_existing_projected_scene_does_not_copy_the_unused_capture(monkeypatch):
     ra, cca = asyncio.run(validated.validate_event(task=task, session=session, prepared=prepared,
         planner=planner, turn={}))
     assert ra["allowed"] and cca["is_safe"]
+
+
+def test_outline_feedback_retains_ra_unsupported_combination_without_suggesting_an_event():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import _outline_feedback_for_prompt
+
+    prepared, session, planner, event, _ = _union_case()
+    model = prepared["recovery_resources"][JID]["recovery_des_model"]
+    model["events"] = [
+        {"event_name": "private_first", "updates": {"resource_state": {"set": "idle"},
+            "held_part": {"set": None}}, "primitive_support": [{"primitive": "reset_fault", "params": {}}]},
+        {"event_name": "private_second", "updates": {"resource_state": {"set": "failed"},
+            "held_part": {"set": "gear_small"}}, "primitive_support": [{"primitive": "reset_fault", "params": {}}]}]
+    event["expected_end_state"] = {"resource_state": "idle", "held_part": "gear_small"}
+    before = deepcopy(session)
+    decision, _ = _run(prepared, session, planner, event)
+    assert decision == "need_revision"
+    assert planner.product_agent.cca_requests == []
+    finding = session["outline_validation_findings"][0]
+    support = finding["evidence"]["condition_support"]
+    assert support["combination_supported"] is False
+    assert support["individual_conditions_supported"] is True
+    public = _outline_feedback_for_prompt(finding, set(model["state_variables"]))
+    assert public["evidence"]["condition_support"] == support
+    assert "private_first" not in json.dumps(public) and "private_second" not in json.dumps(public)
+    for field in ("accepted_outline_prefix", "symbolic_resources", "symbolic_parts", "outline_monitor_context"):
+        assert session[field] == before[field]
+
+
+@pytest.mark.parametrize("resource_jid", [JID, "M2@localhost", "Conveyor@localhost"])
+def test_recent_accepted_prefix_shows_only_changed_public_conditions(resource_jid):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import _accepted_transition_prefix_for_prompt
+
+    tasks = [{"outline_id": str(index), "event_name": "accepted_event", "resource_jid": resource_jid,
+        "expected_start_state": {"resource_state": "idle", "held_part": "gear_small", "_private": "before"},
+        "expected_end_state": {"resource_state": "idle", "held_part": None, "_private": "after"},
+        "primitive_steps": ["private operation"], "rationale": "private explanation"} for index in range(9)]
+    original = deepcopy(tasks)
+    rows = _accepted_transition_prefix_for_prompt(tasks, hide_registered_functions=True,
+        public_fields={resource_jid: {"resource_state", "held_part"}})
+    assert len(rows) == len(tasks)
+    assert all("expected_end_state" not in row for row in rows[:3])
+    assert all(row["expected_end_state"] == {"held_part": None} for row in rows[3:])
+    assert "private" not in json.dumps(rows)
+    assert tasks == original
+    assert all("expected_end_state" not in row for row in _accepted_transition_prefix_for_prompt(tasks))
 
 
 def _union_case():
@@ -184,12 +378,138 @@ def _union_case():
     return prepared, session, planner, event, save_preview
 
 
+def _policy_case(context):
+    from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
+
+    task, snapshot, model, physical = selective_movement_case(context)
+    prepared, session, planner, _ = _case()
+    jid = task['resource_jid']
+    prepared.update(outline_evidence_policy_version=1, primitive_support_semantics='successor_primitive_union',
+        physical_evidence=physical['physical_evidence'], outline_safety_specifications=physical['outline_safety_specifications'],
+        recovery_resources={jid: {'recovery_snapshot': snapshot, 'recovery_des_model': model,
+                                 'resource_evidence': physical['resource_evidence']}},
+        llm_input={'goal_conditions': [{'entity_kind': 'resource', 'entity': jid,
+                                       'field': 'resource_location', 'expected': 'M1'}]})
+    session.update(outline_evidence_policy_version=1, primitive_support_semantics='successor_primitive_union',
+        symbolic_resources={jid: deepcopy(snapshot)}, recovery_des_models={jid: deepcopy(model)})
+    planner.product_agent.owner = SimpleNamespace(jid=jid, get_recovery_snapshot=lambda: deepcopy(snapshot),
+        recovery_des_model=lambda **_: deepcopy(model),
+        validate_recovery_primitive_support=lambda **kw: {'allowed': True, 'feasibility_status': 'FEASIBLE',
+            'primitive_support': derive_primitive_union(task=kw['task'], recovery_des_model=kw['recovery_des_model'],
+                                                       recovery_snapshot=kw['recovery_snapshot'])},
+        project_recovery_outline_event=lambda **_: {'status': 'needs_context', 'unresolved': ['Fresh supported geometry required'],
+            'interval_complete': False, 'observations': []})
+    return prepared, session, planner, task
+
+
+def test_marked_event_updates_state_and_shared_nominal_path(selective_owner_context):
+    prepared, session, planner, event = _policy_case(selective_owner_context)
+    status, turn = _run(prepared, session, planner, event)
+    assert turn.get('transition_validation', {}).get('status') == 'passed', turn
+    assert status == 'outline_ready', turn.get('nominal_continuation_evidence')
+    assert session['symbolic_resources'][event['resource_jid']]['resource_location'] == 'M1'
+    assert 'current_pose' not in session['derived_resource_snapshots'][event['resource_jid']]
+    assert session['outline_monitor_context']
+    assert turn['nominal_continuation_evidence']['complete'] is True
+    assert turn['nominal_continuation_evidence']['execution_authorized'] is False
+    assert planner.product_agent.ra_requests[-1]['outline_evidence_policy_version'] == 1
+    assert planner.product_agent.cca_requests[-1]['outline_evidence_policy_version'] == 1
+
+
+@pytest.mark.parametrize('failure', ['running_job', 'tampered_coverage'])
+def test_marked_failed_candidate_preserves_accepted_facts_and_monitor_history(selective_owner_context, failure):
+    prepared, session, planner, event = _policy_case(selective_owner_context)
+    if failure == 'running_job':
+        prepared['physical_evidence']['processing_observations'] = {'M2': {'active_job': 'job',
+            'jobs': {'job': {'part_name': 'RGOCG4-50_Round_4mm', 'job_state': 'running'}}}}
+    else:
+        def tamper(reply, payload):
+            reply['results'][0]['geometry_evidence']['evidence_coverage']['status'] = 'missing'
+            return reply
+        planner.product_agent.ra_reply = tamper
+    before = deepcopy(session)
+    status, turn = _run(prepared, session, planner, event)
+    assert status == 'need_context', turn
+    for field in ('accepted_outline_prefix', 'symbolic_resources', 'symbolic_parts', 'outline_monitor_context'):
+        assert session[field] == before[field]
+
+
+def test_unmarked_movement_keeps_legacy_projection_requirement(selective_owner_context):
+    prepared, session, planner, event = _policy_case(selective_owner_context)
+    prepared.pop('outline_evidence_policy_version')
+    session.pop('outline_evidence_policy_version')
+    status, turn = _run(prepared, session, planner, event)
+    assert status == 'need_context', turn
+    assert session['accepted_outline_prefix'] == []
+    assert 'outline_evidence_policy_version' not in planner.product_agent.ra_requests[-1]
+
+
+def test_marked_empty_successor_never_falls_back_to_captured_state():
+    captured = {'resource_state': 'processing', 'active_job': 'captured-job'}
+    seen = []
+    def capability(**kwargs):
+        seen.append(kwargs['recovery_snapshot'])
+        return {'allowed': False, 'feasibility_status': 'NEEDS_CONTEXT', 'reason': 'Required owner facts are unknown'}
+    owner = SimpleNamespace(jid='M2@localhost', get_recovery_snapshot=lambda: captured,
+        recovery_des_model=lambda **_: {}, validate_recovery_primitive_support=capability)
+    result = validate_resource_outline_payload(owner, {'validation_contract_version': 2,
+        'outline_evidence_policy_version': 1, 'primitive_support_semantics': 'successor_primitive_union',
+        'candidates': [{'task': {'resource_jid': owner.jid}, 'physical_input': {'projected_snapshot': {}}}]})
+    assert seen == [{}]
+    assert not result['results'][0]['allowed']
+
+
+def test_later_geometry_demand_cannot_reuse_invalidated_capture(selective_owner_context):
+    from cais_spade_llm.recovery_framework.outline_validation import load_outline_specifications
+    from cais_spade_llm.recovery_framework import ROOT
+
+    prepared, session, planner, event = _policy_case(selective_owner_context)
+    physical = prepared['physical_evidence']
+    for name in ('front_access', 'side_access', 'workholding'):
+        physical['geometry']['regions']['M2.' + name] = {'bounds': [[4, 5], [4, 5], [4, 5]]}
+    for rid, values in physical['snapshot']['resources'].items():
+        if 'held_part' in values:
+            physical['geometry']['resources'][rid]['stationary_only'] = False
+    assert _run(prepared, session, planner, event)[1]['transition_validation']['status'] == 'passed'
+    accepted = deepcopy(session)
+    prepared['outline_safety_specifications'].extend(load_outline_specifications(
+        ['cais_spade_llm/specification/safety/safety_M2_mutex.txt'], ROOT))
+    seen = []
+    def missing_geometry(**kwargs):
+        supplied = kwargs['physical_input']['physical_evidence']
+        seen.append(deepcopy(supplied))
+        assert 'current_pose' not in supplied['snapshot']['resources']['KMR']
+        assert 'configuration' not in supplied['resource_models']['KMR']
+        return {'status': 'needs_context', 'unresolved': ['Fresh supported occupancy projection required'],
+            'interval_complete': False, 'observations': [], 'context_requests': ['/physical_evidence']}
+    planner.product_agent.owner.project_recovery_outline_event = missing_geometry
+    later = {**event, 'outline_id': 'following-movement', 'expected_end_state': {'resource_location': 'M2', 'resource_state': 'idle'}}
+    status, turn = _run(prepared, session, planner, later)
+    assert status == 'need_context', turn
+    assert seen
+    assert session['projected_physical_evidence'] == accepted['projected_physical_evidence']
+    assert session['outline_monitor_context'] == accepted['outline_monitor_context']
+    assert session['accepted_outline_prefix'] == accepted['accepted_outline_prefix']
+
+
+def test_selected_processing_history_survives_unneeded_geometry_changes(selective_owner_context):
+    prepared, session, planner, event = _policy_case(selective_owner_context)
+    assert _run(prepared, session, planner, event)[1]['transition_validation']['status'] == 'passed'
+    history = deepcopy(session['outline_monitor_context'])
+    later = {**event, 'outline_id': 'following-movement', 'expected_end_state': {'resource_location': 'M2', 'resource_state': 'idle'}}
+    _, turn = _run(prepared, session, planner, later)
+    assert turn.get('transition_validation', {}).get('status') == 'passed', turn
+    key = next(iter(history))
+    assert len(session['outline_monitor_context'][key]['evidence_history']) == 2
+    assert len(session['outline_monitor_context'][key]['observations']) > len(history[key]['observations'])
+
+
 def test_union_ra_and_cca_append_only_with_independent_event_preview():
     prepared, session, planner, event, save_preview = _union_case()
     before = deepcopy(session)
     decision, turn = _run(prepared, session, planner, event)
     assert decision == "need_context", turn
-    assert planner.product_agent.ra_requests and planner.product_agent.cca_requests
+    assert planner.product_agent.ra_requests and planner.product_agent.cca_requests == []
     assert session["accepted_outline_prefix"] == before["accepted_outline_prefix"]
     assert session["symbolic_resources"] == before["symbolic_resources"]
     assert session["outline_monitor_context"] == before["outline_monitor_context"]
@@ -292,6 +612,7 @@ def test_rejected_supplied_motion_retries_with_factual_feedback_without_state_co
     record = _rejected_motion_record(task, entry["recovery_snapshot"], entry["recovery_des_model"], physical)
     physical["rejected_event_evidence"] = [record]
     before = deepcopy(session)
+    cca_calls = len(planner.product_agent.cca_requests)
     decision, turn = asyncio.run(validated.retry_pending_event(prepared=prepared, session=session, planner=planner))
     assert decision == "need_revision"
     assert turn["transition_validation"]["status"] == "rejected"
@@ -299,7 +620,11 @@ def test_rejected_supplied_motion_retries_with_factual_feedback_without_state_co
     assert stages["ResourceAgent"]["feasibility_status"] == "FEASIBLE"
     assert stages["ResourceAgent"]["geometry_evidence"]["status"] == "rejected"
     assert stages["CentralControllerAgent"]["formal_safety_status"] == "not_checked"
+    assert len(planner.product_agent.cca_requests) == cca_calls
+    skipped = turn["validation_stages"][-1]
+    assert skipped["status"] == "not_checked" and skipped["request_sent"] is False
     assert session["outline_validation_findings"][0]["constraint_code"] == "physical_motion_rejected"
+    assert session["outline_validation_findings"][0]["constraint_owner"] == "resource"
     assert "pending_outline_validation" not in session
     for field in ("accepted_outline_prefix", "symbolic_resources", "symbolic_parts", "outline_monitor_context"):
         assert session[field] == before[field]
@@ -387,6 +712,7 @@ def test_incomplete_motion_preserves_unresolved_verdict_and_allows_one_factual_r
     physical["incomplete_event_evidence"] = [_incomplete_motion_record(
         task, entry["recovery_snapshot"], entry["recovery_des_model"], physical)]
     before = deepcopy(session)
+    cca_calls = len(planner.product_agent.cca_requests)
     decision, turn = asyncio.run(validated.retry_pending_event(prepared=prepared, session=session, planner=planner))
     assert decision == "need_revision"
     assert turn["transition_validation"]["validation_status"] == "NEEDS_CONTEXT"
@@ -395,20 +721,22 @@ def test_incomplete_motion_preserves_unresolved_verdict_and_allows_one_factual_r
     assert stages["ResourceAgent"]["feasibility_status"] == "FEASIBLE"
     assert stages["CentralControllerAgent"]["validation_status"] == "NEEDS_CONTEXT"
     assert stages["CentralControllerAgent"]["formal_safety_status"] == "not_checked"
+    assert len(planner.product_agent.cca_requests) == cca_calls
     assert "pending_outline_validation" not in session
     for field in ("accepted_outline_prefix", "symbolic_resources", "symbolic_parts", "outline_monitor_context"):
         assert session[field] == before[field]
     finding = session["outline_validation_findings"][0]
+    assert finding["constraint_owner"] == "resource"
     public = _outline_feedback_for_prompt(finding, set(entry["recovery_des_model"]["state_variables"]))
     summary = public["evidence"]["solver_summary"]
     assert summary["failed_query"] == {"index": 0, "error_code": -6, "timeout_seconds": .05}
-    assert summary["last_accepted_nearest_bound"] == {"name": "joint", "position": .99, "min_position": -1., "max_position": 1.}
+    assert summary["last_accepted_nearest_bound"] == {"position": .99}
     assert "private_evaluator_data" not in json.dumps(public)
     assert "ik_queries" not in json.dumps(public)
     prompt = _render_outline_prompt({"session_state": session, "llm_input": prepared["llm_input"],
                                     "recovery_resources": prepared["recovery_resources"]})
     assert '"error_code": -6' in prompt and '"timeout_seconds": 0.05' in prompt
-    assert '"position": 0.99' in prompt and '"max_position": 1.0' in prompt
+    assert '"position": 0.99' in prompt and 'max_position' not in prompt
     assert "physical validation remains NEEDS_CONTEXT" in prompt
     assert "private_evaluator_data" not in prompt and "ik_queries" not in prompt
     renamed = {**event, "outline_id": "OTHER", "event_name": "another_identifier", "rationale": "Different text."}
@@ -416,6 +744,75 @@ def test_incomplete_motion_preserves_unresolved_verdict_and_allows_one_factual_r
     assert session["status"] == "NEEDS_CONTEXT"
     assert len(session["incomplete_motion_revision_identities"]) == 1
     assert session["accepted_outline_prefix"] == []
+
+
+def test_unbound_public_parameter_allows_one_revision_without_acceptance(monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
+        _outline_feedback_for_prompt, _render_outline_prompt,
+    )
+
+    prepared, session, planner, event = _case()
+    event['part_name'] = None
+    before = deepcopy(session)
+    verdict = {'allowed': False, 'feasibility_status': 'NEEDS_CONTEXT',
+        'reason': 'private primitive and replacement event must not be public',
+        'primitive_support': {'descriptor_fingerprint': 'recorded-owner', 'snapshot_fingerprint': 'recorded-state'},
+        'missing_parameters': [{'primitive': 'private_primitive', 'event_name': 'private_event',
+            'unresolved_parameters': {'part_name': {'$arg': 'part_name'}, 'target': {'$step': 'private_target'}}}]}
+
+    async def missing(**kwargs):
+        return deepcopy(verdict), {}
+
+    monkeypatch.setattr(validated, 'validate_event', missing)
+    decision, turn = _run(prepared, session, planner, event)
+    assert decision == 'need_revision'
+    assert turn['transition_validation']['status'] == 'unresolved'
+    assert turn['transition_validation']['validation_status'] == 'NEEDS_CONTEXT'
+    assert turn['transition_validation']['proposal_revision_available'] is True
+    assert 'pending_outline_validation' not in session
+    assert session['status'] == 'paused_after_outline_turn'
+    for field in ('accepted_outline_prefix', 'symbolic_resources', 'symbolic_parts', 'outline_monitor_context'):
+        assert session[field] == before[field]
+    public = _outline_feedback_for_prompt(session['outline_validation_findings'][0], {'resource_state'})
+    assert public['evidence']['missing_candidate_fields'] == ['part_name']
+    assert public['reason'] == 'NEEDS_CONTEXT: required proposal fields are unbound: part_name. No event was accepted.'
+    assert 'private' not in json.dumps(public)
+    session['validation_contract_version'] = 2
+    prepared['llm_input']['outline_validation_contract_version'] = 2
+    prompt = _render_outline_prompt({'session_state': session, 'llm_input': prepared['llm_input'],
+                                    'recovery_resources': prepared['recovery_resources']})
+    assert 'missing_candidate_fields' in prompt and 'required proposal fields are unbound: part_name' in prompt
+    assert 'private_primitive' not in prompt and 'private_target' not in prompt
+    renamed = {**event, 'outline_id': 'OTHER', 'event_name': 'another_identifier', 'rationale': 'Different text.'}
+    assert _run(prepared, session, planner, renamed)[0] == 'need_context'
+    assert session['status'] == 'NEEDS_CONTEXT'
+    assert len(session['incomplete_parameter_revision_identities']) == 1
+    assert session['accepted_outline_prefix'] == before['accepted_outline_prefix']
+    assert session['pending_outline_validation']['task']['part_name'] is None
+    assert verdict['feasibility_status'] == 'NEEDS_CONTEXT'
+
+
+@pytest.mark.parametrize('part,expression', [
+    ('gear_small', {'$arg': 'part_name'}), (None, {'$state': 'part_name'}),
+    (None, {'$arg': 'model_name'}), (None, {'$step': 'private_target'}),
+])
+def test_missing_private_evidence_does_not_trigger_public_parameter_revision(monkeypatch, part, expression):
+    prepared, session, planner, event = _case()
+    event['part_name'] = part
+    if part is not None:
+        session['symbolic_parts'][part] = {'part_name': part, 'part_state': 'ready', 'part_location': 'Storage'}
+
+    async def missing(**kwargs):
+        return {'allowed': False, 'feasibility_status': 'NEEDS_CONTEXT', 'reason': 'Missing owner facts',
+            'missing_parameters': [{'unresolved_parameters': {'value': expression}}]}, {}
+
+    monkeypatch.setattr(validated, 'validate_event', missing)
+    decision, turn = _run(prepared, session, planner, event)
+    assert decision == 'need_context'
+    assert session['status'] == 'NEEDS_CONTEXT'
+    assert 'proposal_revision_available' not in turn['transition_validation']
+    assert 'incomplete_parameter_revision_identities' not in session
+    assert session['accepted_outline_prefix'] == []
 
 
 def test_workflow_retains_incomplete_native_record_and_enables_revision_without_llm(tmp_path):
@@ -605,7 +1002,7 @@ def test_nominal_result_uses_final_verdict_after_retrieval_and_reports_motion_re
         assert "physical_capability_rejected" in rendered and "safety_rule_violation" not in rendered
         prompt = _render_outline_prompt({"session_state": session, "llm_input": prepared["llm_input"],
                                         "recovery_resources": prepared["recovery_resources"]})
-        assert "xy_radius=2.0000 m, max=0.7000 m" in prompt
+        assert "gripper_reach" not in prompt and "max_xy_radius_m" not in prompt
         assert "calculated owner motion target" in prompt and '"revision": 4' in prompt
 
 
@@ -1427,7 +1824,8 @@ def test_versioned_schema_keeps_legacy_suffix_only_for_legacy_attempts(outline_m
     Draft202012Validator.check_schema(current["schema"])
     assert "transition_suffix" in legacy["schema"]["properties"]
     assert "transition_suffix" not in current["schema"]["properties"]
-    assert "next_transition" in current["schema"]["properties"]
+    field = "candidate_events" if outline_mode == "incremental_candidates_validated" else "next_transition"
+    assert field in current["schema"]["properties"]
     assert "anyOf" not in current["schema"]
     assert current["strict"] is False
     assert not uses_outline_evidence({})
@@ -1500,6 +1898,243 @@ def test_nominal_event_uses_exact_recorded_parameter_binding(function_name, bind
     prepared["recovery_resources"][JID]["recovery_des_model"]["events"].append(deepcopy(event))
     with pytest.raises(ValueError, match="one exact declared transition"):
         _nominal_event(node, prepared)
+
+
+def _environment_nominal_witness_case():
+    jid = "recovery-resource-8@localhost"
+    bindings = {"resource_id": "KMR", "source_resource": "M2", "target_resource": "Storage",
+                "arrival_acknowledged": True, "arm_parked": True}
+    steps = [{"id": "transport", "op": "move_base", "params": {}, "when": []},
+             {"id": "home", "op": "move_to_named_pose", "params": {"pose_name": "home"}, "when": []}]
+    declared = {"event_id": 3, "event_name": "move_to_resource",
+        "program": {"steps": steps[:1]}, "program_variants": {"empty_return": {"steps": steps}},
+        "updates": {"resource_location": {"set": "Storage"}}, "product_effects": {"processCompleted": []}}
+    source = {"resource_id": "KMR", "events": [declared]}
+    event = {**deepcopy(declared), "composition_contract": {"event_id": 3,
+        "parameter_bindings": bindings, "source_model_fingerprint": recovery_validation_fingerprint(source)}}
+    model = {"resource_id": "KMR", "resource_jid": jid, "events": [event],
+             "state_variables": {"resource_location": {"scope": "resource"}}}
+    prepared = {"physical_evidence": {"endpoint_evidence_policy_version": 2, "jids": {"KMR": jid}},
+        "recovery_resources": {jid: {"recovery_des_model": model,
+            "resource_evidence": {"resource_id": "KMR", "environment_models": {"KMR": source}}}}}
+    selected = {**deepcopy(declared), "program": deepcopy(declared["program_variants"]["empty_return"]),
+                "selected_program_variant": "empty_return"}
+    binding = {"owner_model": recovery_validation_fingerprint(model), "proposal": "recorded-proposal"}
+    program_fingerprint = recovery_validation_fingerprint(selected)
+    projection = {"status": "projected", "endpoint_evidence_policy_version": 2, "unresolved": [],
+        "projection_kind": "owner_endpoints_with_predicate_bounds",
+        "owner_successor": {"task": {"resource_id": "KMR", "event_id": 3,
+            "event_name": "move_to_resource", "parameters": deepcopy(bindings)}},
+        "owner_program_fingerprint": program_fingerprint,
+        "evidence_requirements": {"binding": binding},
+        "observations": [{"resources": {"KMR": {"held_part": None}}}],
+        "projected_resource_snapshot": {"resource_location": "Storage"},
+        "successor_evidence": {"provenance": {"contract_fingerprint": program_fingerprint}},
+        "endpoint_evidence": {"status": "supported", "binding": deepcopy(binding),
+            "condition": "successful_owner_action_completion", "owner_program_fingerprint": program_fingerprint,
+            "steps": [{"step": deepcopy(step), "status": "calculated", "params": deepcopy(step["params"]),
+                       "capability": {"allowed": True, "feasibility_status": "FEASIBLE"}} for step in steps]}}
+    ra = {"allowed": True, "feasibility_status": "FEASIBLE",
+          "primitive_support": {"semantics": "successor_primitive_union"}, "geometry_evidence": projection}
+    node = {"id": "environment_22", "resource_jid": jid, "function_name": "move_to_resource", "params": bindings}
+    return node, ra, prepared
+
+
+@pytest.mark.parametrize("damage", [None, "parameters", "source_model", "program", "steps", "capability",
+                                    "binding", "effects", "owner", "conditional", "unresolved"])
+def test_nominal_environment_witness_requires_exact_owner_program_and_binding(damage):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_nominal_evidence import _exact_nominal_witness
+
+    node, ra, prepared = _environment_nominal_witness_case()
+    geometry = ra["geometry_evidence"]
+    if damage == "parameters":
+        geometry["owner_successor"]["task"]["parameters"]["arrival_acknowledged"] = 1
+    elif damage == "source_model":
+        prepared["recovery_resources"][node["resource_jid"]]["resource_evidence"]["environment_models"]["KMR"]["changed"] = True
+    elif damage == "program":
+        geometry["endpoint_evidence"]["owner_program_fingerprint"] = "different-program"
+    elif damage == "steps":
+        geometry["endpoint_evidence"]["steps"].pop()
+    elif damage == "capability":
+        geometry["endpoint_evidence"]["steps"][1]["capability"]["feasibility_status"] = "NEEDS_CONTEXT"
+    elif damage == "binding":
+        geometry["endpoint_evidence"]["binding"]["proposal"] = "another-proposal"
+    elif damage == "effects":
+        geometry["projected_resource_snapshot"]["resource_location"] = "M2"
+    elif damage == "owner":
+        geometry["owner_successor"]["task"]["resource_id"] = "ur5e-1"
+    elif damage == "conditional":
+        geometry["endpoint_evidence"]["steps"][1]["status"] = "skipped"
+    elif damage == "unresolved":
+        geometry["unresolved"] = ["required owner evidence is unavailable"]
+    before = deepcopy((node, ra, prepared))
+    result = _exact_nominal_witness(node, ra, prepared)
+    assert result.startswith("NEEDS_CONTEXT:") if damage else result == ""
+    assert (node, ra, prepared) == before
+
+
+def _accepted_nominal_movement_case():
+    node, ra, prepared = _environment_nominal_witness_case()
+    prepared.update(nominal_continuation_semantics="recorded_unfinished_tasks",
+                    saved_pending_nodes=[node], completed_task_ids=[], source_observation_fingerprint="capture")
+    task = {"outline_id": "accepted-movement", "event_name": "move_to_location",
+        "resource_jid": node["resource_jid"], "expected_end_state": {"resource_location": "Storage"}}
+    session = {"session_id": "accepted-nominal", "accepted_outline_prefix": [
+        {**deepcopy(task), "candidate_source": "llm"}]}
+    cca = {"is_safe": True, "validation_status": "passed"}
+    return node, task, ra, cca, session, prepared
+
+
+def test_exact_accepted_movement_fulfills_nominal_task_without_product_completion():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_nominal_evidence as nominal
+
+    node, task, ra, cca, session, prepared = _accepted_nominal_movement_case()
+    original = deepcopy((node, task, ra, cca, prepared))
+    nominal.record_nominal_task_completions(task, ra, cca, session, prepared)
+    result = nominal._fulfilled_nominal_tasks({node["id"]: node}, session, prepared)
+    assert set(result) == {node["id"]}
+    assert result[node["id"]]["accepted_event_completion"]["accepted_outline_id"] == task["outline_id"]
+    assert result[node["id"]]["execution_authorized"] is False
+    # Moving elsewhere later does not undo completion of the earlier task.
+    session["accepted_outline_prefix"].append({"outline_id": "subsequent-movement", "candidate_source": "llm"})
+    session["symbolic_resources"] = {node["resource_jid"]: {"resource_location": "M2"}}
+    assert nominal._fulfilled_nominal_tasks({node["id"]: node}, session, prepared) == result
+    assert (node, task, ra, cca, prepared) == original
+
+
+@pytest.mark.parametrize("resource_id,function_name", [("M2", "select_program"), ("Conveyor", "move_part"),
+                                                       ("ur5e-3", "pick_approach")])
+def test_exact_nominal_task_completion_is_not_limited_to_kmr(resource_id, function_name):
+    """Supplied registered-task witnesses exercise owner-independent bookkeeping."""
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_nominal_evidence as nominal
+
+    node, task, ra, cca, session, prepared = _accepted_nominal_movement_case()
+    jid = resource_id + "@localhost"
+    node.update(resource_jid=jid, function_name=function_name, params={})
+    task["resource_jid"] = jid
+    session["accepted_outline_prefix"][0]["resource_jid"] = jid
+    event = {"event_name": function_name, "composition_contract": {"params": {}}}
+    prepared["recovery_resources"] = {jid: {"recovery_des_model": {"resource_id": resource_id, "events": [event]}}}
+    ra["primitive_support"] = {"trace": [{"task_contract": function_name,
+        "declaration_fingerprint": recovery_validation_fingerprint(event), "params": {},
+        "primitive_start_index": 0, "primitive_end_index": 0}]}
+    nominal.record_nominal_task_completions(task, ra, cca, session, prepared)
+    assert set(nominal._fulfilled_nominal_tasks({node["id"]: node}, session, prepared)) == {node["id"]}
+
+
+def test_nominal_archive_binding_includes_retained_task_completions():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import nominal_continuation_context_binding
+
+    prepared, session, _, _ = _case()
+    before = nominal_continuation_context_binding(session, prepared)
+    session["nominal_task_completion_records"] = [{"source_task_id": "recorded-nominal", "fingerprint": "verified-record"}]
+    assert nominal_continuation_context_binding(session, prepared) != before
+
+
+@pytest.mark.parametrize("damage", ["ra", "physical", "cca", "not_accepted", "end_state_only",
+                                   "different_binding", "dependency", "prior_owner_task"])
+def test_nominal_task_completion_requires_accepted_exact_work_and_dependencies(damage):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_nominal_evidence as nominal
+
+    node, task, ra, cca, session, prepared = _accepted_nominal_movement_case()
+    if damage == "ra":
+        ra["feasibility_status"] = "NEEDS_CONTEXT"
+    elif damage == "physical":
+        ra["geometry_evidence"]["status"] = "needs_context"
+    elif damage == "cca":
+        cca.update(is_safe=False, validation_status="unresolved")
+    elif damage == "not_accepted":
+        session["accepted_outline_prefix"] = []
+    elif damage == "end_state_only":
+        ra["geometry_evidence"].pop("endpoint_evidence")
+    elif damage == "different_binding":
+        ra["geometry_evidence"]["owner_successor"]["task"]["parameters"]["source_resource"] = "M1"
+    elif damage == "dependency":
+        node["predecessors"] = ["unfinished"]
+    else:
+        node["sequence_index"] = 1
+        prepared["saved_pending_nodes"].append({**deepcopy(node), "id": "earlier", "sequence_index": 0,
+                                                "function_name": "other-recorded-task"})
+    nominal.record_nominal_task_completions(task, ra, cca, session, prepared)
+    assert not session.get("nominal_task_completion_records")
+
+
+@pytest.mark.parametrize("damage", ["prefix", "session", "capture", "specifications", "model", "record", "task"])
+def test_retained_nominal_task_completion_rejects_changed_dependencies(damage):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_nominal_evidence as nominal
+
+    node, task, ra, cca, session, prepared = _accepted_nominal_movement_case()
+    nominal.record_nominal_task_completions(task, ra, cca, session, prepared)
+    # Exercise the persisted form, not an in-memory identity shortcut.
+    session = json.loads(json.dumps(session))
+    assert nominal._fulfilled_nominal_tasks({node["id"]: node}, session, prepared)
+    if damage == "prefix":
+        session["accepted_outline_prefix"][0]["expected_end_state"]["resource_location"] = "M1"
+    elif damage == "session":
+        session["session_id"] = "another-attempt"
+    elif damage == "capture":
+        prepared["source_observation_fingerprint"] = "changed"
+    elif damage == "specifications":
+        prepared["outline_safety_specifications"] = [{"source_sha256": "changed"}]
+    elif damage == "model":
+        prepared["recovery_resources"][node["resource_jid"]]["recovery_des_model"]["changed"] = True
+    elif damage == "record":
+        session["nominal_task_completion_records"][0]["resource_validation_fingerprint"] = "changed"
+    else:
+        node["params"]["source_resource"] = "M1"
+    assert nominal._fulfilled_nominal_tasks({node["id"]: node}, session, prepared) == {}
+
+
+@pytest.mark.parametrize("damage", [None, "no_comparison", "unresolved", "program"])
+def test_exact_nominal_witness_can_use_an_equivalent_validated_owner_alternative(damage):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_nominal_evidence import _exact_nominal_witness
+
+    node, ra, prepared = _environment_nominal_witness_case()
+    projection = ra["geometry_evidence"]
+    alternative = {key: deepcopy(projection[key]) for key in (
+        "status", "unresolved", "owner_successor", "endpoint_evidence", "owner_program_fingerprint")}
+    projection["owner_successor"]["task"]["event_name"] = "move_to_location"
+    projection["owner_alternatives"] = [alternative]
+    projection["owner_declaration_comparison"] = {"status": "equivalent"}
+    if damage == "no_comparison":
+        projection.pop("owner_declaration_comparison")
+    elif damage == "unresolved":
+        alternative["status"] = "needs_context"
+    elif damage == "program":
+        alternative["endpoint_evidence"]["owner_program_fingerprint"] = "changed"
+    result = _exact_nominal_witness(node, ra, prepared)
+    assert result.startswith("NEEDS_CONTEXT:") if damage else result == ""
+
+
+@pytest.mark.parametrize("damage", [None, "declaration", "calculation", "source", "audit"])
+def test_nominal_witness_uses_the_validated_calculation_model_without_changing_nominal_work(damage):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_nominal_evidence import _exact_nominal_witness
+
+    node, ra, prepared = _environment_nominal_witness_case()
+    entry = prepared["recovery_resources"][node["resource_jid"]]
+    calculated, evidence = deepcopy(entry["recovery_des_model"]), deepcopy(entry["resource_evidence"])
+    calculated["additional_calculation"] = "isolated verification case"
+    evidence["environment_models"]["KMR"]["events"].append({"event_id": 4, "event_name": "additional-binding"})
+    record = {"task": {"resource_jid": node["resource_jid"]},
+        "source_model_fingerprint": recovery_validation_fingerprint(entry["recovery_des_model"]),
+        "calculation_model_fingerprint": recovery_validation_fingerprint(calculated)}
+    record["fingerprint"] = recovery_validation_fingerprint(record)
+    ra.update(additional_binding_record=record, calculation_model=calculated,
+        calculation_physical_input={"resource_evidence": evidence,
+                                    "physical_evidence": {"additional_binding_records": [deepcopy(record)]}})
+    projection = ra["geometry_evidence"]
+    for binding in (projection["endpoint_evidence"]["binding"], projection["evidence_requirements"]["binding"]):
+        binding["owner_model"] = recovery_validation_fingerprint(calculated)
+    if damage == "declaration":
+        evidence["environment_models"]["KMR"]["events"][0]["updates"] = {}
+    elif damage == "calculation":
+        calculated["changed"] = True
+    elif damage == "source":
+        record["source_model_fingerprint"] = "changed"
+    elif damage == "audit":
+        ra["calculation_physical_input"]["physical_evidence"]["additional_binding_records"] = []
+    result = _exact_nominal_witness(node, ra, prepared)
+    assert result.startswith("NEEDS_CONTEXT:") if damage else result == ""
 
 
 @pytest.mark.parametrize("changed", [{}, {"part_name": "gear_small"}, {"part_name": "gear_small", "confirmed": 1}])
@@ -1687,8 +2322,10 @@ def test_owner_capability_prompt_preserves_only_supported_numeric_reasons(reason
                "evidence": {"capability_result": {"feasibility_status": "INFEASIBLE", "checks": [check]}}}
     original = deepcopy(finding)
     public = _outline_feedback_for_prompt(finding, set())
-    assert public["reason"] == reason
-    assert public["evidence"]["capability_result"]["checks"][0]["reason"] == reason
+    explanation = "The calculated target is outside the recorded owner motion capability."
+    assert public["reason"] == explanation
+    assert public["evidence"]["capability_result"]["checks"][0]["reason"] == explanation
+    assert "gripper_reach" not in json.dumps(public)
     assert "secret" not in json.dumps(public)
     assert finding == original
     finding["reason"] = "private proof suggests a particular event"
@@ -1787,12 +2424,14 @@ def test_workflow_owner_capability_rejection_preserves_ra_and_returns_factual_fe
     assert finding["reason"] == record["reason"]
     prompt = _render_outline_prompt({"session_state": current, "llm_input": prepared["llm_input"],
                                     "recovery_resources": prepared["recovery_resources"]})
-    assert record["reason"] in prompt
-    for field in ('"x": 2.0', '"max_xy_radius_m": 0.7', '"tolerance_m": 0.01', '"frame": "world"',
+    assert record["reason"] not in prompt
+    assert "The calculated target is outside the recorded owner motion capability." in prompt
+    for field in ('"x": 2.0', '"frame": "world"',
                   '"revision": 4', '"run_id": "captured-run"', "2026-10-10T04:14:18+00:00",
                   f"/resources/{JID}/static_capabilities", "calculated owner motion target"):
         assert field in prompt
-    for private in ("private_evaluator_data", "private proof", "private_model", "private source details", "motion_requests"):
+    for private in ("private_evaluator_data", "private proof", "private_model", "private source details", "motion_requests",
+                    "gripper_reach", "max_xy_radius_m", "tolerance_m"):
         assert private not in prompt
     saved = json.loads(next((tmp_path / "recovery_outline/turns").glob("*validation*.json")).read_text())
     stages = {row["validator_role"]: row["evidence"] for row in saved["validation_stages"]}
@@ -1827,6 +2466,7 @@ def test_owner_effect_rejection_returns_revision_without_appending_or_checking_s
     assert cca["formal_safety_status"] == "not_checked" and cca["checks"] == []
     assert cca["monitor_context_before"] == cca["monitor_context_after"] == before["outline_monitor_context"]
     assert cca["execution_authorized"] is False
+    assert planner.product_agent.cca_requests == []
     finding = session["outline_validation_findings"][0]
     assert finding["constraint_owner"] == "resource"
     assert finding["constraint_code"] == "owner_effect_rejected"
@@ -1835,6 +2475,59 @@ def test_owner_effect_rejection_returns_revision_without_appending_or_checking_s
         {"field": "part_state", "requested": "in_gripper", "derived": "in_transit"}]
     assert "private" not in json.dumps(public)
     assert "not observations" in public["reason"]
+
+
+def test_owner_guard_rejection_does_not_request_cca_or_change_the_accepted_state():
+    prepared, session, planner, event, _ = _union_case()
+    planner.product_agent.owner.project_recovery_outline_event = lambda **_: {
+        "status": "rejected", "physical_capability_rejected": True,
+        "reason": "Recorded owner conditions block every supported declaration",
+        "capability_result": {"feasibility_status": "INFEASIBLE", "guard_failures": [{
+            "resource_id": "ur5e-3", "field": "resource_state", "operator": "equals",
+            "expected": "idle", "actual": "failed", "declaration_fingerprint": "recorded-declaration"}]},
+        "capability_source": {"snapshot_fingerprint": "recorded-snapshot"},
+        "observations": [], "interval_complete": False, "execution_authorized": False}
+    before = deepcopy(session)
+    source = deepcopy(prepared)
+    decision, turn = _run(prepared, session, planner, event)
+    assert decision == "need_revision"
+    assert planner.product_agent.cca_requests == []
+    assert prepared == source
+    for field in ("accepted_outline_prefix", "symbolic_resources", "symbolic_parts", "outline_monitor_context"):
+        assert session[field] == before[field]
+    finding = session["outline_validation_findings"][0]
+    assert finding["constraint_owner"] == "resource"
+    assert finding["constraint_code"] == "physical_capability_rejected"
+    skipped = turn["validation_stages"][-1]
+    assert skipped["validator_role"] == "CentralControllerAgent"
+    assert skipped["status"] == "not_checked" and skipped["request_sent"] is False
+    assert skipped["evidence"]["formal_safety_status"] == "not_checked"
+    assert skipped["evidence"]["checks"] == []
+
+
+@pytest.mark.parametrize('message_field', ['reason', 'unresolved'])
+def test_missing_physical_evidence_is_not_reported_as_a_cca_failure(message_field):
+    prepared, session, planner, event, _ = _union_case()
+    reason = 'NEEDS_CONTEXT: recorded endpoint geometry'
+    projection = {'status': 'needs_context', 'observations': [], 'interval_complete': False,
+                  'execution_authorized': False,
+                  message_field: [reason] if message_field == 'unresolved' else reason}
+    planner.product_agent.owner.project_recovery_outline_event = lambda **_: deepcopy(projection)
+    before = deepcopy(session)
+    source = deepcopy(prepared)
+    decision, turn = _run(prepared, session, planner, event)
+    assert decision == 'need_context'
+    assert planner.product_agent.cca_requests == [] and prepared == source
+    for field in ('accepted_outline_prefix', 'symbolic_resources', 'symbolic_parts', 'outline_monitor_context'):
+        assert session[field] == before[field]
+    finding = session['outline_validation_findings'][0]
+    assert finding['constraint_owner'] == 'resource'
+    assert finding['constraint_code'] == 'resource_validation_unavailable'
+    assert finding['reason'] == reason
+    skipped = turn['validation_stages'][-1]
+    assert skipped['status'] == 'not_checked' and skipped['request_sent'] is False
+    assert skipped['evidence']['checks'] == []
+    assert skipped['evidence']['monitor_context_before'] == skipped['evidence']['monitor_context_after']
 
 
 def test_owner_effect_feedback_keeps_explicit_null_and_filters_private_fields():

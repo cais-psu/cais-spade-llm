@@ -15,6 +15,43 @@ integration, dual-robot execution, and a NiceGUI operator UI.
   explicitly asks for a public interface change.
 - Do not mix unrelated refactors into feature work or bug fixes.
 
+## Recovery result retention
+
+- For Recovery UI work, read the current saved-result status and retained record
+  identifiers in
+  [IMPLEMENTATION_PLAN.md](<writing/Journal Paper 2 (recovery framework)/IMPLEMENTATION_PLAN.md>).
+- Keep one accepted recovery outline and one accepted primitive composition for
+  each of `Part slippage`, `Machining breakdown during part processing`,
+  `Conveyor breakdown`, and `ur5e-1 breakdown`. Retain their required source
+  observations, validation evidence, nominal-continuation proof, native models,
+  and other dependencies.
+- Preserve official failure captures, their required derived observations, and
+  regression fixtures. A successful failure capture is not a failed recovery
+  attempt, even when its run is `stopped` or has no recovery outline yet.
+- After diagnosing a finished failed attempt, record its identifier, concise
+  failure reason, and next step in the recovery handoff. Then delete its
+  disposable outputs before starting another attempt or ending the task.
+- Protect active work and the current partial attempt still needed for debugging,
+  including work owned by another chat or process. Remove abandoned attempts once
+  their useful findings are recorded and their required dependencies are retained.
+- A failed primitive composition must never cause deletion of its accepted
+  recovery outline or shared dependencies. Clean only the failed stage's
+  disposable outputs when stages share an attempt directory.
+- Verify and load the selected replacement before removing superseded accepted
+  results. Do not treat an accepted event prefix, `NEEDS_CONTEXT`, or a successful
+  failure capture as a complete accepted recovery outline or primitive composition.
+- Before cleanup, build an explicit deletion list, check file ownership and
+  recent changes, and exclude active or newly changed records and required
+  dependencies. Preserve application code, regression coverage, and unrelated
+  working or staged changes.
+- After cleanup, confirm that retained results still load with their required
+  evidence, that official failure captures remain selectable, and report the
+  files removed and space released. Keep the retained identifiers and current
+  stage status in the recovery handoff up to date.
+- This is a Codex cleanup duty during recovery work. The Recovery UI does not
+  automatically delete failed attempts; this rule does not authorize execution
+  of recovery or establish completed live recovery.
+
 ## Spec2Primitives / ICRA 2027 isolation
 
 - When a task mentions `Spec2Primitives` or `ICRA 2027`, begin in

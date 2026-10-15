@@ -166,6 +166,65 @@ def _check(model: dict | None = None, task: dict | None = None, evaluator=None) 
     )
 
 
+@pytest.mark.parametrize('combination', [False, True])
+def test_unsupported_public_conditions_are_distinguished_from_combinations(combination):
+    model = _model()
+    model['state_variables']['held_part'].update(domain=[None, 'part'], domain_complete=True)
+    model['events'] = [{
+        'event_name': 'a', 'guards': {}, 'updates': {'resource_state': {'set': 'idle'}, 'held_part': {'set': None}},
+        'primitive_support': [{'primitive': 'release_part', 'params': {}}]}, {
+        'event_name': 'b', 'guards': {}, 'updates': {'resource_state': {'set': 'failed'}, 'held_part': {'set': 'part'}},
+        'primitive_support': [{'primitive': 'release_part', 'params': {}}]}]
+    task = {**_task(), 'expected_end_state': {'resource_state': 'idle', 'held_part': 'part' if combination else 'unknown'}}
+    result = _check(model=model, task=task)
+    assert result['feasibility_status'] == 'INFEASIBLE'
+    evidence = result['evidence']['condition_support']
+    assert evidence['combination_supported'] is False
+    assert evidence['individual_conditions_supported'] is combination
+    assert next(row for row in evidence['conditions'] if row['field'] == 'held_part')['supported'] is combination
+    if combination:
+        assert evidence['unsupported_combinations'] == [[
+            {'field': 'held_part', 'actual': 'part'}, {'field': 'resource_state', 'actual': 'idle'}]]
+    else:
+        assert 'unsupported_combinations' not in evidence
+    model['model_complete'] = False
+    assert _check(model=model, task=task)['feasibility_status'] == 'NEEDS_CONTEXT'
+
+
+def test_unsupported_pair_excludes_unrelated_conditions_and_preserves_input_order_independence():
+    model = _model()
+    model['state_variables']['held_part'].update(domain=[None, 'part'], domain_complete=True)
+    model['state_variables']['resource_location'] = {'scope': 'resource', 'domain': ['M1', 'M2']}
+    model['events'] = [{
+        'event_name': 'private_first', 'guards': {},
+        'updates': {'resource_state': {'set': 'idle'}, 'held_part': {'set': None}},
+        'primitive_support': [{'primitive': 'release_part', 'params': {}}]}, {
+        'event_name': 'private_second', 'guards': {},
+        'updates': {'resource_state': {'set': 'failed'}, 'held_part': {'set': 'part'}},
+        'primitive_support': [{'primitive': 'release_part', 'params': {}}]}]
+    task = {**_task(), 'expected_start_state': {'resource_state': 'failed', 'held_part': None, 'resource_location': 'M2'},
+        'expected_end_state': {'resource_state': 'idle', 'held_part': 'part', 'resource_location': 'M2'}}
+    before = deepcopy((model, task))
+    first = _check(model=model, task=task)['evidence']['condition_support']
+    assert first['unsupported_combinations'] == [[
+        {'field': 'held_part', 'actual': 'part'}, {'field': 'resource_state', 'actual': 'idle'}]]
+    assert (model, task) == before
+    model['events'].reverse()
+    task['expected_end_state'] = dict(reversed(list(task['expected_end_state'].items())))
+    assert _check(model=model, task=task)['evidence']['condition_support'] == first
+    assert 'private_first' not in str(first) and 'private_second' not in str(first)
+
+
+def test_preserving_a_value_does_not_establish_support_for_changing_it():
+    model = _model()
+    model['state_variables']['held_part']['domain'] = [None, 'part']
+    model['events'][0]['guards']['held_part'] = {'equals': 'part'}
+    task = {**_task(), 'expected_end_state': {'held_part': 'part'}}
+    result = _check(model=model, task=task)
+    assert result['evidence']['condition_support']['conditions'] == [
+        {'field': 'held_part', 'actual': 'part', 'supported': False}]
+
+
 def test_one_feasible_alternative_does_not_satisfy_the_union() -> None:
     def evaluate(*, primitive: str, params: dict) -> dict:
         allowed = primitive == "release_part"
@@ -277,6 +336,29 @@ def test_unsupported_successor_is_rejected_before_primitive_validation(value) ->
     result = _check(task=task, evaluator=unexpected)
     assert result["allowed"] is False
     assert result["constraint_code"] == "unsupported_successor_condition"
+
+
+@pytest.mark.parametrize("missing", [None, "declaration", "complete_model"])
+def test_part_only_successor_is_a_proposal_error_when_declarations_are_complete(missing):
+    model = _model()
+    model["state_variables"]["part_location"] = {
+        "scope": "part", "domain": ["M2", "M2 staging tray"]}
+    task = {**_task(), "expected_start_state": {"part_location": "M2"},
+            "expected_end_state": {"part_location": "M2 staging tray"}}
+    if missing == "declaration":
+        model["state_variables"].pop("part_location")
+    elif missing == "complete_model":
+        model["model_complete"] = False
+    original = deepcopy((model, task))
+    evaluator = Mock(side_effect=AssertionError("A part-only proposal cannot establish resource primitive support"))
+    result = _check(model=model, task=task, evaluator=evaluator)
+    assert result["allowed"] is False
+    assert result["feasibility_status"] == ("NEEDS_CONTEXT" if missing else "INFEASIBLE")
+    if not missing:
+        assert result["constraint_code"] == "unsupported_successor_condition"
+        assert "public resource" in result["reason"]
+    evaluator.assert_not_called()
+    assert (model, task) == original
 
 
 def test_all_primitives_of_one_alternative_require_witnesses() -> None:

@@ -342,6 +342,96 @@ def _nominal_step_coverage(event: dict, witness: dict) -> str:
     return ""
 
 
+def _exact_kmr_nominal_witness(node: dict, ra: dict, prepared: dict, event: dict, authored: dict) -> str:
+    """Verify the recorded KMR program against its conditional endpoint evidence."""
+    from cais_spade_llm.recovery_framework.kmr_outline_evidence import _program
+
+    try:
+        entry = prepared["recovery_resources"][node["resource_jid"]]
+        model, evidence = entry["recovery_des_model"], entry["resource_evidence"]
+        contract = event["composition_contract"]
+        projection = ra["geometry_evidence"]
+        if (ra.get("allowed") is not True or ra.get("feasibility_status") != "FEASIBLE"
+                or projection.get("status") != "projected" or projection.get("unresolved")
+                or projection.get("projection_kind") != "owner_endpoints_with_predicate_bounds"
+                or projection.get("endpoint_evidence_policy_version") != 2):
+            raise ValueError("KMR nominal endpoint evidence is incomplete")
+        if (evidence.get("resource_id") != "KMR"
+                or prepared["physical_evidence"]["jids"].get("KMR") != node["resource_jid"]
+                or contract.get("source_model_fingerprint") != recovery_validation_fingerprint(
+                    evidence["environment_models"]["KMR"])):
+            raise ValueError("KMR nominal declaration differs from its recorded owner model")
+        if ra.get("additional_binding_record"):
+            record = ra["additional_binding_record"]
+            calculated = ra["calculation_model"]
+            calculated_input = ra["calculation_physical_input"]
+            calculated_evidence = calculated_input["resource_evidence"]
+            original = [row for row in evidence["environment_models"]["KMR"]["events"]
+                        if row.get("event_id") == contract["event_id"]]
+            retained = [row for row in calculated_evidence["environment_models"]["KMR"]["events"]
+                        if row.get("event_id") == contract["event_id"]]
+            if (record.get("source_model_fingerprint") != recovery_validation_fingerprint(model)
+                    or record.get("calculation_model_fingerprint") != recovery_validation_fingerprint(calculated)
+                    or record.get("task", {}).get("resource_jid") != node["resource_jid"]
+                    or len(original) != 1 or retained != original
+                    or record.get("fingerprint") != recovery_validation_fingerprint(
+                        {key: value for key, value in record.items() if key != "fingerprint"})
+                    or calculated_input["physical_evidence"]["additional_binding_records"][-1] != record):
+                raise ValueError("KMR nominal calculation changes its recorded declaration or validation binding")
+            model, evidence = calculated, calculated_evidence
+        expected = {"resource_id": "KMR", "event_id": contract["event_id"],
+                    "event_name": node["function_name"], "parameters": authored}
+        declared, endpoint = projection["owner_successor"], projection["endpoint_evidence"]
+        if recovery_validation_fingerprint(declared["task"]) != recovery_validation_fingerprint(expected):
+            alternatives = [row for row in projection.get("owner_alternatives", [])
+                if recovery_validation_fingerprint(row.get("owner_successor", {}).get("task"))
+                == recovery_validation_fingerprint(expected)]
+            if (projection.get("owner_declaration_comparison", {}).get("status") != "equivalent"
+                    or len(alternatives) != 1 or alternatives[0].get("status") != "projected"
+                    or alternatives[0].get("unresolved")):
+                raise ValueError("KMR nominal witness changes the recorded event or parameter binding")
+            declared, endpoint = alternatives[0]["owner_successor"], alternatives[0]["endpoint_evidence"]
+        # The owner selects empty/carrying programs using recorded starting
+        # custody. An empty return includes its home step after base movement.
+        selected = _program(declared, evidence, {"snapshot": projection["observations"][0]})
+        program_fingerprint = recovery_validation_fingerprint(selected)
+        binding = projection["evidence_requirements"]["binding"]
+        if (endpoint.get("status") != "supported"
+                or endpoint.get("condition") != "successful_owner_action_completion"
+                or endpoint.get("binding") != binding
+                or binding.get("owner_model") != recovery_validation_fingerprint(model)
+                or endpoint.get("owner_program_fingerprint") != program_fingerprint
+                or projection["endpoint_evidence"].get("owner_program_fingerprint") != projection.get("owner_program_fingerprint")
+                or projection["successor_evidence"]["provenance"].get("contract_fingerprint") != projection.get("owner_program_fingerprint")):
+            raise ValueError("KMR nominal endpoint is not bound to the exact owner program")
+        steps, covered = selected["program"]["steps"], endpoint["steps"]
+        if not isinstance(covered, list) or len(covered) != len(steps):
+            raise ValueError("KMR nominal endpoint does not cover every owner program step")
+        for step, row in zip(steps, covered, strict=True):
+            if (not isinstance(row, dict)
+                    or recovery_validation_fingerprint(row.get("step")) != recovery_validation_fingerprint(step)
+                    or step.get("when") or row.get("status") != "calculated"
+                    or not isinstance(row.get("params"), dict)
+                    or row.get("capability", {}).get("allowed") is not True
+                    or row.get("capability", {}).get("feasibility_status") != "FEASIBLE"):
+                raise ValueError("KMR nominal endpoint lacks a supported exact owner step")
+        if selected.get("product_effects") != {"processCompleted": []}:
+            raise ValueError("KMR nominal product completion requires separate owner evidence")
+        for field, effect in event.get("updates", {}).items():
+            if set(effect) == {"set"}:
+                value = effect["set"]
+            elif set(effect) == {"set_from_param"} and effect["set_from_param"] in authored:
+                value = authored[effect["set_from_param"]]
+            else:
+                raise ValueError("KMR nominal owner effect cannot be resolved")
+            snapshot = projection["projected_resource_snapshot"]
+            if field not in snapshot or recovery_validation_fingerprint(snapshot[field]) != recovery_validation_fingerprint(value):
+                raise ValueError("KMR nominal endpoint leaves a declared owner effect unresolved")
+    except (KeyError, ValueError, TypeError, IndexError) as exc:
+        return "NEEDS_CONTEXT: " + str(exc)
+    return ""
+
+
 def _exact_nominal_witness(node: dict, ra: dict, prepared: dict) -> str:
     """Require the actual registered nominal task, without preceding recovery work."""
     model = prepared.get("recovery_resources", {}).get(node.get("resource_jid"), {}).get("recovery_des_model", {})
@@ -353,6 +443,10 @@ def _exact_nominal_witness(node: dict, ra: dict, prepared: dict) -> str:
             raise
         return str(exc)
     if ra.get("primitive_support", {}).get("semantics") == "successor_primitive_union":
+        if (len(events) == 1 and "parameter_bindings" in events[0].get("composition_contract", {})
+                and model.get("resource_id") == "KMR"
+                and prepared.get("physical_evidence", {}).get("endpoint_evidence_policy_version") == 2):
+            return _exact_kmr_nominal_witness(node, ra, prepared, events[0], authored)
         witness = ra.get("geometry_evidence", {}).get("task_contract_witness")
         if (len(events) != 1 or not isinstance(witness, dict)
                 or witness.get("task_contract") != node.get("function_name")
@@ -543,8 +637,68 @@ def _completion_from_other_owner(node: dict, binding: dict, session: dict, physi
     return None
 
 
+def _pending_nominal_nodes(prepared: dict) -> dict:
+    nodes = {row["id"]: deepcopy(row) for row in prepared.get("saved_pending_nodes", [])
+             if isinstance(row, dict) and row.get("id") and row.get("status") not in {"completed", "done"}}
+    for entry in prepared.get("recovery_resources", {}).values():
+        for row in entry.get("pending_tasks", []):
+            if row.get("id") and row.get("status") not in {"completed", "done"}:
+                nodes.setdefault(row["id"], deepcopy(row))
+    return nodes
+
+
+def _nominal_completion_binding(node: dict, prepared: dict) -> str:
+    return recovery_validation_fingerprint({
+        "recorded_task": node,
+        "source": {key: prepared.get(key) for key in (
+            "source_observation_fingerprint", "source_context_revision", "validation_contract_version",
+            "primitive_support_semantics", "nominal_continuation_semantics", "outline_safety_specifications",
+            "completed_task_ids")},
+        "resource": prepared.get("recovery_resources", {}).get(node.get("resource_jid")),
+        "endpoint_evidence_policy_version": prepared.get("physical_evidence", {}).get("endpoint_evidence_policy_version"),
+    })
+
+
+def record_nominal_task_completions(task: dict, ra: dict, cca: dict, session: dict, prepared: dict) -> None:
+    """Retain exact nominal work performed by an accepted recovery event.
+
+    A matching endpoint alone is insufficient. The existing nominal witness
+    check must establish the exact registered owner program and every effect.
+    These are conditional planning completions, never execution acknowledgements.
+    """
+    prefix = session.get("accepted_outline_prefix") or []
+    if (prepared.get("nominal_continuation_semantics") != "recorded_unfinished_tasks"
+            or not session.get("session_id") or not prepared.get("source_observation_fingerprint")
+            or not prefix or prefix[-1].get("candidate_source") != "llm"
+            or prefix[-1].get("outline_id") != task.get("outline_id")
+            or ra.get("allowed") is not True or ra.get("feasibility_status") != "FEASIBLE"
+            or ra.get("geometry_evidence", {}).get("status") != "projected"
+            or cca.get("is_safe") is not True or cca.get("validation_status") != "passed"):
+        return
+    nodes = _pending_nominal_nodes(prepared)
+    completed = set(prepared.get("completed_task_ids", [])) | set(_fulfilled_nominal_tasks(nodes, session, prepared))
+    for identifier, node in nodes.items():
+        if (identifier in completed or node.get("resource_jid") != task.get("resource_jid")
+                or not set(node.get("predecessors", [])).issubset(completed)
+                or any(key not in completed and prior.get("resource_jid") == node.get("resource_jid")
+                       and prior.get("sequence_index", 0) < node.get("sequence_index", 0)
+                       for key, prior in nodes.items())):
+            continue
+        if _exact_nominal_witness(node, ra, prepared):
+            continue
+        record = {"source_task_id": identifier, "recorded_task": deepcopy(node),
+            "session_id": session.get("session_id"), "context_binding": _nominal_completion_binding(node, prepared),
+            "accepted_outline_id": task["outline_id"], "accepted_prefix_length": len(prefix),
+            "accepted_prefix_fingerprint": recovery_validation_fingerprint(prefix),
+            "resource_validation_fingerprint": recovery_validation_fingerprint(ra),
+            "safety_validation_fingerprint": recovery_validation_fingerprint(cca),
+            "kind": "predicted", "execution_authorized": False}
+        record["fingerprint"] = recovery_validation_fingerprint(record)
+        session.setdefault("nominal_task_completion_records", []).append(record)
+
+
 def _fulfilled_nominal_tasks(nodes: dict, session: dict, prepared: dict) -> dict:
-    """Record retained work superseded by an exact supported product completion.
+    """Find exact accepted task completions and supported product replacements.
 
     A different owner can fulfill the same declared product effects; that does
     not establish the original owner's resource effects. Resource cleanup remains.
@@ -555,7 +709,26 @@ def _fulfilled_nominal_tasks(nodes: dict, session: dict, prepared: dict) -> dict
 
     physical = session.get("projected_physical_evidence") or prepared.get("physical_evidence", {})
     result = {}
+    prefix = session.get("accepted_outline_prefix") or []
+    for record in session.get("nominal_task_completion_records", []):
+        node = nodes.get(record.get("source_task_id"))
+        count = record.get("accepted_prefix_length")
+        if (node is None or record.get("recorded_task") != node
+                or type(count) is not int or not 0 < count <= len(prefix)
+                or record.get("kind") != "predicted" or record.get("execution_authorized") is not False
+                or record.get("session_id") != session.get("session_id")
+                or record.get("context_binding") != _nominal_completion_binding(node, prepared)
+                or record.get("accepted_prefix_fingerprint") != recovery_validation_fingerprint(prefix[:count])
+                or record.get("accepted_outline_id") != prefix[count - 1].get("outline_id")
+                or record.get("fingerprint") != recovery_validation_fingerprint(
+                    {key: value for key, value in record.items() if key != "fingerprint"})):
+            continue
+        result[record["source_task_id"]] = {"source_task_id": record["source_task_id"],
+            "recorded_task": deepcopy(node), "accepted_event_completion": deepcopy(record),
+            "reason": "Exact nominal owner program fulfilled by an accepted recovery event", "execution_authorized": False}
     for identifier, node in nodes.items():
+        if identifier in result:
+            continue
         try:
             _, binding = _nominal_arguments(node, prepared)
         except ValueError as exc:
@@ -641,12 +814,7 @@ async def validate_nominal_continuation(*, session: dict, prepared: dict, planne
         incomplete = _completion_goals(session, prepared, conditions)
         if incomplete:
             return incomplete
-    nodes = {row["id"]: deepcopy(row) for row in prepared.get("saved_pending_nodes", [])
-             if isinstance(row, dict) and row.get("id") and row.get("status") not in {"completed", "done"}}
-    for entry in prepared.get("recovery_resources", {}).values():
-        for row in entry.get("pending_tasks", []):
-            if row.get("id") and row.get("status") not in {"completed", "done"}:
-                nodes.setdefault(row["id"], deepcopy(row))
+    nodes = _pending_nominal_nodes(prepared)
     replacement_evidence = _fulfilled_nominal_tasks(nodes, session, prepared) if recorded_unfinished else {}
     replaced = set(replacement_evidence) if recorded_unfinished else {
         task for suffix in prepared.get("marked_reentry_context", {}).get("pending_suffix_summary", [])
@@ -686,7 +854,10 @@ async def validate_nominal_continuation(*, session: dict, prepared: dict, planne
         identity = recovery_validation_fingerprint({"completed": sorted(completed),
                     "resources": current.get("symbolic_resources"), "parts": current.get("symbolic_parts"),
                     "monitor": current.get("outline_monitor_context"),
-                    "physical_evidence": current.get("projected_physical_evidence")})
+                    "physical_evidence": current.get("projected_physical_evidence"),
+                    **({"outline_evidence_policy_version": current["outline_evidence_policy_version"],
+                        "specifications": prepared.get("outline_safety_specifications")}
+                       if "outline_evidence_policy_version" in current else {})})
         if identity in seen:
             continue
         seen.add(identity)

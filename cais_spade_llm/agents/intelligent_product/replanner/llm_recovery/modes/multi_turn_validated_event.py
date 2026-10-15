@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""One LLM event followed by independent RA and CCA validation."""
+"""LLM events followed by independent RA and CCA validation."""
 
 import asyncio
 from copy import deepcopy
@@ -23,6 +23,12 @@ def _payload(session: dict, task: dict) -> dict:
                 "primitive_support_semantics": session.get("primitive_support_semantics"), "task": task})}
     if "primitive_support_semantics" in session:
         payload["primitive_support_semantics"] = session["primitive_support_semantics"]
+    if "outline_evidence_policy_version" in session:
+        payload["outline_evidence_policy_version"] = session["outline_evidence_policy_version"]
+        payload["state_fingerprint"] = recovery_validation_fingerprint({
+            "legacy_state": payload["state_fingerprint"],
+            "outline_evidence_policy_version": session["outline_evidence_policy_version"],
+            "specifications": session.get("outline_evidence_specifications_fingerprint")})
     return payload
 
 
@@ -42,6 +48,18 @@ def _allow_incomplete_motion_revision(session: dict, identities: list[str]) -> b
         return False
     seen.extend(identity for identity in identities if identity not in seen)
     return True
+
+
+def _missing_candidate_fields(task: dict, verdict: dict) -> list[str]:
+    """Expose only unbound public arguments identified by resource validation."""
+    if verdict.get("allowed") is not False or verdict.get("feasibility_status") != "NEEDS_CONTEXT":
+        return []
+    fields = set()
+    for missing in verdict.get("missing_parameters") or []:
+        for expression in (missing.get("unresolved_parameters") or {}).values():
+            if expression == {"$arg": "part_name"} and task.get("part_name") is None:
+                fields.add("part_name")
+    return sorted(fields)
 
 
 def _physical_fact_fingerprint(evidence: dict | None) -> str:
@@ -74,6 +92,8 @@ def _physical_fact_fingerprint(evidence: dict | None) -> str:
         "processing_observations": evidence.get("processing_observations"),
         "processing_capture_compatibility": evidence.get("processing_capture_compatibility"),
         "recorded_geometry_supplements": evidence.get("recorded_geometry_supplements"),
+        "invalidated_geometry": evidence.get("invalidated_geometry"),
+        "unresolved_processing": evidence.get("unresolved_processing"),
     })
 
 
@@ -175,8 +195,7 @@ async def _retrieve(prepared: dict, session: dict, planner: Any, requests: list,
             "fingerprint": recovery_validation_fingerprint(value), "value": deepcopy(value),
         }
     if "/physical_evidence" in requests:
-        # New sessions acquire live supplementary evidence only through the
-        # explicit UI preview action. Retrieval itself remains saved-facts-only.
+        # Retrieval cannot replace a predicted successor with an older capture.
         saved = prepared.get("physical_evidence") or {}
         projected = session.get("projected_physical_evidence") or {}
         if not session.get("accepted_outline_prefix") and projected.get("provenance", {}).get("kind") != "projected" and saved:
@@ -184,7 +203,9 @@ async def _retrieve(prepared: dict, session: dict, planner: Any, requests: list,
             row["returned_facts"]["/physical_evidence"] = {"source": "saved_observations", "value": deepcopy(saved)}
         else:
             row["missing_facts"].append({"ref": "/physical_evidence",
-                "reason": "Matching projected evidence is unavailable; an explicit Gazebo preview may supply it"})
+                "reason": ("Additional supported owner bounds or facts are required; trajectory fallback is disabled"
+                    if saved.get("endpoint_evidence_policy_version") in (1, 2) else
+                    "Matching projected evidence is unavailable; an explicit Gazebo preview may supply it")})
     check_context_revision(prepared, planner)
     return before != _validation_fact_fingerprint(prepared, session)
 
@@ -238,12 +259,15 @@ async def _retrieve_legacy(prepared: dict, session: dict, planner: Any, requests
 
 
 async def validate_event(*, task: dict, session: dict, prepared: dict, planner: Any, turn: dict) -> tuple[dict, dict]:
-    """Ask the assigned RA and CCA without accepting a proposed transition."""
+    """Ask the assigned RA, then CCA after physical validation can proceed."""
     from .multi_turn_context import check_context_revision
 
     jid = task["resource_jid"]
     if "projected_physical_evidence" not in session:
         session["projected_physical_evidence"] = deepcopy(prepared.get("physical_evidence") or {})
+    if session.get("outline_evidence_policy_version") in (1, 2):
+        session["outline_evidence_specifications_fingerprint"] = recovery_validation_fingerprint(
+            prepared.get("outline_safety_specifications"))
     seen = set()
     while True:
         check_context_revision(prepared, planner)
@@ -262,6 +286,12 @@ async def validate_event(*, task: dict, session: dict, prepared: dict, planner: 
             physical["resource_evidence"] = deepcopy(resource.get("resource_evidence") or {})
             if resource.get("outline_event_evidence") is not None:
                 physical["outline_event_evidence"] = deepcopy(resource["outline_event_evidence"])
+        if session.get("outline_evidence_policy_version") in (1, 2):
+            from cais_spade_llm.recovery_framework.outline_evidence_policy import sanitize_validation_input
+
+            physical["outline_evidence_policy_version"] = session["outline_evidence_policy_version"]
+            physical["outline_safety_specifications"] = deepcopy(prepared.get("outline_safety_specifications"))
+            sanitize_validation_input(physical, jid)
         request = {**_payload(session, task), "candidates": [{"candidate_index": 0,
                    "event_id": task["outline_id"], "task": deepcopy(task), "physical_input": physical}]}
         response = await planner.product_agent.request_recovery_outline_physical_validation(resource_jid=jid, payload=request)
@@ -272,6 +302,20 @@ async def validate_event(*, task: dict, session: dict, prepared: dict, planner: 
         if response.get("validator_jid") != jid or len(rows) != 1:
             raise ValueError("NEEDS_CONTEXT: RA validation identity or result count differs")
         ra = deepcopy(rows[0])
+        validation_model = deepcopy(response.get("recovery_des_model") or resource.get("recovery_des_model") or {})
+        if ra.get("additional_binding_record"):
+            record = ra["additional_binding_record"]
+            calculated = ra.get("calculation_model") or {}
+            calculated_input = ra.get("calculation_physical_input") or {}
+            from cais_spade_llm.recovery_framework.kmr_calculation import validate_calculation_records
+
+            validate_calculation_records(calculated_input.get("physical_evidence") or {},
+                session_id=session.get("session_id", ""), inputs=(resource.get("resource_evidence") or {}).get("inputs", {}))
+            if (record.get("task") != task or record.get("source_model_fingerprint") != recovery_validation_fingerprint(validation_model)
+                    or record.get("snapshot_fingerprint") != recovery_validation_fingerprint(physical["projected_snapshot"])
+                    or record.get("calculation_model_fingerprint") != recovery_validation_fingerprint(calculated)):
+                raise ValueError("NEEDS_CONTEXT: owner additional binding calculation differs from the proposal")
+            validation_model, physical = deepcopy(calculated), deepcopy(calculated_input)
         if ra.get("candidate_fingerprint") != recovery_validation_fingerprint(task):
             raise ValueError("NEEDS_CONTEXT: RA reply belongs to another proposed event")
         semantics = session.get("primitive_support_semantics")
@@ -291,11 +335,38 @@ async def validate_event(*, task: dict, session: dict, prepared: dict, planner: 
                     continue
             return ra, {}
         projection = ra.get("geometry_evidence") or {}
+        physical_incomplete = projection.get("status") == "needs_context"
+        if (physical_incomplete or projection.get("physical_motion_unresolved") is True or
+                projection.get("status") == "rejected" and any(projection.get(flag) is True for flag in (
+                    "owner_effect_rejected", "physical_capability_rejected", "physical_motion_rejected"))):
+            # Preserve the transaction result without sending a resource failure
+            # to CCA or representing it as a selected safety-rule violation.
+            before = deepcopy(session.get("outline_monitor_context") or {})
+            verdict = {"candidate_index": 0, "event_id": task["outline_id"], "is_safe": False,
+                "validation_status": "NEEDS_CONTEXT" if physical_incomplete or projection.get("physical_motion_unresolved") else "rejected",
+                "formal_safety_status": "not_checked", "constraint_owner": "resource", "checks": [],
+                "reason": projection.get("reason") or "; ".join(projection.get("unresolved") or []),
+                "monitor_context_before": before, "monitor_context_after": deepcopy(before),
+                "candidate_fingerprint": recovery_validation_fingerprint(task),
+                "execution_authorized": False, "planning_only": True}
+            verdict.update({key: deepcopy(projection[key]) for key in (
+                "owner_effect_rejected", "owner_effect_result", "physical_capability_rejected",
+                "capability_result", "capability_source", "physical_motion_unresolved", "revision_identity",
+                "solver_summary", "physical_motion_rejected", "continuous_mating_rejected", "mating_rejection",
+                "physical_endpoint_rejected", "endpoint_rejection") if key in projection})
+            turn["validation_stages"].append({"validator_role": "CentralControllerAgent",
+                "status": "not_checked", "request_sent": False, "state_fingerprint": request["state_fingerprint"],
+                "evidence": deepcopy(verdict)})
+            return ra, verdict
         safety_input = {"task": deepcopy(task), "candidate_fingerprint": recovery_validation_fingerprint(task),
                         "projection": deepcopy(projection),
                         "specifications": deepcopy(prepared.get("outline_safety_specifications")),
                         "monitor_history": deepcopy(prepared.get("monitor_history") or {}),
                         "monitor_context": deepcopy(session.get("outline_monitor_context") or {})}
+        if session.get("outline_evidence_policy_version") in (1, 2):
+            safety_input["evidence_input"] = {"task": deepcopy(task),
+                "snapshot": deepcopy(physical["projected_snapshot"]), "model": validation_model,
+                "physical_input": deepcopy(physical)}
         safety_request = {**_payload(session, task), "candidates": [{"candidate_index": 0,
                           "event_id": task["outline_id"], "safety_input": safety_input}]}
         response = await planner.product_agent.request_recovery_outline_safety_validation(payload=safety_request)
@@ -397,11 +468,27 @@ def _project(task: dict, ra: dict, cca: dict, session: dict) -> None:
             if target.get("observed_pose") is not None:
                 target["last_observed_pose"] = target.pop("observed_pose")
     session["projected_physical_evidence"] = successor
+    if session.get("outline_evidence_policy_version") in (1, 2):
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import invalidate_session_facts
+
+        invalidate_session_facts(session, successor)
     session["outline_monitor_context"] = deepcopy(cca.get("monitor_context_after") or {})
 
 
 async def handle_validated_event(*, session: dict, prepared: dict, response: dict, planner: Any) -> tuple[str, dict]:
     """Commit exactly one authored event after independent agent validation."""
+    from cais_spade_llm.recovery_framework.kmr_recovery import _cartesian_joint_calculation_cache
+
+    if _cartesian_joint_calculation_cache.get() is not None:
+        return await _handle_validated_event(session=session, prepared=prepared, response=response, planner=planner)
+    token = _cartesian_joint_calculation_cache.set({})
+    try:
+        return await _handle_validated_event(session=session, prepared=prepared, response=response, planner=planner)
+    finally:
+        _cartesian_joint_calculation_cache.reset(token)
+
+
+async def _handle_validated_event(*, session: dict, prepared: dict, response: dict, planner: Any) -> tuple[str, dict]:
     from . import multi_turn as shared
     from .multi_turn_context import check_context_revision, handle_outline_context
 
@@ -412,6 +499,8 @@ async def handle_validated_event(*, session: dict, prepared: dict, response: dic
     turn = {"next_transition": deepcopy(event), "validation_contract_version": OUTLINE_VALIDATION_CONTRACT_VERSION}
     if "primitive_support_semantics" in session:
         turn["primitive_support_semantics"] = session["primitive_support_semantics"]
+    if "outline_evidence_policy_version" in session:
+        turn["outline_evidence_policy_version"] = session["outline_evidence_policy_version"]
     error = None
     if (set(response) - {"thought", "next_transition", "decision", "context_requests"}
             or response.get("decision") is not None or response.get("context_requests", []) != []):
@@ -435,18 +524,49 @@ async def handle_validated_event(*, session: dict, prepared: dict, response: dic
     try:
         ra, cca = await validate_event(task=task, session=working, prepared=prepared, planner=planner, turn=turn)
         if not ra.get("allowed") or not cca.get("is_safe"):
-            owner = "resource" if not ra.get("allowed") else "cca"
-            verdict = ra if owner == "resource" else cca
+            upstream = (cca.get("formal_safety_status") == "not_checked" and (
+                cca.get("constraint_owner") == "resource" or any(cca.get(flag) is True for flag in (
+                "owner_effect_rejected", "physical_capability_rejected", "physical_motion_rejected",
+                "physical_motion_unresolved"))))
+            owner = "resource" if not ra.get("allowed") or upstream else "cca"
+            verdict = ra if not ra.get("allowed") else cca
             missing = (verdict.get("feasibility_status") == "NEEDS_CONTEXT" or
                        verdict.get("validation_status") in {"unresolved", "NEEDS_CONTEXT", "unavailable"})
             from .multi_turn_prompts import _outline_safety_checks_for_prompt
 
             finding = _finding(verdict.get("reason") or "Required validation did not pass", missing=missing, owner=owner)
+            missing_fields = _missing_candidate_fields(task, ra) if owner == "resource" else []
+            if missing_fields:
+                finding["evidence"] = {"missing_candidate_fields": missing_fields}
             if owner == "resource" and ra.get("constraint_code") == "unsupported_successor_condition":
                 finding["constraint_code"] = ra["constraint_code"]
                 finding["evidence"] = {"mismatches": deepcopy(ra.get("evidence", {}).get("mismatches", []))}
+                if isinstance(ra.get("evidence", {}).get("condition_support"), dict):
+                    finding["evidence"]["condition_support"] = deepcopy(ra["evidence"]["condition_support"])
             if owner == "resource" and isinstance(ra.get("evidence", {}).get("capability_result"), dict):
                 finding.setdefault("evidence", {})["capability_result"] = deepcopy(ra["evidence"]["capability_result"])
+            if owner == "resource":
+                conflicts = []
+                for primitive in ra.get("primitive_support", {}).get("primitives", []):
+                    for attempt in primitive.get("parameter_attempts", []):
+                        witness = attempt.get("parameter_witness") or {}
+                        bindings = witness.get("parameter_bindings", {})
+                        params = witness.get("params", {})
+                        for field in attempt.get("evidence", {}).get("conflicting_parameters", []):
+                            if field in bindings and field in params:
+                                row = {"field": field, "expected": deepcopy(bindings[field]),
+                                       "actual": deepcopy(params[field])}
+                                if row not in conflicts:
+                                    conflicts.append(row)
+                if conflicts:
+                    finding.setdefault("evidence", {})["parameter_conflicts"] = conflicts
+                projection = ra.get("geometry_evidence", {})
+                failures = [reason for row in [projection, *projection.get("owner_alternatives", [])]
+                            for reason in row.get("unresolved", [])]
+                if "Bounded KMR endpoint search found no independently verified joint witness; reachability is unresolved" in failures:
+                    finding.setdefault("evidence", {})["solver_summary"] = {
+                        "source": "resource-owned endpoint calculation", "failure_kind": "bounded_search_failed",
+                        "source_ref": f"/resources/{task['resource_jid']}/resource_evidence"}
             if verdict.get("physical_motion_rejected") is True:
                 finding["constraint_code"] = ("continuous_mating_rejected"
                     if verdict.get("continuous_mating_rejected") is True else "physical_endpoint_rejected"
@@ -482,6 +602,22 @@ async def handle_validated_event(*, session: dict, prepared: dict, response: dic
                     finding["evidence"]["owner_effect_result"] = deepcopy(cca["owner_effect_result"])
             findings = [finding]
             session["outline_validation_findings"] = findings
+            if missing_fields:
+                identity = recovery_validation_fingerprint({
+                    "resource_jid": task["resource_jid"], "missing_candidate_fields": missing_fields,
+                    "expected_start_state": task.get("expected_start_state"),
+                    "expected_end_state": task.get("expected_end_state"),
+                    "descriptor_fingerprint": ra.get("primitive_support", {}).get("descriptor_fingerprint"),
+                    "snapshot_fingerprint": ra.get("primitive_support", {}).get("snapshot_fingerprint")})
+                seen = session.setdefault("incomplete_parameter_revision_identities", [])
+                if identity not in seen:
+                    seen.append(identity)
+                    session["status"] = "paused_after_outline_turn"
+                    session.pop("pending_outline_validation", None)
+                    turn.update(validation_findings=findings,
+                        transition_validation={"status": "unresolved", "validation_status": "NEEDS_CONTEXT",
+                            "findings": findings, "proposal_revision_available": True, "execution_authorized": False})
+                    return "need_revision", turn
             if verdict.get("physical_motion_unresolved") is True:
                 identity = verdict["revision_identity"]
                 if _allow_incomplete_motion_revision(session, [identity]):
@@ -515,6 +651,9 @@ async def handle_validated_event(*, session: dict, prepared: dict, response: dic
         return "need_context", {**turn, "validation_findings": findings}
     check_context_revision(prepared, planner)
     working.setdefault("accepted_outline_prefix", []).append({**deepcopy(task), "candidate_source": "llm"})
+    from .multi_turn_nominal_evidence import record_nominal_task_completions
+
+    record_nominal_task_completions(task, ra, cca, working, prepared)
     working["outline_validation_findings"] = []
     working["candidate_rejection_feedback"] = []
     working["outline_lookahead"] = []
@@ -550,6 +689,190 @@ async def handle_validated_event(*, session: dict, prepared: dict, response: dic
     return "outline_ready" if complete else "need_next_task", turn
 
 
+def _comparison_state_fingerprint(session: dict) -> str:
+    """Compare modeled facts without counting generated record identities as progress."""
+    ignored = {"source", "provenance", "captured_at", "recorded_at", "revision", "source_fingerprint",
+               "snapshot_fingerprint", "fingerprint", "outline_id", "command_id", "candidate_source",
+               "current_pose_captured_at", "current_pose_source", "field_sources", "commands", "history"}
+
+    def facts(value):
+        if isinstance(value, dict):
+            return {key: facts(item) for key, item in value.items() if key not in ignored}
+        if isinstance(value, list):
+            return [facts(item) for item in value]
+        return value
+
+    physical = session.get("projected_physical_evidence") or {}
+    return recovery_validation_fingerprint(facts({
+        "resources": session.get("symbolic_resources"), "parts": session.get("symbolic_parts"),
+        "monitor": {key: {field: value for field, value in record.items()
+                          if field in {"rules_fingerprint", "states", "pending_rule_ids", "activation"}}
+                    for key, record in session.get("outline_monitor_context", {}).items()},
+        "snapshot": physical.get("snapshot"), "geometry": physical.get("geometry"),
+        "processing_observations": physical.get("processing_observations"),
+        "environment_valuation": physical.get("environment_valuation"),
+        "resource_models": physical.get("resource_models"),
+        "unresolved_processing": physical.get("unresolved_processing"),
+    }))
+
+
+async def handle_validated_candidates(*, session: dict, prepared: dict, response: dict, planner: Any) -> tuple[str, dict]:
+    """Validate alternatives independently and commit one progressing supported successor.
+
+    Args:
+        session: Accepted planning state, updated only for the selected candidate.
+        prepared: Recorded context shared by the candidate comparisons.
+        response: LLM-authored candidate_events or a public context request.
+        planner: Resource and CCA validation transport.
+
+    Returns:
+        Continuation decision and the candidate comparison audit.
+    """
+    if session.get("outline_diagnostic_bypass"):
+        return await _handle_validated_candidates(session=session, prepared=prepared, response=response, planner=planner)
+
+    from cais_spade_llm.recovery_framework.kmr_recovery import _cartesian_joint_calculation_cache
+
+    # Only pure solver calculations are shared within this batch. Every owner
+    # rechecks the returned FK, limits and proposal evidence independently.
+    token = _cartesian_joint_calculation_cache.set({})
+    try:
+        return await _handle_validated_candidates(session=session, prepared=prepared, response=response, planner=planner)
+    finally:
+        _cartesian_joint_calculation_cache.reset(token)
+
+
+async def _handle_validated_candidates(*, session: dict, prepared: dict, response: dict, planner: Any) -> tuple[str, dict]:
+    from . import multi_turn_outline_generation as comparison
+    from .multi_turn_context import check_context_revision, handle_outline_context
+
+    check_context_revision(prepared, planner)
+    if response.get("decision") == "need_context":
+        return await handle_outline_context(prepared=prepared, session=session, response=response, planner=planner)
+    events = response.get("candidate_events")
+    if (set(response) - {"thought", "candidate_events", "decision", "context_requests"}
+            or response.get("decision") is not None or response.get("context_requests", []) != []
+            or not isinstance(response.get("thought"), str) or not isinstance(events, list)
+            or not 1 <= len(events) <= 5 or any(not isinstance(event, dict) for event in events)
+            or len({event.get("outline_id") for event in events if isinstance(event.get("outline_id"), str)}) != len(events)):
+        finding = {"constraint_owner": "planner", "constraint_code": "invalid_candidate_response",
+                   "reason": "Return thought and one to five candidate_events with distinct outline_id values, or need_context."}
+        session.update(status="paused_after_outline_turn", outline_validation_findings=[finding])
+        return "need_revision", {"validation_findings": [finding]}
+    base = {key: value for key, value in session.items()
+            if key not in {"turns", "nominal_continuation_evidence", "pending_outline_validation"}}
+    initial = _comparison_state_fingerprint(session)
+    visited = set(session.get("accepted_state_fingerprints", [])) | {initial}
+    sequences, evaluations, branches = [], [], {}
+    diagnostic = session.get("outline_diagnostic_bypass") is True
+    if diagnostic:
+        from .multi_turn_diagnostic import handle_event
+    for index, event in enumerate(events):
+        working, context = deepcopy(base), deepcopy(prepared)
+        event_handler = handle_event if diagnostic else handle_validated_event
+        decision, audit = await event_handler(session=working, prepared=context,
+            response={"thought": response["thought"], "next_transition": deepcopy(event)}, planner=planner)
+        valid = (audit.get("schema_valid") is True and audit.get("transition_validation", {}).get("status") == "not_checked"
+                 if diagnostic else audit.get("transition_validation", {}).get("status") == "passed")
+        identity = _comparison_state_fingerprint(working) if valid else None
+        sequences.append({"candidate_index": index, "surface_events": [deepcopy(event)]})
+        evaluation = {"candidate_index": index, "task": deepcopy(event), "valid": valid,
+            "validation_audit": audit, "decision": decision, "repeated_state": valid and identity in visited,
+            "projected_symbolic_resources": deepcopy(working.get("symbolic_resources", {})),
+            "projected_symbolic_parts": deepcopy(working.get("symbolic_parts", {})),
+            "safety_dfa_states_before": deepcopy(session.get("projected_safety_dfa_states", {})),
+            "safety_dfa_states_after": deepcopy(working.get("projected_safety_dfa_states", {})),
+            "projected_validation_state": working if valid else {},
+            "validated_events": [deepcopy(audit["next_transition"])] if diagnostic and valid else [],
+            "diagnostic_handoff_complete": diagnostic and working.get("diagnostic_nominal_handoff", {}).get("complete") is True,
+            "nominal_continuation_complete": working.get("nominal_continuation_evidence", {}).get("complete") is True}
+        evaluations.append(evaluation)
+        branches[index] = (working, decision, audit, identity)
+    # Comparison rejection is not a change to the independent RA/CCA results.
+    eligible = [row for row in evaluations if row["valid"] and not row["repeated_state"]]
+    complete = [row for row in eligible if row["diagnostic_handoff_complete"]] if diagnostic else [row for row in eligible if row["nominal_continuation_complete"]]
+    selected = None
+    if complete:
+        selected = min(complete, key=lambda row: comparison._candidate_effect_identifier(sequences[row["candidate_index"]]))
+        selected["selection_status"] = "proposed_nominal_handoff" if diagnostic else "nominal_continuation_established"
+    elif eligible:
+        await comparison._populate_agent_filtered_enabledness(candidate_evaluations=eligible,
+            session_state=deepcopy(base), prepared_recovery_request=deepcopy(prepared), planner=planner)
+        preferred = comparison._apply_neurosymbolic_comparison(candidate_sequences=sequences,
+            candidate_evaluations=eligible, session_state=base, prepared_recovery_request=prepared)
+        selected = min((row for row in eligible if row.get("candidate_id") in preferred),
+                       key=lambda row: row["candidate_id"], default=None)
+    for row in evaluations:
+        row.pop("projected_validation_state", None)
+        if row["repeated_state"]:
+            row["selection_status"] = "excluded_repeated_state"
+    audit = {"candidate_events": deepcopy(events), "candidate_evaluations": evaluations,
+             "validation_contract_version": OUTLINE_VALIDATION_CONTRACT_VERSION,
+             "outline_diagnostic_bypass": diagnostic,
+             "execution_authorized": False}
+    if selected is None:
+        findings = [finding for row in evaluations
+                    for finding in row["validation_audit"].get("validation_findings", [])]
+        findings.append({"constraint_owner": "planner", "constraint_code": "no_progressing_candidate",
+            "reason": "No candidate established a new supported state that reduces unresolved obligations or enables further work."})
+        session.update(status="paused_after_outline_turn", outline_validation_findings=findings)
+        if diagnostic:
+            unresolved = [row for row in evaluations if row["decision"] == "need_context"]
+            rejected = [row for row in evaluations if row["validation_audit"].get("checks") and not row["valid"]]
+            if unresolved or rejected:
+                session["status"] = "NEEDS_CONTEXT" if unresolved else "validation_rejected"
+                session["outline_check_results"] = deepcopy((unresolved or rejected)[0]["validation_audit"].get("checks", {}))
+                audit["validation_findings"] = findings
+                return "need_context" if unresolved else "need_revision", audit
+            same = session.get("selection_repeated_failure_fingerprint") == initial
+            session["selection_repeated_failure_count"] = session.get("selection_repeated_failure_count", 0) + 1 if same else 1
+            session["selection_repeated_failure_fingerprint"] = initial
+            if session["selection_repeated_failure_count"] >= session.get("selection_repeated_failure_limit", 3):
+                session["status"] = "selection_unresolved"
+            audit["validation_findings"] = findings
+            return "need_revision", audit
+        feedback = {recovery_validation_fingerprint(row): deepcopy(row)
+                    for working, _, _, _ in branches.values()
+                    for row in working.get("candidate_rejection_feedback", [])}
+        session["candidate_rejection_feedback"] = [feedback[key] for key in sorted(feedback)]
+        unresolved = [row for row in evaluations if row["decision"] == "need_context"]
+        revision_available = False
+        if unresolved and not eligible and session.get("outline_evidence_policy_version") == 2:
+            identity = recovery_validation_fingerprint(sorted(recovery_validation_fingerprint(
+                {"conditions": {key: row["task"].get(key) for key in
+                    ("resource_jid", "part_name", "expected_start_state", "expected_end_state")},
+                 "findings": [{key: finding.get(key) for key in ("constraint_owner", "constraint_code", "reason")}
+                    for finding in row["validation_audit"].get("validation_findings", [])]})
+                for row in unresolved))
+            seen = session.setdefault("incomplete_candidate_revision_identities", [])
+            if identity not in seen:
+                seen.append(identity)
+                revision_available = True
+                # The unresolved verdict remains in the audit and prompt. A
+                # different proposal may avoid facts that this one requires.
+                feedback.update({recovery_validation_fingerprint(row): deepcopy(row) for row in findings[:-1]})
+                session["candidate_rejection_feedback"] = [feedback[key] for key in sorted(feedback)]
+        if unresolved and not eligible:
+            if revision_available:
+                session.pop("pending_outline_validation", None)
+            else:
+                session["pending_outline_validation"] = {"kind": "candidates", "response": deepcopy(response),
+                    "source_turn_index": session.get("turn_index")}
+                session["status"] = "NEEDS_CONTEXT"
+        else:
+            session.pop("pending_outline_validation", None)
+        audit["validation_findings"] = findings
+        audit["proposal_revision_available"] = revision_available
+        return ("need_context" if unresolved and not eligible and not revision_available else "need_revision"), audit
+    working, decision, selected_audit, identity = branches[selected["candidate_index"]]
+    working["accepted_state_fingerprints"] = [*dict.fromkeys([*session.get("accepted_state_fingerprints", []), initial, identity])]
+    session.pop("pending_outline_validation", None)
+    session.update(working)
+    audit.update(selected_audit)
+    audit["selected_candidate_index"] = selected["candidate_index"]
+    return decision, audit
+
+
 async def retry_pending_event(*, prepared: dict, session: dict, planner: Any) -> tuple[str, dict]:
     """Retry recorded validation after explicit evidence preparation, without LLM calls."""
     from .multi_turn_context import check_context_revision
@@ -563,6 +886,9 @@ async def retry_pending_event(*, prepared: dict, session: dict, planner: Any) ->
     if pending.get("kind") == "event":
         decision, turn = await handle_validated_event(session=session, prepared=prepared,
                                                       response=pending["response"], planner=planner)
+    elif pending.get("kind") == "candidates":
+        decision, turn = await handle_validated_candidates(session=session, prepared=prepared,
+            response=pending["response"], planner=planner)
     elif pending.get("kind") == "nominal":
         from .multi_turn_nominal_evidence import validate_nominal_continuation, nominal_continuation_findings
 

@@ -161,9 +161,17 @@ def _robot_configuration(scene: dict, robot: dict) -> tuple[dict, dict, dict]:
             for connection in robot.get("handling_connections", [])
         }
     )
-    static["gripper_reach"]["origin_pose"] = {
-        axis: float(value) for axis, value in zip(("x", "y", "z"), robot["base_xyz"], strict=True)
-    }
+    # The template's printer workspace is not a limit or a staging declaration
+    # for this cell. Explicit cell limits remain authoritative; native robot
+    # models supply kinematic constraints when no workspace envelope is given.
+    static.pop("gripper_reach", None)
+    if "gripper_reach" in robot:
+        static["gripper_reach"] = deepcopy(robot["gripper_reach"])
+    static["staging_areas"] = {
+        machine["resource_id"] + " staging tray": {
+            "anchor_pose": dict(zip(("x", "y", "z"), machine["staging_pose"][:3], strict=True))}
+        for machine in scene.get("machines", [])
+        if machine["resource_id"] + " staging tray" in static["reachability"] and "staging_pose" in machine}
     return controller, named_positions, static
 
 

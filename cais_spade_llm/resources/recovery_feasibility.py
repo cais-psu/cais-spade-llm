@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from itertools import islice, product
+from itertools import combinations, islice, product
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -467,6 +467,58 @@ def derive_primitive_union(  # noqa: C901 - preserve exact matching and missing-
     return support
 
 
+def _public_condition_support(task: dict, model: dict) -> dict:
+    """Separate unsupported conditions and report proven incompatible pairs.
+
+    At most 64 pairs are checked for concise diagnostics. An omitted pair is
+    not evidence of support; incomplete pair checks never establish rejection.
+    """
+    conditions = []
+    for field, value in sorted(task['expected_end_state'].items()):
+        declaration = model.get('state_variables', {}).get(field, {})
+        if not declaration or declaration.get('private') or declaration.get('scope', 'resource') != 'resource':
+            continue
+        partial = {**task, 'expected_end_state': {field: deepcopy(value)}}
+        unknown, supported = not model.get('model_complete', True), False
+        start = task.get('expected_start_state') or {}
+        changed = field in start and not _equal(start[field], value)
+        unknown |= field not in start
+        for event in model.get('events', []):
+            if changed and field not in event.get('updates', {}):
+                continue
+            missing = []
+            bindings = _successor_bindings(partial, event, model, missing=missing)
+            unknown |= bool(missing)
+            supported |= bindings is not None
+        conditions.append({'field': field, 'actual': deepcopy(value),
+                           'supported': True if supported else None if unknown else False})
+    unsupported_combinations = []
+    start = task.get('expected_start_state') or {}
+    for pair in islice(combinations(conditions, 2), 64):
+        if not all(row['supported'] is True for row in pair):
+            continue
+        end = {row['field']: deepcopy(row['actual']) for row in pair}
+        changed = {field for field, value in end.items() if field in start and not _equal(start[field], value)}
+        if not changed or any(field not in start for field in end):
+            continue
+        partial = {**task, 'expected_end_state': end}
+        unknown, supported = not model.get('model_complete', True), False
+        for event in model.get('events', []):
+            if not changed.intersection(event.get('updates', {})):
+                continue
+            missing = []
+            bindings = _successor_bindings(partial, event, model, missing=missing)
+            unknown |= bool(missing)
+            supported |= bindings is not None
+        if not unknown and not supported:
+            unsupported_combinations.append([{'field': row['field'], 'actual': deepcopy(row['actual'])} for row in pair])
+    return {'conditions': conditions,
+            'combination_supported': False,
+            'individual_conditions_supported': bool(conditions) and all(row['supported'] is True for row in conditions),
+            **({'unsupported_combinations': unsupported_combinations} if unsupported_combinations else {}),
+            'source': {'descriptor_fingerprint': model.get('descriptor_fingerprint')}}
+
+
 def _successor_condition_conflicts(task: dict, model: dict) -> list[dict]:
     """Explain public contradictions with the other proposed conditions fixed.
 
@@ -594,6 +646,12 @@ def validate_primitive_support(  # noqa: C901, PLR0912 - retain contributor-scop
             return {**_result("NEEDS_CONTEXT", "Parameter witness belongs to different observations or declarations"),
                     "primitive_support": support}
     if not support["matching_transitions"]:
+        if support["missing_context"] == ["No declared public resource end condition is available"]:
+            # Complete declarations establish this as a proposal error. Asking
+            # for more observations cannot supply the omitted resource condition.
+            return {**_result("INFEASIBLE", "expected_end_state requires a declared public resource condition; "
+                              "part conditions alone cannot establish resource primitive support"),
+                    "constraint_code": "unsupported_successor_condition", "primitive_support": support}
         result = _result("INFEASIBLE" if support["model_complete"] else "NEEDS_CONTEXT",
                          "No declared resource successor supports a requested change in expected_end_state" if support["model_complete"]
                          else "; ".join(support["missing_context"]))
@@ -601,6 +659,8 @@ def validate_primitive_support(  # noqa: C901, PLR0912 - retain contributor-scop
             result["constraint_code"] = "unsupported_successor_condition"
             conflicts = _successor_condition_conflicts({**task, "expected_start_state": support["expected_start_state"]}, recovery_des_model)
             result["evidence"]["mismatches"] = conflicts
+            result["evidence"]["condition_support"] = _public_condition_support(
+                {**task, "expected_start_state": support["expected_start_state"]}, recovery_des_model)
             if conflicts:
                 result["reason"] += ": " + "; ".join(
                     f"{row['field']} proposed {row['actual']!r}; supported {row['condition_operator']} {row['expected']!r} "

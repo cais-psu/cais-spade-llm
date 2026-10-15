@@ -3,6 +3,7 @@ from __future__ import annotations
 """Recovery generation from saved facts with no equipment or agent transport."""
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 class SavedRecoveryResource:
     """Expose only recorded observation methods and declared resource metadata."""
 
+    def validate_recovery_primitive_composition(self, **kwargs) -> dict:
+        """Use the same nonexecuting composition contract as the live RA."""
+        return ResourceAgent.validate_recovery_primitive_composition(self, **kwargs)
+
     def __init__(self, jid: str, entry: dict, observations: dict, *, _copy_observations: bool = True) -> None:
         """Keep a detached resource record without constructing a controller.
 
@@ -40,6 +45,7 @@ class SavedRecoveryResource:
         self._entry = deepcopy(entry)
         self._observations = deepcopy(observations) if _copy_observations else observations
         self._resource_evidence_supplement: dict | None = None
+        self._scene_capability_calculation: dict | None = None
         evidence = entry.get('resource_evidence') or observations.get('resource_evidence', {}).get(jid, {})
         if evidence.get('environment_models') and entry.get('resource_type') != 'robot':
             from cais_spade_llm.resources.environment_recovery import environment_declared_capabilities
@@ -48,6 +54,37 @@ class SavedRecoveryResource:
                 if field in self.static_capabilities and recovery_validation_fingerprint(self.static_capabilities[field]) != recovery_validation_fingerprint(value):
                     raise ValueError(f'Conflicting recorded resource capabilities: {self.jid}.{field}')
                 self.static_capabilities[field] = deepcopy(value)
+
+    def prepare_current_scene_capabilities(self) -> dict:
+        """Derive current cell capabilities for a new attempt, retaining captured declarations."""
+        if self._entry.get("resource_type") != "robot":
+            return {}
+        from .workflow_execution import _robot_configuration
+        from cais_spade_llm.recovery_framework import ROOT
+
+        scene = self._observations.get("inputs", {}).get("scene", {})
+        robots = [row for row in scene.get("robots", []) if row.get("resource_id") == self.agent_name]
+        if len(robots) != 1:
+            return {}
+        robot = robots[0]
+        template = json.loads((ROOT / "cais_spade_llm/initialization/resources/robot_ur5e.json").read_text())["ur5e"]["gazebo"]["static_capabilities"]
+        inherited = deepcopy(template["gripper_reach"])
+        inherited["origin_pose"] = dict(zip(("x", "y", "z"), robot["base_xyz"], strict=True))
+        _, _, configured = _robot_configuration(scene, robot)
+        before = deepcopy(self.static_capabilities)
+        for field, old in (("gripper_reach", inherited), ("staging_areas", template["staging_areas"])):
+            if field in before and before[field] != old:
+                continue
+            if field in configured:
+                self.static_capabilities[field] = deepcopy(configured[field])
+            else:
+                self.static_capabilities.pop(field, None)
+        self._scene_capability_calculation = {
+            "kind": "calculated", "source": "recorded scene and workflow_execution._robot_configuration",
+            "scene_fingerprint": recovery_validation_fingerprint(scene),
+            "recorded_static_capabilities": before, "static_capabilities": deepcopy(self.static_capabilities),
+            "resource_id": self.agent_name, "execution_authorized": False}
+        return deepcopy(self._scene_capability_calculation)
 
     def install_recovery_resource_evidence(self, *, observations: dict, source_fingerprint: str) -> dict:
         """Retain compatible supplementary facts separately from the source capture."""
@@ -73,6 +110,9 @@ class SavedRecoveryResource:
         if recorded is None:
             recorded = (self._observations.get("resource_evidence") or {}).get(self.jid)
         evidence = deepcopy(recorded) if isinstance(recorded, dict) else {}
+        evidence.setdefault("resource_id", self.agent_name)
+        if self._scene_capability_calculation:
+            evidence["scene_capability_calculation"] = deepcopy(self._scene_capability_calculation)
         evidence.setdefault("resource_type", self._entry.get("resource_type"))
         if "execution_mode" in (self._observations.get("setup") or {}):
             evidence.setdefault("execution_mode", self._observations["setup"]["execution_mode"])
@@ -177,6 +217,19 @@ class SavedRecoveryResource:
     def get_recovery_snapshot(self) -> dict:
         """Restore declared owner facts without changing the original capture."""
         snapshot, _ = self._recorded_recovery_snapshot()
+        if self._scene_capability_calculation:
+            for field in ("gripper_reach", "staging_areas"):
+                snapshot.pop(field, None)
+                if field in self.static_capabilities:
+                    snapshot[field] = deepcopy(self.static_capabilities[field])
+            from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_resource_adapter import (
+                adapt_recovery_resource_snapshot,
+            )
+
+            snapshot = adapt_recovery_resource_snapshot(resource_jid=self.jid,
+                resource_type=self._entry["resource_type"], snapshot=snapshot,
+                modeled_state=self._entry.get("modeled_state", {}),
+                state_variables=self._entry.get("recovery_des_model", {}).get("state_variables", {}))
         return snapshot
 
     def _recorded_recovery_snapshot(self) -> tuple[dict, dict]:
@@ -233,7 +286,7 @@ class SavedRecoveryResource:
         """Return the recorded descriptor without adapting its symbols."""
         evidence = self.get_recovery_resource_evidence()
         if (snapshot is not None and self._entry.get('resource_type') != 'robot'
-                and evidence.get('environment_models')):
+                and evidence.get('environment_models', {}).get(evidence.get('resource_id'))):
             from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor
 
             return environment_recovery_descriptor(evidence, snapshot, resource_jid=self.jid)
@@ -250,6 +303,13 @@ class SavedRecoveryResource:
         if physical_input.get("primitive_support_semantics") == "successor_primitive_union":
             supplied = physical_input.get("resource_evidence")
             known = self.get_recovery_resource_evidence()
+            if physical_input.get("physical_evidence", {}).get("endpoint_evidence_policy_version") in (1, 2):
+                from .outline_evidence_policy import sanitize_validation_input
+
+                checked = {**deepcopy(physical_input), "projected_snapshot": deepcopy(recovery_snapshot),
+                           "resource_evidence": known}
+                sanitize_validation_input(checked, self.jid)
+                known = checked["resource_evidence"]
             if supplied is not None:
                 def matches(recorded, proposed):
                     if isinstance(recorded, dict) and isinstance(proposed, dict):
@@ -632,6 +692,19 @@ class SavedRecoveryProduct:
                     raise ValueError("Saved supplementary validation evidence identifies an unknown resource")
                 self.resources[jid].install_recovery_resource_evidence(
                     observations=observations, source_fingerprint=source_fingerprint)
+        physical = session.get('projected_physical_evidence') or {}
+        if physical.get('additional_binding_records'):
+            from .kmr_calculation import validate_calculation_records
+
+            owner = self.resources.get(physical.get('jids', {}).get('KMR'))
+            if owner is None:
+                raise ValueError('Saved additional bindings have no recorded resource owner')
+            validate_calculation_records(physical, session_id=session.get('session_id', ''),
+                inputs=owner.get_recovery_resource_evidence().get('inputs', {}))
+            model = owner.recovery_des_model(snapshot=owner.get_recovery_snapshot())
+            if any(record.get('source_model_fingerprint') != recovery_validation_fingerprint(model)
+                   for record in physical['additional_binding_records']):
+                raise ValueError('Saved additional bindings use a changed resource model')
 
     async def ask_llm_structured(self, prompt: str, **kwargs) -> dict:
         """Capture actual provider requests through the existing implementation."""
@@ -712,7 +785,7 @@ class SavedRecoveryProduct:
 
         payload = kwargs.get("payload") or {}
         if uses_outline_evidence(payload):
-            return validate_safety_outline_payload(payload)
+            return validate_safety_outline_payload(payload, offline=True)
         raise ValueError("Formal safety checks are skipped in this offline example")
 
 
@@ -752,7 +825,7 @@ def create_offline_recovery(
                  runtime_recovery_validation_policy="no_validation", selected_safety_file="__NONE__",
                  runtime_recovery_mode="manual", runtime_recovery_primitive_mode="manual")
     setup["failure_scenario"] = {**setup.get("failure_scenario", {}), "scenario": observations["scenario"]}
-    setup["outline_only"] = observations["scenario"] != "Part slippage"
+    setup["outline_only"] = False
     runtime = SimpleNamespace(
         diagnostic_cca_bypass=True, setup=setup, path=RECORDS.parent, agent=product,
         context=SimpleNamespace(run_id=f"offline_{uuid4().hex}", revision=observations.get("context_revision", 0)),

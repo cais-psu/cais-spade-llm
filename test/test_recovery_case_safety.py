@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _document(identifier):
-    doc = json.loads((ROOT / default_safety_files('Conveyor breakdown')[0]).read_text())
+    doc = json.loads((ROOT / 'cais_spade_llm/specification/safety/safety_Conveyor_breakdown.txt').read_text())
     return {**doc, 'catalog': {'version': 2, 'specifications': [r for r in doc['catalog']['specifications']
             if r['id'] == identifier]}, 'requirement_scopes': [r for r in doc['requirement_scopes']
             if r['specification'] == identifier]}
@@ -64,17 +64,16 @@ def _check(projection, identifier='SAFE_M1_front_access_ur5e-1_interlock', **kwa
         requirement_scopes=doc['requirement_scopes'], prospective_activation=True, **kwargs)
 
 
-@pytest.mark.parametrize('scenario', ['Conveyor breakdown', 'ur5e-1 breakdown'])
+@pytest.mark.parametrize('scenario', ['ur5e-1 breakdown'])
 def test_case_defaults_compile_given_rules_without_model_calls(scenario):
     selected = default_safety_files(scenario)
     doc = json.loads((ROOT / selected[0]).read_text())
     rules, dfas = compile_predefined_safety(doc)
-    assert len(rules) == len(dfas) == 77
-    assert 'SAFE_KMR_docking' in dfas
-    assert any('workholding_exclusive' in rule['id'] for rule in rules)
+    assert len(rules) == len(dfas) == 1
+    assert rules[0]['id'] == 'SAFE_M1_mutex'
+    assert set(dfas) == {'SAFE_M1_mutex'}
     selected.clear()
-    assert len(default_safety_files(scenario)) == 3
-    assert default_safety_files(scenario)[1:] == default_safety_files('Part slippage')
+    assert default_safety_files(scenario) == ['cais_spade_llm/specification/safety/safety_M1_mutex.txt']
 
 
 def test_previous_machine_safety_file_remains_available():
@@ -82,6 +81,165 @@ def test_previous_machine_safety_file_remains_available():
     rules, dfas = compile_predefined_safety(json.loads(path.read_text()))
     assert len(rules) == len(dfas) == 77
     assert 'SAFE_KMR_docking' in dfas
+
+
+@pytest.mark.parametrize('first_region', ['M1.front_access', 'M1.side_access', 'M1.workholding'])
+@pytest.mark.parametrize('second_region', ['M1.front_access', 'M1.side_access', 'M1.workholding'])
+@pytest.mark.parametrize('second_inside,expected', [(False, 'FEASIBLE'), (True, 'INFEASIBLE'),
+                                                  (None, 'NEEDS_CONTEXT')])
+def test_m1_mutex_counts_failed_robot_across_all_access_areas(first_region, second_region, second_inside, expected):
+    resources = {'M1': {'resource_state': 'completed'},
+                 'ur5e-1': {'resource_state': 'failed', 'held_part': None},
+                 'KMR': {'held_part': None}, 'ur5e-4': {'held_part': None}}
+    regions = ['M1.front_access', 'M1.side_access', 'M1.workholding']
+    occupancy = {region: {rid: rid == 'M1' for rid in resources} for region in regions}
+    occupancy[first_region]['ur5e-1'] = True
+    occupancy[second_region]['KMR'] = second_inside
+    projection = {'status': 'projected', 'interval_complete': True,
+        'observations': [{'time': 0, 'time_exact': '0', 'phase': 'at', 'frame': 'world',
+                          'resources': resources, 'parts': {}, 'region_occupancy': occupancy}],
+        'geometry': {'frame': 'world', 'parts': {},
+                     'resources': {rid: {'stationary_only': rid == 'M1'} for rid in resources},
+                     'regions': {region: {'bounds': [[0, 1]] * 3} for region in regions}}}
+    doc = json.loads((ROOT / default_safety_files('ur5e-1 breakdown')[0]).read_text())
+    result = validate_outline_evidence_safety(projection=projection, catalog=doc['catalog'],
+        requirement_scopes=doc['requirement_scopes'], prospective_activation=True)
+    assert result['validation_status'] == expected
+    if second_inside is not None:
+        population = result['coverage']['scope_populations'][0]
+        assert population['resources'] == ['KMR', 'ur5e-1', 'ur5e-4']
+        assert [row['resource_id'] for row in population['excluded_resources']] == ['M1']
+        assert len(result['rule_checks']) == 3
+
+
+def test_previous_conveyor_safety_file_remains_available():
+    path = ROOT / 'cais_spade_llm/specification/safety/safety_Conveyor_breakdown.txt'
+    rules, dfas = compile_predefined_safety(json.loads(path.read_text()))
+    assert len(rules) == len(dfas) == 77
+    assert 'SAFE_KMR_docking' in dfas
+
+
+def _conveyor_document(index):
+    return json.loads((ROOT / default_safety_files('Conveyor breakdown')[index]).read_text())
+
+
+def _conveyor_assembly_projection(trace):
+    robots = ['ur5e-3', 'ur5e-4', 'KMR']
+    parts = ['KET4_Square_4mm', 'gear_small']
+    observations = []
+    for time, (completed, gear_inside, robot_inside, kmr_inside) in enumerate(trace):
+        observations.append({
+            'time': time, 'time_exact': str(time), 'phase': 'at', 'frame': 'world',
+            'resources': {rid: {'held_part': None} for rid in robots},
+            'parts': {part: {
+                'processCompleted': ([{'process': 'assembly',
+                    'target': 'GMC_Laser_Plate_Virtual/KET4_Square_4mm'}]
+                    if completed and part == 'KET4_Square_4mm' else []),
+                'processCompleted_complete': True,
+                'processCompleted_evidence': {'complete': True, 'source_kind': 'recorded',
+                                              'checkpoint': 'capture'},
+            } for part in parts},
+            'region_occupancy': {'assembly_board-v1': {
+                'ur5e-3': robot_inside, 'ur5e-4': gear_inside, 'KMR': kmr_inside}},
+            'part_region_occupancy': {'assembly_board-v1': {
+                'KET4_Square_4mm': completed, 'gear_small': gear_inside}},
+        })
+    return {'status': 'projected', 'interval_complete': True, 'observations': observations,
+            'geometry': {'frame': 'world', 'resources': {rid: {} for rid in robots},
+                         'regions': {'assembly_board-v1': {'bounds': [[0, 1]] * 3}},
+                         'parts': {
+                             'KET4_Square_4mm': {'target': 'GMC_Laser_Plate_Virtual/KET4_Square_4mm'},
+                             'gear_small': {'target': 'Gear_Plate/Gear_Shaft_1'},
+                         }}}
+
+
+def _conveyor_check(projection, index=None, **kwargs):
+    doc = _conveyor_document(1 if index is None else index)
+    if index is None:
+        mutex = _conveyor_document(0)
+        doc['catalog']['specifications'] += mutex['catalog']['specifications']
+        doc['requirement_scopes'] += mutex['requirement_scopes']
+    return validate_outline_evidence_safety(
+        projection=projection, catalog=doc['catalog'], requirement_scopes=doc['requirement_scopes'],
+        prospective_activation=True, **kwargs)
+
+
+def test_conveyor_defaults_select_exact_independent_mutex_and_ordering_specs():
+    from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
+
+    paths = default_safety_files('Conveyor breakdown')
+    assert [Path(path).name for path in paths] == [
+        'safety_assembly_board-v1_mutex.txt',
+        'safety_assembly_board-v1_KET4_Square_4mm_before_gear_small.txt']
+    for index, identifier in enumerate(['SAFE_shared_area_mutex', 'SAFE_KET4_Square_4mm_before_gear_small']):
+        rules, dfas = compile_predefined_safety(_conveyor_document(index))
+        assert len(rules) == len(dfas) == 1
+        assert rules[0]['id'] == identifier
+    assert [row['requirement'] for row in _prompt_safety_rules(paths)] == [
+        'At most one resource may occupy the assembly_board-v1 destination area at any time.',
+        'gear_small may enter assembly_board-v1 only after assembly of KET4_Square_4mm is completed.']
+
+
+@pytest.mark.parametrize('trace,expected', [
+    ([(False, False, False, False)], 'FEASIBLE'),
+    ([(False, False, False, False), (True, False, True, False), (True, True, False, False)], 'FEASIBLE'),
+    ([(False, False, False, False), (False, True, False, False)], 'INFEASIBLE'),
+    ([(False, False, False, False), (True, True, False, False)], 'INFEASIBLE'),
+])
+def test_conveyor_ordering_requires_earlier_exact_assembly_completion(trace, expected):
+    assert _conveyor_check(_conveyor_assembly_projection(trace), 1)['validation_status'] == expected
+
+
+@pytest.mark.parametrize('record', [
+    {'process': 'trim', 'result': 'square'},
+    {'process': 'assembly', 'target': 'Gear_Plate/Gear_Shaft_1'},
+])
+def test_conveyor_ordering_rejects_machining_or_another_assembly_target(record):
+    projection = _conveyor_assembly_projection([(False, False, False, False),
+                                      (True, False, False, False), (True, True, False, False)])
+    for row in projection['observations'][1:]:
+        row['parts']['KET4_Square_4mm']['processCompleted'] = [record]
+    assert _conveyor_check(projection, 1)['validation_status'] == 'INFEASIBLE'
+
+
+def test_conveyor_ordering_retains_completion_history_and_missing_evidence():
+    projection = _conveyor_assembly_projection([(False, False, False, False),
+                                      (True, False, False, False), (True, True, False, False)])
+    accepted = _conveyor_check({**projection, 'observations': projection['observations'][:2]}, 1)
+    assert accepted['validation_status'] == 'FEASIBLE'
+    result = _conveyor_check({**projection, 'observations': projection['observations'][1:]}, 1,
+                            monitor_context=accepted['monitor_context_after'])
+    assert result['validation_status'] == 'FEASIBLE'
+    assert len(result['monitor_context_after']['observations']) == 3
+    projection['observations'][0]['parts']['KET4_Square_4mm']['processCompleted_complete'] = False
+    assert _conveyor_check(projection, 1)['validation_status'] == 'NEEDS_CONTEXT'
+
+
+@pytest.mark.parametrize('robot_inside,kmr_inside,expected', [
+    (False, False, 'FEASIBLE'), (True, False, 'FEASIBLE'),
+    (False, True, 'FEASIBLE'), (True, True, 'INFEASIBLE'),
+])
+def test_conveyor_mutex_includes_kmr_occupancy(robot_inside, kmr_inside, expected):
+    projection = _conveyor_assembly_projection([(False, False, robot_inside, kmr_inside)])
+    result = _conveyor_check(projection, 0)
+    assert result['validation_status'] == expected
+    assert len(result['rule_checks']) == 3
+
+
+def test_conveyor_mutex_keeps_missing_kmr_geometry_unresolved():
+    projection = _conveyor_assembly_projection([(False, False, True, False)])
+    del projection['observations'][0]['region_occupancy']['assembly_board-v1']['KMR']
+    assert _conveyor_check(projection, 0)['validation_status'] == 'NEEDS_CONTEXT'
+
+
+@pytest.mark.parametrize('trace,expected', [
+    ([(False, False, False, False), (False, True, False, False)], 'INFEASIBLE'),
+    ([(False, False, False, False), (True, False, True, False), (True, True, True, False)], 'INFEASIBLE'),
+    ([(False, False, False, False), (True, False, False, True), (True, True, False, True)], 'INFEASIBLE'),
+    ([(False, False, False, False), (True, False, True, False), (True, True, False, False)], 'FEASIBLE'),
+])
+def test_conveyor_checks_ordering_and_mutex_together(trace, expected):
+    assert _conveyor_check(_conveyor_assembly_projection(trace))['validation_status'] == expected
 
 
 def _machine_document(index):

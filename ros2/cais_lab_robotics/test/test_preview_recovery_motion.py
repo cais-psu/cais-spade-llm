@@ -1114,6 +1114,24 @@ class PreviewRecoveryMotionCartesianFileTests(unittest.TestCase):
             self.assertEqual(query["joint_names"], [f"joint{index}" for index in range(6)])
             self.assertFalse(query["return_approximate_solution"])
 
+    def test_cartesian_fixed_tool_frame_beyond_group_tip_preserves_exact_target(self):
+        from cais_spade_llm.recovery_framework.geometry import compose
+
+        target = [.2, .1, .15, .08, .09, -.06]
+        goal = self.goal([target])
+        goal.link_name = "grasp_mount"
+        desired = compose(self.forward(target), [.01, 0., 0., 0., 0., 0., 1.])
+        waypoint = goal.waypoints[0]
+        waypoint.position.x, waypoint.position.y, waypoint.position.z = desired[:3]
+        waypoint.orientation.x, waypoint.orientation.y, waypoint.orientation.z, waypoint.orientation.w = desired[3:]
+        response = self.run_goal(goal)
+        self.assertEqual(response.status, "PREVIEW_COMPLETE", response.reason)
+        positions = response.trajectory.joint_trajectory.points[-1].positions
+        actual = compose(self.forward(positions), [.01, 0., 0., 0., 0., 0., 1.])
+        self.assertLessEqual(max(abs(a - b) for a, b in zip(actual, desired, strict=True)), 2e-13)
+        self.assertLessEqual(response.cartesian_position_residual, response.cartesian_position_precision)
+        self.assertLessEqual(response.cartesian_orientation_residual, response.cartesian_orientation_precision)
+
     def test_cartesian_support_departure_rejects_reentry_and_deeper_contact(self):
         for targets, phrase in (([[.2, 0., 0., 0., 0., 0.], [0.] * 6], "reenters"),
                                 ([[-.03, 0., 0., 0., 0., 0.]], "penetration")):
@@ -1285,7 +1303,14 @@ class PreviewRecoveryMotionBaseFileTests(unittest.TestCase):
           <joint name="KMR_base_y_joint" type="prismatic"><parent link="KMR_base_x_link"/><child link="KMR_base_y_link"/>
             <axis xyz="0 1 0"/><limit lower="-2" upper="2" velocity="1" effort="10"/></joint>
           <joint name="KMR_base_yaw_joint" type="continuous"><parent link="KMR_base_y_link"/><child link="KMR_base_link"/>
-            <axis xyz="0 0 1"/><limit velocity="1" effort="10"/></joint>'''
+            <axis xyz="0 0 1"/><limit velocity="1" effort="10"/></joint>
+          <link name="adapter"/><joint name="adapter_mount" type="fixed">
+            <parent link="tool"/><child link="adapter"/><origin xyz="0 0 0.1"/></joint>
+          <link name="tcp"/><joint name="tcp_mount" type="fixed">
+            <parent link="adapter"/><child link="tcp"/><origin xyz="0.1 0 0" rpy="0 0 0.2"/></joint>
+          <link name="articulated_tcp"/><joint name="tcp_slider" type="prismatic">
+            <parent link="tcp"/><child link="articulated_tcp"/><axis xyz="0 0 1"/>
+            <limit lower="-0.11" upper="0.11" velocity="1" effort="10"/></joint>'''
         parameters['robot_description'] = urdf.replace('</robot>', chain + '</robot>')
         return parameters
 
@@ -1304,8 +1329,8 @@ class PreviewRecoveryMotionBaseFileTests(unittest.TestCase):
         goal.mode, goal.base_link = 'base_trajectory', 'KMR_base_link'
         goal.joint_target.name, goal.joint_target.position = [], []
         names = ['KMR_base_x_joint', 'KMR_base_y_joint', 'KMR_base_yaw_joint']
-        goal.planning_scene.robot_state.joint_state.name.extend(names)
-        goal.planning_scene.robot_state.joint_state.position.extend([0.] * 3)
+        goal.planning_scene.robot_state.joint_state.name.extend([*names, 'tcp_slider'])
+        goal.planning_scene.robot_state.joint_state.position.extend([0.] * 4)
         goal.start_state = copy.deepcopy(goal.planning_scene.robot_state)
         goal.scene_fingerprint = _scene_message_fingerprint(goal.planning_scene)
         goal.base_trajectory.joint_names = names
@@ -1328,6 +1353,49 @@ class PreviewRecoveryMotionBaseFileTests(unittest.TestCase):
         record = preview_result_record(message_to_ordereddict(goal), message_to_ordereddict(response))
         self.assertFalse(record['execution_authorized'])
         self.assertFalse(record['coverage']['continuous_collision_verified'])
+        request = message_to_ordereddict(goal)
+        for point in request['base_trajectory']['points']:
+            point.pop('accelerations')
+            point.pop('effort')
+        partial = preview_result_record(request, message_to_ordereddict(response))
+        self.assertEqual(partial['joint_trajectory'], record['joint_trajectory'])
+
+    def test_file_base_motion_accepts_only_model_fixed_group_tool_extensions(self):
+        goal = self.goal()
+        goal.link_name = 'tcp'
+        response = self.run_goal(goal)
+        self.assertEqual(response.status, 'PREVIEW_COMPLETE', response.reason)
+        self.assertEqual(response.trajectory.joint_trajectory, goal.base_trajectory)
+        self.assertGreater(response.checked_states, 0)
+        for link in ('articulated_tcp', 'peer_tool', 'KMR_base_link', 'missing_tcp'):
+            with self.subTest(link=link):
+                invalid = copy.deepcopy(goal)
+                invalid.link_name = link
+                rejected = self.run_goal(invalid)
+                self.assertEqual(rejected.status, 'NEEDS_CONTEXT')
+                self.assertIn('group link_name', rejected.reason)
+                self.assertFalse(rejected.path_complete)
+                self.assertEqual(rejected.checked_states, 0)
+
+    def test_file_base_motion_retains_observed_bound_roundoff_without_clamping(self):
+        for sign in (-1., 1.):
+            for offset, accepted in ((6.938893903907228e-17, True), (1e-10, False)):
+                with self.subTest(sign=sign, offset=offset):
+                    goal = self.goal()
+                    joints = goal.planning_scene.robot_state.joint_state
+                    observed = sign * (.11 + offset)
+                    joints.position[joints.name.index('tcp_slider')] = observed
+                    goal.start_state = copy.deepcopy(goal.planning_scene.robot_state)
+                    goal.scene_fingerprint = _scene_message_fingerprint(goal.planning_scene)
+                    response = self.run_goal(goal)
+                    if accepted:
+                        self.assertEqual(response.status, 'PREVIEW_COMPLETE', response.reason)
+                        end = response.end_state.joint_state
+                        self.assertEqual(end.position[end.name.index('tcp_slider')], observed)
+                    else:
+                        self.assertEqual(response.status, 'NEEDS_CONTEXT')
+                        self.assertIn('Starting joint configuration violates', response.reason)
+                        self.assertFalse(response.path_complete)
 
     def test_file_base_motion_checks_interior_and_carried_part_contacts(self):
         from geometry_msgs.msg import Pose

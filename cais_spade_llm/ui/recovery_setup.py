@@ -268,6 +268,11 @@ def _validate_failure(failure: Any, models: dict, parts: list[str], permitted: l
         raise ValueError("during_processing requires a recorded integer seed")
     if scenario == "Conveyor breakdown" and rid != "Conveyor":
         raise ValueError("Conveyor breakdown requires Conveyor")
+    if scenario == "Conveyor breakdown" and failure.get("additional_condition") is not None:
+        part = failure.get("part_name")
+        if "ur5e-1" not in permitted or part not in eligible_parts(models["ur5e-1"], parts):
+            raise ValueError("Conveyor breakdown requires an exact selected part eligible for ur5e-1")
+        _validate_additional_condition(failure, models, parts, permitted)
     if scenario == "ur5e-1 breakdown" and rid != "ur5e-1":
         raise ValueError("ur5e-1 breakdown requires ur5e-1")
     if scenario == "Machining breakdown during part processing" and not any(

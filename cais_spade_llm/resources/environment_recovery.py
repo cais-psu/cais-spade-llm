@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
+from fractions import Fraction
 from itertools import combinations_with_replacement, product
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
@@ -124,6 +125,64 @@ def environment_declared_capabilities(evidence: dict) -> dict:
         from cais_spade_llm.resources.machine.machine_jobs import public_processing_observations
         result['processing_observations'] = public_processing_observations(evidence['processing_observations'])
     return result
+
+
+def public_evaluation_support(entry: dict) -> dict:
+    """Describe implemented owner checks without exposing their private programs."""
+    model = entry.get('recovery_des_model') or {}
+    events = model.get('events') or []
+    # Both environment owners and robot owners implement condition validation.
+    # An absent executable declaration must not become an advertised capability.
+    supported = [event for event in events if event.get('primitive_support')
+                 and event.get('program_status', 'implemented') == 'implemented']
+    fields = sorted({field for event in supported for field in event.get('updates', {})
+                     if field in model.get('state_variables', {})
+                     and not model['state_variables'][field].get('private')
+                     and not field.startswith(('task_ctx.', '_'))})
+    result = {'public_conditions': True} if fields else {}
+    if model.get('resource_id') == 'KMR':
+        names = {event.get('event_name') for event in supported}
+        operations = [name for name in ('move_to_location', 'pick_approach', 'pick_part',
+                                       'place_approach', 'place_release') if name in names]
+        if operations:
+            result['additional_bindings'] = operations
+    return result
+
+
+def storage_placement_conditions(model: dict, scene: dict, valuation: dict, part: str) -> dict:
+    """Calculate receiving conditions for an exact recorded empty Storage slot.
+
+    This owner calculation supplies inventory effects only. KMR must separately
+    establish its placement program, docking, attachment and supported rest.
+
+    Args:
+        model: The captured Storage owner declaration.
+        scene: The unchanged recorded scene configuration.
+        valuation: Current projected Storage inventory.
+        part: Exact proposed part identifier.
+
+    Returns:
+        Bound inventory conditions and their recorded source fingerprints.
+    """
+    storage = scene['Storage']
+    domain = model.get('state_variables', {}).get('inventory.{part_name}', {}).get('domain')
+    if model.get('resource_id') != 'Storage' or domain != [False, True]:
+        raise KeyError('Recorded Storage inventory declaration')
+    slot = storage.get('slots', {}).get(part)
+    if (not isinstance(slot, list) or len(slot) != 6
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in slot)):
+        raise KeyError('Exact recorded Storage slot for ' + part)
+    field = 'inventory.' + part
+    if type(valuation.get(field)) is not bool:
+        raise KeyError('Recorded Storage inventory for ' + part)
+    if valuation[field]:
+        raise ValueError('Recorded Storage slot is occupied: ' + part)
+    return {'guards': {field: {'equals': False}}, 'updates': {field: {'set': True}},
+        'source': '/inputs/scene/Storage/slots/' + part,
+        'model_fingerprint': recovery_validation_fingerprint(model),
+        'scene_fingerprint': recovery_validation_fingerprint(storage),
+        'valuation_fingerprint': recovery_validation_fingerprint(valuation),
+        'physical_access_validated': False, 'execution_authorized': False}
 
 
 def _binding_values(name: str, declaration: dict, model: dict, evidence: dict) -> list | None:
@@ -281,6 +340,8 @@ def _result(status: str, reason: str, evidence: dict, snapshot: dict, **facts) -
 def kmr_validation_evidence(evidence: dict, snapshot: dict, physical: dict | None) -> dict:
     """Read accepted KMR projections separately from immutable capture facts."""
     result = deepcopy(evidence)
+    if (physical or {}).get('endpoint_evidence_policy_version') in (1, 2):
+        result['endpoint_evidence_policy_version'] = physical['endpoint_evidence_policy_version']
     provenance = (physical or {}).get('provenance', {})
     if provenance.get('kind') != 'projected':
         return result
@@ -300,10 +361,17 @@ def kmr_validation_evidence(evidence: dict, snapshot: dict, physical: dict | Non
                                   != recovery_validation_fingerprint(owner[field])):
             raise ValueError('Projected KMR public snapshot conflicts with accepted ' + field)
     result['snapshot'] = {**deepcopy(snapshot), **deepcopy(owner)}
-    result['continuous_motion_configuration'] = deepcopy(physical['resource_models']['KMR']['configuration'])
-    result['snapshot']['continuous_motion_configuration'] = deepcopy(result['continuous_motion_configuration'])
+    invalidated = 'KMR' in physical.get('invalidated_geometry', {}).get('resources', {})
+    if invalidated:
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import remove_invalidated_pose
+
+        remove_invalidated_pose(result)
+    else:
+        result['continuous_motion_configuration'] = deepcopy(physical['resource_models']['KMR']['configuration'])
+        result['snapshot']['continuous_motion_configuration'] = deepcopy(result['continuous_motion_configuration'])
     result['observed_parts'] = {part: {'current_pose': deepcopy(row['current_pose']),
-        'source': deepcopy(provenance), 'kind': 'projected'} for part, row in physical['snapshot']['parts'].items()}
+        'source': deepcopy(provenance), 'kind': 'projected'} for part, row in physical['snapshot']['parts'].items()
+        if row.get('current_pose') is not None}
     result.pop('attachment', None)
     if 'held_part' in owner:
         if owner['held_part'] is None:
@@ -435,26 +503,157 @@ def _machine_command_projection(evidence: dict, snapshot: dict, primitive: str, 
     if primitive in {'start_job', 'resume_job'}:
         current_access = physical.get('machine_access_observations', {}).get(rid)
         if physical.get('provenance', {}).get('kind') == 'projected' and current_access is None:
-            raise ValueError('NEEDS_CONTEXT: workholding and access evidence for the projected scene at ' + rid)
+            current_access = _machine_access_projection(evidence, snapshot, task, physical, part)
         observation = deepcopy(current_access if current_access is not None else observation)
         if snapshot.get('part_name') != part:
             raise ValueError('Observed workholding does not contain the requested part')
     return project_job_command(machine, record, primitive, params, observation,
-                               command_id=recovery_validation_fingerprint([task, primitive, params]))
+        command_id=recovery_validation_fingerprint([task, primitive, params]),
+        allow_relative_time=physical.get('outline_evidence_policy_version') == 2)
 
 
-def project_environment_event(*, task: dict, recovery_snapshot: dict, recovery_des_model: dict,
-                              physical_input: dict) -> dict:
-    """Retain owner-derived symbolic effects separately from missing motion evidence."""
+def _machine_distance_bounds(bounds: list, point: list) -> tuple[float, float]:
+    """Enclose distance from a recorded point to a calculated position box."""
+    if len(bounds) != 3 or len(point) != 3:
+        raise ValueError('NEEDS_CONTEXT: three-dimensional machine access geometry')
+    lower, upper = Fraction(0), Fraction(0)
+    for pair, coordinate in zip(bounds, point, strict=True):
+        if (len(pair) != 2 or any(type(value) not in (int, float) or not math.isfinite(value)
+                                  for value in (*pair, coordinate)) or pair[0] > pair[1]):
+            raise ValueError('NEEDS_CONTEXT: finite ordered machine access geometry')
+        low, high = (Fraction(value) - Fraction(coordinate) for value in pair)
+        lower += (min(abs(low), abs(high)) if low > 0 or high < 0 else Fraction(0)) ** 2
+        upper += max(abs(low), abs(high)) ** 2
+    start, end = math.sqrt(float(lower)), math.sqrt(float(upper))
+    while Fraction(start) ** 2 > lower:
+        start = math.nextafter(start, -math.inf)
+    while Fraction(end) ** 2 < upper:
+        end = math.nextafter(end, math.inf)
+    return start, end
+
+
+def _machine_access_transforms(physical: dict, rid: str) -> tuple[dict, dict]:
+    """Use the current endpoint or an established peer hold, never an old pose."""
+    from cais_spade_llm.recovery_framework.outline_endpoint_evidence import _arm_hold, _readiness
+    from cais_spade_llm.resources.continuous_motion import interval, kinematic_transforms
+    from cais_spade_llm.resources.recovery_geometry import commanded_hold_evidence
+
+    if rid in physical.get('invalidated_geometry', {}).get('resources', {}):
+        raise ValueError('NEEDS_CONTEXT: current machine access geometry for ' + rid)
+    state, model = physical['snapshot']['resources'][rid], physical['resource_models'][rid]
+    resource = physical['resources'][rid]
+    if resource.get('projected_endpoint') is not None:
+        try:
+            _readiness(physical, rid)
+        except ValueError as exc:
+            raise ValueError('NEEDS_CONTEXT: ' + str(exc)) from exc
+        hold = _arm_hold(physical, rid)
+    else:
+        hold = commanded_hold_evidence(resource_id=rid, state=state, model=model, physical=resource,
+            robot_description=physical.get('endpoint_robot_description'), include_observation_roundoff=True)
+    if hold.get('status') != 'supported':
+        raise ValueError('NEEDS_CONTEXT: machine access configuration for ' + rid + ': ' + hold.get('reason', ''))
+    configuration = model['configuration']
+    if (state.get('joint_names') != configuration['joint_names']
+            or len(state['joint_positions']) != len(state['joint_names'])):
+        raise ValueError('NEEDS_CONTEXT: machine access joint identities for ' + rid)
+    if 'base_pose' in state and state['base_pose'] != [*configuration['root_xyz'], *configuration['root_quaternion']]:
+        raise ValueError('NEEDS_CONTEXT: machine access base configuration for ' + rid)
+    positions = {name: interval(*bounds) for name, bounds in hold['joint_intervals'].items()}
+    transforms = kinematic_transforms(configuration, positions)
+    return transforms, {'resource_id': rid, 'hold': hold,
+        'state_fingerprint': recovery_validation_fingerprint(state),
+        'configuration_fingerprint': recovery_validation_fingerprint(configuration)}
+
+
+def _machine_access_projection(evidence: dict, snapshot: dict, task: dict, physical: dict, part: str) -> dict:
+    """Evaluate the native machine workholding and clearance checks on model bounds."""
+    from cais_spade_llm.resources.continuous_motion import transformed_box
+
+    rid = evidence['resource_id']
+    scene = evidence['inputs']['scene']
+    machine = next(row for row in scene['machines'] if row['resource_id'] == rid)
+    if (physical['snapshot'].get('frame') != 'world' or physical['geometry'].get('frame') != 'world'
+            or physical['resources'][rid].get('model_static') is not True
+            or physical['geometry']['resources'][rid].get('stationary_only') is not True):
+        raise ValueError('NEEDS_CONTEXT: recorded static machine geometry in world')
+    if snapshot.get('part_name') != part or physical['snapshot']['resources'][rid].get('part_name') != part:
+        raise ValueError('Observed workholding does not contain the requested part')
+    if any(row.get('held_part') == part for row in physical['snapshot']['resources'].values()):
+        raise ValueError('The requested workholding part remains held by a resource')
+    state = physical['snapshot']['parts'][part]
+    if state.get('location') != rid:
+        raise ValueError('NEEDS_CONTEXT: machine and part location declarations conflict')
+    support = physical.get('stationary_part_evidence', {}).get(part, {})
+    if (support.get('status') != 'supported' or not support.get('source')
+            or support.get('current_pose') != state.get('current_pose')):
+        raise ValueError('NEEDS_CONTEXT: matching stationary workholding part evidence')
+    expected = machine['workholding_pose'][:3]
+    present = _machine_distance_bounds([[value, value] for value in state['current_pose'][:3]], expected)
+    # These are the same checks used by WorkflowPrimitiveRunner.observe_workholding
+    # and its native robot_clearance callback; no clearance is inferred from labels.
+    if present[0] > .08:
+        raise ValueError('The correct part is not observed at machine workholding')
+    if present[1] > .08:
+        raise ValueError('NEEDS_CONTEXT: workholding position bounds cross the native tolerance')
+    kmr, kmr_source = _machine_access_transforms(physical, 'KMR')
+    configured = scene['KMR']['task_execution']['clearance_link_bounds']
+    clearance = machine['KMR_process_clearance_m']
+    if not configured or type(clearance) not in (int, float) or not math.isfinite(clearance) or clearance < 0:
+        raise ValueError('NEEDS_CONTEXT: configured KMR process clearance')
+    kmr_bounds = {}
+    for link, spheres in configured.items():
+        if not spheres:
+            raise ValueError('NEEDS_CONTEXT: KMR clearance bounds for ' + link)
+        distances = []
+        for sphere in spheres:
+            radius = sphere['radius']
+            if type(radius) not in (int, float) or not math.isfinite(radius) or radius < 0:
+                raise ValueError('NEEDS_CONTEXT: finite KMR clearance radius')
+            box = transformed_box(kmr[link], [[value, value] for value in sphere['center']], link)
+            bounds = [[low[0], high[1]] for low, high in zip(box['minimum'], box['maximum'], strict=True)]
+            low, high = _machine_distance_bounds(bounds, expected)
+            distances.append((math.nextafter(low - radius, -math.inf), math.nextafter(high - radius, math.inf)))
+        kmr_bounds[link] = [min(pair[0] for pair in distances), min(pair[1] for pair in distances)]
+    handling = machine['handling_robot']
+    robot = next(row for row in scene['robots'] if row['resource_id'] == handling)
+    transforms, robot_source = _machine_access_transforms(physical, handling)
+    link = robot['prefix'] + robot['clearance_observation_link']
+    robot_bounds = _machine_distance_bounds([list(transforms[link][index][3]) for index in range(3)],
+                                            state['current_pose'][:3])
+    blocked = any(pair[1] < clearance for pair in kmr_bounds.values()) or robot_bounds[1] < .12
+    if not blocked and (any(pair[0] < clearance for pair in kmr_bounds.values()) or robot_bounds[0] < .12):
+        raise ValueError('NEEDS_CONTEXT: machine access bounds cross the native clearance limits')
+    return {'part_name': part, 'correct_part_present': True, 'robot_access_clear': not blocked,
+        'robot_clearance_m': {handling: robot_bounds[0]},
+        'KMR_arm_clearance_m': {link: pair[0] for link, pair in kmr_bounds.items()},
+        'clearance_bounds_m': {'KMR': kmr_bounds, handling: list(robot_bounds)},
+        'source': {'kind': 'projected', 'calculation': 'resource_owned_machine_access',
+            'task_fingerprint': recovery_validation_fingerprint(task),
+            'physical_fingerprint': recovery_validation_fingerprint(physical),
+            'machine_fingerprint': recovery_validation_fingerprint(machine),
+            'part_support_fingerprint': recovery_validation_fingerprint(support),
+            'resources': [kmr_source, robot_source]},
+        'physical_execution_verified': False, 'execution_authorized': False}
+
+
+def declared_environment_successors(*, task: dict, recovery_snapshot: dict, recovery_des_model: dict,
+                                   physical_input: dict, guard_failures: list | None = None) -> tuple[list[dict], list[str]]:
+    """Calculate declared successor effects without establishing a motion interval."""
     evidence = physical_input.get('resource_evidence') or {}
     rid = evidence.get('resource_id')
+    defer_resource_guards = (physical_input.get('outline_evidence_policy_version') == 2
+                            and not task.get('required_task_contract'))
     calculation_model = recovery_des_model
     if rid == 'Conveyor' and evidence.get('environment_models'):
         calculation_model = environment_recovery_descriptor(evidence, recovery_snapshot, resource_jid=task['resource_jid'])
         if calculation_model['source_model_fingerprint'] != recovery_des_model.get('source_model_fingerprint'):
             raise ValueError('Conveyor collection declarations changed after capture')
     support = derive_primitive_union(task=task, recovery_des_model=calculation_model, recovery_snapshot=recovery_snapshot)
-    candidates, unresolved, rejected = [], [], []
+    candidates, unresolved = [], []
+    if guard_failures is not None and (support.get('missing_context') or support.get('search', {}).get('limit_reached')
+                                       or support.get('model_complete') is not True):
+        unresolved.append('Owner declaration search lacks complete evidence')
     for contributor in support['matching_transitions']:
         contract = contributor.get('composition_contract', {})
         declared_task = {'resource_id': rid, 'event_id': contract.get('event_id'),
@@ -483,14 +682,51 @@ def project_environment_event(*, task: dict, recovery_snapshot: dict, recovery_d
                 if field in recovery_snapshot:
                     valuation[rid][field] = deepcopy(recovery_snapshot[field])
             after, products = project_transition(evidence['environment_models'], valuation,
-                physical.get('products', evidence['environment_products']), declared_task, evidence['product_name'], evidence['requirements'])
+                physical.get('products', evidence['environment_products']), declared_task,
+                evidence['product_name'], evidence['requirements'], defer_resource_guards=defer_resource_guards)
         except (KeyError, ValueError, TypeError) as exc:
+            from cais_spade_llm.resources.environment_models import ResourceGuardError
+
+            if guard_failures is not None and isinstance(exc, ResourceGuardError):
+                variables = evidence['environment_models'][exc.resource_id]['state_variables']
+                public = (exc.field in variables and not variables[exc.field].get('private')
+                          and not exc.field.startswith(('task_ctx.', '_')))
+                guard_failures.append({'declaration_fingerprint': recovery_validation_fingerprint(declaration),
+                    **({'resource_id': exc.resource_id, 'field': exc.field, 'operator': exc.operator,
+                        'expected': exc.expected, 'actual': exc.actual} if public else {})})
             unresolved.append(str(exc))
             continue
         candidates.append({'task': declared_task, 'environment_valuation': after,
                            'environment_products': products, 'kind': 'projected',
+                           **({'composition_prerequisites': [
+                               {'resource_id': participant, 'guards': deepcopy(local['guards']),
+                                'collection_guards': deepcopy(local.get('collection_guards', {}))}
+                               for participant in declaration['participants']
+                               for local in evidence['environment_models'][participant]['events']
+                               if local['event_id'] == declaration['event_id']]}
+                              if defer_resource_guards else {}),
                            'source_model_fingerprint': recovery_validation_fingerprint(evidence['environment_models']),
                            'source_fingerprint': recovery_validation_fingerprint(evidence)})
+    return candidates, unresolved
+
+
+def project_environment_event(*, task: dict, recovery_snapshot: dict, recovery_des_model: dict,
+                              physical_input: dict) -> dict:
+    """Retain owner-derived symbolic effects separately from missing motion evidence."""
+    if physical_input.get('physical_evidence', {}).get('endpoint_evidence_policy_version') in (1, 2):
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import event_evidence_requirements
+        from cais_spade_llm.recovery_framework.outline_endpoint_evidence import project_bounded_successor
+
+        required = event_evidence_requirements(task=task, snapshot=recovery_snapshot, model=recovery_des_model,
+            physical_input=physical_input, specifications=physical_input.get('outline_safety_specifications',
+                physical_input['physical_evidence'].get('outline_safety_specifications')))
+        return project_bounded_successor(task=task, snapshot=recovery_snapshot, model=recovery_des_model,
+            physical_input=physical_input, requirements=required)
+    evidence = physical_input.get('resource_evidence') or {}
+    rid = evidence.get('resource_id')
+    candidates, unresolved = declared_environment_successors(task=task, recovery_snapshot=recovery_snapshot,
+        recovery_des_model=recovery_des_model, physical_input=physical_input)
+    rejected = []
     for declared in candidates:
         from cais_spade_llm.resources.machine.machine_jobs import MACHINE_PRIMITIVES
         projector = (_project_machine_dwell if declared['task']['event_name'] == 'machine_part' else
@@ -508,6 +744,9 @@ def project_environment_event(*, task: dict, recovery_snapshot: dict, recovery_d
             if projected.get('status') == 'projected':
                 return projected
             rejected.append(projected)
+            if projected.get('status') != 'rejected':
+                unresolved.extend(projected.get('unresolved') or
+                    ([projected['reason']] if projected.get('reason') else []))
         except (KeyError, ValueError, TypeError, StopIteration) as exc:
             unresolved.append(str(exc))
     if rejected and not unresolved and len(rejected) == len(candidates):
@@ -530,14 +769,46 @@ def _project_machine_command(*, task: dict, recovery_snapshot: dict, recovery_de
     record, reply = _machine_command_projection(resource_evidence, recovery_snapshot,
         selected['event_name'], selected['parameters'], task, physical)
     snapshot, geometry, models = deepcopy(physical['snapshot']), physical['geometry'], physical['resource_models']
-    if physical['resources'][rid].get('model_static') is not True:
+    bounded = physical.get('endpoint_evidence_policy_version') == 2
+    complete, gap = None, None
+    if physical['resources'][rid].get('model_static') is True:
+        try:
+            complete = _checkpoint(snapshot, geometry, models, index=0)
+        except (KeyError, ValueError, TypeError, IndexError) as exc:
+            if not bounded:
+                raise
+            gap = str(exc)
+    if complete is not None:
+        first = complete
+        bounded = False
+    elif bounded:
+        from cais_spade_llm.recovery_framework.outline_endpoint_evidence import (
+            OCCUPANCY_FIELDS, _bounded_checkpoint, _occupancy_binding,
+        )
+
+        first = _bounded_checkpoint(physical, index=0)
+        if gap:
+            first['bound_gaps'].append(gap)
+        cached = physical.get('endpoint_occupancy')
+        if cached is not None:
+            if cached['binding'] != _occupancy_binding(physical):
+                raise ValueError('Retained endpoint occupancy is stale')
+            for field in OCCUPANCY_FIELDS:
+                first[field] = deepcopy(cached[field])
+    else:
         raise ValueError('NEEDS_CONTEXT: declared static simulation machine geometry')
-    first = _checkpoint(snapshot, geometry, models, index=0)
     first['owner_completion_applied'] = False
     first['state_snapshot'] = deepcopy(physical.get('environment_valuation', resource_evidence['environment_valuation']))
     declared['environment_valuation'][rid].update(job_public_state(record))
     snapshot['resources'][rid].update(deepcopy(declared['environment_valuation'][rid]))
-    last = _checkpoint(snapshot, geometry, models, index=0)
+    if bounded:
+        # These owner commands update the simulated job ledger at one event
+        # boundary. No motion or elapsed processing interval is projected.
+        last = deepcopy(first)
+        last['resources'] = deepcopy(snapshot['resources'])
+        last['parts'] = deepcopy(snapshot['parts'])
+    else:
+        last = _checkpoint(snapshot, geometry, models, index=0)
     last['owner_completion_applied'] = True
     last['state_snapshot'] = deepcopy(declared['environment_valuation'])
     result = _finish_environment_projection(task=task, recovery_snapshot=recovery_snapshot,
@@ -551,12 +822,40 @@ def _project_machine_command(*, task: dict, recovery_snapshot: dict, recovery_de
         for field in ('successor_evidence',):
             if isinstance(result.get(field), dict):
                 result[field].setdefault('processing_observations', {})[rid] = deepcopy(record)
+                successor = result[field]
+                for peer, values in physical['resources'].items():
+                    endpoint = values.get('projected_endpoint')
+                    if (peer == rid or not endpoint
+                            or endpoint.get('binding') != physical.get('provenance', {}).get('binding')
+                            or endpoint.get('state_fingerprint') != recovery_validation_fingerprint(physical['snapshot']['resources'][peer])
+                            or endpoint.get('configuration_fingerprint') != recovery_validation_fingerprint(physical['resource_models'][peer]['configuration'])
+                            or successor['snapshot']['resources'][peer] != physical['snapshot']['resources'][peer]
+                            or successor['resource_models'][peer] != physical['resource_models'][peer]
+                            or successor['geometry']['resources'][peer] != physical['geometry']['resources'][peer]
+                            or successor['snapshot']['parts'] != physical['snapshot']['parts']):
+                        continue
+                    # A zero-duration job control does not move an unchanged
+                    # peer. Retain the endpoint's source instead of claiming
+                    # that this machine command established a new robot pose.
+                    retained = successor['resources'][peer]['projected_endpoint']
+                    retained['preserved_endpoint'] = {
+                        'fingerprint': recovery_validation_fingerprint(endpoint),
+                        'binding': deepcopy(endpoint['binding']),
+                        'duration_sec': 0,
+                    }
+                    retained['binding'] = deepcopy(successor['provenance']['binding'])
+                if physical.get('endpoint_evidence_policy_version') == 2 and (
+                        bounded or 'endpoint_occupancy' in physical):
+                    from cais_spade_llm.recovery_framework.outline_endpoint_evidence import OCCUPANCY_FIELDS, _occupancy_binding
+
+                    result[field]['endpoint_occupancy'] = {'binding': _occupancy_binding(result[field]),
+                        **{name: deepcopy(last[name]) for name in OCCUPANCY_FIELDS}}
     return result
 
 
 def _project_machine_dwell(*, task: dict, recovery_snapshot: dict, recovery_des_model: dict,
                            resource_evidence: dict, physical: dict, declared: dict) -> dict:
-    """Project a declared static dwell with a complete supported peer scene."""
+    """Project owner processing and supported peer occupancy over its duration."""
     from cais_spade_llm.resources.recovery_geometry import _checkpoint, commanded_hold_evidence
 
     rid = resource_evidence['resource_id']
@@ -584,7 +883,7 @@ def _project_machine_dwell(*, task: dict, recovery_snapshot: dict, recovery_des_
         duration = machine['simulation_process']['processing_time_sec']
     completed_jobs = None
     if operations == ['start_job']:
-        from cais_spade_llm.resources.machine.machine_jobs import MachineJobs, job_public_state
+        from cais_spade_llm.resources.machine.machine_jobs import project_job_completion, job_public_state
         active = job_record['active_job']
         if active is None:
             job_record, _reply = _machine_command_projection(resource_evidence, recovery_snapshot,
@@ -594,11 +893,7 @@ def _project_machine_dwell(*, task: dict, recovery_snapshot: dict, recovery_des_
         if any(job.get(key) != selected['parameters'].get(key) for key in ('part_name', 'process', 'result')):
             raise ValueError('Active job differs from the nominal machining obligation')
         duration = job['processing_time_sec'] - job['processing_active_sec']
-        owner = MachineJobs(machine, job_record['run_id'], job_record)
-        completion = owner.observe(job_record['simulation_clock_sec'] + duration, job['observations'])
-        if completion is None:
-            raise ValueError('NEEDS_CONTEXT: no owner-supported machining completion')
-        completed_jobs = owner.snapshot()
+        completed_jobs = project_job_completion(machine, job_record, duration, job['observations'])
         declared['environment_valuation'][rid].update(job_public_state(completed_jobs))
     requested_duration = task.get('params', {}).get('duration_sec')
     if requested_duration is not None and recovery_validation_fingerprint(requested_duration) != recovery_validation_fingerprint(duration):
@@ -614,17 +909,25 @@ def _project_machine_dwell(*, task: dict, recovery_snapshot: dict, recovery_des_
         raise ValueError('Physical and symbolic starting observations disagree')
     if physical['resources'][rid].get('model_static') is not True or geometry['resources'][rid].get('stationary_only') is not True:
         raise ValueError('Machine dwell requires recorded static owner geometry')
-    holds = {}
+    partial = physical.get('outline_evidence_policy_version') == 2
+    holds, unknown = {}, set()
     for peer, state in snapshot['resources'].items():
         row = physical['resources'][peer]
         if row.get('model_static') is True:
             continue
         if 'controller_hold_model' in row or row.get('idle') is not True:
-            hold = commanded_hold_evidence(resource_id=peer, state=state, model=models[peer], physical=row)
+            hold = commanded_hold_evidence(resource_id=peer, state=state,
+                model=models.get(peer, {}) if partial else models[peer], physical=row)
             if hold.get('status') != 'supported':
+                if partial:
+                    unknown.add(peer)
+                    continue
                 raise ValueError('Machine dwell lacks supported peer hold: ' + peer + ': ' + hold.get('reason', ''))
             holds[peer] = hold
         elif row.get('stationary_contract', {}).get('requires_no_active_goals') is not True:
+            if partial:
+                unknown.add(peer)
+                continue
             raise ValueError('Machine dwell lacks a stationary peer contract: ' + peer)
     held = {row.get('held_part') for row in snapshot['resources'].values()}
     for part, state in snapshot['parts'].items():
@@ -633,9 +936,16 @@ def _project_machine_dwell(*, task: dict, recovery_snapshot: dict, recovery_des_
         support = physical.get('stationary_part_evidence', {}).get(part, {})
         if (support.get('status') != 'supported' or support.get('current_pose') != state.get('current_pose')
                 or not support.get('source')):
-            raise ValueError('Machine dwell requires matching stationary part evidence: ' + part)
-    first = _checkpoint(snapshot, geometry, models, index=0)
-    interval = _checkpoint(snapshot, geometry, models, index=0, peer_holds=holds)
+            if not partial:
+                raise ValueError('Machine dwell requires matching stationary part evidence: ' + part)
+    if partial:
+        from cais_spade_llm.recovery_framework.outline_endpoint_evidence import _bounded_checkpoint
+
+        first = _bounded_checkpoint(physical, index=0)
+        interval = _bounded_checkpoint(physical, index=0, holds=holds, unknown=unknown)
+    else:
+        first = _checkpoint(snapshot, geometry, models, index=0)
+        interval = _checkpoint(snapshot, geometry, models, index=0, peer_holds=holds)
     interval.update(phase='between', continuous_interval=['0', str(duration)],
         continuous_cells=[{'interval': ['0', str(duration)],
             'occupancy_possibilities': deepcopy(interval['occupancy_possibilities']),
@@ -650,18 +960,34 @@ def _project_machine_dwell(*, task: dict, recovery_snapshot: dict, recovery_des_
             for field in ('state', 'location', 'processCompleted', 'target'):
                 if field in values:
                     successor_snapshot['parts'][name][field] = deepcopy(values[field])
-    last = _checkpoint(successor_snapshot, geometry, models, index=duration)
+    last = (_bounded_checkpoint({**physical, 'snapshot': successor_snapshot}, index=duration,
+                                holds=holds, unknown=unknown) if partial else
+            _checkpoint(successor_snapshot, geometry, models, index=duration))
     for observation, valuation in ((first, before), (interval, before), (last, after)):
         observation['state_snapshot'] = deepcopy(valuation)
     contract = {'event': deepcopy(event), 'task': selected, 'duration_sec': duration,
                 'physical_start_fingerprint': recovery_validation_fingerprint(physical),
                 'stationary_resource_evidence': holds, 'kind': 'resource_owned_static_dwell'}
+    if partial:
+        contract['unknown_resources'] = sorted(unknown)
+        for point in (first, interval, last):
+            point['time_basis'] = 'owner_processing_duration_seconds'
     projected = _finish_environment_projection(task=task, recovery_snapshot=recovery_snapshot,
         recovery_des_model=recovery_des_model, resource_evidence=resource_evidence, physical=physical,
         declared=declared, geometry=geometry, models=models, observations=[first, interval, last],
         successor_snapshot=successor_snapshot, contract=contract)
     if completed_jobs is not None and projected.get('status') == 'projected':
         projected['successor_evidence'].setdefault('processing_observations', {})[rid] = completed_jobs
+    if partial and projected.get('status') == 'projected':
+        from cais_spade_llm.recovery_framework.outline_evidence_policy import invalidate_geometry
+
+        successor = projected['successor_evidence']
+        invalidate_geometry(successor, unknown, binding=projected['provenance']['binding'])
+        projected['projected_snapshot'] = deepcopy(successor['snapshot'])
+        projected['geometry'] = deepcopy(successor['geometry'])
+        projected['resource_models'] = deepcopy(successor['resource_models'])
+        projected['elapsed_time'] = {'status': 'calculated', 'seconds': duration,
+                                    'source': 'machine owner processing_time_sec'}
     return projected
 
 
@@ -709,7 +1035,8 @@ def _finish_environment_projection(*, task: dict, recovery_snapshot: dict, recov
     provenance = {'kind': 'projected', 'source': contract['kind'],
                   'binding': binding, 'contract_fingerprint': recovery_validation_fingerprint(contract)}
     successor = deepcopy(physical)
-    successor.update(snapshot=successor_snapshot, environment_valuation=deepcopy(after), products=deepcopy(products), provenance=provenance)
+    successor.update(snapshot=successor_snapshot, geometry=deepcopy(geometry), resource_models=deepcopy(models),
+                     environment_valuation=deepcopy(after), products=deepcopy(products), provenance=provenance)
     ledger_models = deepcopy(resource_evidence['environment_models'])
     initial = [{'resource_id': owner, 'process': 'any', 'product': 'any', 'context': 'any', 'values': deepcopy(values)}
                for owner, values in before.items()]

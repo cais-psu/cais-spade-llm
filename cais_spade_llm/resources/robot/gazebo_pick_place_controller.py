@@ -39,6 +39,7 @@ from cais_spade_llm.resources.resource_safety_preparation import (
     validate_prepared_start,
 )
 from cais_spade_llm.resources.robot.target_calculations import (
+    handling_robot_access_poses,
     controlled_link_height,
     pick_travel_height,
     placement_poses,
@@ -5506,83 +5507,15 @@ class GazeboPickPlaceController:
             tz, board_center_z, pick_z, approach_height,
             None if bool(ignore_current_height_for_travel_z) else ee.position.z,
         )
-        explicit_access_poses = None
-        raw_access_approach = handling_access.get("approach_pose")
-        raw_access_target = handling_access.get("target_pose")
-        if raw_access_approach is not None or raw_access_target is not None:
-            if handling_access.get("pose_format") != "xyz_xyzw":
-                return {
-                    "success": False,
-                    "message": "configured handling_robot_access pose_format must be xyz_xyzw",
-                }
-            if not all(
-                isinstance(value, (list, tuple)) and len(value) == 7
-                for value in (raw_access_approach, raw_access_target)
-            ):
-                return {
-                    "success": False,
-                    "message": "configured handling_robot_access requires approach_pose and target_pose",
-                }
-
-            access_poses = []
-            for label, raw_pose in (
-                ("approach_pose", raw_access_approach),
-                ("target_pose", raw_access_target),
-            ):
-                try:
-                    xyz = [float(value) for value in raw_pose[:3]]
-                except (TypeError, ValueError, OverflowError):
-                    return {
-                        "success": False,
-                        "message": f"configured handling_robot_access {label} is invalid",
-                    }
-                orientation, orientation_error = _normalized_optional_quaternion(
-                    *raw_pose[3:]
-                )
-                if (
-                    not all(math.isfinite(value) for value in xyz)
-                    or orientation_error
-                    or orientation is None
-                ):
-                    return {
-                        "success": False,
-                        "message": f"configured handling_robot_access {label} is invalid",
-                    }
-                if grasp_quaternion is not None and abs(
-                    sum(a * b for a, b in zip(orientation, grasp_quaternion, strict=True))
-                ) < 0.999:
-                    return {
-                        "success": False,
-                        "message": (
-                            f"configured handling_robot_access {label} orientation "
-                            "does not match grasp_orientation_xyzw"
-                        ),
-                    }
-                access_poses.append(
-                    {
-                        "x": xyz[0],
-                        "y": xyz[1],
-                        "z": xyz[2] - ee_tcp_offset_z,
-                        **dict(
-                            zip(
-                                ("qx", "qy", "qz", "qw"),
-                                orientation,
-                                strict=True,
-                            )
-                        ),
-                    }
-                )
-            if math.dist(
-                (access_poses[1]["x"], access_poses[1]["y"]), (tx, ty)
-            ) > 0.08:
-                return {
-                    "success": False,
-                    "message": "configured handling_robot_access target disagrees with the observed part",
-                }
-            explicit_access_poses = tuple(access_poses)
-            pick_tcp_z = access_poses[1]["z"] + ee_tcp_offset_z
-            pick_z = access_poses[1]["z"]
-            travel_z = access_poses[0]["z"]
+        try:
+            explicit_access_poses = handling_robot_access_poses(
+                handling_access, ee_tcp_offset_z, (tx, ty), grasp_quaternion)
+        except ValueError as exc:
+            return {"success": False, "message": str(exc)}
+        if explicit_access_poses is not None:
+            pick_tcp_z = explicit_access_poses[1]["z"] + ee_tcp_offset_z
+            pick_z = explicit_access_poses[1]["z"]
+            travel_z = explicit_access_poses[0]["z"]
 
         self._log().info(
             "[ComputePickTargets] "

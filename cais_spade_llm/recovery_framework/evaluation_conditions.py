@@ -19,10 +19,28 @@ from cais_spade_llm.recovery_framework.diagnostics import read_object, write_rec
 
 
 def condition_setup(setup: dict, scenario: str, condition: str, directory: Path) -> dict:
-    """Keep variant machine program declarations in a separate configuration."""
+    """Keep capture settings and variant machine programs in a private scene.
+
+    Args:
+        setup: Selected simulation setup, preserved unchanged.
+        scenario: Exact selected failure scenario.
+        condition: Selected normal or changed evaluation condition.
+        directory: Owned capture directory for the private scene declaration.
+
+    Returns:
+        Setup referencing the private scene when an override is required.
+    """
     result = deepcopy(setup)
     if condition not in {'normal', 'changed'}:
         raise ValueError('Select normal or changed')
+    if scenario == 'ur5e-1 breakdown':
+        scene = read_object(ROOT / setup['scene_file'])
+        # Slow /clock progress needs a larger wall budget, with the same trajectory and result checks.
+        scene['KMR']['arm_motion_wall_timeout_sec'] = 360.
+        destination = Path(directory) / 'recovery_framework_gazebo.json'
+        write_record(destination, scene)
+        result['scene_file'] = str(destination.resolve())
+        return result
     if scenario != 'Machining breakdown during part processing' or condition == 'normal':
         return result
     scene = read_object(ROOT / setup['scene_file'])

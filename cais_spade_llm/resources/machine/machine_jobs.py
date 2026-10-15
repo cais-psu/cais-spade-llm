@@ -37,16 +37,132 @@ def public_processing_observations(record: dict) -> dict:
 
 
 def project_job_command(machine: dict, record: dict, primitive: str, params: dict,
-                        observations: dict, *, command_id: str) -> tuple[dict, dict]:
+                        observations: dict, *, command_id: str,
+                        allow_relative_time: bool = False) -> tuple[dict, dict]:
     """Check one command against a copied owner snapshot without live interfaces."""
     if not record:
         raise ValueError("NEEDS_CONTEXT: processing_observations")
-    owner = MachineJobs(machine, record["run_id"], record)
+    calculated = deepcopy(record)
     now = record.get("simulation_clock_sec")
-    if now is None:
+    relative = now is None and primitive in {"start_job", "resume_job"} and allow_relative_time
+    if relative:
+        if (record.get("active_job") is not None or any(job.get("job_state") not in
+                {"paused", "stopped", "interrupted", "completed"} for job in record["jobs"].values())):
+            raise ValueError("NEEDS_CONTEXT: relative processing time requires inactive retained jobs")
+        job = calculated["jobs"].get(params.get("job_id"), {})
+        # Only active processing duration is used. The unobserved pause before
+        # this proposal is not zero and is never reported as measured time.
+        now = job.get("simulation_clock_sec", job.get("calculation_clock_sec", 0.0))
+        if primitive == "resume_job":
+            for name in ("started", "clock", "elapsed", "paused"):
+                field = f"simulation_{name}_sec"
+                job.setdefault(field, job.get(f"calculation_{name}_sec", now if name in {"started", "clock"} else 0.0))
+        calculated["simulation_clock_sec"] = now
+    if now is None and primitive != "select_program":
         raise ValueError("NEEDS_CONTEXT: observed simulation_clock_sec")
+    owner = MachineJobs(machine, record["run_id"], calculated)
     reply = owner.command(primitive, params, command_id=command_id, now=now, observations=observations)
-    return owner.snapshot(), reply
+    projected = owner.snapshot()
+    if relative:
+        _retain_calculation_time(projected, params["job_id"], origin=now,
+            source=fingerprint(record), command_id=command_id)
+        reply.pop("simulation_clock_sec", None)
+        reply.update(calculation_clock_sec=now, time_basis="relative_owner_calculation", execution_authorized=False)
+        projected["commands"][command_id]["reply"] = deepcopy(reply)
+    return projected, reply
+
+
+def _retain_calculation_time(record: dict, job_id: str, *, origin: float,
+                             source: str, command_id: str) -> None:
+    job = record["jobs"][job_id]
+    for name in ("started", "clock", "completed"):
+        field = f"simulation_{name}_sec"
+        if field in job:
+            job[f"calculation_{name}_sec"] = job.pop(field)
+    # Total elapsed and paused time cannot be extended across an unknown gap.
+    for name in ("elapsed", "paused"):
+        job.pop(f"simulation_{name}_sec", None)
+    record["calculation_clock_sec"] = record.pop("simulation_clock_sec")
+    record["calculation_time"] = {"kind": "relative_owner_calculation", "job_id": job_id,
+        "origin_sec": origin, "source_record_fingerprint": source, "command_id": command_id,
+        "absolute_time_known": False, "execution_authorized": False}
+
+
+def project_job_completion(machine: dict, record: dict, duration: float,
+                           observations: dict) -> dict:
+    """Calculate completion over an owner duration without inventing an observed clock."""
+    source = deepcopy(record)
+    relative = record.get("calculation_time") if "simulation_clock_sec" not in record else None
+    if relative:
+        active = record.get("active_job")
+        if active != relative.get("job_id") or active not in record["jobs"]:
+            raise ValueError("NEEDS_CONTEXT: matching relative job calculation")
+        source["simulation_clock_sec"] = record["calculation_clock_sec"]
+        job = source["jobs"][active]
+        for name in ("started", "clock"):
+            job[f"simulation_{name}_sec"] = job[f"calculation_{name}_sec"]
+        job.update(simulation_elapsed_sec=0.0, simulation_paused_sec=0.0)
+    owner = MachineJobs(machine, record["run_id"], source)
+    completion = owner.observe(source["simulation_clock_sec"] + duration, observations)
+    if completion is None:
+        raise ValueError("NEEDS_CONTEXT: no owner-supported machining completion")
+    projected = owner.snapshot()
+    if relative:
+        _retain_calculation_time(projected, relative["job_id"], origin=relative["origin_sec"],
+            source=relative["source_record_fingerprint"], command_id=relative["command_id"])
+    return projected
+
+
+def interrupted_pickup_conditions(machine: dict, record: dict, valuation: dict,
+                                  part: str, *, run_id: str) -> dict:
+    """Establish inactive processing for pickup of an interrupted loaded part.
+
+    The simulation owner clears active_job when interrupting its worker. This
+    establishes no processing progression, not geometric access, successful
+    machining, a pause acknowledgement, or permission to restart the machine.
+
+    Args:
+        machine: Recorded versioned machine declaration.
+        record: Processing record from the same run and machine configuration.
+        valuation: Current declared machine state and part custody.
+        part: Exact recorded part identifier.
+        run_id: Run identity from the processing observation source.
+
+    Returns:
+        Supported guards and their source identities for detached calculation.
+    """
+    if (not record or not run_id or not isinstance(record.get("jobs"), dict)
+            or any(not isinstance(job, dict) for job in record["jobs"].values())
+            or type(record.get("revision")) is not int):
+        raise KeyError("Recorded machine job identity for interrupted pickup")
+    try:
+        owner = MachineJobs(machine, run_id, record)
+    except ValueError as exc:
+        raise KeyError("Matching recorded machine declaration for interrupted pickup: " + str(exc)) from exc
+    if any(field not in valuation for field in ("resource_state", "part_name", "job_state", "active_job")):
+        raise KeyError("Recorded machine custody and processing state for interrupted pickup")
+    public = job_public_state(owner.record)
+    if any(valuation[field] != public[field] for field in ("active_job", "job_state")):
+        raise KeyError("Consistent machine owner record for interrupted pickup")
+    if (valuation["resource_state"] != "loaded" or valuation["part_name"] != part
+            or public["job_state"] != "interrupted" or public["active_job"] is not None):
+        raise ValueError("Machine owner does not establish an interrupted loaded part with inactive processing")
+    jobs = [job for job in owner.record["jobs"].values() if job.get("part_name") == part
+            and job.get("job_state") == "interrupted" and job.get("process_completed") is False]
+    if len(jobs) != 1 or any(job.get("job_state") == "running" for job in owner.record["jobs"].values()):
+        raise KeyError("Unambiguous interrupted job and inactive processing for the recorded part")
+    job = jobs[0]
+    if (not isinstance(job.get("job_id"), str) or owner.record["jobs"].get(job["job_id"]) != job
+            or job.get("configuration_fingerprint") != fingerprint(job.get("configuration"))
+            or job.get("configuration") != owner.record["current_configuration"]):
+        raise KeyError("Recorded interrupted job identity and configuration")
+    return {"resource_id": machine["resource_id"], "run_id": run_id,
+        "model_fingerprint": owner.model_fingerprint, "record_fingerprint": fingerprint(record),
+        "revision": record["revision"], "job_id": job["job_id"],
+        "guards": {"resource_state": {"equals": "loaded"}, "job_state": {"equals": "interrupted"},
+                   "active_job": {"equals": None}},
+        "simulation_processing_quiescent": True, "process_completed": False,
+        "physical_access_validated": False, "execution_authorized": False}
 
 
 def missing_processing_projection(before: dict, projection: dict) -> list[str]:
@@ -204,14 +320,15 @@ class MachineJobs:
             raise ValueError("Machine access is occupied")
 
     def command(self, primitive: str, params: dict, *, command_id: str,
-                now: float, observations: dict) -> dict:
+                now: float | None, observations: dict) -> dict:
         """Apply one confirmed owner command, preserving idempotent replies.
 
         Args:
             primitive: Exact declared job-control primitive.
             params: Bound job or program arguments.
             command_id: Unique request identity; reuse requires identical arguments.
-            now: Observed simulation time when the worker applies the command.
+            now: Observed simulation time. None permits only program selection
+                with established inactive jobs and establishes no elapsed time.
             observations: Current workholding and access observations.
 
         Returns:
@@ -225,7 +342,14 @@ class MachineJobs:
             if previous["signature"] != signature:
                 raise ValueError("Command identity was reused with conflicting parameters")
             return deepcopy(previous["reply"])
-        now = self._time(now)
+        if now is None:
+            if (primitive != "select_program" or self.record["active_job"] is not None
+                    or any(not isinstance(job, dict) or job.get("job_state") not in {
+                        "paused", "stopped", "interrupted", "completed"}
+                        for job in self.record["jobs"].values())):
+                raise ValueError("NEEDS_CONTEXT: program selection without simulation time requires inactive retained jobs")
+        else:
+            now = self._time(now)
         if (primitive in {"pause_job", "stop_job"}
                 and self.record["active_job"] == params.get("job_id")
                 and self.record["active_job"] is not None):
@@ -307,7 +431,10 @@ class MachineJobs:
                            simulation_elapsed_sec=now - job["simulation_started_sec"],
                            observations=deepcopy(observations))
             self.record["revision"] += 1
-            self.record["simulation_clock_sec"] = now
+            if now is None:
+                self.record.pop("simulation_clock_sec", None)
+            else:
+                self.record["simulation_clock_sec"] = now
             reply = {"status": "completed", "primitive": primitive, "command_id": command_id,
                      "run_id": self.run_id, "resource_id": self.machine["resource_id"],
                      "job_id": job_id, "selected_program": self.record["selected_program"],
