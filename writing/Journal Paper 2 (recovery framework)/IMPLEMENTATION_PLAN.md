@@ -1,5 +1,177 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Failure grounding from raw facts — October 15, 2026 — Phases A, B and C applied; re-capture pending
+
+User decisions:
+- Captures keep raw facts only (Gazebo measurements, agent self-reports, configuration
+  references). Derived views are computed at preparation time.
+- Failures are assumed detectable; the paper states this.
+- Turn 1 grounding is deterministic code, not the LLM.
+- A device fault report (a resource reporting its own fault or unavailability) counts
+  as a detection signal.
+
+The injection code writes labels directly (`failure_effects.py:97-102`,
+`conveyor_fault.py:406,413,469-473`). Conveyor and ur5e-1 have no physical fault
+signal; their only evidence is the injected unavailability or `failed` state.
+
+New `cais_spade_llm/recovery_framework/failure_grounding.py` grounds a capture from an
+allowlisted raw view. It never reads stored labels, `part_tracker`, `setup`, the
+scenario name or `prepared_recovery_request`. Generic rules:
+- A1: controller goal outcome.
+- A2: machine job interrupted.
+- B1: controller fault reason.
+- B2: unavailable resource, or a resource's own reported fault state.
+- C1: expected holder vs measured attachment.
+- C2: loose part outside its expected region. Fixture attachments place parts first.
+
+Settings are in `execution_monitoring` in `recovery_framework_gazebo.json`.
+
+Results on the four official captures (`monitor/environment_runs/failure_grounding_report.json`):
+- **Part slippage:** A1+B2+C1. ur5e-4, environment_9 `place_approach`, gear_small
+  `misplaced`. Agrees with stored labels except resource_state (stored `failed`,
+  grounded DES value `picked`, fault listed separately). The transition log conflict
+  (its last entry already shows ur5e-4 `failed`) is reported.
+- **Machining:** A2+B2. M1, environment_21 `machine_part`. Fully agrees.
+- **Conveyor:** B2. Fills the empty interrupted task with `d49d…_pending_2`
+  `place_approach`.
+- **ur5e-1:** B2. Fills it with `01ee…_pending_0` `pick_grasp`; resource_state stored
+  `failed`, grounded `at_pick`.
+
+One false positive was found and fixed during development: the `assembly_board-v1`
+region is the shared work area above the board (z 1.05–1.4), not where assembled
+parts sit. Measured fixture attachments now take precedence over regions.
+
+Tests: `test/test_failure_grounding.py` (14 passed), plus 1,241 focused tests passed.
+`test_environment_capabilities.py` has 113 failures that already exist with the committed
+config ("Current configuration differs from the declared selected_program",
+`machine_jobs.py:238`). They were not caused by this change and are not investigated
+here. `poetry check` reported only existing deprecations; compileall and
+`git diff --check` passed.
+
+**Phase B (applied October 15, user-approved):**
+- Turn 1 is code-only for any capture that records the agents' state at the
+  failure. `multi_turn._code_grounding_turn` runs the existing grounding handler with
+  a `grounded` decision. There is no provider call. The turn record stores
+  `llm_called=false` and `code_grounding`. The Recovery UI turn view shows it as
+  "Code grounding — no LLM call".
+- Both offline preparation paths apply grounding:
+  - Draft: `outline_draft.OutlineDraft`, which also adds `fault_grounding` to the draft
+    record.
+  - Full-check: `part_slippage_recovery._install_prepared`, which writes
+    `failure_grounding.json`.
+  - `failure_grounding.apply_grounding` replaces `llm_input.fault_event` with the grounded
+    event, including `detected_signals`. It updates `failure_anchor`, affected part facts
+    and the faulted resource row, and drops `failure_type` and `checkpoint`.
+  - Captures without raw failure facts keep their stored summaries. A capture with them
+    but no detectable fault stops with `NEEDS_CONTEXT`.
+- `_slim_fault_event` no longer forwards `failure_type` (the scenario name).
+- `environment_models.owners` accepts configured fault states
+  (`execution_monitoring.fault_report_values`) for `resource_state`. Recorded captures'
+  models omit them. The recorded capture files are unchanged.
+
+Verification (offline, no API calls):
+- In both paths, all four captures prepare with turn 1 code-grounded.
+- The first LLM request is the outline turn. It carries the grounded fault and no
+  scenario name, failure type or checkpoint label.
+- Full-check preparation reaches `outline_ready`.
+- Tests: 19 grounding tests and 1,219 focused tests passed.
+
+Replaying Attempt 17 under all checks:
+- Event 1 (ur5e-4 `move_home`) now passes RA, CCA and transition validation. It is
+  still rejected by the comparator as `excluded_no_progress`: clearing a shared area
+  neither reduces a goal condition nor enables a new admissible event.
+- Event 2 (ur5e-3 places KET4 at the Buffer) has no supporting owner declaration
+  ("Endpoint requires one supported owner declaration").
+- RA+physical now stops at "Owner static_capabilities were not recorded in this
+  attempt's physical model".
+
+These are validator and selection issues, not grounding issues.
+
+**Phase C (applied October 15, user-approved): capture schema 2**
+- New `recovery_framework/capture_files.py`. A schema-2 capture is two files:
+  - `observations.json` holds raw facts only: metadata, the run's resolved `inputs` plus
+    `config_references` (path + sha256 of each source file), agent and device reports
+    (`failure`, transitions, acknowledgements, `fault_reports`, `unavailable_resources`,
+    job reports), measurements (`physical_evidence` without its derived views,
+    `planning_scene_capture`, `robot_poses`), and copies of `agent_reports` and
+    `agent_declarations` (the robot DES models, catalogs and static capabilities).
+  - `preparation.json` holds the derived views: `prepared_recovery_request`,
+    `resource_evidence`, `pending_nodes`, the `part_tracker` and `resource_states`
+    beliefs, the physical `snapshot`/`environment_models`/`environment_valuation`/
+    `products`, and `failure.*_after`. It is bound to the raw file by sha256.
+  - `read_capture` merges the two. Views that do not match the raw file are ignored, so
+    preparation reports them missing. Schema-1 files are read and written unchanged.
+- The captured `inputs` were kept: the scene file has changed in 49 places since the
+  October 10 capture, so a reference alone would silently change old captures.
+- Failure injection writes device fault reports to `context.fault_reports` instead of
+  labels:
+  - Part slippage: the robot reports its lost part (`_current_state="failed"`,
+    `_held_part=None`). The product's valuation and part tracker stay unchanged.
+  - ur5e-1 breakdown: the robot reports `failed`, and the valuation stays at `at_pick`.
+  - Conveyor and M1 report unavailable, alongside `unavailable_resources`.
+- Detection design (user question, answered):
+  - the failing device detects (gripper object detection, robot or machine controller,
+    conveyor PLC);
+  - the Gazebo pose stands in for an idealized camera that localizes parts;
+  - the product agent's execution monitor (grounding code) derives `misplaced` and
+    `failed`.
+- Live preparation (`PartSlippageRecovery._begin`) grounds the raw capture.
+  `failure_grounding.update_beliefs` then applies `belief_updates` to the live context
+  and the belief copies, and records the new `context_revision`. The physical and
+  resource evidence is retaken once, so the belief-dependent views agree. A frozen
+  checkpoint whose beliefs would change stops with NEEDS_CONTEXT.
+- Grounding (schema 2) reads `fault_reports` and builds pending work from the planner's
+  report (`capture_files.pending_nodes`, now also used by `_pending_nodes`).
+  `verify_capture` checks the ur5e-1 fault report instead of the valuation.
+- Conversion check, scratch copies only
+  (`python -m cais_spade_llm.recovery_framework.capture_files --official`, report in
+  `monitor/environment_runs/capture_v2_preview/conversion_report.json`):
+  - All four splits are lossless (same observation fingerprint).
+  - Grounding from the raw file alone equals grounding of the original; only the
+    evidence path names the new location.
+  - Raw sizes: 25–39 MB. Originals: 43–102 MB.
+  - The only label left in a raw file is Part slippage `transitions/7/after/ur5e-4`
+    `failed`, the schema-1 alias fixed in c40aba2. Re-capture removes it.
+  - The official captures were not modified.
+- Not changed:
+  - The Machining worker still records `interruption=<scenario name>`; grounding never
+    reads it.
+  - Conveyor injection still sets `inputs.scene.Conveyor.transport_enabled=False`.
+  - `PartSlippageExample._use_new_observations` writes into a directory it never
+    creates. This was already true before this change.
+
+Tests (offline, no API calls):
+- New `test/test_capture_files.py`: 7 passed.
+- `test_failure_grounding.py`: 21 passed.
+- Injection tests updated to the device-report contract (`test_conveyor_fault.py`):
+  93 passed.
+- New live-grounding test in `test_part_slippage_recovery.py`: 169 passed.
+- Also passed:
+  - `test_offline_recovery` (280)
+  - `test_recovery_evaluation_capture` (103)
+  - `test_machine_jobs` (126)
+  - `test_validated_recovery_outline` (264)
+  - `test_recovery_outline_evidence` (482)
+  - `test_recovery_context_retrieval` (313)
+  - `test_multi_turn_diagnostic` (12)
+  - `test_outline_draft` (14)
+- These failures also occur on unmodified HEAD (checked in a clean worktree):
+  - 3 in `test_recovery_evaluation`;
+  - 12 in `test_recovery_feasibility`;
+  - 1 in `test_environment_recovery`.
+- `poetry check` reported only existing deprecations. compileall, `ui_main --help` and
+  `git diff --check` passed.
+- The preview copies (357 MB) in `monitor/environment_runs/capture_v2_preview/` are
+  disposable; the converter regenerates them.
+
+Next:
+- Re-capture the four failures in Gazebo with CCA active after the validator freeze.
+  Live capture of schema 2 has not been run in Gazebo.
+- Rebuilding `prepared_recovery_request` offline from `agent_declarations` (instead of
+  reading `preparation.json`) is possible later; it was not needed for this phase.
+
+Plan: `~/.claude/plans/what-do-you-mean-synchronous-kahn.md`.
+
 ## Current diagnostic — October 14, 2026 — three unchanged Machining breakdown attempts
 
 The user requested exactly three sequential fresh `Machining breakdown during part processing`

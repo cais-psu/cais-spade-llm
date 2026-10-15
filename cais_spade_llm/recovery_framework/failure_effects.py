@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from copy import deepcopy
 
 
@@ -92,14 +93,14 @@ async def slip_part(runtime, configuration: dict, evidence: dict) -> None:
     if not result.get("success") or str(result.get("release_mode", "")).startswith("assumed"):
         evidence["custody_uncertain"] = True
         raise ValueError("Slipped part detachment was not confirmed")
+    # The robot reports its own lost part. The product's beliefs keep their
+    # last acknowledged values until execution monitoring grounds the fault.
     with context.admission_lock:
-        actor = context.resources[rid]
-        actor.valuation.update(held_part=None, resource_state="failed")
-        actor.revision += 1
         agent._held_part = None
         agent._current_state = "failed"
         agent._task_ctx = {}
-        context.part_tracker[part].update(state="misplaced", location=None)
+        context.fault_reports[rid] = {"reported_state": "failed", "source": "gripper object detection",
+                                      "reported_at_unix": time.time()}
         context.revision += 1
     placed = await asyncio.to_thread(
         controller.set_entity_pose, model,
@@ -134,6 +135,3 @@ async def slip_part(runtime, configuration: dict, evidence: dict) -> None:
     evidence["collision_scene"] = deepcopy(getattr(controller, "_last_command_evidence", {}))
     if not synced:
         raise ValueError("Dropped part collision scene could not be acknowledged")
-    with context.admission_lock:
-        context.part_tracker[part]["observed_pose"] = deepcopy(observed)
-        context.revision += 1

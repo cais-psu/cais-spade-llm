@@ -16,9 +16,11 @@ import json
 import math
 from copy import deepcopy
 from dataclasses import asdict
+from functools import lru_cache
 from itertools import combinations_with_replacement
 from typing import Any
 
+from cais_spade_llm.recovery_framework import SCENE_PATH
 from cais_spade_llm.recovery_framework.kmr_tasks import KMR_TASKS
 from cais_spade_llm.resources import nominal_des as tasks
 from cais_spade_llm.resources.function_contracts import validate_function_contracts
@@ -35,6 +37,18 @@ from cais_spade_llm.resources.resource_safety_preparation import (
 )
 from cais_spade_llm.resources.robot.robot_task_registry import robot_task_registry
 from cais_spade_llm.resources.workflow_task_programs import workflow_task_program
+
+
+@lru_cache(maxsize=1)
+def declared_fault_states() -> frozenset[str]:
+    """Return resource states entered by an uncontrollable fault event.
+
+    Returns:
+        The configured ``execution_monitoring.fault_report_values``.
+    """
+    scene = json.loads(SCENE_PATH.read_text(encoding="utf-8"))
+    return frozenset(scene.get("execution_monitoring", {}).get("fault_report_values", []))
+
 
 PART_REFERENCE = {"scope": "resource", "type": ["string", "null"], "reference": "part_name"}
 PART_PARAMETER = {"required": True, "type": "string", "reference": "part_name"}
@@ -786,7 +800,11 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
             raise ValueError(f"Incomplete resource valuation: {rid}")
         for field, value in values.items():
             declaration = declaration_for(model, field)
-            if not check_value(declaration, value, products):
+            # A fault is an uncontrollable event into a declared fault state;
+            # models recorded before that declaration omit it from their domain.
+            if not check_value(declaration, value, products) and not (
+                field == "resource_state" and value in declared_fault_states()
+            ):
                 raise ValueError(f"Invalid resource value: {rid}.{field}")
             part = _custody_part(rid, field, value, product_name)
             if part is not None:

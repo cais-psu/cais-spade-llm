@@ -14,7 +14,20 @@ from typing import Any
 from openai import OpenAIError
 
 from cais_spade_llm.recovery_framework import ROOT, fingerprint
+from cais_spade_llm.recovery_framework.capture_files import (
+    RAW_SCHEMA_VERSION,
+    pending_nodes,
+    write_capture,
+)
+from cais_spade_llm.recovery_framework.capture_files import completed_tasks as _completed_tasks
 from cais_spade_llm.recovery_framework.diagnostics import write_record
+from cais_spade_llm.recovery_framework.failure_grounding import (
+    apply_grounding,
+    fault_identity,
+    ground_failure,
+    has_raw_failure_facts,
+    update_beliefs,
+)
 from cais_spade_llm.recovery_framework.recovery_observations import (
     capture_observations,
     observation_fingerprint,
@@ -24,15 +37,6 @@ from cais_spade_llm.recovery_framework.recovery_observations import (
 from cais_spade_llm.ui.recovery_setup import FAILURE_SCENARIOS
 
 logger = logging.getLogger(__name__)
-
-
-def _completed_tasks(observations: dict) -> dict:
-    records = observations.get("acknowledgements", {})
-    records = records.values() if isinstance(records, dict) else records if isinstance(records, list) else []
-    return {record["task_id"]: record for record in records if isinstance(record, dict)
-            and isinstance(record.get("task_id"), str) and record["task_id"]
-            and record.get("run_id") == observations.get("run_id")
-            and record.get("status") == "completed" and record.get("evidence") == "resource"}
 
 
 def _recorded_checkpoint(observations: dict) -> dict:
@@ -439,7 +443,7 @@ class PartSlippageRecovery:
 
     def _save_observations(self) -> None:
         path = self.path / "observations.json"
-        write_record(path, self._observations)
+        write_capture(path, self._observations)
         self._publish(observation_path=str(path), observations=observation_summary(self._observations))
 
     def begin(self, failure: dict, *, generate_outline: bool | None = None,
@@ -474,31 +478,18 @@ class PartSlippageRecovery:
         if self._defer_observation_save:
             await self._offline_work(self._save_observations)
         await self.runtime.nominal_idle.wait()
+        # The same gate as offline grounding: only failures that record the agents' state are grounded.
+        grounds_beliefs = (not self.offline and self._observations.get("schema_version") == RAW_SCHEMA_VERSION
+                           and self._failure.get("injection_status") == "completed"
+                           and has_raw_failure_facts({"failure": self._failure}))
         if not self.offline and self._observations.get("physical_evidence", {}).get("status") == "pending":
-            from cais_spade_llm.recovery_framework.recovery_observations import (
-                capture_recovery_physical_evidence, capture_resource_evidence,
-            )
-
             # Persist reconciled facts before a slow or failing ROS observation;
             # its owner agents must remain able to service their event loop.
             self._observations = capture_observations(self.runtime, self._failure, include_physical=False)
             self._save_observations()
-            revision = self.runtime.context.revision
-            capture = asyncio.create_task(asyncio.to_thread(capture_recovery_physical_evidence, self.runtime))
-            try:
-                physical = await asyncio.shield(capture)
-            except asyncio.CancelledError:
-                # Observation interfaces cannot be cancelled as robot commands.
-                # Drain the owned worker and discard its result after Stop.
-                await asyncio.gather(capture, return_exceptions=True)
-                raise
-            if self._stopped:
-                raise asyncio.CancelledError()
-            if self.runtime.context.revision != revision:
-                raise ValueError("NEEDS_CONTEXT: runtime observations changed during physical capture; retry preparation")
-            self._observations["physical_evidence"] = physical
-            self._observations["resource_evidence"] = capture_resource_evidence(self.runtime, physical)
-            self._save_observations()
+            physical = await self._capture_physical_evidence()
+            if grounds_beliefs:
+                physical = await self._ground_live_capture(physical)
             settings = self.runtime.context.inputs.get("scene", {}).get("safety_preparation", {}).get("outline_preview")
             if isinstance(settings, dict):
                 from cais_spade_llm.recovery_framework.recovery_motion_preview import capture_preview_scene
@@ -524,6 +515,9 @@ class PartSlippageRecovery:
                 if self._stopped:
                     raise asyncio.CancelledError()
                 self._save_observations()
+        elif grounds_beliefs and self._ground_beliefs()["belief_updates"]:
+            raise ValueError("NEEDS_CONTEXT: grounding changed beliefs recorded in a frozen checkpoint capture; "
+                             "retake the checkpoint")
         if self._failure.get("injection_status") != "completed":
             raise ValueError("Failure observations require reconciliation before recovery: " +
                              str(self._failure.get("error") or self._failure.get("injection_status")))
@@ -989,6 +983,10 @@ class PartSlippageRecovery:
 
         write_record(directory / "recorded_public_fact_sources.json",
                      restore_recorded_public_facts(prepared, self._observations))
+        if self.offline:
+            grounded = apply_grounding(prepared, self._observations)
+            if grounded is not None:
+                write_record(directory / "failure_grounding.json", grounded)
         prepared["multi_turn_session_seed"] = build_multi_turn_session_seed(prepared)
         prepared["multi_turn_session_seed"]["public_safety_context_version"] = prepared["public_safety_context_version"]
         if self.offline:
@@ -1011,31 +1009,62 @@ class PartSlippageRecovery:
         self._outline_request = {}
         self._publish(imported_recovery=False)
 
+    async def _capture_physical_evidence(self) -> dict:
+        from cais_spade_llm.recovery_framework.recovery_observations import (
+            capture_recovery_physical_evidence, capture_resource_evidence,
+        )
+
+        revision = self.runtime.context.revision
+        capture = asyncio.create_task(asyncio.to_thread(capture_recovery_physical_evidence, self.runtime))
+        try:
+            physical = await asyncio.shield(capture)
+        except asyncio.CancelledError:
+            # Observation interfaces cannot be cancelled as robot commands.
+            # Drain the owned worker and discard its result after Stop.
+            await asyncio.gather(capture, return_exceptions=True)
+            raise
+        if self._stopped:
+            raise asyncio.CancelledError()
+        if self.runtime.context.revision != revision:
+            raise ValueError("NEEDS_CONTEXT: runtime observations changed during physical capture; retry preparation")
+        self._observations["physical_evidence"] = physical
+        self._observations["resource_evidence"] = capture_resource_evidence(self.runtime, physical)
+        self._save_observations()
+        return physical
+
+    async def _ground_live_capture(self, physical: dict) -> dict:
+        grounded = self._ground_beliefs()
+        if not grounded["belief_updates"]:
+            return physical
+        # Belief-dependent views were derived before grounding; retake them.
+        physical = await self._capture_physical_evidence()
+        if fault_identity(ground_failure(self._observations)) != fault_identity(grounded):
+            raise ValueError("NEEDS_CONTEXT: the retaken physical capture grounds a different fault")
+        return physical
+
+    def _ground_beliefs(self) -> dict:
+        """Ground the observed fault from raw facts and update the product's beliefs.
+
+        Failure injection leaves the beliefs at their acknowledged values, so
+        execution monitoring applies the grounded fault state before preparation.
+
+        Returns:
+            The grounding, whose ``belief_updates`` were applied.
+
+        Raises:
+            ValueError: No failure is detectable from the recorded facts.
+        """
+        grounded = ground_failure(self._observations)
+        if not grounded["fault_event"]["detected"]:
+            raise ValueError("NEEDS_CONTEXT: no failure is detectable from the recorded execution-monitoring facts")
+        if update_beliefs(self.runtime.context, self._observations, grounded):
+            self._observations["context_revision"] = self.runtime.context.revision
+        self._save_observations()
+        return grounded
+
     def _pending_nodes(self) -> list[dict]:
-        runtime = self.runtime
-        tasks = list(self._failure.get("pending_tasks", []))
-        continuations = self._failure.get("continuations", {})
-        # Resource cleanup paths can have been cached before the acknowledged
-        # pickup. The retained part work must precede those cleanup goals.
-        keys = sorted(continuations, key=lambda key: key.startswith("resource:"))
-        tasks += [task for key in keys for task in continuations[key].get("path", [])]
-        nodes, seen = [], set()
-        completed = _completed_tasks(self._observations)
-        for index, task in enumerate(tasks):
-            if task.get("task_id") in completed:
-                continue
-            key = (task["resource_id"], task["event_id"], str(task["parameters"]))
-            if key in seen:
-                continue
-            seen.add(key)
-            nodes.append({
-                "id": task.get("task_id", f"{runtime.context.run_id}_pending_{index}"),
-                "type": "task", "function_name": task["event_name"],
-                "resource_jid": runtime.jids[task["resource_id"]],
-                "params": deepcopy(task["parameters"]), "status": "pending",
-                "predecessors": [], "successors": [], "sequence_index": index,
-            })
-        return nodes
+        return pending_nodes(self._failure, self._observations, run_id=self.runtime.context.run_id,
+                             jids=self.runtime.jids)
 
     async def _run_stage(self, stage: str) -> dict:
         from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (

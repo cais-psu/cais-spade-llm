@@ -12,15 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.recovery_framework import ROOT
-from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
 from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS
+from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
 from cais_spade_llm.recovery_framework.recovery_observations import (
+    RECORDS,
     copy_generation_records,
     list_observations,
     observation_fingerprint,
     observation_summary,
     read_observations,
-    RECORDS,
 )
 from cais_spade_llm.ui.recovery_setup import (
     FAILURE_SCENARIOS,
@@ -430,7 +430,9 @@ class PartSlippageExample:
         outline_request = read_object(source / "outline_request.json")
         proposal = {} if outline_only else read_object(source / "proposal.json")
         if outline_only:
-            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+                recovery_validation_fingerprint,
+            )
 
             recorded = outline_request.get("multi_turn_session_state", {})
             if not isinstance(recorded, dict):
@@ -452,8 +454,10 @@ class PartSlippageExample:
         elif proposal.get("source_observation_fingerprint") != observation_fingerprint(observations):
             raise ValueError("Saved composition does not match its source observations")
         if proposal.get("composition_validation_version") == 1:
+            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+                recovery_validation_fingerprint,
+            )
             from cais_spade_llm.resources.recovery_composition import composition_program_error
-            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 
             composition = read_object(source / "composition.json")
             program = composition.get("accepted_primitive_program", [])
@@ -491,7 +495,8 @@ class PartSlippageExample:
                 write_record(directory / name, value)
         if outline_only or proposal.get("composition_validation_version") == 1:
             from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-                _nominal_artifact_path, _nominal_artifact_sha256,
+                _nominal_artifact_path,
+                _nominal_artifact_sha256,
             )
 
             reference = session._prepared["multi_turn_session_state"]["nominal_continuation_evidence"]["artifact_reference"]
@@ -889,7 +894,9 @@ class PartSlippageExample:
             raise ValueError("Use Start failure to obtain an owned paused Gazebo checkpoint")
 
         async def prepare() -> None:
-            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import prepare_gazebo_evidence
+            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import (
+                prepare_gazebo_evidence,
+            )
 
             recovery._publish(message="Preparing Gazebo evidence without executing recovery.")
             cancelled = threading.Event()
@@ -933,12 +940,13 @@ class PartSlippageExample:
         if not path:
             raise ValueError("No fresh observations are available")
         from uuid import uuid4
-        from cais_spade_llm.recovery_framework.diagnostics import write_record
+
+        from cais_spade_llm.recovery_framework.capture_files import write_capture
 
         observations = read_observations(path)
         saved_path = recovery.path.parent / f"capture_{uuid4().hex}" / "observations.json"
-        write_record(saved_path, {key: value for key, value in observations.items()
-                                 if key not in {"source_path", "source_sha256"}})
+        write_capture(saved_path, {key: value for key, value in observations.items()
+                                   if key not in {"source_path", "source_sha256"}})
         if self.source != "offline":
             self._gazebo_modes = (self.outline_mode, self.primitive_mode)
         self.source = "offline"

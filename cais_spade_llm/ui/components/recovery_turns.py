@@ -177,8 +177,26 @@ def _expansion(label: str, key: str, reader, render):
     return expansion, refresh
 
 
+def _code_grounding(data: dict) -> dict | None:
+    return next((result["payload"]["code_grounding"] for result in data["results"]
+                 if isinstance(result["payload"].get("code_grounding"), dict)), None)
+
+
 def render_turn_content(data: dict, tab: str, *, state_key: str = "") -> None:
     """Separate exact model messages from runtime retrieval and validation."""
+    grounding = _code_grounding(data)
+    if grounding is not None:
+        ui.label("Code grounding — no LLM call").classes("font-semibold")
+        if tab == "input":
+            ui.label("Raw capture facts read by the execution-monitoring rules").classes("text-xs text-slate-500")
+            _text([{key: row.get(key) for key in ("signal", "resource_id", "task_id", "part_name", "evidence", "values")
+                    if row.get(key) is not None} for row in grounding["fault_event"]["signals"]])
+        else:
+            _text({key: grounding[key] for key in ("fault_event", "parts", "resources", "expected_state_conflicts")
+                   if key in grounding})
+        for result in data["results"]:
+            _download(result["path"], "Download runtime record")
+        return
     if tab == "output":
         _proposed_events(data)
         ui.label("LLM response").classes("font-semibold")

@@ -22,6 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.recovery_framework.capture_files import RAW_SCHEMA_VERSION, write_capture
 from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS, SUPPORTED_CHECKPOINTS
 
 logger = logging.getLogger(__name__)
@@ -196,8 +197,11 @@ def _verify_robot_breakdown_capture(captured: dict) -> None:
     part = failure['part_name']
     values = captured.get('resource_states', {})
     robot, machine = values.get('ur5e-1', {}), values.get('M1', {})
+    # Schema 2 keeps the robot's own fault report apart from the product's beliefs.
+    reported = (captured.get('fault_reports', {}).get('ur5e-1', {}).get('reported_state')
+                if captured.get('schema_version') == RAW_SCHEMA_VERSION else robot.get('resource_state'))
     if (captured['setup']['failure_scenario']['resource_id'] != 'ur5e-1'
-            or robot.get('resource_state') != 'failed' or robot.get('held_part') is not None
+            or reported != 'failed' or robot.get('held_part') is not None
             or failure.get('resource_values_before', {}).get('ur5e-1', {}).get('resource_state') != 'at_pick'
             or machine.get('resource_state') != 'completed' or machine.get('part_name') != part
             or captured['part_tracker'][part].get('location') != 'M1'
@@ -745,13 +749,13 @@ async def run_capture(args) -> dict:
         destination.mkdir()
         observation_path = destination / 'observations.json'
         report.update(observation_path=str(observation_path), capture_verification=verify_capture(captured, args.scenario))
-        write_record(observation_path, captured)
+        write_capture(observation_path, captured)
         write_record(directory / 'report.json', report)
         captured['prepared_recovery_request'] = await bridge._run_on_agent_runtime(
             _prepare_saved_capture(runtime, captured, recovery._observations['prepared_recovery_request'], observation_path))
         captured['missing'] = offline_preparation_missing(captured)
         captured['offline_ready'] = not captured['missing']
-        write_record(observation_path, captured)
+        write_capture(observation_path, captured)
         report['native_model_archive'] = await save_native_preview_model_from_capture(
             observation_path, cancel_event=cancelled)
         if getattr(args, 'scene_image', False):

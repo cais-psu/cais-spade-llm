@@ -443,6 +443,7 @@ def test_slippage_both_directions_preserve_other_custody_and_obligations(monkeyp
     fault = runtime.conveyor_fault
     other = setup["failure_scenario"]["additional_condition"]
     other_before = deepcopy(runtime.context.part_tracker[other["part_name"]])
+    tracker_before, values_before = deepcopy(runtime.context.part_tracker), runtime.context.snapshot()
     observed = {"x": 0.01, "y": setup["failure_scenario"]["drop_pose"]["y"], "z": 1.035,
                 "qx": 0., "qy": 0., "qz": 0., "qw": 1.}
     monkeypatch.setattr("cais_spade_llm.recovery_framework.failure_effects._observe_part",
@@ -452,8 +453,12 @@ def test_slippage_both_directions_preserve_other_custody_and_obligations(monkeyp
     assert fault.holds_task({"resource_id": robot, "event_name": "place_approach"})
     asyncio.run(fault.trigger())
     assert fault.evidence["injection_status"] == "completed"
-    assert runtime.context.part_tracker[part]["location"] is None
-    assert runtime.context.resources[robot].valuation["held_part"] is None
+    # The robot reports its own lost part; the product's beliefs wait for grounding.
+    agent = next(owner for owner in runtime.resource_agents if owner.agent_name == robot)
+    assert (agent._held_part, agent._current_state) == (None, "failed")
+    assert runtime.context.fault_reports[robot]["reported_state"] == "failed"
+    assert runtime.context.part_tracker == tracker_before and runtime.context.snapshot() == values_before
+    assert runtime.context.part_tracker[part]["location"] == robot
     assert runtime.context.part_tracker[other["part_name"]] == other_before
     assert runtime.context.resources[other["resource_id"]].valuation["held_part"] == other["part_name"]
     assert set(fault.evidence["pickups"]) == {"ur5e-3", "ur5e-4"}
@@ -500,7 +505,8 @@ def test_partial_slippage_keeps_latch_and_reports_uncertainty(monkeypatch, stage
     assert fault.evidence["injection_status"] == "failed"
     assert fault.evidence["physical_state_reconciliation_required"]
     assert "ur5e-3" in runtime.context.unavailable_resources
-    assert (runtime.context.resources["ur5e-3"].valuation["held_part"] == part) == (stage in {"open", "detach"})
+    assert runtime.context.resources["ur5e-3"].valuation["held_part"] == part
+    assert ("ur5e-3" in runtime.context.fault_reports) == (stage not in {"open", "detach"})
     if stage in {"open", "detach"}:
         controller.set_entity_pose.assert_not_called()
 
@@ -516,7 +522,8 @@ def test_robot_breakdown_retains_completed_part_in_M1_and_observed_pose(monkeypa
     assert runtime.context.part_tracker[part]["location"] == "M1"
     assert runtime.context.resources["M1"].valuation["resource_state"] == "completed"
     assert runtime.context.unavailable_resources == set()
-    assert runtime.context.resources["ur5e-1"].valuation["resource_state"] == "failed"
+    assert runtime.context.resources["ur5e-1"].valuation["resource_state"] == "at_pick"
+    assert runtime.context.fault_reports["ur5e-1"]["reported_state"] == "failed"
     assert runtime.resource_agents[0]._current_state == "failed"
     assert runtime.context.resources["ur5e-1"].executors == executors
     assert runtime.conveyor_fault.evidence["resource_values_before"]["ur5e-1"]["resource_state"] == "at_pick"
@@ -576,6 +583,7 @@ def test_failed_robot_retains_recorded_home_motion_capability(monkeypatch):
                         Mock(return_value={"status": "completed"}))
     asyncio.run(runtime.conveyor_fault.trigger())
     snapshot = {**runtime.context.resources["ur5e-1"].valuation,
+                "resource_state": runtime.context.fault_reports["ur5e-1"]["reported_state"],
                 "named_poses": ["home"], "controller_ready": True}
     result = check_robot_primitive_capability(primitive="move_to_named_pose", params={"pose_name": "home"},
         task={}, recovery_snapshot=snapshot, resource_evidence={"source": {"run_id": runtime.context.run_id}},

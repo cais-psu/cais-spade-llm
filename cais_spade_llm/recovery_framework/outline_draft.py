@@ -125,6 +125,9 @@ class OutlineDraft:
         from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 
         self.prepared, self.session = _inputs(observations)
+        from .failure_grounding import apply_grounding
+
+        grounded = apply_grounding(self.prepared, observations)
         choices = dict(zip(CHECK_FIELDS, (check_ra_feasibility, check_physical_evidence, check_cca_safety)))
         if any(type(value) is not bool for value in choices.values()) or all(choices.values()):
             raise ValueError("Use the validated Recovery workflow when all three checks are enabled")
@@ -183,6 +186,8 @@ class OutlineDraft:
             "llm_settings": deepcopy(self.provider.llm_settings), "checks": dict(_NOT_CHECKED),
             "execution_authorized": False, "transition_trace": [], "provider_calls": 0,
             "llm_turns": [], "retrievals": [], "message": "Ready for an unvalidated multi_turn outline."}
+        if grounded is not None:
+            self.record["fault_grounding"] = deepcopy(grounded["fault_event"])
         ask = self.provider.ask_llm_structured
 
         async def recorded_ask(prompt: str, **kwargs):

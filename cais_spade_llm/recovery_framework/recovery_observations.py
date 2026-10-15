@@ -16,6 +16,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
+from cais_spade_llm.recovery_framework.capture_files import (
+    PREPARATION_NAME, RAW_SCHEMA_VERSION, config_references, read_capture,
+)
 from cais_spade_llm.recovery_framework.diagnostics import read_object, write_record
 
 RECORDS = ROOT / "cais_spade_llm/monitor/environment_runs/recovery"
@@ -932,7 +935,7 @@ def capture_observations(runtime, failure: dict, *, include_physical: bool = Tru
         if rid and isinstance(failure.get(key), dict):
             robot_poses[rid] = deepcopy(failure[key])
     result = {
-        "schema_version": 1,
+        "schema_version": RAW_SCHEMA_VERSION,
         "run_id": context.run_id,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "evidence_source": "Gazebo",
@@ -949,6 +952,8 @@ def capture_observations(runtime, failure: dict, *, include_physical: bool = Tru
         "program_revision": getattr(runtime, "program_revision", ""),
         "requirements": deepcopy(getattr(context, "requirements", {})),
         "unavailable_resources": sorted(getattr(context, "unavailable_resources", set())),
+        "fault_reports": deepcopy(getattr(context, "fault_reports", {})),
+        "config_references": config_references(runtime.setup),
         "nominal_permitted_resources": deepcopy(getattr(context, "permitted_resources", runtime.setup.get("permitted_resources", []))),
         "recovery_permitted_resources": deepcopy(runtime.setup.get("recovery_permitted_resources", runtime.setup.get("permitted_resources", []))),
         "acknowledgements": deepcopy(getattr(context, "acknowledgements", [])),
@@ -1597,7 +1602,7 @@ def read_observations(path: str | Path, *, root: Path = RECORDS) -> dict:
     source = Path(path).resolve()
     if not source.is_relative_to(root.resolve()) or source.name not in {"observations.json", "environment_run.json"}:
         raise ValueError("Select a saved observation record from this Recovery page")
-    record = read_object(source)
+    record = read_capture(source) if source.name == "observations.json" else read_object(source)
     if source.name == "environment_run.json":
         fault = record.get("conveyor_fault") or {}
         record = {
@@ -1648,8 +1653,10 @@ def copy_generation_records(state: dict, source_directory: Path, directory: Path
 
 
 @lru_cache(maxsize=512)
-def _observation_list_summary(path: Path, root: Path, modified_ns: int, size: int) -> tuple[dict, str]:
+def _observation_list_summary(path: Path, root: Path, modified_ns: int, size: int,
+                              preparation_modified_ns: int = 0) -> tuple[dict, str]:
     # Cache only display metadata; loading and validation always reread the capture.
+    # Schema-2 derived views live beside the raw file, so their time is part of the key.
     record = read_observations(path, root=root)
     item = {key: record.get(key) for key in (
         "source_path", "run_id", "captured_at", "scenario", "offline_ready", "missing",
@@ -1668,7 +1675,10 @@ def list_observations(*, root: Path = RECORDS) -> list[dict]:
             continue
         try:
             stat = path.stat()
-            summary, capture_fingerprint = _observation_list_summary(path, root, stat.st_mtime_ns, stat.st_size)
+            preparation = directory / PREPARATION_NAME
+            summary, capture_fingerprint = _observation_list_summary(
+                path, root, stat.st_mtime_ns, stat.st_size,
+                preparation.stat().st_mtime_ns if preparation.is_file() else 0)
         except (OSError, ValueError, TypeError):
             continue
         item = deepcopy(summary)
@@ -1747,7 +1757,7 @@ def read_native_preview_model(observation_path: str | Path, observations: dict) 
         if source in visited or len(visited) >= 8:
             raise ValueError('Saved native model source reference is cyclic or too deep')
         visited.add(source)
-        saved = json.loads(source.read_bytes())
+        saved = read_capture(source)
         if observation_fingerprint(saved) != capture_fingerprint:
             raise ValueError('Saved native model copy differs from the selected observations')
         reference = saved.get('source_path')
@@ -1971,7 +1981,7 @@ async def save_native_preview_model_from_capture(observation_path: str | Path, *
     from cais_spade_llm.recovery_framework.recovery_motion_preview import verify_native_model_parameters
 
     source = Path(observation_path).resolve()
-    observations = json.loads(source.read_bytes())
+    observations = read_capture(source)
     existing = source.parent / 'native_preview_model'
     if existing.exists():
         return read_native_preview_model(source, observations)

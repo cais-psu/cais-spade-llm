@@ -1689,7 +1689,9 @@ def _accepted_transition_prefix_for_prompt(
     public_fields: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return identities and optional recent accepted public changes."""
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+        recovery_validation_fingerprint,
+    )
 
     prompt_rows: list[dict[str, Any]] = []
     for index, task in enumerate(tasks):
@@ -3129,9 +3131,10 @@ def _projected_outline_parts(
 
 def _slim_fault_event(fault_event: dict[str, Any]) -> dict[str, Any]:
     """Expose recorded failure fields without forwarding capture metadata."""
+    # The failure type is the experimenter's scenario name, not an observation.
     fields = {
         "focused_resource_jid", "blocked_at_task_id", "blocked_at_function",
-        "resource_state", "current_location", "failure_type", "affected_part_names",
+        "resource_state", "current_location", "affected_part_names", "detected_signals",
     }
     result = {key: deepcopy(value) for key, value in fault_event.items() if key in fields}
     checkpoint = fault_event.get("checkpoint")

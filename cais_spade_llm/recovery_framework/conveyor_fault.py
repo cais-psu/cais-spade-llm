@@ -404,6 +404,8 @@ class ConveyorFault:
                 if scenario not in {"Part slippage", "ur5e-1 breakdown"}:
                     actor.executors.clear()
                     context.unavailable_resources.add(rid)
+                    context.fault_reports[rid] = {"available": False, "source": "device controller",
+                                                  "reported_at_unix": time.time()}
                 actor.revision += 1
                 actor.evidence = scenario + (
                     "; awaiting observed recovery" if scenario in {"Part slippage", "ur5e-1 breakdown"}
@@ -464,13 +466,14 @@ class ConveyorFault:
                 from cais_spade_llm.recovery_framework.failure_effects import observe_robot
 
                 self.evidence["robot_pose"] = await observe_robot(runtime, rid)
-                # The failed pick stops nominal work; observed motion capability remains for recovery.
+                # The robot reports its own fault and keeps its observed motion capability for recovery.
+                # The product's beliefs keep their acknowledged values until the fault is grounded.
                 with context.admission_lock:
-                    context.resources[rid].valuation["resource_state"] = "failed"
-                    context.resources[rid].revision += 1
                     for owner in runtime.resource_agents:
                         if owner.agent_name == rid:
                             owner._current_state = "failed"
+                    context.fault_reports[rid] = {"reported_state": "failed", "source": "robot controller",
+                                                  "reported_at_unix": time.time()}
                     context.revision += 1
             if scenario == "Machining breakdown during part processing" and self.evidence.get("source") != "gazebo_workholding_observation":
                 raise ValueError(self.evidence.get("observation_error", "Machine checkpoint observation was interrupted"))

@@ -120,6 +120,52 @@ def test_stage_modes_stop_before_execution(recovery, monkeypatch, outline_mode, 
     asyncio.run(run())
 
 
+def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(recovery, monkeypatch):
+    from cais_spade_llm.recovery_framework.capture_files import PREPARATION_NAME
+
+    context = recovery.runtime.context
+    context.resources = {"arm_a": SimpleNamespace(valuation={"resource_state": "picked", "held_part": "peg"}, revision=1)}
+    context.part_tracker = {"peg": {"state": "in_gripper", "location": "arm_a"}}
+    failure = {"injection_status": "completed",
+               "resource_values_before": {"arm_a": {"resource_state": "picked", "held_part": "peg"}},
+               "part_tracker_before": {"peg": {"state": "in_gripper", "location": "arm_a"}},
+               "pending_tasks": [{"task_id": "t2", "resource_id": "arm_a", "event_id": "place", "event_name": "place",
+                                  "parameters": {"part_name": "peg"}}], "continuations": {}}
+    observations = {"schema_version": 2, "run_id": "test-run", "jids": {"arm_a": "jid-a"}, "acknowledgements": {},
+                    "failure": failure, "fault_reports": {"arm_a": {"reported_state": "failed"}},
+                    "part_tracker": deepcopy(context.part_tracker),
+                    "resource_states": {"arm_a": {"resource_state": "picked", "held_part": "peg"}},
+                    "context_revision": context.revision, "physical_evidence": {"status": "pending"}}
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.part_slippage_recovery.capture_observations",
+                        lambda runtime, failure, include_physical=True: deepcopy(observations))
+    trackers = []
+
+    async def capture_physical():
+        # The robot gripper is empty and the peg lies where it fell.
+        trackers.append(deepcopy(context.part_tracker))
+        recovery._observations["physical_evidence"] = {
+            "resources": {"arm_a": {"attachment": {"model_name": None}}},
+            "parts": {"peg": {"name": "peg", "pose": [3.0, 3.0, 1.0, 0, 0, 0, 1]}},
+            "geometry": {"regions": {}, "parts": {}}, "physics_evidence": {"attachments": []}}
+        return recovery._observations["physical_evidence"]
+
+    monkeypatch.setattr(recovery, "_capture_physical_evidence", capture_physical)
+
+    async def run():
+        recovery.begin(failure)
+        await recovery._task
+
+    asyncio.run(run())
+    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "misplaced"]
+    assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
+    assert recovery._observations["context_revision"] == context.revision == 5
+    path = Path(recovery.snapshot()["observation_path"])
+    assert "part_tracker" not in json.loads(path.read_text())
+    views = json.loads((path.parent / PREPARATION_NAME).read_text())["views"]
+    assert views["part_tracker"]["peg"]["state"] == "misplaced"
+    assert views["resource_states"]["arm_a"] == {"resource_state": "failed", "held_part": None}
+
+
 def test_outline_evidence_retry_does_not_generate_or_replace_llm_capture(recovery, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
 

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from copy import copy, deepcopy
 from functools import wraps
 from threading import RLock
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from cais_spade_llm.product.order import validate_product_order
@@ -268,6 +269,8 @@ class EnvironmentProductContext:
         self.revision = 0
         self._task_sequence = 0
         self.unavailable_resources: set[str] = set()
+        # Each resource's own fault report, kept apart from the product's beliefs.
+        self.fault_reports: dict[str, dict] = {}
         self.pending_tasks: dict[str, dict] = {}
         self.reservations: dict[str, str] = {}
         self.acknowledgements: dict[str, dict] = {}

@@ -2,10 +2,6 @@ from __future__ import annotations
 
 """Multi-turn recovery execution engine — one-task-at-a-time outline."""
 
-from cais_spade_llm.agents.shared_information.llm_request_records import (
-    recorded_structured_call, recovery_request_directory,
-)
-
 import asyncio
 import inspect
 import json
@@ -30,6 +26,10 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_p
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_validation_service import (
     annotate_validation_finding,
     validate_recovery_outline_task,
+)
+from cais_spade_llm.agents.shared_information.llm_request_records import (
+    recorded_structured_call,
+    recovery_request_directory,
 )
 from cais_spade_llm.resources.resource_primitives import (
     filter_synthesis_primitive_catalog,
@@ -1197,6 +1197,34 @@ async def _handle_grounding_phase(
     return decision, turn_entry
 
 
+async def _code_grounding_turn(
+    *,
+    session_state: dict[str, Any],
+    prepared_recovery_request: dict[str, Any],
+    planner: Any,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Record deterministic failure grounding as the grounding turn without an LLM call.
+
+    Args:
+        session_state: Multi-turn session state.
+        prepared_recovery_request: Prepared request carrying ``code_grounding``.
+        planner: Planner passed to the existing grounding handler.
+
+    Returns:
+        Decision, turn record and the recorded grounded response.
+    """
+    parsed = {"thought": "Grounded from raw facts by execution-monitoring rules; no LLM call.",
+              "decision": "grounded", "observations": []}
+    decision, turn_entry = await _handle_grounding_phase(
+        session_state=session_state,
+        parsed_response=parsed,
+        prepared_recovery_request=prepared_recovery_request,
+        planner=planner,
+    )
+    turn_entry.update(llm_called=False, code_grounding=deepcopy(prepared_recovery_request["code_grounding"]))
+    return decision, turn_entry, parsed
+
+
 def _projected_outline_validation_context(
     *,
     session_state: dict[str, Any],
@@ -1469,7 +1497,9 @@ def _condition_expected_matches(actual: Any, expected: Any, *, exact: bool = Fal
     if isinstance(expected, dict) and set(expected) == {"not"}:
         return not _condition_expected_matches(actual, expected.get("not"), exact=exact)
     if exact:
-        from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
+        from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+            recovery_validation_fingerprint,
+        )
 
         return recovery_validation_fingerprint(actual) == recovery_validation_fingerprint(expected)
     if isinstance(expected, (dict, list)):
@@ -5116,7 +5146,7 @@ def _write_per_turn_artifact(
                 "context_selection", "context_requests", "served_context", "context_errors", "observations",
                 "validation_stages", "validation_context_exchanges", "nominal_continuation_evidence",
                 "transition_validation", "next_transition", "validation_contract_version",
-                "outline_evidence_policy_version",
+                "outline_evidence_policy_version", "llm_called", "code_grounding",
             ) if key in turn_entry},
         })
         stamped_paths = {
@@ -5929,7 +5959,13 @@ async def execute_multi_turn_recovery(
             )
         else:
             modeled_continuation = None
-            if current_phase == "outline" and session_state.get("validation_contract_version") != 2:
+            if current_phase == "grounding" and prepared_recovery_request.get("code_grounding"):
+                modeled_continuation = await _code_grounding_turn(
+                    session_state=session_state,
+                    prepared_recovery_request=prepared_recovery_request,
+                    planner=planner,
+                )
+            elif current_phase == "outline" and session_state.get("validation_contract_version") != 2:
                 modeled_continuation = await _try_handle_modeled_continuation(
                     session_state=session_state,
                     prepared_recovery_request=prepared_recovery_request,

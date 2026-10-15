@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cais_spade_llm.recovery_framework.capture_files import write_capture
 from cais_spade_llm.recovery_framework.diagnostics import write_record
 from cais_spade_llm.recovery_framework.recovery_observations import (
     capture_observations,
@@ -144,12 +145,12 @@ async def prepare_gazebo_evidence(recovery, runtime, *, cancel_event=None) -> di
             _check_cancelled(cancel_event)
             fresh["pending_nodes"] = live_recovery._pending_nodes()
             fresh_path = attempt / "observations.json"
-            write_record(fresh_path, fresh)
+            write_capture(fresh_path, fresh)
             _check_cancelled(cancel_event)
             template = live_recovery._observations.get("prepared_recovery_request")
             if isinstance(template, dict):
                 fresh["prepared_recovery_request"] = await _prepare_saved_capture(runtime, fresh, template, fresh_path)
-            write_record(fresh_path, fresh)
+            write_capture(fresh_path, fresh)
             if runtime.context.revision != revision:
                 raise ValueError("Gazebo checkpoint changed during evidence capture")
             differences = checkpoint_differences(recovery._observations, fresh)
