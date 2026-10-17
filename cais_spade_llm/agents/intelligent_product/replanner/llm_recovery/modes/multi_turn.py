@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import re
 from copy import deepcopy
 from typing import Any
@@ -163,7 +164,12 @@ def transition_multi_turn_phase(current_phase: str, decision: str) -> str:
 def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
     prepared_recovery_request: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the initial session state for a multi-turn recovery run."""
+    """Build the initial session state for a multi-turn recovery run.
+
+    A request grounded during preparation starts at the outline phase with the
+    grounded part poses already in the observation store; there is no grounding
+    turn to record.
+    """
     recovery_session = dict(prepared_recovery_request.get("recovery_session") or {})
     max_turns = int(recovery_session.get("max_turns") or _DEFAULT_MAX_TURNS)
     max_observations = int(recovery_session.get("max_observations") or _DEFAULT_MAX_OBSERVATIONS)
@@ -277,9 +283,10 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
     base_symbolic_resources = deepcopy(symbolic_resources)
     base_symbolic_parts = deepcopy(symbolic_parts)
 
-    return {
+    code_grounded = isinstance(prepared_recovery_request.get("code_grounding"), dict)
+    seed = {
         "session_id": recovery_session.get("session_id", ""),
-        "current_phase": "grounding",
+        "current_phase": "outline" if code_grounded else "grounding",
         "validation_contract_version": prepared_recovery_request.get("validation_contract_version"),
         **({"outline_evidence_policy_version": prepared_recovery_request["outline_evidence_policy_version"]}
            if "outline_evidence_policy_version" in prepared_recovery_request else {}),
@@ -363,6 +370,9 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         "symbolic_resources": symbolic_resources,
         "symbolic_parts": symbolic_parts,
     }
+    if code_grounded:
+        _seed_grounded_part_pose_observations(prepared_recovery_request, seed)
+    return seed
 
 
 # ---------------------------------------------------------------------------
@@ -1195,34 +1205,6 @@ async def _handle_grounding_phase(
         _logger.info("[MultiTurn] Grounding complete")
 
     return decision, turn_entry
-
-
-async def _code_grounding_turn(
-    *,
-    session_state: dict[str, Any],
-    prepared_recovery_request: dict[str, Any],
-    planner: Any,
-) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    """Record deterministic failure grounding as the grounding turn without an LLM call.
-
-    Args:
-        session_state: Multi-turn session state.
-        prepared_recovery_request: Prepared request carrying ``code_grounding``.
-        planner: Planner passed to the existing grounding handler.
-
-    Returns:
-        Decision, turn record and the recorded grounded response.
-    """
-    parsed = {"thought": "Grounded from raw facts by execution-monitoring rules; no LLM call.",
-              "decision": "grounded", "observations": []}
-    decision, turn_entry = await _handle_grounding_phase(
-        session_state=session_state,
-        parsed_response=parsed,
-        prepared_recovery_request=prepared_recovery_request,
-        planner=planner,
-    )
-    turn_entry.update(llm_called=False, code_grounding=deepcopy(prepared_recovery_request["code_grounding"]))
-    return decision, turn_entry, parsed
 
 
 def _projected_outline_validation_context(
@@ -2440,6 +2422,21 @@ def _generated_candidate_start_state(
     ]
 
 
+def _finite_json_object(value: Any) -> bool:
+    """Accept explicit event arguments such as numbers, tokens, lists and nested objects."""
+    def finite(item: Any) -> bool:
+        if isinstance(item, (bool, int, str)) or item is None:
+            return True
+        if isinstance(item, float):
+            return math.isfinite(item)
+        if isinstance(item, list):
+            return all(finite(entry) for entry in item)
+        if isinstance(item, dict):
+            return all(isinstance(key, str) and key and finite(entry) for key, entry in item.items())
+        return False
+    return isinstance(value, dict) and finite(value)
+
+
 def _derive_candidate_outline_task(
     *,
     candidate_task: dict[str, Any],
@@ -2456,6 +2453,7 @@ def _derive_candidate_outline_task(
         "resource_jid",
         "part_name",
         "expected_end_state",
+        "params",
         "rationale",
     }
     outline_id = str(candidate_task.get("outline_id") or "").strip()
@@ -2496,6 +2494,23 @@ def _derive_candidate_outline_task(
                     + ", ".join(unexpected_top_level)
                 ),
                 evidence={"field": "candidate", "unexpected": unexpected_top_level},
+            )
+        ]
+
+    if "params" in candidate_task and not session_state.get("outline_diagnostic_bypass"):
+        return None, [
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason="candidate params are accepted only when outline validation is bypassed",
+                evidence={"field": "params"},
+            )
+        ]
+    if "params" in candidate_task and not _finite_json_object(candidate_task["params"]):
+        return None, [
+            _candidate_schema_finding(
+                task=candidate_task,
+                reason="candidate params must be an object of finite JSON values",
+                evidence={"field": "params"},
             )
         ]
 
@@ -2650,6 +2665,8 @@ def _derive_candidate_outline_task(
     }
     if part_name_present:
         validated_task["part_name"] = deepcopy(raw_part_name)
+    if candidate_task.get("params"):
+        validated_task["params"] = deepcopy(candidate_task["params"])
     if start_state_findings:
         validated_task["diagnostic_assumptions"] = [
             {"field": name, "reason": "start condition unknown; validation bypassed"}
@@ -3591,7 +3608,7 @@ def _build_phase_prompt(
     )
     if session_state.get("outline_diagnostic_bypass"):
         # Product goals can include final delivery owned by the nominal flow;
-        # the recorded handoff conditions below state the recovery's obligations.
+        # Recovery Goals states the recorded handoff conditions instead.
         prompt_input["llm_input"]["goal_conditions"] = []
         prompt_input["llm_input"]["relevant_assembly_requirements"] = []
     if phase == "primitive_generation":
@@ -3605,46 +3622,12 @@ def _build_phase_prompt(
         from .multi_turn_context import scope_prompt_input
 
         prompt_input = scope_prompt_input(prompt_input, prepared_recovery_request, session_state)
+    if session_state.get("outline_diagnostic_bypass") and phase in {"grounding", "outline"}:
+        from .multi_turn_diagnostic import prompt_context
+
+        prompt_input["outline_diagnostic"] = prompt_context(
+            session_state, prepared_recovery_request, dict(llm_input.get("fault_event") or {}), outline=phase == "outline")
     prompt_text = render_multi_turn_phase_prompt(prompt_input)
-    if session_state.get("outline_diagnostic_bypass"):
-        from cais_spade_llm.recovery_framework.outline_checks import selected_checks
-
-        from .multi_turn_diagnostic import condition_holds, handoff_conflicts, recorded_conditions
-
-        outline = phase == "outline"
-        conditions = [{**{key: row.get(key) for key in ("role", "entity_kind", "entity", "field", "expected")},
-                       **({"holds": condition_holds(row, session_state, prepared_recovery_request)} if outline else {})}
-                      for row in recorded_conditions(prepared_recovery_request)]
-        handoff = {"pending_suffix_summary": prepared_recovery_request.get("marked_reentry_context", {}).get("pending_suffix_summary", []),
-                   "pending_tasks": [{key: node[key] for key in ("id", "resource_jid", "function_name", "params") if key in node}
-                                     for node in prepared_recovery_request.get("saved_pending_nodes", [])],
-                   **({"handoff_conditions": conditions} if conditions else {})}
-        choices = selected_checks(session_state)
-        note = ("RA feasibility, CCA safety and physical validation are bypassed." if not any(choices.values()) else
-                "Requested outline checks: " + json.dumps(choices) + ". Enabled checks must pass before an event advances.")
-        blocked = (handoff_conflicts(session_state, prepared_recovery_request)
-                   if outline and conditions and all(row["holds"] for row in conditions) else [])
-        fault = dict(llm_input.get("fault_event") or {})
-        reach = prepared_recovery_request.get("diagnostic_reach") or {}
-        regions = {name: row.get("bounds") for name, row in (prepared_recovery_request.get("diagnostic_regions") or {}).items()
-                   if isinstance(row, dict) and row.get("bounds")}
-        prompt_text += ("\n\nDiagnostic mode: " + note + " "
-            "Selected events and propagated states are tentative. Recovery ends when the recorded handoff conditions hold "
-            "in the projected state; subsequent nominal processing and delivery belong to the nominal flow. "
-            "Owner bookkeeping is not a separate recovery task. "
-            "Unchanged fields need not be repeated.\nRecorded nominal handoff context:\n" + json.dumps(handoff, ensure_ascii=False) +
-            "".join("\nNominal handoff is blocked in the projected state: " + row["reason"] for row in blocked) +
-            (f"\nInterrupted event: {fault['blocked_at_function']} of {fault['focused_resource_jid']} did not complete. "
-             "A resource_location changes only when an event completes; compare it with any recorded current_pose."
-             if fault.get("blocked_at_function") and fault.get("focused_resource_jid") else "") +
-            ("\nSpatial facts (world frame, also used by current_pose and observed_pose). Region bounds as "
-             "[[x_min, x_max], [y_min, y_max], [z_min, z_max]]: " + json.dumps(regions, ensure_ascii=False) if regions else "") +
-            ("\nDeclared gripper_reach: " + json.dumps(reach, ensure_ascii=False) + ". A pose is within gripper_reach when "
-             "its xy distance from origin_pose is at most max_xy_radius_m + tolerance_m and its z lies within "
-             "[z_min_m - tolerance_m, z_max_m + tolerance_m]." if reach else "") +
-            "\nA part with null part_location is located only by its observed_pose; an event that picks it may omit "
-            "resource_location." +
-            "\nSelected safety requirements (CCA not checked):\n" + json.dumps(prepared_recovery_request.get("prompt_safety_rules", []), ensure_ascii=False))
     feedback = prepared_recovery_request.get("recovery_feedback")
     if feedback:
         prompt_input["recovery_feedback"] = feedback
@@ -5146,7 +5129,7 @@ def _write_per_turn_artifact(
                 "context_selection", "context_requests", "served_context", "context_errors", "observations",
                 "validation_stages", "validation_context_exchanges", "nominal_continuation_evidence",
                 "transition_validation", "next_transition", "validation_contract_version",
-                "outline_evidence_policy_version", "llm_called", "code_grounding",
+                "outline_evidence_policy_version", "llm_called",
             ) if key in turn_entry},
         })
         stamped_paths = {
@@ -5815,6 +5798,7 @@ async def execute_multi_turn_recovery(
 
     Iterates through phases (grounding → outline → primitive_generation → finalize),
     calling the LLM each turn and dispatching to the appropriate phase handler.
+    A request grounded during preparation starts at the outline phase.
 
     Pass an existing *session_state* to resume from a previous pause (e.g.
     ``paused_after_outline_turn``).  When omitted a fresh seed is built.
@@ -5959,13 +5943,7 @@ async def execute_multi_turn_recovery(
             )
         else:
             modeled_continuation = None
-            if current_phase == "grounding" and prepared_recovery_request.get("code_grounding"):
-                modeled_continuation = await _code_grounding_turn(
-                    session_state=session_state,
-                    prepared_recovery_request=prepared_recovery_request,
-                    planner=planner,
-                )
-            elif current_phase == "outline" and session_state.get("validation_contract_version") != 2:
+            if current_phase == "outline" and session_state.get("validation_contract_version") != 2:
                 modeled_continuation = await _try_handle_modeled_continuation(
                     session_state=session_state,
                     prepared_recovery_request=prepared_recovery_request,

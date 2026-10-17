@@ -17,6 +17,19 @@ from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety 
 from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
 
 ROOT = Path(__file__).resolve().parents[1]
+SAFETY = 'cais_spade_llm/specification/safety/'
+PLANT_SAFETY_FILES = [SAFETY + name for name in (
+    'safety_assembly_board-v1_mutex.txt', 'safety_M1_mutex.txt', 'safety_M2_mutex.txt',
+    'safety_assembly_board-v1_trim_before_entry.txt',
+    'safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt',
+    'safety_assembly_board-v1_KET4_Square_4mm_before_RGOCG4-50_Round_4mm.txt',
+    'safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt')]
+SCENARIOS = ['Part slippage', 'Conveyor breakdown', 'ur5e-1 breakdown',
+             'Machining breakdown during part processing']
+
+
+def _spec(name):
+    return json.loads((ROOT / SAFETY / name).read_text())
 
 
 def _document(identifier):
@@ -64,16 +77,22 @@ def _check(projection, identifier='SAFE_M1_front_access_ur5e-1_interlock', **kwa
         requirement_scopes=doc['requirement_scopes'], prospective_activation=True, **kwargs)
 
 
-@pytest.mark.parametrize('scenario', ['ur5e-1 breakdown'])
+@pytest.mark.parametrize('scenario', SCENARIOS)
 def test_case_defaults_compile_given_rules_without_model_calls(scenario):
     selected = default_safety_files(scenario)
-    doc = json.loads((ROOT / selected[0]).read_text())
-    rules, dfas = compile_predefined_safety(doc)
-    assert len(rules) == len(dfas) == 1
-    assert rules[0]['id'] == 'SAFE_M1_mutex'
-    assert set(dfas) == {'SAFE_M1_mutex'}
+    assert selected == PLANT_SAFETY_FILES
+    identifiers = []
+    for path in selected:
+        rules, dfas = compile_predefined_safety(json.loads((ROOT / path).read_text()))
+        assert len(rules) == len(dfas) == 1
+        identifiers.append(rules[0]['id'])
+    assert identifiers == [
+        'SAFE_shared_area_mutex', 'SAFE_M1_mutex', 'SAFE_M2_mutex',
+        'SAFE_trim_before_assembly_board-v1_entry',
+        'SAFE_gear_small_before_KET4_Square_4mm', 'SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm',
+        'SAFE_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing']
     selected.clear()
-    assert default_safety_files(scenario) == ['cais_spade_llm/specification/safety/safety_M1_mutex.txt']
+    assert default_safety_files(scenario) == PLANT_SAFETY_FILES
 
 
 def test_previous_machine_safety_file_remains_available():
@@ -101,7 +120,7 @@ def test_m1_mutex_counts_failed_robot_across_all_access_areas(first_region, seco
         'geometry': {'frame': 'world', 'parts': {},
                      'resources': {rid: {'stationary_only': rid == 'M1'} for rid in resources},
                      'regions': {region: {'bounds': [[0, 1]] * 3} for region in regions}}}
-    doc = json.loads((ROOT / default_safety_files('ur5e-1 breakdown')[0]).read_text())
+    doc = _spec('safety_M1_mutex.txt')
     result = validate_outline_evidence_safety(projection=projection, catalog=doc['catalog'],
         requirement_scopes=doc['requirement_scopes'], prospective_activation=True)
     assert result['validation_status'] == expected
@@ -119,8 +138,12 @@ def test_previous_conveyor_safety_file_remains_available():
     assert 'SAFE_KMR_docking' in dfas
 
 
+_CONVEYOR_RULES = ('safety_assembly_board-v1_mutex.txt',
+                   'safety_assembly_board-v1_KET4_Square_4mm_before_gear_small.txt')
+
+
 def _conveyor_document(index):
-    return json.loads((ROOT / default_safety_files('Conveyor breakdown')[index]).read_text())
+    return _spec(_CONVEYOR_RULES[index])
 
 
 def _conveyor_assembly_projection(trace):
@@ -164,13 +187,70 @@ def _conveyor_check(projection, index=None, **kwargs):
         prospective_activation=True, **kwargs)
 
 
-def test_conveyor_defaults_select_exact_independent_mutex_and_ordering_specs():
+def _trim_entry_projection(trace):
+    """Observe every trimmed peg; each step gives the recorded trims and the parts on the board."""
+    scopes = _spec('safety_assembly_board-v1_trim_before_entry.txt')['requirement_scopes']
+    parts = [scope['physical_ap_bindings']['ap001']['part'] for scope in scopes]
+    observations = []
+    for time, (trims, entered) in enumerate(trace):
+        observations.append({
+            'time': time, 'time_exact': str(time), 'phase': 'at', 'frame': 'world',
+            'resources': {'ur5e-3': {'held_part': None}},
+            'parts': {part: {
+                'processCompleted': [{'process': 'trim', 'result': trims[part]}] if part in trims else [],
+                'processCompleted_complete': True,
+                'processCompleted_evidence': {'complete': True, 'source_kind': 'recorded',
+                                              'checkpoint': 'capture'},
+            } for part in parts},
+            'region_occupancy': {'assembly_board-v1': {'ur5e-3': False}},
+            'part_region_occupancy': {'assembly_board-v1': {part: part in entered for part in parts}},
+        })
+    return {'status': 'projected', 'interval_complete': True, 'observations': observations,
+            'geometry': {'frame': 'world', 'resources': {'ur5e-3': {}},
+                         'regions': {'assembly_board-v1': {'bounds': [[0, 1]] * 3}},
+                         'parts': {part: {} for part in parts}}}
+
+
+def test_trim_before_entry_covers_every_trimmed_peg_and_no_gear():
+    doc = _spec('safety_assembly_board-v1_trim_before_entry.txt')
+    rule, = doc['catalog']['specifications']
+    assert rule['formula'] == '(!ap001 U (ap002 & !ap001)) | G !ap001'
+    bindings = [scope['physical_ap_bindings'] for scope in doc['requirement_scopes']]
+    assert [(row['ap001']['part'], row['ap002']['result']) for row in bindings] == [
+        ('KET4_Square_4mm', 'square'), ('KET8_Square_8mm', 'square'),
+        ('KET12_Square_12mm', 'square'), ('KET16_Square_16mm', 'square'),
+        ('RGOCG4-50_Round_4mm', 'circle'), ('RGOCG8-50_8mm', 'circle'),
+        ('RGOCG12-50_12mm', 'circle'), ('RGOCG16-50_16mm', 'circle')]
+    assert all(row['ap001']['part'] == row['ap002']['part'] and row['ap002']['process'] == 'trim'
+               and row['ap001']['region'] == 'assembly_board-v1' for row in bindings)
+
+
+KET4, RGOCG4 = 'KET4_Square_4mm', 'RGOCG4-50_Round_4mm'
+
+
+@pytest.mark.parametrize('trace,expected', [
+    ([({}, set())], 'FEASIBLE'),
+    ([({}, set()), ({KET4: 'square'}, set()), ({KET4: 'square'}, {KET4})], 'FEASIBLE'),
+    ([({}, set()), ({KET4: 'square'}, {KET4})], 'INFEASIBLE'),
+    ([({}, set()), ({}, {KET4})], 'INFEASIBLE'),
+    ([({}, set()), ({KET4: 'square'}, set()), ({KET4: 'square'}, {RGOCG4})], 'INFEASIBLE'),
+    ([({}, set()), ({RGOCG4: 'square'}, set()), ({RGOCG4: 'square'}, {RGOCG4})], 'INFEASIBLE'),
+    ([({}, set()), ({RGOCG4: 'circle'}, set()), ({RGOCG4: 'circle'}, {RGOCG4})], 'FEASIBLE'),
+])
+def test_trim_before_entry_checks_each_peg_against_its_own_trim(trace, expected):
+    doc = _spec('safety_assembly_board-v1_trim_before_entry.txt')
+    result = validate_outline_evidence_safety(
+        projection=_trim_entry_projection(trace), catalog=doc['catalog'],
+        requirement_scopes=doc['requirement_scopes'], prospective_activation=True)
+    assert result['validation_status'] == expected
+
+
+def test_conveyor_mutex_and_retired_ordering_specs_compile_independently():
     from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
 
-    paths = default_safety_files('Conveyor breakdown')
-    assert [Path(path).name for path in paths] == [
-        'safety_assembly_board-v1_mutex.txt',
-        'safety_assembly_board-v1_KET4_Square_4mm_before_gear_small.txt']
+    paths = [SAFETY + name for name in _CONVEYOR_RULES]
+    defaults = default_safety_files('Conveyor breakdown')
+    assert paths[0] in defaults and paths[1] not in defaults
     for index, identifier in enumerate(['SAFE_shared_area_mutex', 'SAFE_KET4_Square_4mm_before_gear_small']):
         rules, dfas = compile_predefined_safety(_conveyor_document(index))
         assert len(rules) == len(dfas) == 1
@@ -242,9 +322,11 @@ def test_conveyor_checks_ordering_and_mutex_together(trace, expected):
     assert _conveyor_check(_conveyor_assembly_projection(trace))['validation_status'] == expected
 
 
+_MACHINE_RULES = ('safety_M2_mutex.txt', 'safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt')
+
+
 def _machine_document(index):
-    paths = default_safety_files('Machining breakdown during part processing')
-    return json.loads((ROOT / paths[index]).read_text())
+    return _spec(_MACHINE_RULES[index])
 
 
 def _machine_check(projection, index=0, **kwargs):
@@ -287,13 +369,11 @@ def _processing_observations(completions):
     return projection
 
 
-def test_machine_defaults_are_two_independent_compilable_specs_without_recovery_instructions():
+def test_machine_specs_are_independent_compilable_specs_without_recovery_instructions():
     from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
 
-    paths = default_safety_files('Machining breakdown during part processing')
-    assert [Path(path).name for path in paths] == [
-        'safety_M2_mutex.txt',
-        'safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt']
+    paths = [SAFETY + name for name in _MACHINE_RULES]
+    assert set(paths) <= set(default_safety_files('Machining breakdown during part processing'))
     for index in range(2):
         rules, dfas = compile_predefined_safety(_machine_document(index))
         assert len(rules) == len(dfas) == 1
@@ -426,10 +506,8 @@ def test_machine_mutex_owner_declarations_and_monitor_history_are_bound():
     assert _machine_check(projection)['validation_status'] == 'NEEDS_CONTEXT'
 
 
-def test_part_slippage_defaults_keep_exact_original_two_definitions():
-    assert default_safety_files('Part slippage') == [
-        'cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt',
-        'cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt']
+def test_part_slippage_defaults_use_the_plant_wide_set():
+    assert default_safety_files('Part slippage') == PLANT_SAFETY_FILES
     with pytest.raises(ValueError):
         default_safety_files('part slippage')
 

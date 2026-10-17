@@ -2149,6 +2149,48 @@ def test_stop_then_generate_creates_a_fresh_attempt(offline_example, monkeypatch
     bridge.stop_system.assert_not_called()
 
 
+def test_stage_stop_keeps_the_offline_outline_and_composes_again(offline_example, monkeypatch, scripted_generation):
+    from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
+
+    example, path, bridge = offline_example
+    original = path.read_bytes()
+    started = asyncio.Event()
+    stage_runner = PartSlippageRecovery._run_stage
+    async def pending(self, stage):
+        if stage == "outline":
+            return await stage_runner(self, stage)
+        started.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(PartSlippageRecovery, "_run_stage", pending)
+    async def run():
+        example.prepare_offline()
+        session = example._offline
+        await session._task
+        await example.action("generate_outline")
+        await session._task
+        outline = example.snapshot()["outline"]
+        assert outline
+        await example.action("generate_primitives")
+        await started.wait()
+        assert example.snapshot()["generating_stage"] == "primitive"
+        await example.action("stop_generation")
+        assert example.snapshot()["generating_stage"] == ""
+        await asyncio.gather(session._task, return_exceptions=True)
+        state = example.snapshot()
+        assert (state["status"], state["primitive_status"]) == ("outline_review", "stopped")
+        assert state["outline"] == outline
+        monkeypatch.setattr(PartSlippageRecovery, "_run_stage", stage_runner)
+        await example.action("generate_primitives")
+        await session._task
+        assert example._offline is session
+        assert session.snapshot()["status"] == "offline_completed"
+        assert scripted_generation == ["outline", "primitive"]
+    asyncio.run(run())
+    assert path.read_bytes() == original
+    bridge.stop_system.assert_not_called()
+
+
+
 @pytest.mark.parametrize("stop_during_drain", [False, True])
 def test_changed_capture_cancels_obsolete_preparation_and_rejects_late_results(
         offline_example, captured, monkeypatch, stop_during_drain):
@@ -3109,11 +3151,16 @@ def test_native_companion_distinguishes_boolean_and_integer_declarations(tmp_pat
         read_native_preview_model(source, observations)
 
 
+@pytest.mark.parametrize('schema', [1, 2])
 @pytest.mark.parametrize('unset', [False, True])
-def test_new_capture_native_archive_verifies_and_preserves_typed_source(tmp_path, monkeypatch, unset):
+def test_new_capture_native_archive_verifies_and_preserves_typed_source(tmp_path, monkeypatch, unset, schema):
     import hashlib
     from cais_spade_llm.recovery_framework import recovery_motion_preview
-    from cais_spade_llm.recovery_framework.recovery_observations import save_native_preview_model_from_capture
+    from cais_spade_llm.recovery_framework.capture_files import read_capture, write_capture
+    from cais_spade_llm.recovery_framework.recovery_observations import (
+        read_native_preview_model,
+        save_native_preview_model_from_capture,
+    )
 
     source = tmp_path / 'observations.json'
     record = {'run_id': 'new-capture', 'planning_scene_capture': {'scene_fingerprint': 'scene',
@@ -3124,7 +3171,11 @@ def test_new_capture_native_archive_verifies_and_preserves_typed_source(tmp_path
     unset_name = 'robot_description_kinematics.KMR_iiwa_arm.kinematics_solver_ik_links'
     if unset:
         record['planning_scene_capture']['native_model_parameters'][unset_name] = {'type': 0}
-    source.write_text(json.dumps(record))
+    if schema == 2:
+        # Raw facts and derived views are separate files; the archive binds to both.
+        write_capture(source, {**record, 'schema_version': 2, 'prepared_recovery_request': {'derived': True}})
+    else:
+        source.write_text(json.dumps(record))
     original = source.read_bytes()
 
     async def verify(path, *, expected_model_fingerprint, artifact_directory, cancel_event):
@@ -3147,6 +3198,7 @@ def test_new_capture_native_archive_verifies_and_preserves_typed_source(tmp_path
     assert (directory / 'fingerprint-goal.cdr').read_bytes() == b'exact goal'
     assert asyncio.run(save_native_preview_model_from_capture(source)) == result
     assert len(list(tmp_path.glob('native_model_capture_*'))) == 1
+    assert read_native_preview_model(source, read_capture(source)) == result
 
 
 def test_unset_native_description_cannot_supply_a_model():
@@ -3231,8 +3283,12 @@ def test_cell_capability_calculation_preserves_explicit_limits_and_source(resour
     if explicit:
         assert owner.static_capabilities['gripper_reach'] == capabilities['gripper_reach']
     else:
-        assert 'gripper_reach' not in owner.static_capabilities
-        assert 'gripper_reach' not in owner.get_recovery_snapshot()
+        from cais_spade_llm.recovery_framework.workflow_execution import _robot_configuration
+
+        # The inherited printer-cell reach is replaced by the reach computed from the robot kinematics.
+        computed = _robot_configuration(scene, robot)[2]['gripper_reach']
+        assert computed['source'] == 'computed from the robot kinematics for a top-down grasp of a loose part'
+        assert owner.static_capabilities['gripper_reach'] == computed
     assert calculation['recorded_static_capabilities'] == capabilities
     assert calculation['execution_authorized'] is False
     snapshot = owner.get_recovery_snapshot()

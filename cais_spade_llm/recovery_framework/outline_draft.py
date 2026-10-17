@@ -3,8 +3,10 @@ from __future__ import annotations
 """Generate and review unvalidated outlines from immutable saved observations."""
 
 import asyncio
+import importlib.util
 import json
 import logging
+import math
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -16,6 +18,7 @@ from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_context as context
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
     _slim_fault_event,
+    _slim_primitive_catalog_for_prompt,
 )
 from cais_spade_llm.recovery_framework.evaluation_capture import sha256_file, write_record
 from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryProduct, SavedRecoveryResource
@@ -33,6 +36,11 @@ _HIDDEN = context._PRIVATE_CONTEXT_FIELDS | {
 }
 _NOT_CHECKED = {name: "not_checked" for name in ("ra", "physical_evidence", "cca", "nominal_continuation")}
 DRAFTS = RECORDS / "outline_drafts"
+# Where equipment is and how large it is. Routes, docking poses, handling
+# assignments and transfer targets are left out so geometry gives no answer.
+_GEOMETRY_KEYS = ("world_pose", "size", "length", "width", "surface_height", "enclosure_dimensions_m", "stand_height_m")
+_MOBILE_KEYS = ("platform_overall_dimensions_m", "arm_mount_xyz", "arm_reach_m")
+_NAVIGATION_MAP = ROOT / "ros2/cais_lab_robotics/scripts/generate_recovery_framework_map.py"
 
 
 def _public(value: Any) -> Any:
@@ -43,13 +51,60 @@ def _public(value: Any) -> Any:
     return deepcopy(value)
 
 
+def _planar_pose(pose: list) -> list[float]:
+    x, y, _, qx, qy, qz, qw = pose
+    return [round(x, 4), round(y, 4), round(math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz)), 4)]
+
+
+def _navigation_floor() -> dict:
+    """Read the fixed floor map that mobile bases plan their routes around."""
+    if not _NAVIGATION_MAP.is_file():
+        return {}
+    spec = importlib.util.spec_from_file_location("recovery_framework_navigation_map", _NAVIGATION_MAP)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    extent = [module.ORIGIN_X_M, module.ORIGIN_X_M + module.WIDTH * module.RESOLUTION_M,
+              module.ORIGIN_Y_M, module.ORIGIN_Y_M + module.HEIGHT * module.RESOLUTION_M]
+    return {"floor_extent_xy": [round(value, 3) for value in extent],
+            "floor_obstacles_xy": {name: list(bounds) for name, bounds in module.OBSTACLE_BOUNDS.items()}}
+
+
+def scene_geometry(observations: dict) -> dict:
+    """Describe the captured cell layout the same way for every resource.
+
+    Args:
+        observations: A saved failure capture.
+
+    Returns:
+        Station, machine and robot-base geometry, each mobile base's current
+        planar pose and arm data, and the navigation floor map.
+    """
+    scene = (observations.get("inputs") or {}).get("scene") or {}
+    measured = (observations.get("physical_evidence") or {}).get("resources") or {}
+    stations = {name: {key: deepcopy(row[key]) for key in _GEOMETRY_KEYS if key in row}
+                for name, row in scene.items() if isinstance(row, dict) and "world_pose" in row}
+    stations.update({row["resource_id"]: {key: deepcopy(row[key]) for key in _GEOMETRY_KEYS if key in row}
+                     for row in scene.get("machines", []) if row.get("resource_id")})
+    mobile = {}
+    for name, row in scene.items():
+        if isinstance(row, dict) and "platform_overall_dimensions_m" in row:
+            mobile[name] = {key: deepcopy(row[key]) for key in _MOBILE_KEYS if key in row}
+            pose = (measured.get(name) or {}).get("base_pose")
+            if isinstance(pose, list) and len(pose) == 7:
+                mobile[name]["base_pose_xy_yaw"] = _planar_pose(pose)
+    return {"frame": "world", "stations": stations,
+            "robot_bases": {row["resource_id"]: deepcopy(row["base_xyz"]) for row in scene.get("robots", [])
+                            if row.get("resource_id") and row.get("base_xyz")},
+            "mobile_bases": mobile, **_navigation_floor()}
+
+
 def _inputs(observations: dict) -> tuple[dict, dict]:
     original = observations.get("prepared_recovery_request") or {}
     if not original.get("recovery_resources") or not original.get("llm_input"):
         raise ValueError("Saved observations need recovery_resources and llm_input for generation")
     prepared = {key: deepcopy(original[key]) for key in (
         "ra_jid", "P_id", "failure_anchor", "grounding_context", "part_tracker",
-        "marked_reentry_context", "tools_catalog", "requirement_nodes", "goal_state",
+        "marked_reentry_context", "tools_catalog", "requirement_nodes", "goal_state", "code_grounding",
     ) if key in original}
     prepared.update(offline_recovery=True, observation_jids=deepcopy(observations.get("jids", {})),
         source_observation_run_id=observations.get("run_id"),
@@ -93,6 +148,10 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
     prepared["diagnostic_reach"] = {jid: deepcopy(entry["static_capabilities"]["gripper_reach"])
         for jid, entry in original["recovery_resources"].items()
         if isinstance((entry.get("static_capabilities") or {}).get("gripper_reach"), dict)}
+    prepared["diagnostic_scene_geometry"] = scene_geometry(observations)
+    prepared["diagnostic_primitives"] = {
+        jid: _slim_primitive_catalog_for_prompt(entry.get("execution_primitive_catalog") or [])
+        for jid, entry in original["recovery_resources"].items() if entry.get("execution_primitive_catalog")}
     prepared["validation_contract_version"] = 2
     prepared["public_safety_context_version"] = 1
     prepared["recovery_session"] = {

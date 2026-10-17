@@ -31,6 +31,12 @@ _UR_JOINTS = (
 )
 
 
+# Gazebo workers bound their motion and processing in simulation time. This wall
+# limit only catches a worker that stops responding, so it must exceed those bounds
+# at the real-time factors of the full cell (about 0.07–0.1).
+_WORKER_WALL_LIMIT_SEC = 3900.
+
+
 class WorkflowResourceAgent(ResourceAgent):
     """Own a persistent Gazebo worker for one non-robot workflow resource."""
 
@@ -97,6 +103,40 @@ class WorkflowResourceAgent(ResourceAgent):
         """Cancel owned Gazebo execution before the agent is removed."""
         if self.workflow_worker is not None:
             await self.workflow_worker.cancel()
+
+
+def _top_down_reach_m(kinematics: dict, tcp_height_m: float) -> float:
+    """Return the farthest horizontal TCP reach of a straight-down grasp.
+
+    The farthest grasp keeps the elbow straight in the arm's vertical plane; the
+    wrist-2 offset then extends the reach radially and the wrist-1 offset sideways.
+
+    Args:
+        kinematics: UR DH lengths and the gripper TCP offset below tool0.
+        tcp_height_m: TCP height above the robot base.
+
+    Returns:
+        The reach in metres, or 0 when the height is out of the arm's range.
+    """
+    arm = kinematics["a2_m"] + kinematics["a3_m"]
+    rise = tcp_height_m + kinematics["d6_m"] + kinematics["tool_tcp_offset_m"] - kinematics["d1_m"]
+    if abs(rise) >= arm:
+        return 0.0
+    return math.hypot(math.sqrt(arm * arm - rise * rise) + kinematics["d5_m"], kinematics["d4_m"])
+
+
+def _computed_gripper_reach(kinematics: dict, base_xyz: list) -> dict:
+    """Declare the reach for picking a loose part, computed from the robot kinematics.
+
+    Reach shrinks with height, so the cylinder takes the smaller reach at the
+    ends of the configured loose-part height band.
+    """
+    low, high = kinematics["loose_part_tcp_height_band_m"]
+    radius = min(_top_down_reach_m(kinematics, low), _top_down_reach_m(kinematics, high))
+    return {"frame": "world", "origin_pose": dict(zip(("x", "y", "z"), map(float, base_xyz), strict=True)),
+            "max_xy_radius_m": round(radius, 3), "z_min_m": round(base_xyz[2] + low, 3),
+            "z_max_m": round(base_xyz[2] + high, 3), "tolerance_m": 0.01,
+            "source": "computed from the robot kinematics for a top-down grasp of a loose part"}
 
 
 def _robot_configuration(scene: dict, robot: dict) -> tuple[dict, dict, dict]:
@@ -167,6 +207,8 @@ def _robot_configuration(scene: dict, robot: dict) -> tuple[dict, dict, dict]:
     static.pop("gripper_reach", None)
     if "gripper_reach" in robot:
         static["gripper_reach"] = deepcopy(robot["gripper_reach"])
+    elif "kinematics" in base:
+        static["gripper_reach"] = _computed_gripper_reach(base["kinematics"], robot["base_xyz"])
     static["staging_areas"] = {
         machine["resource_id"] + " staging tray": {
             "anchor_pose": dict(zip(("x", "y", "z"), machine["staging_pose"][:3], strict=True))}
@@ -248,16 +290,16 @@ def create_environment_resource_agents(
             continue
         worker = None
         if rid == "KMR":
-            worker = GazeboWorker(label="KMR", timeout_sec=600)
+            worker = GazeboWorker(label="KMR", timeout_sec=_WORKER_WALL_LIMIT_SEC)
             resources.append(KMRResourceAgent(
-                jid, "none", cca_jid=cca_jid, tool_timeout_s=600, worker=worker,
+                jid, "none", cca_jid=cca_jid, tool_timeout_s=_WORKER_WALL_LIMIT_SEC, worker=worker,
             ))
             continue
         elif rid in {"M1", "M2", "Conveyor", "Buffer For Machined parts"}:
             worker = GazeboWorker(
                 module="cais_spade_llm.recovery_framework.workflow_gazebo",
                 label=rid,
-                timeout_sec=600,
+                timeout_sec=_WORKER_WALL_LIMIT_SEC,
             )
         from cais_spade_llm.resources.environment_recovery import environment_declared_capabilities
 
@@ -265,7 +307,7 @@ def create_environment_resource_agents(
                                                     'inputs': {'scene': scene}})
         resources.append(
             WorkflowResourceAgent(
-                jid, "none", name=rid, cca_jid=cca_jid, tool_timeout_s=600, worker=worker,
+                jid, "none", name=rid, cca_jid=cca_jid, tool_timeout_s=_WORKER_WALL_LIMIT_SEC, worker=worker,
                 static_capabilities=static,
             )
         )
@@ -509,6 +551,7 @@ def bind_environment_executors(runtime, resources: list[ResourceAgent]) -> None:
                 "move_to_resource",
                 "place_approach",
                 "place_release",
+                "move_to_location",
             }:
                 actor.bind_executor(
                     event_name,
@@ -751,6 +794,19 @@ def _validate_transport_completion(task: dict, evidence: dict) -> bool:
     )
 
 
+def _kmr_arrived(parameters: dict, observations: dict) -> bool:
+    """Require the measured base at the commanded coordinates with the arm stowed for travel."""
+    pose = observations.get("base_pose")
+    if (not isinstance(pose, list) or len(pose) != 3
+            or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in pose)):
+        return False
+    yaw_error = math.atan2(math.sin(pose[2] - parameters["yaw"]), math.cos(pose[2] - parameters["yaw"]))
+    located = ("observed_resource_location" not in parameters
+               or observations.get("resource_location") == parameters["observed_resource_location"])
+    return (math.dist(pose[:2], (parameters["x"], parameters["y"])) <= .005 and abs(yaw_error) <= .035
+            and observations.get("arm_parked") is True and located)
+
+
 def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = None) -> bool:
     """Require observed function effects and the pinned primitive step trace."""
     observations = evidence.get("observations", evidence)
@@ -762,6 +818,8 @@ def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = No
         if name == "move_to_resource" and observations.get("attached") is False:
             variant = ("empty_return" if task["parameters"].get("target_resource") == "Storage"
                        else "empty")
+        if name == "move_to_location" and observations.get("attached") is True:
+            variant = "carrying"
         expected = saved_robot_definition(scene, "KMR", name, variant=variant).program.steps
         records = observations.get("primitive_results")
         if (not isinstance(records, list)
@@ -776,6 +834,8 @@ def _validate_kmr_completion(task: dict, evidence: dict, scene: dict | None = No
                 and home.get("gripper_open") is True and observations.get("attached") is False
                 and observations.get("part_name") is None):
             return False
+    if task["event_name"] == "move_to_location" and not _kmr_arrived(task["parameters"], observations):
+        return False
     if task["event_name"] in {"pick_approach", "place_approach"}:
         if observations.get("approach_observed") is not True:
             return False

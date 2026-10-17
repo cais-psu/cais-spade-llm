@@ -29,6 +29,8 @@ _SAFETY_DIR = _ROOT / "cais_spade_llm/specification/safety"
 _STANDALONE_FILES = {
     "mutex": "safety_assembly_board-v1_mutex.txt",
     "precedence": "safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt",
+    "precedence_trim": "safety_assembly_board-v1_trim_before_entry.txt",
+    "precedence_KET4_RGOCG4": "safety_assembly_board-v1_KET4_Square_4mm_before_RGOCG4-50_Round_4mm.txt",
 }
 
 

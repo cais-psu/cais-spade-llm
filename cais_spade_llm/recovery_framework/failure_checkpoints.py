@@ -107,7 +107,8 @@ def checkpoint(context, configuration: dict) -> dict | None:
                 or machine.get("part_name") != part):
             return None
         evidence = {"task_id": task["task_id"], "part_name": part, "custodian": "ur5e-1",
-                    "source": "M1", "pickup_observations": deepcopy(record["observations"])}
+                    "source": "M1", "pickup_observations": deepcopy(record["observations"]),
+                    "pickups": {"ur5e-1": deepcopy(record)}}
         other = configuration.get("additional_condition")
         if other is not None:
             peer = acknowledged_pickup(context, other["resource_id"], other["part_name"])

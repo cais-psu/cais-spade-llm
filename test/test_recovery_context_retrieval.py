@@ -398,11 +398,12 @@ def test_recorded_processing_summary_moves_to_retrieved_record_without_repetitio
 
 @pytest.mark.parametrize("phase", ["grounding", "outline"])
 def test_selected_safety_requirements_appear_once_without_loading_validation(context, phase):
-    from cais_spade_llm.recovery_framework.part_slippage_example import _PART_SLIPPAGE_SAFETY_FILES
     from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
 
     prepared, session, jids, _ = context
-    rules = _prompt_safety_rules(list(_PART_SLIPPAGE_SAFETY_FILES))
+    rules = _prompt_safety_rules([
+        "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt",
+        "cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt"])
     prepared["prompt_safety_rules"] = deepcopy(rules)
     prepared["llm_input"]["loaded_safety_rules"] = []
     session["current_phase"] = phase
@@ -992,6 +993,18 @@ def test_partial_task_contract_does_not_invent_missing_declarations(context):
     assert value["omitted_sections"] == ["guards", "primitive_support", "updates"]
     assert value["guards"] == value["updates"] == {}
     assert "primitive_support" not in value
+
+
+def test_diagnostic_refs_stay_unsupported_outside_diagnostic_mode(context):
+    prepared, session, jids, names = context
+    prepared["diagnostic_reach"] = {jids[0]: {"max_xy_radius_m": 1.0}}
+    for ref in (f"/resources/{jids[0]}/gripper_reach", f"/resources/{jids[0]}/primitives",
+                f"/parts/{names[0]}/pose_relations", "/geometry"):
+        with pytest.raises(ValueError):
+            multi_turn_context.resolve_outline_context(prepared, session, ref)
+    session.update(current_phase="outline", outline_mode="incremental_candidates_validated")
+    prompt = multi_turn._build_phase_prompt(prepared, session)[1]
+    assert "Diagnostic refs:" not in prompt and "Diagnostic Mode" not in prompt
 
 
 def test_retrieval_prompt_states_request_limits_and_separates_declared_contracts(context):

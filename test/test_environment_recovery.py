@@ -2174,3 +2174,26 @@ def test_conveyor_delivery_keeps_pending_custody_and_binds_projected_acknowledge
     changed['owner_safety_evidence']['resource_evidence']['Conveyor']['handoffs']['records'][0]['acknowledgement']['owner_effect_fingerprint'] = 'incorrect'
     with pytest.raises(ValueError, match='exact validated owner effect'):
         case_ap_value('handoff_acknowledged', 'Conveyor', changed)
+
+
+@pytest.mark.parametrize("pose,receiver", [
+    ([-4.13, 1.82, 1.06], ("M1", "M1")),
+    ([-4.6, 1.1, 1.0], ("M1", "M1 staging tray")),
+    ([-6.25, 1.88, 0.645], ("Storage", "Storage")),
+    ([-6.25, 1.98, 0.645], None),
+    ([-0.56, 0.5, 1.017], ("Buffer For Machined parts", "zone_2_part")),
+    ([-0.32, 0.45, 1.02], ("Buffer For Machined parts", "zone_4_part")),
+    ([-3.0, 0.5, 1.015], ("Conveyor", "after loading_position_1")),
+    ([-2.05, 0.52, 1.016], ("Conveyor", "loading_position_2")),
+    ([-4.6, 0.5, 1.015], None),
+    ([-3.0, 0.5, 1.2], None),
+    ([0.25, 0.45, 1.025], None),
+])
+def test_released_part_receiver_comes_from_its_settled_position(pose, receiver):
+    from cais_spade_llm.resources.environment_recovery import observed_receiver
+    from cais_spade_llm.resources.nominal_des import build_nominal_resource_des_models
+
+    scene = read_json(SCENE_PATH)
+    conveyor = build_nominal_resource_des_models(scene)["Conveyor"]
+    assert observed_receiver(scene, conveyor, "KET4_Square_4mm", pose) == receiver
+    assert observed_receiver(scene, None, "KET4_Square_4mm", [-3.0, 0.5, 1.015]) is None

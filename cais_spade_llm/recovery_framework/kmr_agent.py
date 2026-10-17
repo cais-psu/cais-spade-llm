@@ -27,11 +27,14 @@ class KMRResourceAgent(ResourceAgent):
 
     def __init__(self, jid: str, password: str, *, worker: GazeboWorker | None = None, **kwargs) -> None:
         super().__init__(jid, password, name='KMR', function_names=[], **kwargs)
-        self.worker = worker or GazeboWorker()
+        # Long base drives are bounded in simulation time by the worker itself; this
+        # outer limit must stay above that bound's wall-clock backstop.
+        self.worker = worker or GazeboWorker(timeout_sec=3900.)
         self.workflow_worker = self.worker
         self.kmr_primitives = KMRPrimitives(self)
         self._primitive_state = {}
         self._primitive_evidence = {}
+        self._released_part = None
         self.current_state = 'idle'
         for name in ('pick_approach', 'pick_part', 'move_to_resource',
                      'place_approach', 'place_release', 'move_to_location'):
@@ -303,6 +306,9 @@ class KMRResourceAgent(ResourceAgent):
             elif primitive in {'detach_part', 'release_part'}:
                 self._primitive_state['held_part'] = None
                 self._primitive_state['gripper_state'] = 'open'
+                if isinstance(output, dict) and output.get('part_pose'):
+                    self._released_part = {'part_name': output.get('part_name'), 'pose': deepcopy(output['part_pose']),
+                                           'settled': output.get('settled') is True}
             if primitive == 'move_base' and isinstance(output, dict):
                 if output.get('base_pose') is not None:
                     self._primitive_state['base_pose'] = deepcopy(output['base_pose'])

@@ -9,6 +9,7 @@ from itertools import combinations_with_replacement, product
 
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
 from cais_spade_llm.resources.environment_models import feasibility, project_transition
+from cais_spade_llm.resources.nominal_conveyor import conveyor_location_at
 from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
 
 
@@ -183,6 +184,63 @@ def storage_placement_conditions(model: dict, scene: dict, valuation: dict, part
         'scene_fingerprint': recovery_validation_fingerprint(storage),
         'valuation_fingerprint': recovery_validation_fingerprint(valuation),
         'physical_access_validated': False, 'execution_authorized': False}
+
+
+# Settled positions vary by a few millimetres around a declared area's edge.
+_REST_MARGIN_M = .005
+
+
+def observed_receiver(scene: dict, conveyor_model: dict | None, part: str, pose: list) -> tuple[str, str] | None:
+    """Name the declared receiving area a released part rests in, from its settled position.
+
+    Buffer zones, machine workholding and staging trays, and Conveyor loading
+    areas come from the declared safety regions; Storage is the part's own
+    recorded slot; the rest of the belt, which runs along world x, is ordered
+    by the Conveyor's own loading and output-nest positions.
+
+    Args:
+        scene: The recorded scene configuration.
+        conveyor_model: The Conveyor descriptor, or None when the cell has none.
+        part: The released part.
+        pose: The settled world position of the part, x, y, z first.
+
+    Returns:
+        ``(resource_id, area)``: a Buffer zone field such as ``zone_2_part``, a
+        destination token such as ``M1`` or ``M1 staging tray``, ``Storage``, or
+        a Conveyor location. None for a surface no receiver declares.
+    """
+    regions = scene.get('safety_preparation', {}).get('regions', {})
+    machines = {row['resource_id'] for row in scene.get('machines', [])}
+
+    def inside(bounds):
+        return all(low - _REST_MARGIN_M <= value <= high + _REST_MARGIN_M
+                   for value, (low, high) in zip(pose[:3], bounds, strict=True))
+
+    for name, row in sorted(regions.items()):
+        owner, _, area = name.partition('.')
+        if not inside(row['bounds']):
+            continue
+        if owner == 'Buffer For Machined parts' and area.startswith('zone_'):
+            return owner, f'{area}_part'
+        if owner in machines and area == 'workholding':
+            return owner, owner
+        if owner in machines and area == 'staging':
+            return owner, f'{owner} staging tray'
+    slot = scene.get('Storage', {}).get('slots', {}).get(part)
+    if isinstance(slot, list) and math.dist(pose[:3], slot[:3]) <= 3 * _REST_MARGIN_M:
+        return 'Storage', 'Storage'
+    conveyor = scene.get('Conveyor')
+    if conveyor is None or conveyor_model is None:
+        return None
+    x0, y0 = conveyor['world_pose'][:2]
+    surface = conveyor['surface_height']
+    if not (abs(pose[0] - x0) <= conveyor['length'] / 2 and abs(pose[1] - y0) <= conveyor['width'] / 2
+            and surface - _REST_MARGIN_M <= pose[2] <= surface + .05):
+        return None
+    loading = regions.get('Conveyor.loading_position_1', {}).get('bounds')
+    half_width = (loading[0][1] - loading[0][0]) / 2 if loading else .15
+    location = conveyor_location_at(conveyor_model, pose[0], half_width)
+    return ('Conveyor', location) if location else None
 
 
 def _binding_values(name: str, declaration: dict, model: dict, evidence: dict) -> list | None:

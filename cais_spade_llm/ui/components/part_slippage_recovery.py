@@ -9,6 +9,7 @@ from pathlib import Path
 from nicegui import ui
 
 from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.recovery_framework.capture_files import BELIEFS_NAME
 from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
 from cais_spade_llm.ui.components.recovery_turns import RecoveryTurns, render_composition_programs
 from cais_spade_llm.ui.evidence import BackgroundSection
@@ -50,7 +51,6 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
     available_safety = []
     check_fields = {}
     loading_saved_result = False
-    worked_available = False
     selection_revision = state.get("selection_revision", 0)
     saved_options = {path: f"{scenario} · {Path(path).parent.name} · Verified capture"
                      for scenario, path in default_observations.items()}
@@ -96,8 +96,11 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
             controls["reset"] = ui.button("Reset example", icon="restart_alt", on_click=lambda: act("reset")).props("flat")
         capture_status = ui.label().classes("text-sm text-slate-500")
         capture_path = ""
-        download_observations = ui.button("Download observations", icon="download",
-            on_click=lambda: ui.download.file(capture_path)).props("flat dense")
+        with ui.row().classes("items-center gap-2"):
+            download_observations = ui.button("Download observations", icon="download",
+                on_click=lambda: ui.download.file(capture_path)).props("flat dense")
+            download_beliefs = ui.button("Download beliefs", icon="download",
+                on_click=lambda: ui.download.file(Path(capture_path).with_name(BELIEFS_NAME))).props("flat dense")
         provenance_status = ui.label().classes("text-sm text-slate-500")
         provenance_path = ""
         download_provenance = ui.button("Download attempt provenance", icon="download",
@@ -116,40 +119,6 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         for field, label in zip(CHECK_FIELDS, ("RA feasibility validation", "Physical evidence", "CCA safety validation")):
             check_fields[field] = ui.checkbox(label, value=choices[field])
         ui.label("Generate starts a fresh outline with these checks. Previous attempts keep their recorded settings. An enabled check pauses when required evidence is missing.").classes("text-sm text-slate-500")
-
-    with ui.card().classes("w-full"):
-        ui.label("worked — Part slippage").classes("text-lg font-semibold")
-        worked_status = ui.label("Reading the preserved version.").classes("text-sm text-slate-500")
-        worked_content = ui.column().classes("w-full")
-
-    def show_worked(worked: dict) -> None:
-        nonlocal worked_available
-        worked_content.clear()
-        if not isinstance(worked, dict) or not worked:
-            worked_status.text = "No worked archive is available."
-            return
-        worked_available = True
-        worked_status.text = (f"Five outline events · 21 primitives · Outline safety: {worked['outline_safety_status']} · RA: {worked['composition_feasibility']} · "
-                              f"CCA composition: {worked['cca_composition_status']} · Execution authorized: false")
-        with worked_content:
-            ui.label(f"Outline: {worked['outline_run_id']} · Composition: {worked['composition_run_id']}").classes("text-xs text-slate-500")
-            ui.label(f"Code snapshot: {worked['snapshot_at']} · {worked['branch']} · {worked['commit'][:12]}").classes("text-xs text-slate-500")
-            with ui.expansion("Preserved recovery outline").classes("w-full"):
-                ui.table(columns=[{"name": key, "label": label, "field": key} for key, label in (
-                    ("outline_id", "Event"), ("event_name", "Description"), ("resource_jid", "Resource"), ("part_name", "Part"))],
-                    rows=[{key: row.get(key) for key in ("outline_id", "event_name", "resource_jid", "part_name")}
-                          for row in worked["outline"]], row_key="outline_id").classes("w-full").props("wrap-cells")
-            with ui.expansion("Preserved primitive composition").classes("w-full"):
-                render_composition_programs(worked["primitives"])
-            ui.button("Download worked version", icon="download", on_click=lambda: ui.download.file(worked["archive_path"])).props("outline")
-        update()
-
-    worked_reader = BackgroundSection()
-    read_worked = getattr(bridge, "get_worked_recovery_version", None)
-    if callable(read_worked):
-        worked_reader.load(read_worked, show_worked)
-    else:
-        show_worked({})
 
     def options_changed() -> None:
         if updating:
@@ -205,6 +174,10 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                 controls[generate_action] = ui.button("Generate", on_click=lambda action=generate_action: act(action)).props("outline")
                 if key == "outline":
                     controls["continue_outline"] = ui.button("Continue", on_click=lambda: act("continue_outline"))
+                stop_action = "stop_outline" if key == "outline" else "stop_primitives"
+                controls[stop_action] = ui.button("Stop", icon="stop", on_click=lambda: act("stop_generation")).props(
+                    "outline color=negative")
+                controls[stop_action].tooltip("Stops this generation after the current LLM call. Gazebo keeps running.")
             if key == "outline":
                 controls["prepare"] = ui.button("Retry input preparation", on_click=lambda: act("prepare")).props("outline")
                 controls["prepare_gazebo_evidence"] = ui.button(
@@ -288,8 +261,10 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         download_provenance.set_visibility(bool(provenance_path))
         available = {
             "start": status == "idle", "stop": status not in {"idle", "stopped", "resetting", "completed"},
+            "stop_outline": current.get("generating_stage") == "outline",
+            "stop_primitives": current.get("generating_stage") == "primitive",
             "load_offline": status in {"idle", "outline_ready", "stopped", "blocked"} and
-                bool(current.get("selected_observation_path")) and worked_available and current.get("scenario") == "Part slippage",
+                bool(current.get("selected_observation_path")) and current.get("scenario") == "Part slippage",
             "prepare": status == "blocked" and bool(current.get("observation_path")),
             "prepare_gazebo_evidence": bool(current.get("can_prepare_gazebo_evidence")),
             "use_new_observations": bool(current.get("new_observation_path")),
@@ -308,11 +283,14 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                          "test_in_gazebo", "execute", "prepare_gazebo_evidence", "use_new_observations", "prepare"):
                 available[name] = False
         for key, button in controls.items():
-            button.set_enabled(not loading_saved_result and available[key] and (key == "stop" or not current.get("busy")))
-        controls["generate_outline"].set_visibility(offline or current["outline_mode"] == "manual")
+            button.set_enabled(not loading_saved_result and available[key]
+                               and (key in {"stop", "stop_outline", "stop_primitives"} or not current.get("busy")))
+        controls["generate_outline"].set_visibility(offline or current["outline_mode"] == "manual"
+                                                    or current.get("outline_status") == "stopped")
         controls["continue_outline"].set_visibility(not offline and current["outline_mode"] == "manual")
         stages["outline"]["feedback"].set_visibility(not offline)
-        controls["generate_primitives"].set_visibility(offline or current["primitive_mode"] == "manual")
+        controls["generate_primitives"].set_visibility(offline or current["primitive_mode"] == "manual"
+                                                       or current.get("primitive_status") == "stopped")
         controls["start"].set_visibility(not offline)
         controls["load_offline"].set_visibility(offline and available["load_offline"])
         controls["test_in_gazebo"].set_visibility(offline)
@@ -391,6 +369,8 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                                   f"{status_text} · Source run: {observed.get('run_id') or 'not recorded'} · "
                                    f"Capture time: {observed.get('captured_at') or 'not recorded'}")
             download_observations.set_visibility(bool(capture_path))
+            download_beliefs.set_visibility(
+                bool(capture_path) and Path(capture_path).with_name(BELIEFS_NAME).is_file())
         for key, stage in stages.items():
             if draft and key == "outline":
                 stage["status"].text = draft["message"]

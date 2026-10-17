@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-    multi_turn, multi_turn_diagnostic, multi_turn_validated_event,
+    multi_turn, multi_turn_context, multi_turn_diagnostic, multi_turn_validated_event,
 )
 from cais_spade_llm.recovery_framework import outline_draft
 
@@ -176,6 +176,45 @@ def test_repeated_candidates_stop_without_mutating_prefix(captured):
     assert session["accepted_outline_prefix"] == prefix
 
 
+def test_explicit_event_params_are_kept_and_only_exact_repeats_are_excluded(captured):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
+        _accepted_transition_prefix_for_prompt,
+    )
+
+    prepared, _ = outline_draft._inputs(captured)
+    prepared["recovery_resources"]["arm"]["recovery_des_model"]["events"] = [{"event_name": "move_to_location",
+        "parameter_bindings": {name: {"required": True, "type": "number"} for name in ("x", "y", "yaw")}}]
+    session = multi_turn.build_multi_turn_session_seed(prepared)
+    drive = {**event("drive", "arm", None, resource_state="idle"), "params": {"x": -1.2, "y": 1.15, "yaw": -1.5708}}
+    validated = {**session, "outline_diagnostic_bypass": False}
+    _, findings = multi_turn._derive_candidate_outline_task(
+        candidate_task=drive, session_state=validated, prepared_recovery_request=prepared)
+    assert "only when outline validation is bypassed" in findings[0]["reason"]
+    task, findings = multi_turn._derive_candidate_outline_task(
+        candidate_task=drive, session_state=session, prepared_recovery_request=prepared)
+    assert findings == [] and task["params"] == drive["params"]
+    assert multi_turn._finite_json_object({"count": 10 ** 400})
+    for bad in ({"x": float("nan")}, [1.0, 2.0], {"pose": {"x": float("inf")}}):
+        _, findings = multi_turn._derive_candidate_outline_task(
+            candidate_task={**drive, "params": bad}, session_state=session, prepared_recovery_request=prepared)
+        assert findings and findings[0]["evidence"]["field"] == "params"
+
+    def propose(row):
+        return asyncio.run(multi_turn_validated_event.handle_validated_candidates(
+            session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
+            response={"thought": "Explore a pose.", "candidate_events": [row]}))[0]
+
+    # Arguments the resource does not declare are not exploration.
+    assert propose({**drive, "outline_id": "undeclared", "params": {"attempt": 2}}) == "need_revision"
+    # The modeled state is unchanged; the chosen pose is the progress, and the same pose twice is a repeat.
+    assert propose(drive) != "need_revision"
+    assert propose({**drive, "outline_id": "again"}) == "need_revision"
+    assert propose({**drive, "outline_id": "elsewhere", "params": {"x": -1.0, "y": 1.15, "yaw": -1.5708}}) != "need_revision"
+    assert [row["params"] for row in session["accepted_outline_prefix"]] == [
+        {"x": -1.2, "y": 1.15, "yaw": -1.5708}, {"x": -1.0, "y": 1.15, "yaw": -1.5708}]
+    assert _accepted_transition_prefix_for_prompt(session["accepted_outline_prefix"])[0]["params"] == drive["params"]
+
+
 def _arm(jid, state, location, held, pose):
     variables = {name: {"scope": scope, "type": kind} for name, scope, kind in (
         ("resource_state", "resource", "string"), ("resource_location", "resource", "string"),
@@ -303,14 +342,88 @@ def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shar
     provider = AsyncMock(side_effect=[{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},
                                       RuntimeError("stop after the first outline prompt")])
     monkeypatch.setattr(outline_draft.SavedRecoveryProduct, "ask_llm_structured", provider)
-    asyncio.run(outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").generate())
+    draft = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts")
+    asyncio.run(draft.generate())
     prompt = provider.call_args_list[1].kwargs.get("prompt") or provider.call_args_list[1].args[0]
     assert "Prefer approximately" not in prompt
-    assert '"cell": [[-0.25, 0.25], [-0.25, 0.25], [1.0, 1.4]]' in prompt
-    reach = json.loads(prompt.split("Declared gripper_reach: ", 1)[1].split("}}. ", 1)[0] + "}}")
-    assert set(reach) == {"arm_a", "arm_b"}
+    # The handoff obligation comes first; bulky declarations are listed by ref, not inlined.
+    assert (prompt.index("Fault Event") < prompt.index("Recovery Goals") < prompt.index("Resource Capabilities")
+            < prompt.index("Diagnostic Mode") < prompt.index("Context retrieval"))
+    assert prompt.count("Recovery Goals") == 1
+    assert '"entity": "gear", "entity_kind": "part", "expected": "assembled", "field": "state", "holds": false' in prompt
     assert "Interrupted event: place_approach of arm_b did not complete." in prompt
-    assert '"entity": "gear", "field": "state", "expected": "assembled", "holds": false' in prompt
+    assert "[[-0.25, 0.25]" not in prompt and "max_xy_radius_m" not in prompt
+    assert "- /resources/<jid>/gripper_reach: " in prompt and "- /regions/<name>: " in prompt
+    assert "Resource validators check" not in prompt
+    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
+    for jid in ("arm_a", "arm_b"):
+        fact = multi_turn_context.resolve_outline_context(draft.prepared, session, f"/resources/{jid}/gripper_reach")
+        assert fact["value"]["max_xy_radius_m"] == 0.5 and "tolerance_m" in fact["interpretation"]
+    region = multi_turn_context.resolve_outline_context(draft.prepared, session, "/regions/cell")
+    assert region["value"]["bounds"] == [[-0.25, 0.25], [-0.25, 0.25], [1.0, 1.4]]
+
+
+def test_prompt_states_the_handoff_blocker_once_every_condition_holds(shared_cell, tmp_path):
+    prepared, session = _draft(shared_cell, tmp_path)
+    _apply(_cell_recovery()[1:], session, prepared)
+    session["current_phase"] = "outline"
+    prompt = multi_turn._build_phase_prompt(prepared, session)[1]
+    goals = prompt.split("Recovery Goals\n", 1)[1].split("\n\n", 1)[0]
+    assert '"holds": false' not in goals
+    assert ("Nominal handoff is blocked in the projected state: SAFE_cell_mutex: arm_a, arm_b would occupy cell"
+            in goals)
+
+
+def test_pose_relations_treat_every_resource_by_its_declarations():
+    regions = {"cell": {"bounds": [[-1, 1], [-1, 1], [0, 2]]}, "M1.workholding": {"bounds": [[4, 5], [4, 5], [0, 2]]}}
+    envelope = {"origin_pose": {"x": 0.0, "y": 0.0}, "max_xy_radius_m": 0.5, "z_min_m": 0.5, "z_max_m": 1.5,
+                "tolerance_m": 0.01}
+    locations = {"arm": {"cell"}, "station": {"M1"}, "mobile": {"Storage", "M1"}, "silent": set()}
+    station = multi_turn_diagnostic.pose_relations({"x": 4.5, "y": 4.5, "z": 1.0}, regions, locations, {"arm": envelope})
+    assert station == {"containing_regions": ["M1.workholding"],
+                       "by_declared_location": {"mobile": ["M1"], "station": ["M1"]},
+                       "by_declared_envelope": [], "not_evaluated": ["silent"]}
+    near = multi_turn_diagnostic.pose_relations({"x": 0.3, "y": 0.0, "z": 1.0}, regions, locations, {"arm": envelope})
+    assert near["containing_regions"] == ["cell"] and near["by_declared_location"] == {"arm": ["cell"]}
+    assert near["by_declared_envelope"] == ["arm"]
+    far = multi_turn_diagnostic.pose_relations({"x": 0.6, "y": 0.0, "z": 1.0}, regions, locations, {"arm": envelope})
+    assert far["by_declared_envelope"] == []
+
+
+def test_diagnostic_refs_serve_declarations_and_derived_pose_relations(shared_cell, tmp_path):
+    prepared, session = _draft(shared_cell, tmp_path)
+    resolve = multi_turn_context.resolve_outline_context
+    gear = resolve(prepared, session, "/parts/gear/pose_relations")
+    assert gear["source"] == "model_calculation" and gear["basis"]
+    assert gear["value"]["observed_pose"] == {"x": 0.9, "y": 0.1, "z": 1.0}
+    assert gear["value"]["containing_regions"] == [] and gear["value"]["by_declared_envelope"] == ["arm_a"]
+    arm_b = resolve(prepared, session, "/resources/arm_b/pose_relations")["value"]
+    assert arm_b["containing_regions"] == ["cell"]
+    assert arm_b["by_declared_location"] == {"arm_a": ["cell"], "arm_b": ["cell"]}
+    assert resolve(prepared, session, "/safety_rules/SAFE_cell_mutex")["value"]["id"] == "SAFE_cell_mutex"
+    assert "world frame" in resolve(prepared, session, "/geometry")["interpretation"]
+    listed = [ref for ref, _ in multi_turn_context.diagnostic_refs(prepared)]
+    assert "/resources/<jid>/primitives" not in listed
+    for ref in ("/resources/arm_a/primitives", "/geometry/frame/x", "/resources/unknown/gripper_reach"):
+        with pytest.raises(ValueError, match="NEEDS_CONTEXT"):
+            resolve(prepared, session, ref)
+
+
+def test_roster_shows_the_declared_locations_of_a_resource_without_reachability(shared_cell, tmp_path):
+    record, specs = shared_cell
+    mobile = _arm("mobile", "idle", "Storage", None, {"x": 5.0, "y": 5.0, "z": 0.7})
+    mobile["static_capabilities"] = {}
+    mobile["recovery_des_model"]["state_variables"]["resource_location"]["domain"] = [None, "Storage", "cell"]
+    record["prepared_recovery_request"]["recovery_resources"]["mobile"] = mobile
+    prepared, session = _draft((record, specs), tmp_path)
+    session["current_phase"] = "outline"
+    prompt = multi_turn._build_phase_prompt(prepared, session)[1]
+    roster = prompt.split("Resource Capabilities\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    row = next(json.loads(line) for line in roster if '"resource_jid": "mobile"' in line)
+    assert row["resource_location_domain"] == ["Storage", "cell"]
+    assert "field_sources" not in row and "evaluation_support" not in row
+    relations = multi_turn_context.resolve_outline_context(prepared, session, "/resources/arm_b/pose_relations")["value"]
+    assert relations["by_declared_location"]["mobile"] == ["cell"]
 
 
 def _candidate_limit(value):

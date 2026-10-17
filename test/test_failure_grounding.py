@@ -72,7 +72,7 @@ def test_cancelled_goal_and_missing_part_ground_the_interrupted_task():
     event = grounded["fault_event"]
     assert [row["rule"] for row in event["signals"]] == ["A1", "C1"]
     assert (event["failed_task_id"], event["failed_function_name"], event["failed_resource_jid"]) == ("t2", "place_approach", "jid-a")
-    assert grounded["parts"]["peg"] == {"state": "misplaced", "location": None, "observed_pose": [3.0, 3.0, 1.0, 0, 0, 0, 1]}
+    assert grounded["parts"]["peg"] == {"state": "misplaced", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
     assert grounded["resources"]["arm_a"]["des_consistent"] is False
     assert "failure_type" not in event
 
@@ -121,6 +121,18 @@ def test_schema_two_reads_device_fault_reports_instead_of_beliefs():
     assert unavailable["belief_updates"] == []
 
 
+def test_the_reporting_device_is_passed_through_without_a_derived_label():
+    report = {"arm_b": {"reported_state": "failed", "source": "gripper object detection"}}
+    grounded = grounding.ground_failure(capture_v2(fault_reports=report), settings=SETTINGS)
+    signal, = grounded["fault_event"]["signals"]
+    assert signal["values"] == {"resource_state": "failed", "reported_by": "gripper object detection"}
+    assert grounding.prompt_fault_event(grounded)["detected_signals"] == [
+        {"signal": "device_fault_report", "resource_id": "arm_b", "resource_state": "failed",
+         "reported_by": "gripper object detection"}]
+    assert grounding.fault_identity(grounded) == grounding.fault_identity(
+        grounding.ground_failure(capture_v2(fault_reports={"arm_b": {"reported_state": "failed"}}), settings=SETTINGS))
+
+
 def test_grounded_beliefs_update_the_live_context_and_the_recorded_copies():
     import threading
     from types import SimpleNamespace
@@ -142,10 +154,18 @@ def test_grounded_beliefs_update_the_live_context_and_the_recorded_copies():
     assert context.resources["arm_a"].valuation == record["resource_states"]["arm_a"] == {
         "resource_state": "failed", "held_part": None}
     assert context.part_tracker["peg"] == record["part_tracker"]["peg"] == {
-        "state": "misplaced", "location": None, "observed_pose": [3.0, 3.0, 1.0, 0, 0, 0, 1]}
+        "state": "misplaced", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
     assert (context.revision, context.resources["arm_a"].revision) == (5, 3)
     assert grounding.update_beliefs(context, record, grounding.ground_failure(capture_v2(), settings=SETTINGS)) == []
     assert context.revision == 5
+
+
+def test_a_missing_robot_observation_is_not_an_empty_gripper():
+    record = capture()
+    del record["physical_evidence"]["resources"]["arm_a"]
+    assert rules(record) == []
+    record["physical_evidence"]["resources"]["arm_a"] = {"attachment": {"model_name": None}}
+    assert rules(record) == ["C1"]
 
 
 def test_loose_part_outside_its_expected_region_is_a_discrepancy():
@@ -186,6 +206,10 @@ OFFICIAL = {
     "capture_8beafdb8a01e444894cfaf41d29921fd": (["A2", "B2"], ["M1"], "environment_21", "machine_part"),
     "capture_1b3f3d1d729a4701b94cff514c783130": (["B2"], ["Conveyor"], "d49d4e9e71354325b11328a1cee4a5ce_pending_2", "place_approach"),
     "capture_0a7fde8074b6426586b204204f2b3417": (["B2"], ["ur5e-1"], "01eeb91143e741c69242142690a5a4be_pending_0", "pick_grasp"),
+    "capture_77666affc1b9468ca157cf366d706dc8": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
+    "capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87": (["A2", "B2"], ["M1"], "environment_21", "machine_part"),
+    "capture_3aed616530294a4bbdf353000fc69596": (["B2"], ["Conveyor"], "5a764b64795247fe927cef6fc1ef4d72_pending_0", "place_approach"),
+    "capture_d1ca51654ff7423193d1bd13b146964d": (["B2"], ["ur5e-1"], "cb6f780418494c8589b00b8ddc759ec7_pending_1", "pick_grasp"),
 }
 
 
@@ -210,6 +234,8 @@ def test_grounding_replaces_stored_failure_summaries_in_a_prepared_request():
                               "part_facts": [{"part_name": "gear", "current_state": "stale", "current_location": "x"}],
                               "observed_runtime_state": {"resources": [{"resource_jid": "jid-b", "current_state": "idle",
                                                                         "held_part": None}]}},
+                "context_summary": {"fault_event": {"failure_type": "Supplied scenario name"}},
+                "recovery_debug": {"context_summary": {"fault_event": {"failure_type": "Supplied scenario name"}}},
                 "failure_anchor": {"failure_type": "Supplied scenario name", "checkpoint": {"name": "label"}}}
     grounded = grounding.apply_grounding(prepared, record)
     event = prepared["llm_input"]["fault_event"]
@@ -220,6 +246,56 @@ def test_grounding_replaces_stored_failure_summaries_in_a_prepared_request():
     assert "checkpoint" not in prepared["failure_anchor"] and prepared["failure_anchor"]["failed_task_id"] == "t3"
     assert prepared["llm_input"]["part_facts"][0]["current_state"] == "ready"
     assert prepared["llm_input"]["observed_runtime_state"]["resources"][0]["current_state"] == "failed"
+    assert prepared["context_summary"]["fault_event"] == prepared["recovery_debug"]["context_summary"]["fault_event"] == event
+    assert grounded["execution_monitoring"] == grounding.load_grounding_settings()
+
+
+def test_a_stored_grounding_is_reused_only_while_its_raw_facts_still_give_it(monkeypatch):
+    record = capture(**{"resource_states/arm_b": {"resource_state": "failed"}})
+    prepared = {}
+    grounded = grounding.apply_grounding(prepared, record)
+    stored = json.loads(json.dumps(prepared))
+    assert grounding.apply_grounding(stored, record) == grounded
+    edited = deepcopy(stored)
+    edited["code_grounding"]["fault_event"]["failed_task_id"] = "edited"
+    with pytest.raises(ValueError, match="re-derive it"):
+        grounding.apply_grounding(edited, record)
+    changed = {**grounding.load_grounding_settings(), "region_margin_m": 9.0}
+    monkeypatch.setattr(grounding, "load_grounding_settings", lambda: changed)
+    with pytest.raises(ValueError, match="re-derive it"):
+        grounding.apply_grounding(stored, record)
+
+
+def test_storing_the_grounding_rewrites_only_the_beliefs(tmp_path):
+    from cais_spade_llm.recovery_framework import capture_files
+
+    record = capture_v2(fault_reports={"arm_b": {"reported_state": "failed"}})
+    record["prepared_recovery_request"] = {"llm_input": {"fault_event": {"failure_type": "Supplied scenario name"}}}
+    path = tmp_path / "observations.json"
+    capture_files.write_capture(path, record)
+    raw = path.read_bytes()
+    stored = grounding.store_grounding(path)
+    assert path.read_bytes() == raw
+    prepared = capture_files.read_capture(path)["prepared_recovery_request"]
+    assert prepared["code_grounding"] == stored and stored["fault_event"]["failed_task_id"] == "t3"
+    assert "Supplied scenario name" not in json.dumps(prepared)
+    assert grounding.store_grounding(path) == stored
+
+
+def test_a_grounded_request_starts_its_session_at_the_outline():
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
+        build_multi_turn_session_seed,
+    )
+
+    prepared = {"part_tracker": {"peg": {"state": "misplaced", "location": None,
+                                         "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0}}},
+                "llm_input": {"part_facts": [{"part_name": "peg", "current_location": None}]}}
+    seed = build_multi_turn_session_seed(prepared)
+    assert (seed["current_phase"], seed["observation_store"]) == ("grounding", {})
+    seed = build_multi_turn_session_seed({**prepared, "code_grounding": {"fault_event": {}}})
+    assert seed["current_phase"] == "outline" and seed["turns"] == []
+    assert seed["observation_store"] == {"observed_pose_peg": {"part_name": "peg", "pose": {"x": 3.0, "y": 3.0, "z": 1.0},
+                                                               "x": 3.0, "y": 3.0, "z": 1.0}}
 
 
 def test_grounding_keeps_legacy_captures_and_requires_a_detectable_fault():
@@ -256,13 +332,11 @@ def test_plant_model_accepts_only_declared_fault_states():
         environment_models.owners(*arguments)
 
 
-def test_turn_one_is_code_grounding_without_an_llm_call(tmp_path, monkeypatch):
+def test_the_first_turn_is_the_outline_prompt_with_the_grounded_fault(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
 
     from cais_spade_llm.recovery_framework import outline_draft
     from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
-    from cais_spade_llm.ui.components.recovery_turns import _code_grounding
-    from cais_spade_llm.ui.recovery_evidence import read_recovery_turn, recovery_turns
 
     path = RECORDS / "capture_f923020bf9ce496eb443826291f8f2c2" / "observations.json"
     if not path.is_file():
@@ -276,8 +350,6 @@ def test_turn_one_is_code_grounding_without_an_llm_call(tmp_path, monkeypatch):
     assert "Recovery Event Candidate Proposal" in prompt and provider.await_count == 1
     assert '"detected_signals"' in prompt and "Part slippage" not in prompt and "during_place_lowering" not in prompt
     assert draft.record["fault_grounding"]["failed_task_id"] == "environment_9"
-    directory = draft.directory / "recovery_outline"
-    first = recovery_turns(directory, "recovery_outline")[0]
-    assert (first["turn"], first["phase"], first["status"]) == (1, "grounding", "grounded")
-    data = read_recovery_turn(directory, first)
-    assert data["captures"] == [] and _code_grounding(data)["fault_event"]["failed_resource_jid"] == "recovery-resource-4@localhost"
+    session = draft.prepared["multi_turn_session_state"]
+    assert (session["turn_index"], session["current_phase"], session["turns"]) == (1, "outline", [])
+    assert not list(draft.directory.glob("recovery_outline/turns/*grounding*"))

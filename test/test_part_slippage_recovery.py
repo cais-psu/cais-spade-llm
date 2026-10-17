@@ -120,9 +120,8 @@ def test_stage_modes_stop_before_execution(recovery, monkeypatch, outline_mode, 
     asyncio.run(run())
 
 
-def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework.capture_files import PREPARATION_NAME
-
+def _live_grounding_case(recovery, monkeypatch, attachments: list, *, checkpoint: bool = False) -> tuple:
+    """A robot reported a fault after losing its peg; each physical capture reads the next attachment."""
     context = recovery.runtime.context
     context.resources = {"arm_a": SimpleNamespace(valuation={"resource_state": "picked", "held_part": "peg"}, revision=1)}
     context.part_tracker = {"peg": {"state": "in_gripper", "location": "arm_a"}}
@@ -131,22 +130,31 @@ def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(rec
                "part_tracker_before": {"peg": {"state": "in_gripper", "location": "arm_a"}},
                "pending_tasks": [{"task_id": "t2", "resource_id": "arm_a", "event_id": "place", "event_name": "place",
                                   "parameters": {"part_name": "peg"}}], "continuations": {}}
+
+    def physical(model_name):
+        # A dict also reports another resource's controller fault in that capture.
+        faults = model_name.get("faults", {}) if isinstance(model_name, dict) else {}
+        model_name = model_name.get("model_name") if isinstance(model_name, dict) else model_name
+        resources = {} if model_name == "unobserved" else {"arm_a": {"attachment": {"model_name": model_name}}}
+        resources.update({rid: {"controller_hold_observation": {"fault_reason": reason}} for rid, reason in faults.items()})
+        return {"resources": resources, "parts": {"peg": {"name": "peg", "pose": [3.0, 3.0, 1.0, 0, 0, 0, 1]}},
+                "geometry": {"regions": {}, "parts": {}}, "physics_evidence": {"attachments": []}}
+
     observations = {"schema_version": 2, "run_id": "test-run", "jids": {"arm_a": "jid-a"}, "acknowledgements": {},
                     "failure": failure, "fault_reports": {"arm_a": {"reported_state": "failed"}},
                     "part_tracker": deepcopy(context.part_tracker),
                     "resource_states": {"arm_a": {"resource_state": "picked", "held_part": "peg"}},
-                    "context_revision": context.revision, "physical_evidence": {"status": "pending"}}
+                    "context_revision": context.revision,
+                    "physical_evidence": physical(attachments[0]) if checkpoint else {"status": "pending"}}
+    if checkpoint:
+        recovery.runtime.recovery_checkpoint_observations = deepcopy(observations)
     monkeypatch.setattr("cais_spade_llm.recovery_framework.part_slippage_recovery.capture_observations",
                         lambda runtime, failure, include_physical=True: deepcopy(observations))
     trackers = []
 
     async def capture_physical():
-        # The robot gripper is empty and the peg lies where it fell.
         trackers.append(deepcopy(context.part_tracker))
-        recovery._observations["physical_evidence"] = {
-            "resources": {"arm_a": {"attachment": {"model_name": None}}},
-            "parts": {"peg": {"name": "peg", "pose": [3.0, 3.0, 1.0, 0, 0, 0, 1]}},
-            "geometry": {"regions": {}, "parts": {}}, "physics_evidence": {"attachments": []}}
+        recovery._observations["physical_evidence"] = physical(attachments[len(trackers) - 1])
         return recovery._observations["physical_evidence"]
 
     monkeypatch.setattr(recovery, "_capture_physical_evidence", capture_physical)
@@ -155,19 +163,85 @@ def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(rec
         recovery.begin(failure)
         await recovery._task
 
+    return context, trackers, run
+
+
+def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(recovery, monkeypatch):
+    from cais_spade_llm.recovery_framework.capture_files import BELIEFS_NAME
+
+    # The robot gripper is empty and the peg lies where it fell.
+    context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None, None])
     asyncio.run(run())
     assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "misplaced"]
     assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
+    assert context.part_tracker["peg"]["observed_pose"] == {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0,
+                                                           "qw": 1}
     assert recovery._observations["context_revision"] == context.revision == 5
     path = Path(recovery.snapshot()["observation_path"])
     assert "part_tracker" not in json.loads(path.read_text())
-    views = json.loads((path.parent / PREPARATION_NAME).read_text())["views"]
+    views = json.loads((path.parent / BELIEFS_NAME).read_text())["views"]
     assert views["part_tracker"]["peg"]["state"] == "misplaced"
     assert views["resource_states"]["arm_a"] == {"resource_state": "failed", "held_part": None}
 
 
+def test_live_grounding_settles_when_the_first_capture_missed_the_robot(recovery, monkeypatch):
+    # Stage 1 on October 15: the first capture had no observation of the slipping robot.
+    context, trackers, run = _live_grounding_case(recovery, monkeypatch, ["unobserved", None, None])
+    asyncio.run(run())
+    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "in_gripper", "misplaced"]
+    assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
+    assert context.part_tracker["peg"]["state"] == "misplaced"
+    passes = json.loads((recovery.path / "grounding_passes.json").read_text())["passes"]
+    assert [row["signals"] for row in passes] == [["B2:arm_a"], ["B2:arm_a", "C1:arm_a"], ["B2:arm_a", "C1:arm_a"]]
+
+
+def test_live_grounding_keeps_only_what_the_latest_captures_agree_on(recovery, monkeypatch):
+    # The first capture missed the peg; two retakes measure it in the gripper.
+    context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None, "peg", "peg"])
+    asyncio.run(run())
+    assert len(trackers) == 3
+    assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": "peg"}
+    assert context.part_tracker["peg"] == {"state": "in_gripper", "location": "arm_a"}
+    passes = json.loads((recovery.path / "grounding_passes.json").read_text())["passes"]
+    assert [row["signals"] for row in passes] == [["B2:arm_a", "C1:arm_a"], ["B2:arm_a"], ["B2:arm_a"]]
+
+
+def test_live_grounding_restores_beliefs_when_retaken_captures_never_agree(recovery, monkeypatch):
+    context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None, "peg", None, "peg"])
+    asyncio.run(run())
+    assert len(trackers) == 4
+    assert recovery.snapshot()["status"] == "blocked"
+    assert "did not settle" in recovery.snapshot()["message"]
+    assert context.resources["arm_a"].valuation == {"resource_state": "picked", "held_part": "peg"}
+    assert context.part_tracker["peg"] == {"state": "in_gripper", "location": "arm_a"}
+    assert recovery._observations["part_tracker"]["peg"] == {"state": "in_gripper", "location": "arm_a"}
+
+
+def test_live_grounding_stops_when_a_retake_grounds_a_different_fault(recovery, monkeypatch):
+    retake = {"model_name": None, "faults": {"arm_b": "joint limit"}}
+    context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None, retake])
+    asyncio.run(run())
+    assert "grounds a different fault" in recovery.snapshot()["message"]
+    assert context.resources["arm_a"].valuation == {"resource_state": "picked", "held_part": "peg"}
+
+
+def test_frozen_checkpoint_grounding_never_changes_beliefs(recovery, monkeypatch):
+    context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None], checkpoint=True)
+    prepare = AsyncMock()
+    monkeypatch.setattr(recovery, "_prepare", prepare)
+    asyncio.run(run())
+    # The frozen record is kept as captured and preparation continues; offline grounding applies the fault.
+    assert trackers == []
+    prepare.assert_awaited_once()
+    assert context.resources["arm_a"].valuation == {"resource_state": "picked", "held_part": "peg"}
+    assert context.part_tracker["peg"] == {"state": "in_gripper", "location": "arm_a"}
+    assert context.revision == 4
+
+
 def test_outline_evidence_retry_does_not_generate_or_replace_llm_capture(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_validated_event,
+    )
 
     async def retry(*, prepared, session, planner):
         assert session["projected_physical_evidence"]["event_evidence"] == [{"source": "owner preview"}]
@@ -203,9 +277,12 @@ def test_outline_evidence_retry_does_not_generate_or_replace_llm_capture(recover
 
 
 def test_retry_archives_nominal_proof_before_resume_checkpoint(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_validated_event,
+    )
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-        nominal_continuation_context_binding, read_nominal_continuation,
+        nominal_continuation_context_binding,
+        read_nominal_continuation,
     )
 
     proof = {"complete": False, "status": "NEEDS_CONTEXT", "failures": [{"task": {"part_name": None}}]}
@@ -266,7 +343,9 @@ def test_offline_nominal_context_error_keeps_the_recorded_reason(recovery, monke
 
 def test_generation_archives_nominal_proof_before_debug_publication(tmp_path, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import read_nominal_continuation
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
+        read_nominal_continuation,
+    )
 
     proof = {"complete": False, "status": "not_ready", "failures": [{"task": {"part_name": None}}]}
     prepared = {"nominal_continuation_artifact_version": 1, "source_observation_fingerprint": "a" * 64,
@@ -307,7 +386,9 @@ def test_generation_archives_nominal_proof_before_debug_publication(tmp_path, mo
 
 @pytest.mark.parametrize("broken", [None, "source", "file", "context"])
 def test_saved_nominal_archive_requires_verified_source_and_context(recovery, tmp_path, broken):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import archive_nominal_continuation
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
+        archive_nominal_continuation,
+    )
     from cais_spade_llm.recovery_framework.recovery_observations import observation_fingerprint
 
     source = tmp_path / "original_generation"
@@ -336,7 +417,9 @@ def test_saved_nominal_archive_requires_verified_source_and_context(recovery, tm
 
 def test_primitive_regeneration_retains_verified_nominal_archive(recovery, tmp_path):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-        archive_nominal_continuation, read_nominal_continuation, nominal_continuation_context_binding,
+        archive_nominal_continuation,
+        nominal_continuation_context_binding,
+        read_nominal_continuation,
     )
 
     source = tmp_path / "original_generation"
@@ -664,7 +747,9 @@ def test_fresh_preparation_rebuilds_actual_failure_observations_without_mutating
 
 def test_owner_evidence_capture_satisfies_default_pick_calculation_without_calls():
     from cais_spade_llm.recovery_framework.recovery_observations import capture_resource_evidence
-    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
+        GazeboPickPlaceController,
+    )
     from cais_spade_llm.resources.robot.recovery_capability import calculate_recovery_pick_target
 
     controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
@@ -715,7 +800,9 @@ def test_robot_capture_retains_readiness_without_another_pose_query():
 
 def test_owner_evidence_capture_retains_mesh_width_gripper_and_attachment_sources():
     from cais_spade_llm.recovery_framework.recovery_observations import capture_resource_evidence
-    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import GazeboPickPlaceController
+    from cais_spade_llm.resources.robot.gazebo_pick_place_controller import (
+        GazeboPickPlaceController,
+    )
 
     controller = GazeboPickPlaceController.__new__(GazeboPickPlaceController)
     controller.pick_z_adjustments_m = {}
@@ -758,7 +845,10 @@ def test_owner_grasp_geometry_preserves_declared_width_without_fallback(width, m
 
 
 def test_tcp_transform_uses_fixed_captured_joint_declarations_without_live_tf():
-    from cais_spade_llm.recovery_framework.recovery_observations import _captured_tcp_transform, capture_resource_evidence
+    from cais_spade_llm.recovery_framework.recovery_observations import (
+        _captured_tcp_transform,
+        capture_resource_evidence,
+    )
 
     physical = {"controlled_link": "tool0", "tcp_link": "tcp", "tcp_offset_z": -.218}
     configuration = {"description_sha256": "captured-description", "joints": [
@@ -865,6 +955,183 @@ def test_pose_feasibility_plans_without_dispatch_only_in_simulation(mode):
     else:
         assert result["feasibility_status"] == "NEEDS_CONTEXT"
         controller._prepare_cartesian_motion.assert_not_called()
+
+
+def _kmr_reconcile_fixture(primitive_state: dict, held_before=None):
+    part = "KET4_Square_4mm"
+    kmr = SimpleNamespace(valuation={"resource_state": "carrying" if held_before else "idle", "held_part": held_before,
+                                     "approached_part": None, "resource_location": "M1"}, revision=0)
+    machine = SimpleNamespace(valuation={"resource_state": "completed", "part_name": part}, revision=0)
+    pickup = {"event_name": "pick_grasp", "participants": ["ur5e-1", "M1"],
+              "parameter_bindings": {"resource_id": {"equals": "ur5e-1"}, "origin_resource_location": {"equals": "M1"}},
+              "guards": {"resource_state": {"equals": "completed"}, "part_name": {"equals_from_param": "part_name"}},
+              "updates": {"resource_state": {"set": "idle"}, "part_name": {"set": None}}}
+    context = SimpleNamespace(
+        run_id="trial", resources={"KMR": kmr, "M1": machine},
+        models={"KMR": {"state_variables": {"resource_location": {"domain": [None, "Storage", "M1", "M2"]},
+                                            "approached_part": {}}, "events": []},
+                "M1": {"state_variables": {}, "events": [pickup]}},
+        part_tracker={part: {"state": "completed", "location": "M1", "processCompleted": []}},
+        admission_lock=threading.RLock(), revision=0, transitions=[])
+    context.snapshot = lambda: {"KMR": deepcopy(kmr.valuation), "M1": deepcopy(machine.valuation)}
+    owner = SimpleNamespace(agent_name="KMR", _primitive_state=primitive_state)
+    return part, context, SimpleNamespace(context=context, agent=SimpleNamespace()), owner
+
+
+def test_KMR_pickup_reconciles_its_measured_custody_and_the_source_owner_consequence():
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner = _kmr_reconcile_fixture(
+        {"held_part": "KET4_Square_4mm", "resource_location": "M1", "base_pose": [-4.7, 2.2, 1.5708]})
+    task = {"part_name": part, "outline_id": "RECOVERY_SEQ2", "macro_name": "pick_part",
+            "expected_end_state": {"held_part": part}}
+    observed = asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-task", {}))
+    assert observed == {"base_pose": [-4.7, 2.2, 1.5708], "resource_location": "M1", "held_part": part}
+    assert context.resources["KMR"].valuation["resource_state"] == "carrying"
+    assert context.resources["M1"].valuation == {"resource_state": "idle", "part_name": None}
+    assert context.part_tracker[part]["location"] == "KMR"
+    assert context.transitions[0]["acknowledgement"]["evidence"] == "resource"
+
+
+def test_KMR_coordinate_move_reconciles_a_location_no_dock_names():
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner = _kmr_reconcile_fixture(
+        {"held_part": "KET4_Square_4mm", "resource_location": None, "base_pose": [-1.2, 1.15, -1.5708]},
+        held_before="KET4_Square_4mm")
+    context.part_tracker[part].update(state="in_gripper", location="KMR")
+    task = {"part_name": part, "outline_id": "RECOVERY_SEQ3", "macro_name": "move_to_location",
+            "expected_end_state": {"resource_location": None}}
+    asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-drive", {}))
+    assert context.resources["KMR"].valuation["resource_location"] is None
+    assert context.resources["M1"].valuation["part_name"] == part
+    assert context.part_tracker[part]["location"] == "KMR"
+
+
+@pytest.mark.parametrize("state,message", [
+    ({"held_part": None, "resource_location": None}, "observed resting place"),
+    ({"held_part": "KET4_Square_4mm", "resource_location": "Conveyor"}, "resource_location=Conveyor"),
+])
+def test_KMR_release_and_undeclared_locations_are_not_committed(state, message):
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner = _kmr_reconcile_fixture(state, held_before="KET4_Square_4mm")
+    before = deepcopy(context.resources["KMR"].valuation)
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(_reconcile_mobile_completion(runtime, owner, {"part_name": part, "outline_id": "RECOVERY_SEQ4",
+                                                                  "macro_name": "release"}, "kmr-release", {}))
+    assert context.resources["KMR"].valuation == before and context.transitions == []
+
+
+def _kmr_release_fixture(pose):
+    from cais_spade_llm.product.environment import EnvironmentProductContext
+    from cais_spade_llm.ui.recovery_setup import load_setup, validate_setup
+
+    setup = load_setup()
+    inputs = validate_setup(setup)
+    context = EnvironmentProductContext(inputs["scene"], inputs["product_order"], inputs["geometry"],
+                                        setup["permitted_resources"])
+    part = "KET4_Square_4mm"
+    context.resources["KMR"].valuation.update(resource_state="carrying", held_part=part, resource_location=None)
+    context.part_tracker[part].update(state="in_gripper", location="KMR")
+    owner = SimpleNamespace(agent_name="KMR", _primitive_state={"held_part": None, "resource_location": None,
+                                                               "base_pose": [-3.0, -0.12, 0.0]},
+                            _released_part={"part_name": part, "pose": pose, "settled": True})
+    task = {"part_name": part, "outline_id": "RECOVERY_SEQ5", "macro_name": "release_part", "expected_end_state": {}}
+    return part, context, SimpleNamespace(context=context, agent=SimpleNamespace()), owner, task
+
+
+def test_KMR_release_onto_the_belt_is_recorded_where_the_part_rests():
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner, task = _kmr_release_fixture([-3.0, 0.5, 1.016, 0.0, 0.0, 0.0, 1.0])
+    observed = asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    belt = context.resources["Conveyor"].valuation
+    assert belt[f"part_location.{part}"] == "after loading_position_1" and belt[f"part_order.{part}"] == 0
+    assert context.part_tracker[part]["location"] == "Conveyor" and context.part_tracker[part]["state"] == "ready"
+    assert context.part_tracker[part]["observed_pose"]["x"] == -3.0
+    assert observed["released"]["receiver"] == "Conveyor"
+    assert context.resources["KMR"].valuation["held_part"] is None
+
+
+def test_KMR_release_into_a_buffer_zone_and_onto_an_undeclared_surface():
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner, task = _kmr_release_fixture([-0.56, 0.5, 1.017, 0.0, 0.0, 0.0, 1.0])
+    asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    assert context.resources["Buffer For Machined parts"].valuation["zone_2_part"] == part
+    assert context.part_tracker[part]["location"] == "Buffer For Machined parts"
+
+    part, context, runtime, owner, task = _kmr_release_fixture([0.25, 0.45, 1.025, 0.0, 0.0, 0.0, 1.0])
+    asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    assert context.part_tracker[part]["state"] == "misplaced" and context.part_tracker[part]["location"] is None
+    assert context.part_tracker[part]["observed_pose"] == {"x": 0.25, "y": 0.45, "z": 1.025, "qx": 0.0, "qy": 0.0,
+                                                           "qz": 0.0, "qw": 1.0}
+
+
+@pytest.mark.parametrize("pose,receiver,check", [
+    ([-4.13, 1.82, 1.06, 0.0, 0.0, 0.0, 1.0], "M1",
+     lambda context, part: context.resources["M1"].valuation["part_name"] == part
+     and context.resources["M1"].valuation["resource_state"] == "loaded"),
+    ([-4.6, 1.1, 1.0, 0.0, 0.0, 0.0, 1.0], "M1",
+     lambda context, part: context.resources["M1"].valuation["staging_part"] == part
+     and context.part_tracker[part]["location"] == "M1 staging tray"),
+    ([-6.25, 1.88, 0.645, 0.0, 0.0, 0.0, 1.0], "Storage",
+     lambda context, part: context.resources["Storage"].valuation[f"inventory.{part}"] is True),
+])
+def test_KMR_release_uses_the_receiving_owner_declared_consequence(pose, receiver, check):
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner, task = _kmr_release_fixture(pose)
+    context.resources["Storage"].valuation[f"inventory.{part}"] = False
+    context.resources["M1"].valuation.update(resource_state="idle", part_name=None)
+    observed = asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    assert observed["released"]["receiver"] == receiver and check(context, part)
+    assert owner._released_part is None
+
+
+def test_KMR_release_still_moving_when_observation_ended_is_a_misplaced_part():
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner, task = _kmr_release_fixture([-0.56, 0.5, 1.017, 0.0, 0.0, 0.0, 1.0])
+    owner._released_part["settled"] = False
+    asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    assert context.part_tracker[part]["state"] == "misplaced"
+    assert context.resources["Buffer For Machined parts"].valuation["zone_2_part"] is None
+
+
+@pytest.mark.parametrize("location", ["Storage", None])
+def test_KMR_pickup_from_Storage_or_of_a_misplaced_part(location):
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner, task = _kmr_release_fixture([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    context.resources["KMR"].valuation.update(resource_state="idle", held_part=None)
+    context.resources["Storage"].valuation[f"inventory.{part}"] = location is not None
+    context.part_tracker[part].update(state="ready" if location else "misplaced", location=location)
+    owner._primitive_state = {"held_part": part, "resource_location": "Storage" if location else None}
+    asyncio.run(_reconcile_mobile_completion(runtime, owner, {**task, "macro_name": "pick_part"}, "kmr-pick", {}))
+    assert context.part_tracker[part]["location"] == "KMR"
+    assert context.resources["Storage"].valuation[f"inventory.{part}"] is False
+    with pytest.raises(ValueError, match="not the generated event"):
+        part, context, runtime, owner, task = _kmr_release_fixture([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        context.resources["KMR"].valuation.update(resource_state="idle", held_part=None)
+        owner._primitive_state = {"held_part": part, "resource_location": "Storage"}
+        asyncio.run(_reconcile_mobile_completion(runtime, owner, {**task, "part_name": "RGOCG4-50_Round_4mm"},
+                                                 "kmr-pick", {}))
+
+
+def test_KMR_release_into_an_occupied_zone_or_onto_a_moving_belt_is_not_committed():
+    from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
+
+    part, context, runtime, owner, task = _kmr_release_fixture([-0.56, 0.5, 1.017, 0.0, 0.0, 0.0, 1.0])
+    context.resources["Buffer For Machined parts"].valuation["zone_2_part"] = "RGOCG4-50_Round_4mm"
+    with pytest.raises(ValueError, match="already occupied"):
+        asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    part, context, runtime, owner, task = _kmr_release_fixture([-3.0, 0.5, 1.016, 0.0, 0.0, 0.0, 1.0])
+    context.resources["Conveyor"].valuation["belt_stopped"] = False
+    with pytest.raises(ValueError, match="stopped and unreserved"):
+        asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
+    assert context.transitions == [] and context.part_tracker[part]["location"] == "KMR"
 
 
 @pytest.mark.parametrize("observed_x", [.2, .4])
@@ -1048,6 +1315,162 @@ def test_stop_during_composition_preparation_does_not_publish_worker_state(recov
     asyncio.run(run())
 
 
+def test_stage_stop_keeps_the_run_and_generate_starts_a_fresh_outline(recovery, monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
+
+    started = asyncio.Event()
+    finish = multi_turn.execute_multi_turn_recovery.side_effect
+
+    async def pending(planner, prepared, *, session_state):
+        started.set()
+        await asyncio.Event().wait()
+
+    recovery._state.update(outline_mode="manual", primitive_mode="manual")
+
+    async def run():
+        recovery.begin({"injection_status": "completed"})
+        await recovery._task
+        stopped_directory = recovery.snapshot()["artifact_directory"]
+        monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", AsyncMock(side_effect=pending))
+        recovery.action("generate_outline")
+        await started.wait()
+        assert recovery.generating_stage() == "outline"
+        recovery.stop_generation()
+        assert recovery.generating_stage() == ""
+        await asyncio.gather(recovery._task, return_exceptions=True)
+        state = recovery.snapshot()
+        assert (state["status"], state["outline_status"]) == ("outline_ready", "stopped")
+        assert recovery._stopped is False
+        assert not recovery._offline_cancel.is_set()
+        with pytest.raises(ValueError, match="No recovery generation"):
+            recovery.stop_generation()
+        monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", AsyncMock(side_effect=finish))
+        recovery.action("generate_outline")
+        await recovery._task
+        assert recovery.snapshot()["status"] == "outline_review"
+        assert recovery.snapshot()["artifact_directory"] != stopped_directory
+    asyncio.run(run())
+
+
+def test_stage_stop_keeps_the_accepted_outline_for_a_new_gazebo_composition(recovery, monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
+
+    started = asyncio.Event()
+    finish = multi_turn.execute_multi_turn_recovery.side_effect
+
+    async def pending(planner, prepared, *, session_state):
+        if prepared["_stop_after_multi_turn_phase"] == "outline":
+            return await finish(planner, prepared, session_state=session_state)
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", AsyncMock(side_effect=pending))
+    recovery._state.update(outline_mode="auto", primitive_mode="auto")
+
+    async def run():
+        recovery.begin({"injection_status": "completed"})
+        await started.wait()
+        outline = deepcopy(recovery._outline_request)
+        stopped_directory = recovery.snapshot()["artifact_directory"]
+        assert recovery.generating_stage() == "primitive"
+        recovery.stop_generation()
+        await asyncio.gather(recovery._task, return_exceptions=True)
+        state = recovery.snapshot()
+        assert (state["status"], state["primitive_status"]) == ("outline_review", "stopped")
+        assert state["outline"] == outline["multi_turn_session_state"]["accepted_outline_prefix"]
+        assert recovery._outline_request == outline
+        composed = []
+        generate_primitives = recovery._generate_primitives
+
+        async def counted():
+            composed.append(True)
+            await generate_primitives()
+
+        monkeypatch.setattr(recovery, "_generate_primitives", counted)
+        multi_turn.execute_multi_turn_recovery.side_effect = finish
+        # Gazebo Auto composes inside Continue; Generate must not compose twice.
+        recovery.action("generate_primitives")
+        await recovery._task
+        assert composed == [True]
+        assert recovery.snapshot()["status"] == "ready_to_execute"
+        assert recovery.snapshot()["artifact_directory"] != stopped_directory
+    asyncio.run(run())
+
+
+def test_stage_stop_during_offline_composition_drains_and_renews_cancellation(recovery, monkeypatch):
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
+
+    started, release = threading.Event(), threading.Event()
+
+    def preview(prepared, state):
+        started.set()
+        assert release.wait(5)
+        return {}, "Not sent"
+
+    monkeypatch.setattr(multi_turn, "_build_phase_prompt", preview)
+
+    async def run():
+        await recovery._prepare()
+        recovery.offline = True
+        recovery._outline_request = deepcopy(recovery._prepared)
+        original = deepcopy(recovery._outline_request)
+        recovery._state.update(status="outline_review", primitive_mode="manual")
+        recovery.action("generate_primitives")
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            recovery.stop_generation()
+            cancel = recovery._offline_cancel
+            assert cancel.is_set()
+            assert recovery.snapshot()["primitive_status"] == "preparing"
+        finally:
+            release.set()
+        await asyncio.gather(recovery._task, return_exceptions=True)
+        state = recovery.snapshot()
+        assert (state["status"], state["primitive_status"]) == ("outline_review", "stopped")
+        assert recovery._outline_request == original
+        assert recovery._stopped is False
+        assert recovery._offline_cancel is not cancel and not recovery._offline_cancel.is_set()
+        monkeypatch.setattr(multi_turn, "_build_phase_prompt", lambda prepared, state: ({}, "Not sent"))
+        recovery.action("generate_primitives")
+        await recovery._task
+        assert recovery.snapshot()["status"] == "offline_completed"
+        assert recovery.agent._composition_cancel_event is recovery._offline_cancel
+    asyncio.run(run())
+
+
+def test_gazebo_stage_stop_cancels_generation_without_stopping_the_system(recovery, monkeypatch):
+    started = asyncio.Event()
+
+    async def pending(stage):
+        started.set()
+        await asyncio.Event().wait()
+
+    async def run_on_agent_runtime(coroutine):
+        return await coroutine
+
+    monkeypatch.setattr(recovery, "_run_stage", pending)
+    recovery._state.update(outline_mode="auto", primitive_mode="auto")
+    bridge = SimpleNamespace(system_running=True,
+                             stop_system=AsyncMock(side_effect=AssertionError("Stage Stop stopped the system")),
+                             _run_on_agent_runtime=AsyncMock(side_effect=run_on_agent_runtime))
+    example = PartSlippageExample(bridge)
+    example._runtime = recovery.runtime
+    example._status = {"status": "running_example", "message": "Running Part slippage."}
+
+    async def run():
+        recovery.begin({"injection_status": "completed"})
+        await started.wait()
+        assert example.snapshot()["generating_stage"] == "outline"
+        await example.action("stop_generation")
+        assert example.snapshot()["generating_stage"] == ""
+        await asyncio.gather(recovery._task, return_exceptions=True)
+        state = example.snapshot()
+        assert (state["status"], state["outline_status"]) == ("outline_ready", "stopped")
+    asyncio.run(run())
+    bridge._run_on_agent_runtime.assert_awaited_once()
+    bridge.stop_system.assert_not_called()
+
+
 def test_context_change_blocks_execution_and_generation_errors_are_retained(recovery, monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr("cais_spade_llm.recovery_framework.slippage_execution.execute_generated_recovery", execute)
@@ -1144,15 +1567,30 @@ def test_selected_failure_setup_retains_simulation_only_policy(scenario):
     assert diagnostic_setup(setup)
     assert setup["selected_safety_file"] == "__NONE__"
     assert setup["selected_safety_files"] == ["recorded-for-later"]
-    if scenario == "Machining breakdown during part processing":
+    if scenario in {"Machining breakdown during part processing", "ur5e-1 breakdown"}:
+        # Both trims run, so the three-part order includes RGOCG4 on M2.
         assert {"M2", "ur5e-2"}.issubset(setup["permitted_resources"])
         assert {"M2", "ur5e-2"}.issubset(setup["recovery_permitted_resources"])
-    elif scenario != "Part slippage":
+        assert setup["selected_product_order_file"].endswith("assembly_board-v1-machine-breakdown.json")
+    elif scenario == "Conveyor breakdown":
         assert not {"M2", "ur5e-2"}.intersection(setup["permitted_resources"])
         assert {"M2", "ur5e-2"}.issubset(setup["recovery_permitted_resources"])
     assert setup["nominal_permitted_resources"] == setup["permitted_resources"]
     setup["execution_mode"] = "physical"
     assert not diagnostic_setup(setup)
+
+
+def test_default_observations_are_schema_2_captures_of_their_own_scenario():
+    from cais_spade_llm.recovery_framework.part_slippage_example import default_observation_paths
+    from cais_spade_llm.ui.recovery_setup import FAILURE_SCENARIOS
+
+    defaults = default_observation_paths()
+    if not defaults:
+        pytest.skip("retained captures are not present")
+    assert set(defaults) <= set(FAILURE_SCENARIOS)
+    for scenario, path in defaults.items():
+        raw = json.loads(Path(path).read_text())
+        assert (raw["scenario"], raw["schema_version"]) == (scenario, 2)
 
 
 def test_machine_safety_defaults_reach_ui_state_without_overwriting_saved_selections():
@@ -1177,18 +1615,16 @@ def test_machine_safety_defaults_reach_ui_state_without_overwriting_saved_select
 
 def test_part_slippage_safety_defaults_preserve_manual_choices_and_deferred_policy():
     from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
 
-    expected = [
-        "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt",
-        "cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt",
-    ]
+    expected = default_safety_files("Part slippage")
+    assert expected[0] == "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt"
     example = PartSlippageExample(SimpleNamespace(system_running=False))
     assert example.snapshot()["selected_safety_files"] == expected
     setup = example_setup()
     assert setup["selected_safety_files"] == expected
     assert setup["selected_safety_file"] == "__NONE__" and diagnostic_setup(setup)
     assert example_setup(safety_files=[])["selected_safety_files"] == []
-    from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
     assert example_setup(scenario="Conveyor breakdown")["selected_safety_files"] == default_safety_files("Conveyor breakdown")
 
     example.set_options(source="gazebo", scenario="Part slippage", safety_files=[])
@@ -1202,7 +1638,7 @@ def test_part_slippage_safety_defaults_preserve_manual_choices_and_deferred_poli
     absolute_mutex = str(ROOT / expected[0])
     example.set_options(source="gazebo", scenario="Conveyor breakdown", safety_files=[absolute_mutex])
     selected = example.set_options(source="gazebo", scenario="Part slippage", safety_files=[absolute_mutex])
-    assert selected["selected_safety_files"] == [absolute_mutex, expected[1]]
+    assert selected["selected_safety_files"] == [absolute_mutex, *expected[1:]]
 
 
 @pytest.mark.parametrize("change", [
@@ -1249,7 +1685,10 @@ def test_example_duplicate_start_reconnect_stop_and_reset(monkeypatch):
 
 
 def test_saved_generations_and_exact_captures_cannot_cross_runs(tmp_path):
-    from cais_spade_llm.agents.shared_information.llm_request_records import RequestRecords, capture_requests
+    from cais_spade_llm.agents.shared_information.llm_request_records import (
+        RequestRecords,
+        capture_requests,
+    )
 
     monitor = tmp_path / "monitor"
     for run_id in ("first", "second"):
@@ -1301,8 +1740,8 @@ def test_interrupted_assembly_precedes_cached_move_home(recovery):
 
 
 def test_preparation_passes_observed_failure_and_declared_contracts_without_guidance(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import ROOT
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
+    from cais_spade_llm.recovery_framework import ROOT
     from cais_spade_llm.recovery_framework.recovery_observations import capture_observations
 
     rid, part = "ur5e-4", "gear_small"
@@ -1411,7 +1850,10 @@ def test_operator_stop_retains_checkpoint_reader_until_unfreeze(flag):
 ])
 @pytest.mark.parametrize("checkpoint_completed", [False, True])
 def test_nonrobot_preparation_preserves_owner_facts_and_actual_failure(recovery, monkeypatch, scenario, rid, checkpoint_completed):
-    from cais_spade_llm.recovery_framework.recovery_observations import capture_observations, offline_preparation_missing
+    from cais_spade_llm.recovery_framework.recovery_observations import (
+        capture_observations,
+        offline_preparation_missing,
+    )
 
     part = "KET4_Square_4mm"
     recovery.runtime.setup = example_setup(scenario=scenario)
@@ -1577,7 +2019,9 @@ def test_stop_restores_the_previous_bridge_settings():
 
 
 def test_feedback_is_in_the_sent_outline_prompt():
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import _build_phase_prompt
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
+        _build_phase_prompt,
+    )
 
     payload, prompt = _build_phase_prompt({"recovery_feedback": "Keep gear_small custody observed"},
                                           {"current_phase": "grounding"})
@@ -1642,9 +2086,9 @@ def test_invalid_selected_safety_specification_keeps_observations(recovery, tmp_
 
 
 def test_outline_preparation_records_exact_rule_evidence_needs_without_claiming_pass(recovery):
-    from cais_spade_llm.recovery_framework.part_slippage_example import _PART_SLIPPAGE_SAFETY_FILES
-
-    recovery.runtime.setup["selected_safety_files"] = list(_PART_SLIPPAGE_SAFETY_FILES)
+    recovery.runtime.setup["selected_safety_files"] = [
+        "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt",
+        "cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt"]
     recovery._observations = {"captured_at": 123, "run_id": "source-run", "context_revision": 4}
     original = deepcopy(recovery._observations)
     directory = recovery._new_artifact_directory()
@@ -2280,7 +2724,10 @@ def test_offline_pending_preview_requires_verified_source_before_provider_or_nat
 
 @pytest.mark.parametrize("phase", ["provider", "validation"])
 def test_offline_stop_drains_worker_without_committing_private_state(recovery, monkeypatch, phase):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn, multi_turn_validated_event
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn,
+        multi_turn_validated_event,
+    )
 
     task, _, _, _ = _offline_preview_pending(recovery, monkeypatch)
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -2410,7 +2857,7 @@ def test_owner_evidence_keeps_resource_projection_and_missing_facts(rid, monkeyp
 
 @pytest.mark.parametrize("resource_type", ["robot", "kmr", "resource"])
 def test_owner_evidence_does_not_preview_incompatible_checkpoints(resource_type, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence, kmr_outline_evidence
+    from cais_spade_llm.recovery_framework import kmr_outline_evidence, outline_gazebo_evidence
     from cais_spade_llm.resources import resource_safety_preparation
 
     forbidden = Mock(side_effect=AssertionError("Incompatible records reached physical projection"))
@@ -2433,7 +2880,7 @@ def test_owner_evidence_does_not_preview_incompatible_checkpoints(resource_type,
 
 
 def test_owner_evidence_retains_kmr_preview_dispatch(monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence, kmr_outline_evidence
+    from cais_spade_llm.recovery_framework import kmr_outline_evidence, outline_gazebo_evidence
     from cais_spade_llm.resources import resource_safety_preparation
 
     robot = Mock(side_effect=AssertionError("KMR used the robot preview fallback"))
@@ -2451,7 +2898,6 @@ def test_owner_evidence_retains_kmr_preview_dispatch(monkeypatch):
 
 
 def test_offline_owner_evidence_needs_no_robot_archive_and_preserves_pending_event(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence
 
     task, _, read, native = _offline_preview_pending(recovery, monkeypatch)
     owner = recovery.agent.resources[task["resource_jid"]]
@@ -2490,7 +2936,9 @@ def test_offline_owner_evidence_needs_no_robot_archive_and_preserves_pending_eve
 
 def test_offline_stop_during_nominal_archive_retains_artifact_without_committing(recovery, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_artifacts
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
+        multi_turn_validated_event,
+    )
 
     task, _, _, _ = _offline_preview_pending(recovery, monkeypatch)
     recovery._prepared.update(nominal_continuation_artifact_version=1,
@@ -2667,8 +3115,8 @@ def test_new_attempt_restores_declared_owner_fields_without_rewriting_capture_or
 
 
 def test_full_validation_choices_stay_locked_when_generation_pauses_without_an_event(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
     from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
 
     choices = dict.fromkeys(CHECK_FIELDS, True)
     recovery._publish(status="outline_ready", outline=[], primitives=[], validation_checks=choices)

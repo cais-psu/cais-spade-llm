@@ -33,24 +33,35 @@ def condition_setup(setup: dict, scenario: str, condition: str, directory: Path)
     result = deepcopy(setup)
     if condition not in {'normal', 'changed'}:
         raise ValueError('Select normal or changed')
-    if scenario == 'ur5e-1 breakdown':
+    if scenario in {'ur5e-1 breakdown', 'Conveyor breakdown'}:
         scene = read_object(ROOT / setup['scene_file'])
         # Slow /clock progress needs a larger wall budget, with the same trajectory and result checks.
         scene['KMR']['arm_motion_wall_timeout_sec'] = 360.
+        if scenario == 'ur5e-1 breakdown':
+            # A longer M1 trim lets the KMR finish delivering RGOCG4 before ur5e-1 reaches into M1;
+            # a longer M2 trim keeps KET4's trim finishing first and M2 still trimming at the fault.
+            for machine in scene['machines']:
+                machine['simulation_process']['processing_time_sec'] = {'M1': 90., 'M2': 60.}[machine['resource_id']]
         destination = Path(directory) / 'recovery_framework_gazebo.json'
         write_record(destination, scene)
         result['scene_file'] = str(destination.resolve())
         return result
-    if scenario != 'Machining breakdown during part processing' or condition == 'normal':
+    if scenario != 'Machining breakdown during part processing':
         return result
     scene = read_object(ROOT / setup['scene_file'])
-    machine = next(row for row in scene['machines'] if row['resource_id'] == 'M2')
-    # Disable the declared program in this independent simulated installation;
-    # its current circle program and physical tool/fixture remain unchanged.
-    options = machine.get('program_options', {})
-    if 'square' not in options:
-        raise ValueError('The normal M2 declaration does not provide program_options.square')
-    del options['square']
+    scene['KMR']['arm_motion_wall_timeout_sec'] = 360.
+    # Both trims start together at the staged checkpoint. KET4's shorter trim finishes first,
+    # and M2 still has at least 30 s of RGOCG4's trim left when M1 fails.
+    for machine in scene['machines']:
+        machine['simulation_process']['processing_time_sec'] = {'M1': 60., 'M2': 90.}[machine['resource_id']]
+    if condition == 'changed':
+        machine = next(row for row in scene['machines'] if row['resource_id'] == 'M2')
+        # Disable the declared program in this independent simulated installation;
+        # its current circle program and physical tool/fixture remain unchanged.
+        options = machine.get('program_options', {})
+        if 'square' not in options:
+            raise ValueError('The normal M2 declaration does not provide program_options.square')
+        del options['square']
     destination = Path(directory) / 'recovery_framework_gazebo.json'
     write_record(destination, scene)
     result['scene_file'] = str(destination.resolve())

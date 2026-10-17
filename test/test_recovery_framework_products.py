@@ -586,17 +586,12 @@ def test_small_gear_slippage_detaches_only_gear_and_retains_interrupted_obligati
     gear._controller._sync_part_collision.assert_called_once_with("gear_small")
     for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
         getattr(peg._controller, method).assert_not_called()
-    assert gear._held_part is None and gear._gripper_state == "open"
+    # The robot reports its own lost part; the product's beliefs wait for grounding.
+    assert gear._held_part is None and gear._gripper_state == "open" and gear._current_state == "failed"
+    assert context.fault_reports["ur5e-4"]["reported_state"] == "failed"
     assert peg._held_part == "KET4_Square_4mm" and peg._gripper_state == "closed"
-    assert context.part_tracker["gear_small"] == {
-        **parts_before["gear_small"], "state": "misplaced", "location": None,
-        "observed_pose": fault.evidence["observed_drop_pose"],
-    }
-    assert {part: state for part, state in context.part_tracker.items() if part != "gear_small"} == {
-        part: state for part, state in parts_before.items() if part != "gear_small"
-    }
-    assert context.resources["ur5e-4"].valuation["held_part"] is None
-    assert context.resources["ur5e-3"].valuation == before["ur5e-3"]
+    assert context.part_tracker == parts_before
+    assert context.snapshot() == before
     assert context.unavailable_resources == {"ur5e-4"}
     assert not context.resources["ur5e-4"].executors
     assert context.resources["ur5e-3"].executors
@@ -652,17 +647,18 @@ def test_small_gear_slippage_partial_effects_keep_peg_custody_and_failure_latch(
     peg = next(agent for agent in runtime.resource_agents if agent.agent_name == "ur5e-3")
     for method in ("open_gripper", "detach_part", "set_entity_pose", "_sync_part_collision"):
         getattr(peg._controller, method).assert_not_called()
+    assert context.resources["ur5e-4"].valuation["held_part"] == "gear_small"
+    assert context.part_tracker["gear_small"]["location"] == "ur5e-4"
+    assert "observed_pose" not in context.part_tracker["gear_small"]
     if stage in {"detach", "assumed_detach"}:
-        assert context.resources["ur5e-4"].valuation["held_part"] == "gear_small"
-        assert context.part_tracker["gear_small"]["location"] == "ur5e-4"
         assert gear._held_part == "gear_small"
+        assert "ur5e-4" not in context.fault_reports
         assert fault.evidence["custody_uncertain"] is True
         gear._controller.set_entity_pose.assert_not_called()
     else:
-        assert context.resources["ur5e-4"].valuation["held_part"] is None
-        assert context.part_tracker["gear_small"]["state"] == "misplaced"
+        # The confirmed detach is reported by the robot; the product's beliefs stay for grounding.
         assert gear._held_part is None
-        assert "observed_pose" not in context.part_tracker["gear_small"]
+        assert context.fault_reports["ur5e-4"]["reported_state"] == "failed"
     with pytest.raises(ValueError, match="reset"):
         fault.arm(True)
 
@@ -719,7 +715,7 @@ def test_small_gear_slippage_reset_requires_confirmation_and_rerun_uses_fresh_pi
     assert all(record["acknowledgement"]["run_id"] == rerun.context.run_id
                for record in rerun.conveyor_fault.evidence["pickups"].values())
     assert rerun.context.resources["ur5e-3"].valuation["held_part"] == "KET4_Square_4mm"
-    assert rerun.context.part_tracker["gear_small"]["state"] == "misplaced"
+    assert rerun.context.fault_reports["ur5e-4"]["reported_state"] == "failed"
     assert fault.evidence == retained_evidence
 
 
@@ -955,8 +951,8 @@ def test_lowering_slippage_retains_pending_placement_peg_and_obligations(
     assert context.resources["ur5e-3"].valuation == peg_before
     assert context.part_tracker["KET4_Square_4mm"] == peg_part_before
     assert peg._held_part == "KET4_Square_4mm" and peg._gripper_state == "closed"
-    assert context.part_tracker["gear_small"]["state"] == "misplaced"
-    assert context.resources["ur5e-4"].valuation["held_part"] is None
+    assert context.part_tracker["gear_small"]["location"] == "ur5e-4"
+    assert gear._held_part is None and context.fault_reports["ur5e-4"]["reported_state"] == "failed"
     assert context.requirements == fault.evidence["requirements"] == requirements
     assert runtime.retained_paths == fault.evidence["continuations"] == continuations
     assert all(row["acknowledgement"]["event_name"] == "pick_grasp" for row in context.transitions)

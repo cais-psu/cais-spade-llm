@@ -59,7 +59,7 @@ def test_raw_file_keeps_facts_and_preparation_keeps_derived_views(tmp_path):
     record = capture()
     files.write_capture(path, record)
     raw = json.loads(path.read_bytes())
-    preparation = json.loads((tmp_path / files.PREPARATION_NAME).read_bytes())
+    beliefs = json.loads((tmp_path / files.BELIEFS_NAME).read_bytes())
     assert not set(raw) & files.DERIVED_KEYS
     assert {"snapshot", "environment_valuation", "products", "environment_models"}.isdisjoint(raw["physical_evidence"])
     assert {"resource_values_after", "part_tracker_after"}.isdisjoint(raw["failure"])
@@ -68,7 +68,7 @@ def test_raw_file_keeps_facts_and_preparation_keeps_derived_views(tmp_path):
     assert set(raw["agent_declarations"]["jid-a"]) == {"resource_type", "static_capabilities",
                                                        "execution_primitive_catalog", "recovery_des_model"}
     assert "recovery_des_model" not in raw["agent_declarations"]["jid-cell"]
-    assert preparation["observations_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert beliefs["observations_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert files.read_capture(path) == record
 
 
@@ -78,9 +78,23 @@ def test_views_that_do_not_match_the_raw_file_are_not_merged(tmp_path):
     raw = json.loads(path.read_bytes())
     path.write_text(json.dumps({**raw, "run_id": "edited"}, indent=2))
     assert "prepared_recovery_request" not in files.read_capture(path)
-    (tmp_path / files.PREPARATION_NAME).unlink()
+    (tmp_path / files.BELIEFS_NAME).unlink()
     assert "prepared_recovery_request" not in files.read_capture(path)
     assert "agent_reports" not in files.read_capture(path)
+
+
+def test_beliefs_alone_are_rewritten_for_unchanged_raw_facts(tmp_path):
+    path = tmp_path / "observations.json"
+    files.write_capture(path, capture())
+    raw = path.read_bytes()
+    record = files.read_capture(path)
+    record["prepared_recovery_request"]["llm_input"] = {"fault_event": {"detected_signals": []}}
+    files.write_beliefs(path, record)
+    assert path.read_bytes() == raw
+    assert files.read_capture(path)["prepared_recovery_request"]["llm_input"] == {"fault_event": {"detected_signals": []}}
+    record["run_id"] = "edited"
+    with pytest.raises(ValueError, match="only derived views may be rewritten"):
+        files.write_beliefs(path, record)
 
 
 def test_older_schemas_are_written_unchanged(tmp_path):
@@ -88,7 +102,7 @@ def test_older_schemas_are_written_unchanged(tmp_path):
     record = {**capture(), "schema_version": 1}
     files.write_capture(path, record)
     assert json.loads(path.read_bytes()) == record
-    assert not (tmp_path / files.PREPARATION_NAME).exists()
+    assert not (tmp_path / files.BELIEFS_NAME).exists()
     assert files.read_capture(path) == record
 
 

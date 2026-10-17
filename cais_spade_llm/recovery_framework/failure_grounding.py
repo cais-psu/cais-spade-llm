@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any
 
 from cais_spade_llm.recovery_framework import SCENE_PATH
-from cais_spade_llm.recovery_framework.capture_files import RAW_SCHEMA_VERSION, pending_nodes
+from cais_spade_llm.recovery_framework.capture_files import (
+    BELIEFS_NAME,
+    RAW_SCHEMA_VERSION,
+    pending_nodes,
+    read_capture,
+    write_beliefs,
+)
 from cais_spade_llm.recovery_framework.diagnostics import write_record
 
 logger = logging.getLogger(__name__)
@@ -26,6 +32,7 @@ _FAILURE_GOAL_FIELDS = ("task_id", "resource_id", "goal_cancelled", "motion_stop
                         "progress", "target_pose")
 _JOB_FIELDS = ("task_id", "job_state", "process_completed", "processing_fraction", "part_name")
 _PART_FIELDS = ("state", "location")
+_POSE_KEYS = ("x", "y", "z", "qx", "qy", "qz", "qw")
 
 
 @lru_cache(maxsize=1)
@@ -63,6 +70,10 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         reported = {rid: row["reported_state"] for rid, row in reports.items()
                     if row.get("reported_state") in settings["fault_report_values"]}
         unavailable += [rid for rid, row in reports.items() if row.get("available") is False and rid not in unavailable]
+        # A converted schema-1 report names the capture path it came from, not a
+        # reporting device; only a device's own words are passed on.
+        report_sources = {rid: row["source"] for rid, row in reports.items()
+                          if isinstance(row.get("source"), str) and not row["source"].startswith("/")}
         nodes = pending_nodes(failure, observations)
         sources = {"reported_fault_states": "/fault_reports/*/reported_state",
                    "pending_nodes": "/failure/{pending_tasks,continuations} without /acknowledgements"}
@@ -71,6 +82,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         # counts only when it is a configured fault report.
         reported = {rid: values["resource_state"] for rid, values in (observations.get("resource_states") or {}).items()
                     if isinstance(values, dict) and values.get("resource_state") in settings["fault_report_values"]}
+        report_sources = {}
         nodes = observations.get("pending_nodes") or []
         sources = {"reported_fault_states": "/resource_states/*/resource_state", "pending_nodes": "/pending_nodes"}
     resources = physical.get("resources") or {}
@@ -86,6 +98,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         "machine_jobs": jobs,
         "unavailable_resources": unavailable,
         "reported_fault_states": reported,
+        "fault_report_sources": report_sources,
         "controller_faults": {rid: str((row.get("controller_hold_observation") or {}).get("fault_reason") or "")
                               for rid, row in resources.items()},
         "attachments": {rid: (row.get("attachment") or {}).get("model_name")
@@ -107,6 +120,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
             "machine_jobs": "/processing_observations/*/jobs",
             "unavailable_resources": "/unavailable_resources",
             "reported_fault_states": sources["reported_fault_states"],
+            "fault_report_sources": "/fault_reports/*/source",
             "controller_faults": "/physical_evidence/resources/*/controller_hold_observation/fault_reason",
             "attachments": "/physical_evidence/resources/*/attachment/model_name",
             "fixture_attachments": "/physical_evidence/physics_evidence/attachments",
@@ -156,6 +170,11 @@ def _regions_for(location: str, regions: dict) -> dict:
     return {name: bounds for name, bounds in regions.items() if name == location or name.startswith(location + ".")}
 
 
+def _pose_record(pose: list | None) -> dict | None:
+    # Part ledgers and recovery prompts name pose components; captures store them in order.
+    return dict(zip(_POSE_KEYS, pose, strict=True)) if isinstance(pose, list) and len(pose) == 7 else None
+
+
 def _held_by(attachments: dict, model_name: str | None) -> str | None:
     return next((rid for rid, model in attachments.items() if model_name and model == model_name), None)
 
@@ -189,33 +208,47 @@ def detect_signals(raw: dict, expected: dict, settings: dict) -> list[dict]:
                             "evidence": raw["sources"]["controller_faults"], "values": {"fault_reason": reason}})
     for rid in raw["unavailable_resources"]:
         signals.append({"rule": "B2", "signal": "device_fault_report", "resource_id": rid,
-                        "evidence": raw["sources"]["unavailable_resources"], "values": {"available": False}})
+                        "evidence": raw["sources"]["unavailable_resources"],
+                        "values": {"available": False, **_reported_by(raw, rid)}})
     for rid, value in raw["reported_fault_states"].items():
         signals.append({"rule": "B2", "signal": "device_fault_report", "resource_id": rid,
-                        "evidence": raw["sources"]["reported_fault_states"], "values": {"resource_state": value}})
+                        "evidence": raw["sources"]["reported_fault_states"],
+                        "values": {"resource_state": value, **_reported_by(raw, rid)}})
     margin = float(settings["region_margin_m"])
-    for name, part in raw["parts"].items():
-        holder = next((rid for rid, values in expected["resources"].items() if values.get("held_part") == name), None)
-        measured = _held_by(raw["attachments"], part["model_name"])
-        if holder is not None or measured is not None:
-            if holder != measured:
-                signals.append({"rule": "C1", "signal": "state_discrepancy", "resource_id": holder or measured,
-                                "part_name": name, "evidence": raw["sources"]["attachments"],
-                                "values": {"expected_holder": holder, "measured_holder": measured}})
-            continue
-        # A measured fixture attachment places the part; regions only test loose parts.
-        if raw["fixture_attachments"].get(part["model_name"]):
-            continue
-        location = (expected["parts"].get(name) or {}).get("location")
-        regions = _regions_for(location, raw["regions"]) if isinstance(location, str) else {}
-        if not regions or not isinstance(part["pose"], list):
-            continue
-        radius = _part_radius(raw["part_bounds"].get(name))
-        if not any(_overlaps(part["pose"], radius, bounds, margin) for bounds in regions.values()):
-            signals.append({"rule": "C2", "signal": "state_discrepancy", "part_name": name,
-                            "evidence": raw["sources"]["parts"], "values": {"expected_location": location,
-                                                                            "measured_position": part["pose"][:3]}})
+    signals.extend(row for name, part in raw["parts"].items()
+                   if (row := _part_discrepancy(raw, expected, name, part, margin)) is not None)
     return signals
+
+
+def _reported_by(raw: dict, rid: str) -> dict:
+    # The device's own words are passed through; no component is inferred from them.
+    source = raw.get("fault_report_sources", {}).get(rid)
+    return {"reported_by": source} if source else {}
+
+
+def _part_discrepancy(raw: dict, expected: dict, name: str, part: dict, margin: float) -> dict | None:
+    holder = next((rid for rid, values in expected["resources"].items() if values.get("held_part") == name), None)
+    measured = _held_by(raw["attachments"], part["model_name"])
+    if holder is not None or measured is not None:
+        # A holder without an attachment observation has unknown custody, not an empty gripper.
+        if holder == measured or (measured is None and holder not in raw["attachments"]):
+            return None
+        return {"rule": "C1", "signal": "state_discrepancy", "resource_id": holder or measured,
+                "part_name": name, "evidence": raw["sources"]["attachments"],
+                "values": {"expected_holder": holder, "measured_holder": measured}}
+    # A measured fixture attachment places the part; regions only test loose parts.
+    if raw["fixture_attachments"].get(part["model_name"]):
+        return None
+    location = (expected["parts"].get(name) or {}).get("location")
+    regions = _regions_for(location, raw["regions"]) if isinstance(location, str) else {}
+    if not regions or not isinstance(part["pose"], list):
+        return None
+    radius = _part_radius(raw["part_bounds"].get(name))
+    if any(_overlaps(part["pose"], radius, bounds, margin) for bounds in regions.values()):
+        return None
+    return {"rule": "C2", "signal": "state_discrepancy", "part_name": name,
+            "evidence": raw["sources"]["parts"], "values": {"expected_location": location,
+                                                            "measured_position": part["pose"][:3]}}
 
 
 def _names_resource(node: dict, rid: str, settings: dict) -> bool:
@@ -251,13 +284,14 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
     discrepant = {row["part_name"] for row in signals if row["signal"] == "state_discrepancy"}
     parts = deepcopy(expected["parts"])
     updates = []
-    for name in discrepant:
+    # Sorted, so a re-derived grounding compares equal to the stored one.
+    for name in sorted(discrepant):
         holder = measured_parts.get(name)
         row = parts.setdefault(name, {})
         if holder:
             row.update(state="in_gripper", location=holder)
         else:
-            row.update(state="misplaced", location=None, observed_pose=deepcopy(raw["parts"][name]["pose"]))
+            row.update(state="misplaced", location=None, observed_pose=_pose_record(raw["parts"][name]["pose"]))
         updates.append({"part_name": name, **{key: deepcopy(row[key]) for key in ("state", "location", "observed_pose")
                                               if key in row}})
     resources = deepcopy(expected["resources"])
@@ -301,6 +335,66 @@ def fault_identity(grounded: dict) -> tuple:
     event = grounded["fault_event"]
     return (tuple(event["faulted_resources"]), event["failed_task_id"],
             tuple((row["part_name"], row["state"]) for row in event["affected_parts"]))
+
+
+def belief_key(grounded: dict) -> tuple:
+    """Return the belief changes a grounding makes, without measured pose values.
+
+    Two captures of the same settled scene ground the same key even though their
+    measured part poses differ by sensor noise.
+    """
+    rows = []
+    for row in grounded["belief_updates"]:
+        if "resource_id" in row:
+            rows.append(("resource", row["resource_id"], row["field"], json.dumps(row["value"], sort_keys=True)))
+        else:
+            rows.append(("part", row["part_name"], row.get("state"), row.get("location")))
+    return tuple(sorted(rows))
+
+
+def belief_rows(context, observations: dict, grounded: dict, *, saved: dict | None = None) -> dict:
+    """Copy the belief rows that :func:`update_beliefs` would change.
+
+    Args:
+        context: Live environment context owning the valuation and part tracker.
+        observations: In-memory capture with its belief copies.
+        grounded: Output of :func:`ground_failure`.
+        saved: Rows copied earlier; their original values are kept.
+
+    Returns:
+        Live and recorded copies of each affected resource valuation and part row.
+    """
+    rows = deepcopy(saved) if saved else {"valuations": {}, "parts": {}, "resource_states": {}, "part_tracker": {}}
+    resources = {row["resource_id"] for row in grounded["belief_updates"] if "resource_id" in row}
+    parts = {row["part_name"] for row in grounded["belief_updates"] if "part_name" in row}
+    with context.admission_lock:
+        for rid in resources - set(rows["valuations"]):
+            rows["valuations"][rid] = deepcopy(context.resources[rid].valuation)
+            rows["resource_states"][rid] = deepcopy((observations.get("resource_states") or {}).get(rid))
+        for name in parts - set(rows["parts"]):
+            rows["parts"][name] = deepcopy(context.part_tracker[name])
+            rows["part_tracker"][name] = deepcopy((observations.get("part_tracker") or {}).get(name))
+    return rows
+
+
+def restore_beliefs(context, observations: dict, rows: dict) -> None:
+    """Put back the belief rows copied by :func:`belief_rows`."""
+    with context.admission_lock:
+        for rid, values in rows["valuations"].items():
+            actor = context.resources[rid]
+            actor.valuation.clear()
+            actor.valuation.update(deepcopy(values))
+            actor.revision += 1
+        for name, values in rows["parts"].items():
+            context.part_tracker[name].clear()
+            context.part_tracker[name].update(deepcopy(values))
+        context.revision += 1
+    for key in ("resource_states", "part_tracker"):
+        for name, values in rows[key].items():
+            recorded = (observations.get(key) or {}).get(name)
+            if isinstance(values, dict) and isinstance(recorded, dict):
+                recorded.clear()
+                recorded.update(deepcopy(values))
 
 
 def update_beliefs(context, observations: dict, grounded: dict) -> list[dict]:
@@ -370,27 +464,40 @@ def prompt_fault_event(grounded: dict) -> dict:
 def apply_grounding(prepared: dict, observations: dict) -> dict | None:
     """Replace stored failure summaries in a prepared request with code grounding.
 
-    Captures without recorded agent state at the failure keep their stored
-    summaries. A capture with that state must contain a detectable fault.
+    Preparation stores the grounding with the request in ``beliefs.json``.
+    A stored grounding is derived again and must match before it is reused, so
+    a change to the rules or the execution-monitoring settings cannot pass
+    unnoticed. Captures without recorded agent state at the failure keep their
+    stored summaries. A capture with that state must contain a detectable fault.
 
     Args:
         prepared: Prepared recovery request, updated in place.
         observations: The saved failure capture.
 
     Returns:
-        The grounding, or ``None`` for captures without raw failure facts.
+        The grounding with the settings it used, or ``None`` for captures
+        without raw failure facts.
 
     Raises:
-        ValueError: The raw facts show no detectable fault.
+        ValueError: The raw facts show no detectable fault, or they no longer
+            give the stored grounding.
     """
     if not has_raw_failure_facts(observations):
         return None
-    grounded = ground_failure(observations)
+    settings = load_grounding_settings()
+    grounded = {**ground_failure(observations, settings=settings), "execution_monitoring": deepcopy(settings)}
     event = grounded["fault_event"]
     if not event["detected"]:
         raise ValueError("NEEDS_CONTEXT: no failure is detectable from the recorded execution-monitoring facts")
+    if "code_grounding" in prepared and prepared["code_grounding"] != grounded:
+        raise ValueError("NEEDS_CONTEXT: the stored failure grounding differs from the one its raw facts give now; "
+                         "re-derive it with `python -m cais_spade_llm.recovery_framework.failure_grounding --store`")
     prepared["code_grounding"] = deepcopy(grounded)
-    prepared.setdefault("llm_input", {})["fault_event"] = prompt_fault_event(grounded)
+    fault_event = prompt_fault_event(grounded)
+    prepared.setdefault("llm_input", {})["fault_event"] = fault_event
+    for summary in (prepared.get("context_summary"), (prepared.get("recovery_debug") or {}).get("context_summary")):
+        if isinstance(summary, dict) and isinstance(summary.get("fault_event"), dict):
+            summary["fault_event"] = deepcopy(fault_event)
     anchor = prepared.setdefault("failure_anchor", {})
     anchor.pop("failure_type", None)
     anchor.pop("checkpoint", None)
@@ -413,6 +520,34 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
                 row[key] = values.get("resource_state")
             if "held_part" in row and "held_part" in values:
                 row["held_part"] = values["held_part"]
+    return grounded
+
+
+def store_grounding(path: Path) -> dict:
+    """Derive the grounding again and store it in a schema-2 capture's ``beliefs.json``.
+
+    Only the derived file changes; ``observations.json`` is never rewritten.
+
+    Args:
+        path: A saved schema-2 ``observations.json`` with a current ``beliefs.json``.
+
+    Returns:
+        The stored grounding.
+
+    Raises:
+        ValueError: The capture has no current prepared request, no raw failure
+            facts or no detectable fault.
+    """
+    record = read_capture(path)
+    prepared = record.get("prepared_recovery_request")
+    if record.get("schema_version") != RAW_SCHEMA_VERSION or not isinstance(prepared, dict):
+        raise ValueError(f"{path} needs a schema-2 capture with a current {BELIEFS_NAME}")
+    # This explicit re-derivation replaces a grounding made under older rules or settings.
+    prepared.pop("code_grounding", None)
+    grounded = apply_grounding(prepared, record)
+    if grounded is None:
+        raise ValueError(f"{path} records no raw failure facts to ground")
+    write_beliefs(path, record)
     return grounded
 
 
@@ -467,6 +602,8 @@ def main() -> None:
     parser.add_argument("paths", nargs="*", help="Saved observations.json files")
     parser.add_argument("--official", action="store_true", help="Use the retained official capture per failure")
     parser.add_argument("--output", type=Path, default=RECORDS.parent / "failure_grounding_report.json")
+    parser.add_argument("--store", action="store_true",
+                        help=f"Also store each grounding in the capture's {BELIEFS_NAME}")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     paths = list(default_observation_paths().values()) if args.official else args.paths
@@ -476,6 +613,10 @@ def main() -> None:
         grounded = ground_failure(observations)
         report["captures"].append({"source_path": str(path), "run_id": observations.get("run_id"),
                                    "grounded": grounded, "agreement": compare_with_recorded_labels(observations, grounded)})
+        if args.store:
+            # The agreement above reads the labels the beliefs held before this store.
+            store_grounding(Path(path))
+            report["captures"][-1]["stored_in"] = str(Path(path).with_name(BELIEFS_NAME))
         event = grounded["fault_event"]
         logger.info("%s: signals=%s resource=%s task=%s function=%s parts=%s", Path(path).parent.name,
                     [row["rule"] for row in event["signals"]], event["faulted_resources"], event["failed_task_id"],

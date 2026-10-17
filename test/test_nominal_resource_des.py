@@ -2516,3 +2516,25 @@ def test_buffer_graph_follows_declared_transitions(scene):
     assert len(diagram["nodes"]) == 2
     assert len(diagram["edges"]) == 4
     assert all(edge["event_name"] != "advance_part" for edge in diagram["edges"])
+
+
+def test_conveyor_names_observed_belt_locations_and_orders_a_placed_part(models):
+    from cais_spade_llm.resources.nominal_conveyor import conveyor_location_at, conveyor_place_parameters
+
+    conveyor = models["Conveyor"]
+    assert [conveyor_location_at(conveyor, x, .15) for x in (-4.5, -4.05, -3.0, -2.0, -1.5, -0.78, -0.5)] == [
+        None, "loading_position_1", "after loading_position_1", "loading_position_2",
+        "after loading_position_2", "output_nest", None]
+    state = load(models, initial_nominal_valuation(models), "M2", CIRCULAR)
+    belt = state["Conveyor"]
+    assert belt[f"part_location.{CIRCULAR}"] == "loading_position_2"
+    # part_order 0 leads: a part placed downstream goes ahead, one placed upstream goes behind.
+    order = conveyor_place_parameters(conveyor, belt, SQUARE, "after loading_position_2")
+    assert order[f"next_part_order.{SQUARE}"] == 0 and order[f"next_part_order.{CIRCULAR}"] == 1
+    order = conveyor_place_parameters(conveyor, belt, SQUARE, "after loading_position_1")
+    assert order[f"next_part_order.{CIRCULAR}"] == 0 and order[f"next_part_order.{SQUARE}"] == 1
+    for location, error in (("loading_position_2", "occupied"), ("nowhere", "Unknown Conveyor location")):
+        with pytest.raises(ValueError, match=error):
+            conveyor_place_parameters(conveyor, belt, SQUARE, location)
+    with pytest.raises(ValueError, match="already resident"):
+        conveyor_place_parameters(conveyor, belt, CIRCULAR, "output_nest")

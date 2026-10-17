@@ -1,5 +1,317 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Schema-2 re-capture — October 15, 2026 — Stage 0 done; four Gazebo stages pending
+
+The user will re-capture all four failures in Gazebo, one scenario per stage. Every new
+`observations.json` must hold raw facts only. Plan:
+`~/.claude/plans/what-do-you-mean-synchronous-kahn.md`.
+
+**CCA during capture (decided October 15, user questions answered).** Captures run with
+the CCA bypassed, as before. Live CCA capture is not possible with the current code:
+- the capture session exists only under the bypass;
+- under a live CCA, nominal tasks run through `live.execute_nominal`, which never
+  attaches the slip trigger (`workflow_execution.py:453`);
+- the CCA loads one spec file;
+- nominal tasks have no safety contracts for gripper steps or non-arm resources.
+
+Read-only verification, by three investigators plus three skeptics on code and the
+October 10 captures, established the following:
+- **ur5e-3 waits because the harness holds it.** With the fault armed (the default),
+  `failure_checkpoints.holds_task:184-196` holds every ur5e-3 task once its KET4 pickup is
+  acknowledged. It is checked at `environment_runtime.py:982` and `:1147`, before any CCA
+  branch. ur5e-3 parks above Buffer zone 4, outside the assembly zone: nearest link at
+  y = 0.357 against the zone edge at 0.25. It waits there while ur5e-4 lowers the gear and
+  the gear slips.
+- **The paper must say the checkpoint is staged.** A live CCA would not reproduce the same
+  capture. The harness also stages holds the CCA would not make: ur5e-4 waits for
+  ur5e-3's pickup, and both pickups are released together. With the mutex alone, ur5e-3
+  would enter the board first.
+- **Do not disarm the fault in the UI.** Without the harness, nothing keeps ur5e-3 out:
+  `place_approach` does not reserve the board workspace.
+
+**Stage 0 changes (code and tests, no Gazebo):**
+- **Native preview model readers** use `read_capture`. Before this, the archive step
+  rejected every schema-2 capture.
+- **Custody after a device fault report** (`gazebo_safety_preparation`): the gripper is
+  checked against the robot's own `_held_part`, not the product's belief, which lags
+  until grounding. The disagreement is recorded as `custody_after_fault_report`. Without
+  a fault report, the old strict check is unchanged.
+- **Grounding:**
+  - writes the dropped part's `observed_pose` as an `{x,y,z,qx,qy,qz,qw}` record;
+  - a robot without an attachment observation has unknown custody, so C1 does not fire;
+  - live belief updates are restored (`belief_rows`/`restore_beliefs`) if the retaken
+    capture grounds a different fault;
+  - a frozen checkpoint's beliefs are never changed.
+- **Live `_install_prepared`** also applies `apply_grounding`, so live prompts carry no
+  scenario name.
+- **`preparation.json` is now `beliefs.json` (2026-10-16, user request).** All 14 files
+  under `monitor/environment_runs` were renamed with contents unchanged
+  (`recapture_v2_20261015/grounding_store_20261016/beliefs_rename.json`). Earlier entries
+  in this plan still say `preparation.json`. The code constant is `BELIEFS_NAME`, and the
+  UI button reads "Download beliefs". The record fields `preparation_sha256` and
+  `preparation_version` keep their names.
+- **Grounding is stored in `beliefs.json` (2026-10-16).** Preparation grounds the
+  request once (`_prepare`, and `evaluation_capture` after `_prepare_saved_capture`), and
+  a grounded session starts at `outline`. The code-only grounding turn and the per-attempt
+  `failure_grounding.json` are gone. Each attempt derives the grounding again and stops with
+  NEEDS_CONTEXT if it differs, for example after a rule or `execution_monitoring` change.
+  Re-derive with `python -m cais_spade_llm.recovery_framework.failure_grounding --official --store`.
+  - The four official beliefs files were re-derived this way; every
+    `observations.json` is unchanged. Old and new preparation sha256 values are in
+    `recapture_v2_20261015/grounding_store_20261016/store_record.json`. The runs'
+    `condition_record.json` and `report.json` still name the old values.
+  - `failure_context_raw.failure_context.failure_mode` still holds the scenario name;
+    no prompt reads it.
+- **`_prepare_saved_capture`** writes with `write_capture`.
+- **Evaluation integrity:** `preparation.json` is hashed in `report.json` and in the
+  condition record, frozen with evaluation inputs, and checked at registration.
+- **`evaluation_capture --seed`** reproduces a randomly timed failure. It is accepted only
+  where the setup draws a seed (Machining `during_processing`).
+
+**Hold probe: blocked.** The probe proposes the held task (ur5e-3 places KET4 on the
+board) from the captured failure state to the offline checks:
+- CCA alone returns NEEDS_CONTEXT: "Selected safety predicates need occupancy or owner
+  interval evidence".
+- CCA plus physical evidence stops at "Endpoint requires one supported owner
+  declaration", the same validator gap as Attempt 17's event 2.
+
+The probe can run on the new captures once that gap is fixed.
+
+**Runbook (the user runs one stage at a time; Claude checks each capture):**
+- Stop the Recovery UI and every other Gazebo/ROS process first. Do not edit code
+  during a run.
+
+```bash
+tmux new -s recapture        # reattach: tmux attach -t recapture
+cd /home/jongh/projects/cais-spade-llm
+source /opt/ros/humble/setup.bash
+source /home/jongh/ros2_ws/install/setup.bash
+BASE=cais_spade_llm/monitor/environment_runs/recapture_v2_$(date +%Y%m%d)
+mkdir -p "$BASE"
+# set SCEN, NAME, DOMAIN, PORT (and SEED for Machining); the --output folder must not exist yet
+poetry run python -m cais_spade_llm.recovery_framework.evaluation_capture --run \
+  --output "$BASE/$NAME" --scenario "$SCEN" --condition normal --purpose development \
+  --ros-domain $DOMAIN --gazebo-port $PORT --timeout 1800 --settle-timeout 300 --scene-image \
+  ${SEED:+--seed $SEED} > "$BASE/$NAME.log" 2>&1; echo "exit $?"
+```
+
+| Stage | SCEN | NAME | DOMAIN / PORT | SEED | Expected time |
+|---|---|---|---|---|---|
+| 1 | `Part slippage` | `part_slippage_01` | 89 / 11379 | — | ~15 min |
+| 2 | `ur5e-1 breakdown` | `ur5e1_08` (captured 2026-10-16) | 90 / 11380 | — | ~24 min (`--timeout 2400`; trims M1 90 s / M2 60 s in the private scene) |
+| 3 | `Conveyor breakdown` | `conveyor_01` | 91 / 11381 | — | ~12–25 min |
+| 4 | `Machining breakdown during part processing` | `machining_02` (captured 2026-10-16) | 94 / 11384 | `4000168541` | ~17 min (`--timeout 3600`; trims M1 60 s / M2 90 s in the private scene) |
+
+These are development captures. `recovery_evaluation` registers an evaluation capture
+only while every implementation file still matches its capture-time hash
+(`verify_frozen`; "Reserved capture was produced by a different implementation"). A
+development capture can never be promoted. The open validator gaps will still change code,
+so the reserved evaluation captures are re-run with `--purpose evaluation` after the final
+code freeze, using the same procedure.
+
+For a retry, use the next NAME (`_02`) and the next domain/port. Known transient
+failures:
+- Nav2 crash;
+- KMR wall timeout at a low real-time factor;
+- a black scene image;
+- a missed processing overlap.
+
+After each stage, Claude checks:
+- `report.json` status is `captured` and the evaluation row is written;
+- the capture is schema 2, and `label_audit` is empty;
+- `preparation.json` matches the raw file, and offline preparation is ready;
+- the expected fault report and grounding;
+- an offline code-only turn 1 with no scenario name;
+- the capture loads in Recovery Offline.
+
+A failed attempt is recorded here, and only its disposable outputs are deleted.
+
+**Attempts:**
+- **`part_slippage_01` (2026-10-15 15:26–15:31; run `ea6c29d8…`): failed safely** with
+  "NEEDS_CONTEXT: the retaken physical capture grounds a different fault". No official
+  record changed.
+  - Cause: the first live physical capture had no observation of ur5e-4 (transient,
+    right after the slip), so grounding found A1+B2 and updated only `resource_state`. The
+    retake observed ur5e-4's empty gripper (C1, gear_small `misplaced`). The single-retake
+    identity check then stopped the run and restored the beliefs.
+  - Evidence: the saved retake was at revision 11, with ur5e-4 `failed` but `held_part`
+    gear_small.
+  - Fix: `_ground_live_capture` regrounds until two consecutive captures agree, with at
+    most 3 retakes. The faulted resource and task must stay fixed, beliefs are restored
+    otherwise, and every pass is written to `grounding_passes.json`. A replay test covers
+    this case.
+  - The 46.9 MB run folder was deleted under `part_slippage_01_deletion_list.json`. Its 44
+    links into the repository were removed as links only. The log, status and
+    `attempt_history.json` are kept in `recapture_v2_20261015/`.
+  - Next: `part_slippage_02` on domain 90 / port 11380.
+- **`part_slippage_02` (2026-10-15 15:38–15:45; run `c461242a…`): captured as
+  `capture_7dda4f66c81949c3b8e50844c6e13e20`** (development).
+  - The report status is `captured`, the evaluation row is written, protected files are
+    unchanged, and there were no LLM calls. The native model and scene image were saved.
+  - The raw file holds no derived views and no labels. `preparation.json` is bound by
+    sha256. Offline-ready, and listed in Recovery Offline.
+  - The fault report is ur5e-4 `reported_state: failed` from gripper object detection.
+  - Grounding from the raw file alone gives A1+B2+C1: ur5e-4, `environment_9`
+    `place_approach`, gear_small `misplaced` with a named-pose `observed_pose`.
+  - Grounding settled after one retake. The first pass had ur5e-4 unresolved against the
+    not-yet-updated belief; the retake had nothing unresolved.
+  - The physical state matches the scenario: ur5e-3 holds KET4 at (-0.32, 0.50, 1.50)
+    above the Buffer, ur5e-4's gripper is empty, and gear_small rests at (0, 0.30, 1.025).
+  - Offline turn 1 is code-only with no LLM call. The first LLM prompt carries
+    `detected_signals` and no scenario name or checkpoint.
+- **Reach fix and new drop spot (user decisions, 2026-10-15):**
+  - The kinematic premise was checked. A top-down grasp by a UR5e with the RG2 reaches about
+    0.91 m at table height: closed form verified against the published UR5e zero pose, and
+    offline IK on the captured cell model with URDF joint limits. ur5e-4 **could** reach the
+    old drop spot (0, 0.30), so "only ur5e-3 can pick up the gear" was false there.
+  - The drop spot moved to (0.25, 0.45, 1.04) in `initialization/failure_scenarios/part_slippage.json`.
+    Offline IK: ur5e-3 reaches it and ur5e-4 has no solution. Collisions were not checked.
+  - `robot_ur5e.json` gained a `kinematics` block (UR5e DH, RG2 TCP 0.218 m, loose-part TCP
+    band -0.05…0.10 m above the base).
+  - `workflow_execution._robot_configuration` now computes `gripper_reach` when the cell
+    declares none: radius 0.886 m, the smaller reach across the band. An explicit cell value
+    still wins. The template's 0.7 m printer-cell value is not used.
+  - The prompt says the reach bounds picking a part located only by its `observed_pose`;
+    stations follow each robot's reachability list.
+  - Limitation: the band assumes loose parts rest at about base height. ur5e-1 and ur5e-2 sit
+    on pedestals, so a scenario dropping parts near them may need a per-robot band.
+  - Tests:
+    - new `test_ur5e_reach_is_computed_from_kinematics_for_loose_part_picks`;
+    - updated the reach expectation in `test_cell_capability_calculation_…` and the preset in
+      `test_recovery_setup`;
+    - updated the Phase-C slip-injection tests in `test_recovery_framework_products` to the
+      device-report contract. These had been missed in Phase C.
+  - Already failing before Phase C, at c40aba2/HEAD:
+    - `test_gazebo_recording` (1), `test_recovery_diagnostics` (1);
+    - `test_simulation_timing` (6): a missing monitor waypoint file, and `avoid_collisions`
+      versus the scene;
+    - `test_recovery_framework_products` (4).
+- **`part_slippage_03` (2026-10-15 17:54–18:01; run `b96e9650…`): captured as
+  `capture_77666affc1b9468ca157cf366d706dc8`** (development). It supersedes `capture_7dda4f66…`.
+  - Status `captured`; all per-stage checks pass.
+  - Grounding settled after two retakes: the first pass again missed ur5e-4's observation, and
+    passes 2 and 3 agreed.
+  - The gear rests at (0.25, 0.45, 1.025).
+  - The ur5e-3 and ur5e-4 agent declarations carry the computed reach. ur5e-3 is 0.255 m from
+    the gear (inside); ur5e-4 is 0.982 m away (outside).
+  - The first LLM prompt contains the reach line, and no scenario name or checkpoint.
+- **Conveyor breakdown (Stage 3) setup without a held peer (user decisions, 2026-10-16).**
+  - **No held peer.** The old setup made the harness hold ur5e-4 with gear_small until the
+    fault, which fit the retired rule "KET4 before gear_small". Under rule 5a (gear_small before
+    KET4), no rule explains that wait, so the user dropped it. `example_setup` now sets only
+    `part_name` = KET4_Square_4mm, so the Conveyor scenario has no holds. On its own schedule
+    gear_small is on the board long before ur5e-1 picks KET4 from M1 (the ur5e1_04 log shows
+    the snap while the KMR was still bringing KET4 to M1).
+  - **Two-part order, M2 and ur5e-2 off**, unchanged.
+  - The checkpoint is unchanged: it latches on ur5e-1's acknowledged `pick_grasp` of KET4 from
+    the completed M1, before the release onto the Conveyor. The evidence now always records
+    `pickups.ur5e-1`.
+  - Capture verification (`evaluation_capture._verify_conveyor_capture`) fails closed unless:
+    - ur5e-1's pickup and custody are retained, and KET4 is unassembled;
+    - the Conveyor is unavailable, with transport disabled and its own fault report
+      (`available: false`, schema 2);
+    - no task is in progress at the fault;
+    - every other ordered part has a completed assembly and is measured as fixed to the board
+      (`physics_evidence.attachments`, board → part, `fixed_joint`).
+
+    Captures configured with a held peer, such as the retained `capture_1b3f3d1d…`, keep the
+    old checks.
+  - The Conveyor private capture scene gets the same 360 s KMR arm wall budget as ur5e-1.
+    Conveyor `capture_02` (October 14) failed on the 120 s limit at real-time factor 0.06. The
+    trim times are unchanged.
+  - `recovery_setup` checks that the Conveyor `part_name` is eligible for ur5e-1 even without
+    a peer.
+  - Tests:
+    - `test_conveyor_fault`: no peer and no holds, `pickups.ur5e-1`, the fault report, and a
+      part that is not eligible;
+    - `test_recovery_evaluation_capture`: the new verification with 7 fail-closed cases, and
+      the Conveyor 360 s scene;
+    - `test_conveyor_fault` + `test_recovery_evaluation_capture`: 211 passed.
+
+    The related suites show only the known failures: 27 in `test_recovery_case_safety`, 3 in
+    `test_recovery_evaluation` and 4 in `test_recovery_framework_products`.
+  - **Capture timing (user):** do not capture until the ur5e-1 capture succeeds. A tmux watcher
+    (`conveyor_capture`; scratch script `conveyor_after_ur5e1.sh`; state in
+    `recapture_v2_20261015/conveyor_01.watch`) waits for:
+    - a `ur5e1_05`-or-later run with exit 0 and report status `captured`;
+    - no gzserver, capture or Recovery UI process.
+
+    It then runs `conveyor_01` on domain 91 / port 11381 with `--timeout 2400`.
+    The shared order is in `recapture_v2_20261015/GAZEBO_QUEUE.md`. Every peer chat was told
+    on 2026-10-16 at 01:02 to check that file before launching Gazebo.
+- **`conveyor_01` (2026-10-16 02:33–02:43; run `5a764b64…`): captured as
+  `capture_3aed616530294a4bbdf353000fc69596`** (development, first attempt). It started
+  automatically after `ur5e1_08` was captured.
+  - Report: status `captured`, evaluation row written, `preserved_files_unchanged`, no LLM calls,
+    native model saved. The scene image is rendering-verified and shows the red marker on the belt.
+  - The raw file has schema 2, no derived keys and an empty `label_audit`. `preparation.json` is
+    bound by sha256. Offline preparation reports nothing missing, and the capture is listed in
+    Recovery Offline.
+  - `verify_capture` passes the new checks:
+    - ur5e-1 holds KET4 from the completed M1, with its gripper attachment measured;
+    - Conveyor fault report `{available: false, source: "device controller"}`;
+    - `transport_enabled` false;
+    - no task in progress at the fault;
+    - gear_small has a completed assembly and is fixed to `assembly_board_v1`.
+  - The timing was natural, with no holds: ur5e-4 placed gear_small before the KMR reached M1.
+    The KMR was idle at the Storage dock, 4.7 mm from its docking pose. ur5e-3 and ur5e-4 were
+    idle at home.
+  - Grounding from the raw file is B2: Conveyor faulted. The failed task is ur5e-1's
+    `place_approach` (`_pending_0`), with four blocked tasks, KET4 `in_gripper` at ur5e-1, and no
+    belief updates.
+  - Offline turn 1 is `turn_00001_grounding` with `llm_called=false`. The first LLM prompt has
+    `detected_signals`, `reported_by`, cell geometry, resource primitives and
+    `compute_place_targets`. It contains no scenario name, checkpoint or `failure_type`.
+  - Check script (scratch, no LLM): `check_conveyor.py`, adapted from the Machining chat's
+    `check_machining.py`. The Recovery UI page itself was not opened, because `machining_01`
+    started at 02:45.
+  - It supersedes `capture_1b3f3d1d…`, which stays protected until all four re-captures are
+    verified (retirement decision).
+- **Machining timing (user decision, 2026-10-16).** The user wants this case to show the LLM
+  producing new states and events, and left the timing to Claude. The scenario logic is unchanged,
+  and only the trims changed.
+  - The old 5 s + 5 s trims tied on rule 6 in the nominal schedule and left M2 about 3 s at the
+    fault.
+  - `evaluation_conditions.condition_setup` now writes Machining's private scene with M1 60 s,
+    M2 90 s and the KMR 360 s arm budget, for both normal and changed (changed still removes M2
+    `square`).
+  - The start stays staged (`holds_task`). KET4 finishes first nominally, and M2 has more than 30 s
+    left at the fault.
+  - The fault point is random over the overlap, not 50%.
+  - `test_recovery_evaluation_capture` covers both conditions; 367 focused tests pass.
+  - Why the LLM is essential: see `scenarios/03_machining_breakdown.md`.
+- **`machining_01` (2026-10-16 02:45–02:49; domain 92): failed** with "Input preparation failed:
+  Resource did not complete negotiated work", before any machining.
+  - Gazebo answered slowly from startup: 14 read-only `/get_entity_state` retries, against 0 in
+    `conveyor_01` and `ur5e1_08`. Then ur5e-4's `pick_approach.detect_parts` hit a `/detect_all`
+    timeout.
+  - No other Gazebo overlapped. Another chat's 100 MB capture load ran 02:43–02:45, and swap
+    was at 1.3 GB, so this is transient memory pressure.
+  - Preserved files were unchanged, and there were no LLM calls.
+  - Outputs deleted under `machining_01_deletion_list.json` (58 files, 5.2 MB; 46 links removed as
+    links only). The log, status and `attempt_history.json` entry are kept.
+  - Both peer chats paused heavy work for the retry.
+- **`machining_02` (2026-10-16 02:58–03:15; run `4d409713…`; domain 94 / port 11384): captured as
+  `capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87`** (development, seed `4000168541`).
+  - Report: status `captured`, evaluation row written, `preserved_files_unchanged`, no LLM calls.
+    The scene image shows the red marker on M1 and the KMR at the M2 dock.
+  - Schema 2: no derived keys in the raw file, empty `label_audit`, `preparation.json` bound.
+    Offline preparation reports nothing missing, and the capture is listed in Recovery Offline.
+  - `verify_capture` passes; processing compatibility is `supported`.
+  - Frozen at sim 90.41 s:
+    - **M1:** KET4 `interrupted` at 4.20 of 60 s (7.0%).
+    - **M2:** RGOCG4 `running` at 4.61 of 90 s (5.1%), so about 85 s left.
+    - The seeded point was sim 89.88 s, in an overlap of 86.0–145.7 s.
+  - The private scene records trims of 60/90 s.
+  - gear_small is assembled. ur5e-1 to ur5e-4 are idle at home, and the KMR is idle and empty at
+    M2.
+  - The fault report is M1 `{available: false, source: "device controller"}`.
+  - Grounding is A2+B2: M1 faulted on `environment_21` `machine_part`, with KET4 `loaded` at M1.
+  - Offline turn 1 is code grounding (`llm_called=false`). The first prompt (30.6k chars) has
+    `detected_signals` and no scenario name, checkpoint or `failure_type`.
+  - It supersedes `capture_8beafdb8…`, which stays protected until retirement. The run directory
+    is kept as the capture's evidence.
+
 ## Failure grounding from raw facts — October 15, 2026 — Phases A, B and C applied; re-capture pending
 
 User decisions:
@@ -27,6 +339,211 @@ scenario name or `prepared_recovery_request`. Generic rules:
 Settings are in `execution_monitoring` in `recovery_framework_gazebo.json`.
 
 Results on the four official captures (`monitor/environment_runs/failure_grounding_report.json`):
+- **Generic KMR abilities, Stage A — the LLM can express them (2026-10-15).** These are for the
+  ur5e-1 gripper-fault redesign. The KMR gets generic abilities only: no new docks, routes or
+  destination events, and no prompt hints. Gazebo decides the outcome, and failures are recorded
+  as limitations.
+  - Outline events may carry `params` (finite JSON values):
+    - schema: `multi_turn_prompts._OUTLINE_SYMBOLIC_EVENT_SCHEMA`;
+    - checked in `multi_turn._derive_candidate_outline_task`;
+    - kept on the accepted task and shown in accepted-prefix rows.
+  - No-validation mode (`outline_diagnostic_bypass`):
+    - an event carrying `params` counts as progress
+      (`multi_turn_outline_generation._classify_candidate_selection_progress`);
+    - the repeated-state fingerprint includes `params`
+      (`multi_turn_validated_event._event_state_fingerprint`), so an exact repeat is still excluded;
+    - validated mode is unchanged.
+  - The no-validation outline prompt also shows:
+    - **"Cell geometry"** (`outline_draft.scene_geometry`), all from the captured `inputs.scene`
+      except the floor map, which comes from
+      `ros2/.../generate_recovery_framework_map.py`. It covers:
+      - station, machine and robot-base geometry;
+      - each mobile base's measured planar pose, platform size, arm mount and reach;
+      - the navigation floor extent and its obstacles.
+
+      Routes, docking poses, handling assignments and transfer targets are excluded.
+    - **"Resource primitives"**: name and required parameters, rendered identically for every
+      resource.
+  - Two candidate rules now allow explicit coordinates in `params` where no location token
+    applies.
+  - The device fault report's own `source` reaches the prompt as `reported_by`
+    (`failure_grounding`). No component is derived from it.
+  - Tests:
+    - new: `test_multi_turn_diagnostic` (params kept, invalid params rejected, repeats excluded,
+      new poses accepted), `test_outline_draft` (geometry without hints) and
+      `test_failure_grounding` (`reported_by`);
+    - four tests left behind by the plant-wide spec change were updated (removed
+      `_PART_SLIPPAGE_SAFETY_FILES`, new defaults).
+  - Offline check with a mocked LLM on `capture_0a7fde80…`: the prompt shows geometry and the KMR
+    `move_base(target_pose)`, and a KMR `move_to_location` event with `params` is accepted into the
+    prefix.
+  - Already failing without Stage A (checked by temporarily reverting it): three tests in
+    `test_case3_recovery_dryrun`.
+  - Next: Stage B (driving to free poses in Gazebo), then C (release anywhere) and D (conveyor).
+- **Generic KMR abilities, Stages B–D — drive, release and the belt (2026-10-15).** All three are
+  checked live in Gazebo. Captures and LLM runs with them are still to do.
+  - **Stage B, drive anywhere.**
+    - `move_to_location` is bound to `_kmr_executor`.
+    - The worker's task mode accepts the runtime's full parameters
+      (`resource_id`, `resource_state`, x, y, yaw, `observed_resource_location`).
+    - A target with no declared dock skips the configured-route sweep and checks only its
+      endpoints; the base controller checks the path it plans. Nominal tasks still refuse
+      non-dock targets.
+    - Completion requires the measured base within 5 mm and 0.035 rad of the target
+      (`_kmr_arrived`).
+    - Base travel is bounded in simulation time (240 s) with a 3600 s wall backstop, and the
+      KMR worker's outer timeout is 3900 s. A first live run showed the old 240 s wall limit
+      cut a drive short at real-time factor 0.067.
+    - The generated-recovery executor (`slippage_execution`) has a KMR branch. Custody comes from
+      the KMR's measured state; picked parts update the source owner's declared `pick_grasp` or
+      `pick_part` consequence, with `{part_name}` bound.
+  - **Stage C, release anywhere.**
+    - `compute_place_targets(transform, part_pose)` places the held part at an explicit world
+      pose with no dock (`kmr_recovery.release_targets`).
+    - `release_part` and `detach_part` report where the part came to rest and whether it
+      settled.
+    - The receiver comes from the settled position (`environment_recovery.observed_receiver`):
+      buffer zone, machine workholding, staging tray, the part's Storage slot or a belt location.
+      The receiving owner's declared consequence is then committed.
+    - Anything else, or a part still moving when observation ends, becomes a misplaced part at
+      its observed pose.
+  - **Stage D, the conveyor.** A part resting on a stopped belt is recorded at its observed
+    location (`nominal_conveyor.conveyor_location_at` and `conveyor_place_parameters`), and the
+    existing transport carries it.
+  - **Live evidence** (scratch harness; poses chosen by hand the way the LLM would, from the
+    cell geometry):
+    1. The KMR picked KET4 at Storage.
+    2. It drove while carrying to (−3.0, −0.36, −π/2), arriving within 3 mm and 0.025 rad.
+    3. It released at part pose (−3.0, 0.40, 1.016). KET4 settled upright 0.3 mm away and was
+       recorded on the Conveyor at `after loading_position_1`.
+    4. `advance_conveyor` carried it 2.22 m to the output nest, with arrival observed.
+
+    The first base pose tried, facing +x, put the release beyond arm reach (IK failure). Choosing
+    a reachable dock is part of what the LLM must reason about.
+  - **Review:** an adversarial review found ten confirmed defects, all fixed:
+    - the task-mode parameter check;
+    - the Storage pickup lookup and template binding;
+    - missing machine, staging and Storage receivers;
+    - the stale release record;
+    - pickup custody checks;
+    - re-picking a misplaced part;
+    - the worker outer timeout;
+    - `params` accepted in validated mode (now rejected, and the guidance moved to the
+      no-validation suffix);
+    - progress from undeclared arguments, and revisiting earlier states;
+    - `reported_by` taken from converted schema-1 paths.
+  - **Tests:** 3589 pass. All 175 failures, across 109 test names, also fail without these changes
+    (checked against reverted baselines).
+  - **Not done yet:**
+    - capture wiring for the ur5e-1 gripper fault;
+    - a schema-2 capture whose KMR declares the new `compute_place_targets` parameter;
+    - the deferred refactor moving the KMR modules to `resources/robot/`.
+- **ur5e-1 gripper-fault capture wiring (2026-10-15/16).**
+  - Setup: M2 and ur5e-2 stay on, with the three-part order.
+  - Trim times in the private capture scene: M1 90 s and M2 60 s.
+    - M1's longer trim lets the KMR finish delivering RGOCG4 before ur5e-1 reaches into M1.
+    - M2's longer trim keeps KET4's trim finishing first (rule 6) and leaves M2 still trimming at
+      the fault.
+  - The fault is reported by "gripper object detection" at the existing pre-grasp checkpoint.
+  - The capture freezes first (`capture_machine_checkpoint`), so M2 is recorded running.
+    `capture_machine_checkpoint` accepts the failed task's own machine with its completed job.
+  - The harness verifies, failing closed:
+    - M1 finished and M2 still processing;
+    - the reporting device;
+    - the KMR idle at a dock.
+  - **Attempt `ur5e1_02` failed** (outputs deleted).
+    - The agents' per-task wall limit (`tool_timeout_s` 600 s) killed M1's `machine_part` inbox
+      after 600 wall-s. The 90 sim-s trim needs about 900 wall-s at real-time factor 0.1.
+    - RGOCG4 then overtook KET4: M2 finished at sim 145.3, and ur5e-3's nominal RGOCG4
+      `place_approach` failed in collision. That stopped the run before the checkpoint.
+    - **Fix:** Gazebo worker and agent wall limits are now `_WORKER_WALL_LIMIT_SEC` = 3900 s
+      (`workflow_execution.py`). Simulation-time bounds stay authoritative.
+    - **Separate observation:** nominally, with the CCA bypassed, nothing orders RGOCG4 after KET4
+      on the board, and ur5e-3's RGOCG4 insert collided. Not investigated yet.
+  - **`ur5e1_03` and `ur5e1_04` failed on infrastructure** (outputs deleted).
+    - `ur5e1_03`: the controller manager was not up within 60 s at startup.
+    - `ur5e1_04`: the nominal KMR carrying move Storage→M2 was aborted with "KMR arm left its
+      parked configuration". The carrying check needs custody updates within 0.75 s of wall time,
+      which can lapse at real-time factor about 0.1.
+  - **`ur5e1_05` reached the intended frozen state** (outputs deleted). At sim 129.8, world paused:
+    - M1 had KET4 completed;
+    - M2 had RGOCG4 at 67%;
+    - the KMR was idle at Storage;
+    - ur5e-1 was empty in M1, with the fault from gripper object detection.
+
+    Live grounding then refused, because the report's belief update cannot be retaken in a frozen
+    checkpoint.
+    - **Fix:** a frozen checkpoint keeps its acknowledged beliefs (raw), and offline grounding applies
+      the grounded fault before the first LLM turn (`part_slippage_recovery._begin`).
+  - **`ur5e1_06` failed at startup** (outputs deleted): `agent_creator` raised ModuleNotFoundError
+    because a ruff hook had removed the side-effect import `cais_spade_llm.ui_main` from
+    `evaluation_capture.run_capture`. **Fix:** the import is restored with `# noqa: F401` and a
+    comment.
+  - **`ur5e1_07` captured the intended state but failed its scene-image step** (run directory
+    deleted). The after-image check still required a paused world, but a machine checkpoint
+    unpauses after its frozen record. **Fix:** both image checks now apply only to a robot freeze.
+    Its capture `capture_e3e51a42…` was superseded and deleted on 2026-10-16 at 03:21, after the
+    queue went idle: 19 files, 158 MB, no symlinks. The list is in
+    `recapture_v2_20261015/ur5e1_07_deletion_list.json`. A running harness hashes every
+    `capture_*/observations.json` and fails if one changes, so the deletion had to wait. After it:
+    - 14 captures are listed, all offline-ready;
+    - the four defaults are unchanged and load;
+    - the Part slippage accepted result is still available.
+  - **`ur5e1_08` captured `capture_d1ca51654ff7423193d1bd13b146964d`** (exit 0, preserved files
+    unchanged; run directory kept). Frozen at sim 131.78:
+    - M1: KET4 completed (90 s), no active job;
+    - M2: RGOCG4 running at 0.776 of its 60 s trim;
+    - the KMR idle and empty at Storage;
+    - ur5e-1 empty at its pick pose in M1, with the fault from gripper object detection.
+
+    Offline checks with a mocked LLM:
+    - grounding: ur5e-1 faulted, failed task `pick_grasp` for KET4, `reported_by` in the signal;
+    - the prompt shows cell geometry, primitives and the seven safety files;
+    - the KMR declares `compute_place_targets(transform, part_pose?)`;
+    - M2's running job is not in the inline Resources rows (M2 shows only `loaded`). The LLM gets
+      it on request: `/resources/<M2>/snapshot` returns `job_state: running`, and
+      `static_capabilities` returns the job record. This is the same design Machining uses.
+  - **Next:**
+    - done 2026-10-16, at the user's request: `_DEFAULT_OBSERVATIONS` now points all four
+      scenarios at their schema-2 re-captures (77666aff, 4d1e4cc0, 3aed6165, d1ca5165). The
+      schema-1 originals stay selectable as regression fixtures. `test_failure_grounding` covers
+      all eight captures, and a new test checks that each default is a schema-2 capture of its own
+      scenario;
+    - retire `capture_0a7fde80…` once the user confirms;
+    - the user runs the LLM.
+
+- **Plant-wide safety spec set (user decisions, 2026-10-15):** all four scenarios now load the same
+  seven files in `recovery_case_safety._PLANT_SAFETY_FILES` (`part_slippage_example` takes its
+  initial selection from there):
+  - rules 1–3, unchanged: board, M1 and M2 mutex.
+  - rule 4, new, generalized at the user's request: `…_trim_before_entry.txt`. A single rule
+    (`SAFE_trim_before_assembly_board-v1_entry`) has one scope per part whose process plan has a
+    trim step: KET4/8/12/16 → square, RGOCG4/8/12/16 → circle. Each part may enter the board only
+    after its own trim result is recorded.
+    - Gears are excluded: their `print_part` record has no result or target, and printing is never
+      at risk.
+    - The offline checker runs each scope as its own instance (`rule_id = id:<digest>`).
+    - The user kept this rule because the nominal plan does not constrain a recovery. Without it,
+      skipping both trims would satisfy rule 6.
+    - All four captures track all 8 pegs with complete trim ledgers. Offline outline drafts build
+      from all four captures with the set.
+  - rule 5, assembly order gear_small → KET4 → RGOCG4: the existing gear_small-before-KET4 rule
+    plus new `…_KET4_Square_4mm_before_RGOCG4-50_Round_4mm.txt`. The KET4 target is
+    `GMC_Laser_Plate_Virtual/KET4_Square_4mm`.
+  - rule 6, unchanged: KET4 trim before RGOCG4 trim. Machining breakdown is the case that tests it.
+  - `…_KET4_Square_4mm_before_gear_small.txt` is no longer selected because it contradicts rule 5.
+    The file and its tests are kept, because the retained Conveyor capture's records name it.
+  - `capture_77666aff…` records KET4's square trim as complete and RGOCG4's ledger as complete
+    and empty, so rules 4–6 can be grounded from that capture.
+  - Tests:
+    - `test_recovery_case_safety`: lookups by file name; defaults equal the plant-wide set.
+    - `test_predefined_safety`: the two new files run the compile, automaton and monitor tests.
+  - `test_recovery_case_safety` also checks per-peg semantics: another peg's trim never
+    satisfies a peg's instance, and a wrong trim result is rejected.
+    - `test_machine_jobs`: the default selection.
+    - The 27 failures already in `test_recovery_case_safety` are unchanged; they reference the
+      retired `safety_Conveyor_breakdown.txt` and `safety_Machining_breakdown…txt`.
+
 - **Part slippage:** A1+B2+C1. ur5e-4, environment_9 `place_approach`, gear_small
   `misplaced`. Agrees with stored labels except resource_state (stored `failed`,
   grounded DES value `picked`, fault listed separately). The transition log conflict
@@ -165,8 +682,9 @@ Tests (offline, no API calls):
   disposable; the converter regenerates them.
 
 Next:
-- Re-capture the four failures in Gazebo with CCA active after the validator freeze.
-  Live capture of schema 2 has not been run in Gazebo.
+- Re-capture the four failures in Gazebo with the CCA bypassed. See "Schema-2 re-capture"
+  above: live CCA capture is not supported. Live capture of schema 2 has not been run in
+  Gazebo.
 - Rebuilding `prepared_recovery_request` offline from `agent_declarations` (instead of
   reading `preparation.json`) is possible later; it was not needed for this phase.
 
@@ -575,6 +1093,34 @@ worked archive are retained. No recovery generation attempt was made or removed.
 
 ## Recovery result retention — October 13, 2026 — read before running attempts
 
+**Retirement decision (user, October 15, 2026).** All old data will be retired once
+the four schema-2 re-captures are verified and load in Recovery Offline. That covers:
+- the schema-1 official captures with their source runs and native checkpoints;
+- Attempt 17 and the accepted composition;
+- `recovery_worked/`;
+- the Conveyor and ur5e-1 capture folders;
+- `capture_v2_preview/`.
+
+**Partial retirement (2026-10-16, user request: "it was an old version").** Deleted
+`recovery_worked/`, Attempt 17 (`offline_470087fe…`) and the accepted composition
+(`offline_1bb1efac…`): 466 files, 8.25 GB. The list is in
+`environment_runs/cleanup_20261016_worked_part_slippage/deletion_list.json`.
+- Step 3 below (the archive) was not done first, so these files cannot be recovered.
+- `monitor/debug` was excluded at the user's instruction.
+- `worked_version.py`, its test and `SystemBridge.get_worked_recovery_version` were removed,
+  along with the UI card.
+- Part slippage has no accepted outline or composition until a new one is accepted.
+- Records under `machine_*_20261014*`, `experiments/` and `route_calculations/` still name
+  the deleted runs. `experiments/20261010T213423Z/attempt_17_gpt-5.6-sol` keeps Attempt 17's
+  session and prompts.
+
+Until then, everything below stays protected. Retirement happens in this order:
+1. Point `_DEFAULT_OBSERVATIONS` at the new captures.
+2. Move the tests that read retained captures to the new captures or to small fixtures.
+3. Write a compressed archive with a sha256 manifest outside the working tree, and
+   verify it.
+4. Delete the old data under an explicit deletion list.
+
 Keep one accepted recovery outline and one accepted primitive composition for
 each of the four failure scenarios. This is the documented Codex cleanup rule
 in [AGENTS.md](../../AGENTS.md#recovery-result-retention); the Recovery UI does
@@ -586,12 +1132,12 @@ live recovery.
 
 | Failure scenario | Recovery outline | Primitive composition |
 | --- | --- | --- |
-| Part slippage | Attempt 17 accepted: five events and nominal-continuation proof | `offline_1bb1efac84d7443aa37238521ead3b68`: all five events, 21 primitives, RA `FEASIBLE`; loaded and reopened in Recovery UI |
+| Part slippage | None. Attempt 17 was deleted on 2026-10-16 at the user's request (old version) | None. `offline_1bb1efac84d7443aa37238521ead3b68` was deleted on 2026-10-16 at the user's request |
 | Machining breakdown during part processing | Successful failure capture retained; incomplete 28-event retry chain retired at the user's request to free disk space; no complete accepted outline | Pending |
 | Conveyor breakdown | Verified failure capture `capture_1b3f3d1d729a4701b94cff514c783130` retained and loaded in Recovery Offline; no accepted outline | None accepted |
 | ur5e-1 breakdown | Verified failure capture `capture_0a7fde8074b6426586b204204f2b3417` retained and loaded in Recovery Offline; no accepted outline | Pending |
 
-Attempt 17 is `offline_470087fe7a92421abd624ea721aa2ca1`. Its saved state is
+Deleted on 2026-10-16. Attempt 17 was `offline_470087fe7a92421abd624ea721aa2ca1`. Its saved state was
 `status=outline_review`, `outline_status=completed`,
 `outline_safety_status=passed`, `primitive_status=waiting`, and
 `execution_authorized=false`. It contains five outline events and no generated
@@ -616,8 +1162,8 @@ The following records are under
 
 | Purpose | Retained record |
 | --- | --- |
-| Accepted Part slippage recovery outline | `offline_470087fe7a92421abd624ea721aa2ca1` |
-| Accepted Part slippage primitive composition | `offline_1bb1efac84d7443aa37238521ead3b68` |
+| Deleted 2026-10-16; was the accepted Part slippage recovery outline | `offline_470087fe7a92421abd624ea721aa2ca1` |
+| Deleted 2026-10-16; was the accepted Part slippage primitive composition | `offline_1bb1efac84d7443aa37238521ead3b68` |
 | Official Part slippage failure capture | `cf647a0930c64f018d672a27904811b0` |
 | Official Machining breakdown during part processing failure capture | `capture_8beafdb8a01e444894cfaf41d29921fd` |
 | Native checkpoint records for the current Machining breakdown capture | `4a6d23fca53a4d4486ba50f9d005203a` |

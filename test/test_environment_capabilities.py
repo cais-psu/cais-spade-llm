@@ -1733,6 +1733,27 @@ def test_empty_KMR_return_requires_observed_downward_home(home):
     assert _validate_kmr_completion(task, evidence)
 
 
+@pytest.mark.parametrize("change,arrived", [
+    ({}, True),
+    ({"base_pose": [-1.204, 1.15, -1.5708]}, True),
+    ({"base_pose": [-1.21, 1.15, -1.5708]}, False),
+    ({"base_pose": [-1.2, 1.15, -1.5708 + 2 * 3.141592653589793]}, True),
+    ({"base_pose": [-1.2, 1.15, -1.5]}, False),
+    ({"arm_parked": False}, False),
+    ({"resource_location": "M2"}, False),
+    ({"base_pose": None}, False),
+])
+def test_KMR_coordinate_move_requires_the_measured_pose_at_the_commanded_coordinates(change, arrived):
+    from cais_spade_llm.recovery_framework.workflow_execution import _validate_kmr_completion
+
+    task = {"event_name": "move_to_location", "task_id": "drive",
+            "parameters": {"x": -1.2, "y": 1.15, "yaw": -1.5708, "observed_resource_location": None}}
+    observations = {"controllers_succeeded": True, "attached": False, "arm_parked": True,
+                    "resource_location": None, "base_pose": [-1.2, 1.15, -1.5708], **change}
+    evidence = {"status": "completed", "task_id": "drive", "observations": observations}
+    assert _validate_kmr_completion(task, evidence) is arrived
+
+
 def test_discovery_survives_unrelated_acknowledgements_and_rejects_dependency_changes(inputs):
     context = EnvironmentProductContext(**inputs)
     request = context.request(time.time() + 60)

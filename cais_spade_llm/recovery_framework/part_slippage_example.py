@@ -32,16 +32,12 @@ from cais_spade_llm.ui.recovery_setup import (
 
 logger = logging.getLogger(__name__)
 
-_PART_SLIPPAGE_SAFETY_FILES = (
-    "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt",
-    "cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt",
-)
-
+# Schema-2 re-captures (2026-10-16); the schema-1 originals stay selectable as regression fixtures.
 _DEFAULT_OBSERVATIONS = {
-    "Part slippage": "capture_f923020bf9ce496eb443826291f8f2c2",
-    "Machining breakdown during part processing": "capture_8beafdb8a01e444894cfaf41d29921fd",
-    "Conveyor breakdown": "capture_1b3f3d1d729a4701b94cff514c783130",
-    "ur5e-1 breakdown": "capture_0a7fde8074b6426586b204204f2b3417",
+    "Part slippage": "capture_77666affc1b9468ca157cf366d706dc8",
+    "Machining breakdown during part processing": "capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87",
+    "Conveyor breakdown": "capture_3aed616530294a4bbdf353000fc69596",
+    "ur5e-1 breakdown": "capture_d1ca51654ff7423193d1bd13b146964d",
 }
 
 
@@ -93,17 +89,16 @@ def example_setup(*, outline_mode: str = "auto", primitive_mode: str = "auto",
     else:
         resource_id = {"Conveyor breakdown": "Conveyor", "ur5e-1 breakdown": "ur5e-1",
                        "Machining breakdown during part processing": "M1"}[scenario]
-        if scenario != "Machining breakdown during part processing":
+        if scenario == "Conveyor breakdown":
             setup["permitted_resources"] = [rid for rid in setup["permitted_resources"] if rid not in {"M2", "ur5e-2"}]
         setup["failure_scenario"] = {"scenario": scenario, "resource_id": resource_id,
                                      "checkpoint": CHECKPOINTS[scenario], "mode": "once"}
         if scenario == "Conveyor breakdown":
-            setup["failure_scenario"].update(
-                part_name="KET4_Square_4mm",
-                additional_condition={"resource_id": "ur5e-4", "part_name": "gear_small"},
-            )
-        if scenario == "Machining breakdown during part processing":
+            # No held peer: gear_small precedes KET4 on the board, so nothing would make ur5e-4 wait.
+            setup["failure_scenario"]["part_name"] = "KET4_Square_4mm"
+        if scenario in {"Machining breakdown during part processing", "ur5e-1 breakdown"}:
             setup["selected_product_order_file"] = "cais_spade_llm/specification/products/orders/assembly_board-v1-machine-breakdown.json"
+        if scenario == "Machining breakdown during part processing":
             setup["failure_scenario"].update(checkpoint="during_processing", seed=secrets.randbits(32))
     setup["nominal_permitted_resources"] = list(setup["permitted_resources"])
     validate_setup(setup, root=root)
@@ -120,8 +115,10 @@ class PartSlippageExample:
         self.primitive_mode = "auto"
         self._gazebo_modes = (self.outline_mode, self.primitive_mode)
         self.source = "gazebo"
+        from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
+
         self.scenario = "Part slippage"
-        self.safety_files: list[str] = list(_PART_SLIPPAGE_SAFETY_FILES)
+        self.safety_files: list[str] = default_safety_files(self.scenario)
         self.observation_path = ""
         self.validation_checks: dict[str, bool] | None = None
         self._defer_preparation = False
@@ -219,7 +216,17 @@ class PartSlippageExample:
                 state["can_generate_outline"] = bool(self.observation_path and not state["busy"])
                 state["outline_generate_reason"] = ("Generation already running." if state["busy"] else
                     "Select saved observations to prepare the recovery input." if not self.observation_path else "")
+        state["generating_stage"] = self._generating_stage(session)
         return state
+
+    def _generating_stage(self, session) -> str:
+        """Name the stage a stage-level Stop can cancel, or "" once a stop is requested."""
+        if self._task is not None and not self._task.done() and self._task.get_name() == "generate_outline_fresh":
+            return "" if self._fresh_cancel.is_set() else "outline"
+        if self.source == "offline" and self._draft is not None:
+            running = self._draft._task is not None and not self._draft._task.done()
+            return "outline" if running and not self._draft._stopped else ""
+        return session.generating_stage() if session is not None else ""
 
     def set_options(self, *, source: str, scenario: str, safety_files: list[str], observation_path: str = "",
                     check_ra_feasibility: bool = True, check_physical_evidence: bool = True,
@@ -672,6 +679,8 @@ class PartSlippageExample:
 
     async def action(self, action: str, *, feedback: str = "") -> dict:  # noqa: C901, PLR0912 - explicit operator actions
         """Forward an operator action to the owning ProductAgent event loop."""
+        if action == "stop_generation":
+            return await self._stop_generation()
         if action == "generate_outline_fresh":
             if self.source != "offline" or self.snapshot()["busy"] or not self.observation_path:
                 raise ValueError("Select saved observations in Offline and wait for the current action")
@@ -815,6 +824,25 @@ class PartSlippageExample:
                 return self._runtime.part_slippage_recovery.action(action, feedback=feedback)
             await self.bridge._run_on_agent_runtime(dispatch())
             self._status = {"status": "running_example", "message": "Recovery action queued."}
+        return self.snapshot()
+
+    async def _stop_generation(self) -> dict:
+        """Stop only the running outline or composition stage; Gazebo and its agents keep running."""
+        session = self._offline if self.source == "offline" else getattr(self._runtime, "part_slippage_recovery", None)
+        if not self._generating_stage(session):
+            raise ValueError("No recovery generation is running")
+        fresh = self._task is not None and not self._task.done() and self._task.get_name() == "generate_outline_fresh"
+        if self.source == "offline" and (fresh or self._draft is not None):
+            # Offline Generate always starts a fresh outline, so the full attempt stop applies.
+            return await self.action("stop")
+        if self.source == "offline":
+            self._offline.stop_generation()
+            return self.snapshot()
+
+        async def dispatch() -> dict:
+            return session.stop_generation()
+
+        await self.bridge._run_on_agent_runtime(dispatch())
         return self.snapshot()
 
     async def _fresh_work(self, operation):

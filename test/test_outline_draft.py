@@ -340,6 +340,43 @@ def test_generate_outline_fresh_freezes_choices_and_keeps_ui_responsive(observat
     asyncio.run(run())
 
 
+def test_stage_stop_on_a_fresh_outline_stops_before_any_provider_call(observations, tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import part_slippage_example
+
+    actual = outline_draft.OutlineDraft
+    monkeypatch.setattr(outline_draft, "OutlineDraft", lambda *args, **kwargs: actual(*args, **kwargs, root=tmp_path / "drafts"))
+    entered, release = threading.Event(), threading.Event()
+
+    def read(path):
+        entered.set()
+        assert release.wait(3)
+        return deepcopy(observations)
+
+    monkeypatch.setattr(part_slippage_example, "read_observations", read)
+    provider = scripted_provider(monkeypatch, [response()])
+    example = PartSlippageExample(SimpleNamespace(system_running=False))
+    example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
+        observation_path=observations["source_path"], check_ra_feasibility=False, check_physical_evidence=False,
+        check_cca_safety=False, defer_preparation=True)
+
+    async def run():
+        await example.action("generate_outline_fresh")
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            assert example.snapshot()["generating_stage"] == "outline"
+            await example.action("stop_generation")
+            assert example.snapshot()["generating_stage"] == ""
+        finally:
+            release.set()
+        await asyncio.gather(example._task, return_exceptions=True)
+        assert example.snapshot()["status"] == "stopped"
+        assert example.snapshot()["can_generate_outline"]
+
+    asyncio.run(run())
+    provider.assert_not_called()
+    assert not (tmp_path / "drafts").exists()
+
+
 def test_enabled_check_failure_does_not_advance_a_diagnostic_candidate(observations, tmp_path, monkeypatch):
     from cais_spade_llm.recovery_framework import outline_checks
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
@@ -381,3 +418,34 @@ def test_enabled_checks_also_cover_nominal_handoff_before_committing(observation
     assert session["accepted_outline_prefix"] == []
     assert session["symbolic_resources"] == before
     assert audit["nominal_handoff_checks"][0]["checks"]["ra"] == "NEEDS_CONTEXT"
+
+
+def test_scene_geometry_describes_layout_without_routes_docks_or_assignments():
+    scene = {
+        "robots": [{"resource_id": "arm_a", "base_xyz": [0.0, 0.5, 1.0], "prefix": "a_"}],
+        "machines": [{"resource_id": "M1", "world_pose": [-4.0, 1.9, 0, 0, 0, 0], "enclosure_dimensions_m": [0.5, 0.5, 0.5],
+                      "stand_height_m": 1.0, "KMR_docking_pose": [-4.7, 2.2, 0, 0, 0, 0], "handling_robot": "arm_a",
+                      "staging_pose": [-4.6, 1.1, 1.0, 0, 0, 0], "conveyor_loading_pose": [-4.0, 0.5, 1.0, 0, 0, 0]}],
+        "Conveyor": {"world_pose": [-2.0, 0.5, 0, 0, 0, 0], "length": 4.0, "width": 0.3, "surface_height": 1.0,
+                     "normal_output_transfer": {"to": "Buffer"}, "output_handling_robot": "arm_a"},
+        "Storage": {"world_pose": [-6.0, 2.0, 0, 0, 0, 0], "size": [1.0, 1.0, 0.7], "KMR_docking_pose": [-5.5, 2.0, 0, 0, 0, 0],
+                    "KMR_pick_docking_poses": {"peg": [-5.5, 2.1, 0, 0, 0, 0]}},
+        "Mobile": {"initial_pose": [0, 0, 0, 0, 0, 0], "platform_overall_dimensions_m": [1.2, 0.7, 0.7],
+                   "arm_mount_xyz": [-0.25, 0.0, 0.7], "arm_reach_m": 0.8, "predefined_routes": [{"resources": ["Storage", "M1"]}],
+                   "predefined_route_waypoints": {}},
+    }
+    observations = {"inputs": {"scene": scene},
+                    "physical_evidence": {"resources": {"Mobile": {"base_pose": [-5.5, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0]}}}}
+    geometry = outline_draft.scene_geometry(observations)
+    assert geometry["stations"]["M1"] == {"world_pose": [-4.0, 1.9, 0, 0, 0, 0], "enclosure_dimensions_m": [0.5, 0.5, 0.5],
+                                          "stand_height_m": 1.0}
+    assert geometry["stations"]["Conveyor"] == {"world_pose": [-2.0, 0.5, 0, 0, 0, 0], "length": 4.0, "width": 0.3,
+                                                "surface_height": 1.0}
+    assert geometry["robot_bases"] == {"arm_a": [0.0, 0.5, 1.0]}
+    assert geometry["mobile_bases"]["Mobile"] == {"platform_overall_dimensions_m": [1.2, 0.7, 0.7],
+        "arm_mount_xyz": [-0.25, 0.0, 0.7], "arm_reach_m": 0.8, "base_pose_xy_yaw": [-5.5, 2.0, 0.0]}
+    assert "Conveyor" in geometry["floor_obstacles_xy"] and len(geometry["floor_extent_xy"]) == 4
+    text = json.dumps(geometry)
+    for hint in ("docking", "handling_robot", "route", "staging_pose", "conveyor_loading_pose", "normal_output_transfer",
+                 "output_handling_robot"):
+        assert hint not in text

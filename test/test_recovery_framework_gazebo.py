@@ -3947,6 +3947,30 @@ def test_kmr_initial_parking_observes_spawn_without_commanding_motion(feedback):
     assert node.arm_parking_timer.cancel.called is (feedback == 'fresh')
 
 
+def test_ur5e_reach_is_computed_from_kinematics_for_loose_part_picks() -> None:
+    from cais_spade_llm.recovery_framework.workflow_execution import _robot_configuration
+
+    configuration = json.loads(ROBOTS_PATH.read_text())
+    robots = {row["resource_id"]: row for row in configuration["robots"]}
+    reach = {rid: _robot_configuration(configuration, robot)[2]["gripper_reach"] for rid, robot in robots.items()}
+    assert {row["max_xy_radius_m"] for row in reach.values()} == {0.886}
+
+    def within(rid, x, y, z):
+        row = reach[rid]
+        origin = row["origin_pose"]
+        return (math.dist((x, y), (origin["x"], origin["y"])) <= row["max_xy_radius_m"] + row["tolerance_m"]
+                and row["z_min_m"] - row["tolerance_m"] <= z <= row["z_max_m"] + row["tolerance_m"])
+
+    preset = json.loads((ROOT / "cais_spade_llm/initialization/failure_scenarios/part_slippage.json").read_text())
+    drop = preset["preset"]["drop_pose"]
+    # The slipped gear rests on ur5e-3's table: only ur5e-3 can pick it from above.
+    assert within("ur5e-3", drop["x"], drop["y"], 1.03)
+    assert not within("ur5e-4", drop["x"], drop["y"], 1.03)
+    assert within("ur5e-4", 0.0, 0.30, 1.03)
+    explicit = {**robots["ur5e-3"], "gripper_reach": {"frame": "world", "max_xy_radius_m": 0.5}}
+    assert _robot_configuration(configuration, explicit)[2]["gripper_reach"] == explicit["gripper_reach"]
+
+
 def test_ur3_buffer_startup_and_runtime_home_share_the_saved_joint_target(models) -> None:
     from cais_spade_llm.recovery_framework.workflow_execution import _robot_configuration
 

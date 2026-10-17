@@ -5,7 +5,7 @@ from __future__ import annotations
 ``observations.json`` (schema_version 2) keeps only what the run observed or was
 told: experiment metadata, the resolved run configuration with source-file
 hashes, agent and device reports, measurements, and agent declarations.
-``preparation.json`` keeps what the framework derives from those facts: beliefs,
+``beliefs.json`` keeps what the framework derives from those facts: beliefs,
 plant-model copies, reconciled resource evidence, pending nodes and the prepared
 recovery request. It is bound to the raw file by sha256, and readers merge both
 files into the in-memory capture the framework already uses.
@@ -25,7 +25,7 @@ from cais_spade_llm.recovery_framework.diagnostics import read_object, write_rec
 logger = logging.getLogger(__name__)
 
 RAW_SCHEMA_VERSION = 2
-PREPARATION_NAME = "preparation.json"
+BELIEFS_NAME = "beliefs.json"
 
 METADATA_KEYS = frozenset({
     "schema_version", "run_id", "captured_at", "context_revision", "program_revision", "evidence_source",
@@ -70,6 +70,11 @@ def _publish(path: Path, data: bytes) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_bytes(data)
     temporary.replace(path)
+
+
+def _beliefs(data: bytes, derived: dict) -> bytes:
+    return _encode({"preparation_version": 1, "observations_sha256": _sha256(data),
+                    "derived_at": datetime.now(timezone.utc).isoformat(), **derived})
 
 
 def config_references(setup: dict, *, root: Path = ROOT) -> list[dict]:
@@ -197,11 +202,11 @@ def split_capture(record: dict) -> tuple[dict, dict]:
     return raw, {"views": views, "derived_fields": fields}
 
 
-def merge_capture(raw: dict, preparation: dict) -> dict:
+def merge_capture(raw: dict, beliefs: dict) -> dict:
     """Rebuild the in-memory capture from raw facts and their derived views."""
     record = {key: value for key, value in raw.items() if key not in RAW_EXTRACTS}
-    record.update(preparation.get("views") or {})
-    for section, fields in (preparation.get("derived_fields") or {}).items():
+    record.update(beliefs.get("views") or {})
+    for section, fields in (beliefs.get("derived_fields") or {}).items():
         record[section] = {**(record.get(section) or {}), **fields}
     return record
 
@@ -219,10 +224,26 @@ def write_capture(path: Path, record: dict) -> None:
         return
     raw, derived = split_capture(record)
     data = _encode(raw)
-    preparation = {"preparation_version": 1, "observations_sha256": _sha256(data),
-                   "derived_at": datetime.now(timezone.utc).isoformat(), **derived}
-    _publish(path.with_name(PREPARATION_NAME), _encode(preparation))
+    _publish(path.with_name(BELIEFS_NAME), _beliefs(data, derived))
     _publish(path, data)
+
+
+def write_beliefs(path: Path, record: dict) -> None:
+    """Rewrite the derived views of a saved schema-2 capture without touching its raw file.
+
+    Args:
+        path: The capture's ``observations.json``.
+        record: The capture as read by :func:`read_capture`, with changed derived views.
+
+    Raises:
+        ValueError: The record's raw facts differ from the saved raw file.
+    """
+    path = Path(path)
+    raw, derived = split_capture(record)
+    data = path.read_bytes()
+    if _encode(raw) != data:
+        raise ValueError(f"{path} holds different raw facts; only derived views may be rewritten")
+    _publish(path.with_name(BELIEFS_NAME), _beliefs(data, derived))
 
 
 def read_capture(path: Path) -> dict:
@@ -242,14 +263,14 @@ def read_capture(path: Path) -> dict:
         raise ValueError(f"{path.name} must contain a JSON object")
     if record.get("schema_version") != RAW_SCHEMA_VERSION:
         return record
-    preparation_path = path.with_name(PREPARATION_NAME)
-    if not preparation_path.is_file():
+    beliefs_path = path.with_name(BELIEFS_NAME)
+    if not beliefs_path.is_file():
         return merge_capture(record, {})
-    preparation = read_object(preparation_path)
-    if preparation.get("observations_sha256") != _sha256(data):
-        logger.warning("%s does not match %s; its derived views are ignored", preparation_path, path.name)
+    beliefs = read_object(beliefs_path)
+    if beliefs.get("observations_sha256") != _sha256(data):
+        logger.warning("%s does not match %s; its derived views are ignored", beliefs_path, path.name)
         return merge_capture(record, {})
-    return merge_capture(record, preparation)
+    return merge_capture(record, beliefs)
 
 
 def legacy_fault_reports(observations: dict, fault_report_values: list[str]) -> dict:
@@ -367,7 +388,7 @@ def main() -> None:
             "grounding_equal": _without_sources(raw_grounding) == _without_sources(ground_failure(original)),
             "grounding_evidence_paths": sorted({row["evidence"] for row in raw_grounding["fault_event"]["signals"]}),
             "raw_bytes": destination.stat().st_size,
-            "preparation_bytes": destination.with_name(PREPARATION_NAME).stat().st_size,
+            "beliefs_bytes": destination.with_name(BELIEFS_NAME).stat().st_size,
             "original_bytes": path.stat().st_size,
             "raw_keys": sorted(raw), "unclassified_views": sorted(
                 key for key in record if key not in RAW_KEYS | DERIVED_KEYS | set(RAW_EXTRACTS)),

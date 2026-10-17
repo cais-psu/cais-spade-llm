@@ -1862,6 +1862,7 @@ async def preview_recovery_motion_from_files(
         ROS serialization and MoveIt libraries are local dependencies. No node,
         action client, live scene, controller, perception or SPADE call is made.
     """
+    from cais_spade_llm.recovery_framework.capture_files import read_capture
     from cais_spade_llm.recovery_framework.recovery_observations import _file_sha256, read_native_preview_model, fingerprint
     from cais_spade_llm.recovery_framework.diagnostics import write_record
 
@@ -1871,7 +1872,7 @@ async def preview_recovery_motion_from_files(
         raise ValueError('timeout_seconds must be positive and finite')
     prepared = validate_preview_request(request)
     source = Path(model_archive['source_path'])
-    observations = json.loads(source.read_bytes())
+    observations = read_capture(source)
     archive = read_native_preview_model(source, observations)
     if fingerprint(archive) != fingerprint(model_archive) or prepared['model_fingerprint'] != archive['binding']['model_fingerprint']:
         raise ValueError('Native preview model changed or differs from the request')

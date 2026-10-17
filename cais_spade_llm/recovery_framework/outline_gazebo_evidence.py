@@ -210,7 +210,7 @@ def _check_cancelled(cancel_event) -> None:
 
 async def _prepare_saved_capture(runtime, fresh: dict, template: dict, path: Path) -> dict:
     """Persist raw evidence and preparation errors before publishing ready inputs."""
-    write_record(path, fresh)
+    write_capture(path, fresh)
     try:
         return await _fresh_preparation(runtime, fresh, template)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:

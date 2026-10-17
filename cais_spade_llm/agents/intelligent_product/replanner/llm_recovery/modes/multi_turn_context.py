@@ -200,6 +200,14 @@ def _recorded_locations(entry: dict) -> set[str]:
     return locations
 
 
+def _resource_location_domain(entry: dict) -> list[str]:
+    """Return the public declared ``resource_location`` domain without null."""
+    declaration = (entry.get("recovery_des_model") or {}).get("state_variables", {}).get("resource_location") or {}
+    if declaration.get("private"):
+        return []
+    return [value for value in declaration.get("domain") or [] if isinstance(value, str)]
+
+
 def _public_capability_evidence(entry: dict) -> list[dict]:
     records = []
     for record in entry.get('capability_evidence') or []:
@@ -282,6 +290,13 @@ def select_outline_context(prepared: dict, session: dict) -> dict:  # noqa: C901
         include("parts", name, "P_id")
     for name in _part_names(prepared.get("llm_input", {}).get("goal_conditions", [])):
         include("parts", name, "goal_conditions")
+    if session.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import recorded_conditions
+
+        # Diagnostic recovery ends at the recorded handoff, so its entities are the goal.
+        for row in recorded_conditions(prepared):
+            include("resources" if row.get("entity_kind") == "resource" else "parts", str(row.get("entity") or ""),
+                    "handoff_conditions")
     for event in session.get("accepted_outline_prefix", []):
         include("resources", event.get("resource_jid", ""), "accepted_outline_prefix")
         for name in _part_names(event):
@@ -599,19 +614,107 @@ def _resource_fact(prepared: dict, session: dict, jid: str, field: str, ref: str
     return value, source
 
 
+# Diagnostic-mode refs: (ref, what it answers, prepared keys that record its data).
+_DIAGNOSTIC_REFS = (
+    ("/safety_rules/<id>", "full requirement and source of a listed safety rule (or /safety_rules for all)",
+     ("prompt_safety_rules",)),
+    ("/regions/<name>", "region bounds in the world frame (or /regions for all)", ("diagnostic_regions",)),
+    ("/geometry/<key>", "station poses and sizes, robot and mobile bases, floor extent and obstacles (or /geometry for all)",
+     ("diagnostic_scene_geometry",)),
+    ("/resources/<jid>/gripper_reach", "declared pick envelope for a part located only by its observed_pose",
+     ("diagnostic_reach",)),
+    ("/resources/<jid>/primitives", "callable primitive signatures", ("diagnostic_primitives",)),
+    ("/parts/<name>/pose_relations",
+     "regions containing its observed_pose, and resources declaring that location or a pose envelope around it",
+     ("diagnostic_regions", "diagnostic_reach")),
+    ("/resources/<jid>/pose_relations", "the same relations for its current_pose", ("diagnostic_regions", "diagnostic_reach")),
+)
+_DIAGNOSTIC_FIELDS = {("resources", "gripper_reach"), ("resources", "primitives"),
+                      ("resources", "pose_relations"), ("parts", "pose_relations")}
+_REGION_FRAME = "Bounds as [[x_min, x_max], [y_min, y_max], [z_min, z_max]] in the world frame, also used by current_pose and observed_pose."
+_GEOMETRY_FRAME = (
+    "world_pose as [x, y, z, roll, pitch, yaw] in the world frame; size, length, width and enclosure "
+    "dimensions along each station's own axes; base_pose_xy_yaw and floor extent and obstacles, as "
+    "[x_min, x_max, y_min, y_max], in the world frame; arm_mount_xyz in the mobile base frame."
+)
+_REACH_RULE = (
+    "A pose is within gripper_reach when its xy distance from origin_pose is at most max_xy_radius_m + "
+    "tolerance_m and its z lies within [z_min_m - tolerance_m, z_max_m + tolerance_m]. It bounds picking "
+    "a part located only by its observed_pose; station access follows each robot's reachability."
+)
+_POSE_RELATION_BASIS = (
+    "regions: recorded region bounds; locations: declared reachability, reachable_locations or "
+    "resource_location domain, where a region belongs to location L when it is named L or L.<sub>; "
+    "envelopes: declared gripper_reach. not_evaluated resources declare neither."
+)
+
+
+def is_diagnostic_ref(ref: str) -> bool:
+    """Return whether ``ref`` has the shape of a diagnostic-mode reference."""
+    segments = ref.split("/")
+    return (segments[1:2] in (["safety_rules"], ["regions"], ["geometry"]) and len(segments) <= 3
+            or len(segments) == 4 and (segments[1], segments[3]) in _DIAGNOSTIC_FIELDS)
+
+
+def diagnostic_refs(prepared: dict) -> list[tuple[str, str]]:
+    """List the diagnostic-mode refs whose data the capture records, with what each answers."""
+    return [(ref, answers) for ref, answers, keys in _DIAGNOSTIC_REFS if any(prepared.get(key) for key in keys)]
+
+
+def _pose_relations_fact(prepared: dict, session: dict, kind: str, name: str) -> dict:
+    from .multi_turn_diagnostic import pose_relations
+
+    field = "observed_pose" if kind == "parts" else "current_pose"
+    pose = resolve_outline_context(prepared, session, f"/{kind}/{name}/{field}")["value"]
+    locations = {jid: _recorded_locations(entry) or set(_resource_location_domain(entry))
+                 for jid, entry in prepared.get("recovery_resources", {}).items()}
+    return {field: pose, **pose_relations(pose, prepared.get("diagnostic_regions", {}), locations,
+                                          prepared.get("diagnostic_reach", {}))}
+
+
+def _diagnostic_fact(prepared: dict, session: dict, ref: str) -> dict:
+    """Serve a diagnostic-mode declaration, or a pose relation derived from declarations."""
+    if not is_diagnostic_ref(ref):
+        raise ValueError(f"NEEDS_CONTEXT: {ref} is not recorded")
+    segments = ref.split("/")
+    source, interpretation = "saved_context", None
+    if len(segments) == 4 and segments[3] == "pose_relations":
+        value, source = _pose_relations_fact(prepared, session, segments[1], segments[2]), "model_calculation"
+    elif len(segments) == 4 and segments[3] == "gripper_reach":
+        # Diagnostic mode states these declarations; validated runs keep them private.
+        value, interpretation = deepcopy(prepared.get("diagnostic_reach", {}).get(segments[2])), _REACH_RULE
+    elif len(segments) == 4:
+        from .multi_turn_prompts import _primitive_signature_card
+
+        catalog = prepared.get("diagnostic_primitives", {}).get(segments[2])
+        value = (_primitive_signature_card({segments[2]: catalog}, include_optional=True).removeprefix(f"- {segments[2]}: ")
+                 if catalog else None)
+        interpretation = "name(parameters; ? marks optional ones)"
+    else:
+        value = {"safety_rules": prepared.get("prompt_safety_rules", []), "regions": prepared.get("diagnostic_regions", {}),
+                 "geometry": prepared.get("diagnostic_scene_geometry", {})}[segments[1]]
+        if len(segments) == 3:
+            value = (next((row for row in value if row.get("id") == segments[2]), None) if isinstance(value, list)
+                     else value.get(segments[2]))
+        value = None if value is None else _public_fact_value(value)
+        interpretation = {"regions": _REGION_FRAME, "geometry": _GEOMETRY_FRAME}.get(segments[1])
+    if value is None:
+        raise ValueError(f"NEEDS_CONTEXT: {ref} is not recorded")
+    fact = {"value": value, "source": source, "source_run_id": prepared.get("source_observation_run_id"),
+            "captured_at": prepared.get("source_observation_captured_at")}
+    if interpretation:
+        fact["interpretation"] = interpretation
+    if source == "model_calculation":
+        fact["basis"] = _POSE_RELATION_BASIS
+    return fact
+
+
 def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  # noqa: C901, PLR0912 - explicit public reference allowlist
     """Resolve an allowlisted fact reference with recorded provenance."""
+    if session.get("outline_diagnostic_bypass") and (
+            ref.split("/")[1:2] in (["safety_rules"], ["regions"], ["geometry"]) or is_diagnostic_ref(ref)):
+        return _diagnostic_fact(prepared, session, ref)
     if ref.split("/")[1:2] in (["safety_rules"], ["regions"]):
-        if session.get("outline_diagnostic_bypass"):
-            collection = prepared.get("prompt_safety_rules", []) if ref.startswith("/safety_rules") else prepared.get("diagnostic_regions", {})
-            segments = ref.split("/")
-            if len(segments) == 3:
-                collection = next((row for row in collection if row.get("id") == segments[2]), None) if isinstance(collection, list) else collection.get(segments[2])
-            if collection is None or len(segments) > 3:
-                raise ValueError(f"NEEDS_CONTEXT: {ref} is not recorded")
-            return {"value": _public_fact_value(collection), "source": "saved_context",
-                    "source_run_id": prepared.get("source_observation_run_id"),
-                    "captured_at": prepared.get("source_observation_captured_at")}
         if session.get("public_safety_context_version") != 1:
             raise ValueError("Unsupported context reference")
         return public_safety_context_fact(prepared, session, ref)
@@ -741,6 +844,19 @@ def scope_prompt_input(payload: dict, prepared: dict, session: dict) -> dict:
             values["field_sources"] = {key: value for key, value in values.get("field_sources", {}).items() if key not in details}
             row.update(values)
             row["available_capability_fields"] = sorted(details.intersection(fact["value"]))
+    if session.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import llm_selects_next_event
+
+        unvalidated = llm_selects_next_event(session)
+        for row in scope["resource_index"]:
+            if unvalidated:
+                row.pop("field_sources", None)
+                row.pop("evaluation_support", None)
+            # A resource without recorded locations still declares where it can be,
+            # which is how a robot's reachability is derived in the first place.
+            entry = prepared.get("recovery_resources", {}).get(row["resource_jid"], {})
+            if not _recorded_locations(entry) and (domain := _resource_location_domain(entry)):
+                row["resource_location_domain"] = domain
     payload["outline_observation_source"] = {
         "source_run_id": prepared.get("source_observation_run_id"),
         "captured_at": prepared.get("source_observation_captured_at", prepared.get("prepared_at_utc")),

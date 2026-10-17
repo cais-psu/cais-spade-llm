@@ -8,7 +8,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from nicegui import context, core, ui
@@ -414,6 +414,46 @@ def test_offline_disabled_generate_shows_the_actual_reason(status, reason):
     client.delete()
 
 
+@pytest.mark.parametrize("stage", ["outline", "primitive"])
+def test_stage_stop_is_enabled_only_for_the_running_stage(stage, monkeypatch):
+    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
+    from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
+
+    bridge = MagicMock()
+    state = PartSlippageExample(bridge).snapshot()
+    state.update(status="generating_outline" if stage == "outline" else "generating_primitives",
+                 busy=True, generating_stage=stage)
+    bridge.get_part_slippage_example.return_value = state
+    bridge.list_safety_requirement_files.return_value = []
+    bridge.part_slippage_action = AsyncMock(return_value=state)
+    callbacks = {}
+    original_click = ui.button.on_click
+
+    def capture_click(button, callback):
+        callbacks[button.id] = callback
+        return original_click(button, callback)
+
+    monkeypatch.setattr(ui.button, "on_click", capture_click)
+    client = Client(context.client.page)
+    with client:
+        render_part_slippage(bridge)
+    _finish_reads(client)
+    example_stop, outline_stop, primitive_stop = [item for item in client.elements.values()
+                                                  if isinstance(item, ui.button) and item.text == "Stop"]
+    assert example_stop.enabled
+    running, waiting = (outline_stop, primitive_stop) if stage == "outline" else (primitive_stop, outline_stop)
+    assert running.visible and running.enabled
+    assert waiting.visible and not waiting.enabled
+
+    async def exercise():
+        with client:
+            await callbacks[running.id]()
+
+    asyncio.run(exercise())
+    bridge.part_slippage_action.assert_awaited_once_with("stop_generation", feedback="")
+    client.delete()
+
+
 def test_selecting_saved_observations_only_defers_the_input():
     from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
     from cais_spade_llm.ui.components.part_slippage_recovery import render_part_slippage
@@ -449,11 +489,6 @@ def test_saved_result_stays_loadable_when_new_outline_preparation_is_blocked(mon
         "source_path": "capture", "scenario": "Part slippage", "run_id": "source",
         "result_available": True, "offline_ready": True}]
     bridge.list_safety_requirement_files.return_value = []
-    bridge.get_worked_recovery_version.return_value = {
-        "outline_safety_status": "passed", "composition_feasibility": "FEASIBLE", "cca_composition_status": "not_checked",
-        "outline_run_id": "outline", "composition_run_id": "composition", "snapshot_at": "recorded",
-        "branch": "recovery-framework-journal", "commit": "recorded", "outline": [], "primitives": [],
-        "archive_path": "worked.zip"}
     callbacks = {}
     original_click = ui.button.on_click
 
@@ -608,7 +643,6 @@ def test_rapid_outline_checks_survive_pending_poll_without_preparing(monkeypatch
     bridge.set_failure_example_options.side_effect = example.set_options
     bridge.get_default_recovery_observations.return_value = {"Part slippage": "capture"}
     bridge.list_safety_requirement_files.return_value = []
-    bridge.get_worked_recovery_version.return_value = {}
     bridge.list_recovery_observations.side_effect = AssertionError("A preference change scanned history")
     bridge.prepare_offline_recovery.side_effect = AssertionError("A preference change prepared an attempt")
     client = Client(context.client.page)

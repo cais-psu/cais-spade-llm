@@ -23,9 +23,12 @@ from cais_spade_llm.recovery_framework.capture_files import completed_tasks as _
 from cais_spade_llm.recovery_framework.diagnostics import write_record
 from cais_spade_llm.recovery_framework.failure_grounding import (
     apply_grounding,
+    belief_key,
+    belief_rows,
     fault_identity,
     ground_failure,
     has_raw_failure_facts,
+    restore_beliefs,
     update_beliefs,
 )
 from cais_spade_llm.recovery_framework.recovery_observations import (
@@ -37,6 +40,8 @@ from cais_spade_llm.recovery_framework.recovery_observations import (
 from cais_spade_llm.ui.recovery_setup import FAILURE_SCENARIOS
 
 logger = logging.getLogger(__name__)
+# A first capture can miss an observation; retakes refine grounding until it settles.
+_GROUNDING_RETAKES = 3
 
 
 def _recorded_checkpoint(observations: dict) -> dict:
@@ -124,6 +129,7 @@ class PartSlippageRecovery:
         self._task: asyncio.Task | None = None
         self._generation = 0
         self._stopped = False
+        self._stage_stop: str | None = None
         self._offline_cancel = threading.Event()
         self._generate_on_begin: bool | None = None
         self._defer_observation_save = False
@@ -403,6 +409,9 @@ class PartSlippageRecovery:
             try:
                 await operation()
             except asyncio.CancelledError:
+                # Offline workers have drained here, so the stopped stage can publish.
+                if self._stage_stop is not None and not self._stopped:
+                    self._finish_stage_stop()
                 raise
             except (OSError, ValueError, KeyError, TypeError, RuntimeError, TimeoutError, OpenAIError) as exc:
                 if self._defer_observation_save and isinstance(exc, ValueError) and str(exc).startswith("NEEDS_CONTEXT:"):
@@ -414,6 +423,12 @@ class PartSlippageRecovery:
                 logger.exception("Part slippage recovery could not complete")
                 if not self._stopped:
                     self._record_error(f"{type(exc).__name__}: {exc}")
+            finally:
+                # A stage stop must not cancel the next operation's previews or workers.
+                if not self._stopped:
+                    self._stage_stop = None
+                    if self._offline_cancel.is_set():
+                        self._offline_cancel = threading.Event()
 
         self._task = asyncio.create_task(run(), name="part_slippage_recovery")
         self._task.add_done_callback(self._task_finished)
@@ -515,9 +530,8 @@ class PartSlippageRecovery:
                 if self._stopped:
                     raise asyncio.CancelledError()
                 self._save_observations()
-        elif grounds_beliefs and self._ground_beliefs()["belief_updates"]:
-            raise ValueError("NEEDS_CONTEXT: grounding changed beliefs recorded in a frozen checkpoint capture; "
-                             "retake the checkpoint")
+        # A frozen checkpoint cannot be retaken, so its beliefs keep their acknowledged
+        # values; offline grounding applies the grounded fault before the first LLM turn.
         if self._failure.get("injection_status") != "completed":
             raise ValueError("Failure observations require reconciliation before recovery: " +
                              str(self._failure.get("error") or self._failure.get("injection_status")))
@@ -683,6 +697,8 @@ class PartSlippageRecovery:
                     "kind": "observed", "ref": f"resource_evidence/{jid}/snapshot/current_pose",
                     "run_id": self._observations.get("run_id"), "captured_at": self._observations.get("captured_at"),
                     "revision": self._observations.get("context_revision")}
+        # Grounded once here, the request is saved with its grounding in beliefs.json.
+        apply_grounding(prepared, self._observations)
         self._observations.update(
             prepared_recovery_request=deepcopy(prepared),
             llm_model=getattr(self.agent, "model", None),
@@ -770,14 +786,16 @@ class PartSlippageRecovery:
         prepared["source_observation_fingerprint"] = observation_fingerprint(self._observations)
         prepared["outline_only"] = self._state["outline_only"]
         prepared["operator_assistance"] = deepcopy(self._state["operator_assistance"])
-        recorded_failure = prepared.get("failure_context_raw", {}).get("failure_context", {})
-        for target in (prepared.setdefault("llm_input", {}).setdefault("fault_event", {}),
-                       prepared.setdefault("context_summary", {}).setdefault("fault_event", {})):
-            if isinstance(recorded_failure.get("failure_mode"), str):
-                target["failure_type"] = recorded_failure["failure_mode"]
-            checkpoint = _recorded_checkpoint(self._observations)
-            if checkpoint:
-                target["checkpoint"] = checkpoint
+        if "code_grounding" not in prepared:
+            # A grounded request states detection facts instead of these recorded labels.
+            recorded_failure = prepared.get("failure_context_raw", {}).get("failure_context", {})
+            for target in (prepared.setdefault("llm_input", {}).setdefault("fault_event", {}),
+                           prepared.setdefault("context_summary", {}).setdefault("fault_event", {})):
+                if isinstance(recorded_failure.get("failure_mode"), str):
+                    target["failure_type"] = recorded_failure["failure_mode"]
+                checkpoint = _recorded_checkpoint(self._observations)
+                if checkpoint:
+                    target["checkpoint"] = checkpoint
         for field in ("unavailable_resources", "nominal_permitted_resources", "recovery_permitted_resources"):
             if field in self._observations:
                 prepared[field] = deepcopy(self._observations[field])
@@ -983,15 +1001,14 @@ class PartSlippageRecovery:
 
         write_record(directory / "recorded_public_fact_sources.json",
                      restore_recorded_public_facts(prepared, self._observations))
-        if self.offline:
-            grounded = apply_grounding(prepared, self._observations)
-            if grounded is not None:
-                write_record(directory / "failure_grounding.json", grounded)
+        apply_grounding(prepared, self._observations)
         prepared["multi_turn_session_seed"] = build_multi_turn_session_seed(prepared)
         prepared["multi_turn_session_seed"]["public_safety_context_version"] = prepared["public_safety_context_version"]
-        if self.offline:
+        if self.offline and "code_grounding" not in prepared:
+            # A grounded seed already holds the grounded part poses.
             _seed_grounded_part_pose_observations(prepared, prepared["multi_turn_session_seed"])
-        preview, prompt = _build_phase_prompt(prepared, prepared["multi_turn_session_seed"])
+        # An outline prompt updates candidate state; the preview leaves the seed unchanged.
+        preview, prompt = _build_phase_prompt(prepared, deepcopy(prepared["multi_turn_session_seed"]))
         write_record(directory / "input_preview.json", {
             "request_sent": False, "preview_status": "not sent", "prompt_input": preview, "prompt": prompt,
         })
@@ -1033,33 +1050,69 @@ class PartSlippageRecovery:
         return physical
 
     async def _ground_live_capture(self, physical: dict) -> dict:
-        grounded = self._ground_beliefs()
-        if not grounded["belief_updates"]:
-            return physical
-        # Belief-dependent views were derived before grounding; retake them.
-        physical = await self._capture_physical_evidence()
-        if fault_identity(ground_failure(self._observations)) != fault_identity(grounded):
-            raise ValueError("NEEDS_CONTEXT: the retaken physical capture grounds a different fault")
-        return physical
-
-    def _ground_beliefs(self) -> dict:
-        """Ground the observed fault from raw facts and update the product's beliefs.
+        """Update the product's beliefs from the grounded fault until a retaken capture agrees.
 
         Failure injection leaves the beliefs at their acknowledged values, so
         execution monitoring applies the grounded fault state before preparation.
+        A first capture can lack an observation that a retaken one supplies, so
+        each grounding replaces the previous belief changes until two consecutive
+        captures ground the same changes. The original beliefs are restored if
+        they do not settle or the grounded fault itself changes.
+
+        Args:
+            physical: Physical evidence captured before grounding.
 
         Returns:
-            The grounding, whose ``belief_updates`` were applied.
+            Physical evidence captured with the settled beliefs.
 
         Raises:
-            ValueError: No failure is detectable from the recorded facts.
+            ValueError: No failure is detectable, or the grounding does not settle.
         """
+        context = self.runtime.context
+        grounded = self._grounded_fault()
+        passes = [self._grounding_pass(grounded)]
+        if not grounded["belief_updates"]:
+            return physical
+        rows, applied = None, None
+        try:
+            for _ in range(_GROUNDING_RETAKES):
+                if rows is not None:
+                    restore_beliefs(context, self._observations, rows)
+                rows = belief_rows(context, self._observations, grounded, saved=rows)
+                update_beliefs(context, self._observations, grounded)
+                applied = grounded
+                self._observations["context_revision"] = context.revision
+                self._save_observations()
+                # Belief-dependent views were derived before this grounding; retake them.
+                physical = await self._capture_physical_evidence()
+                grounded = ground_failure(self._observations)
+                passes.append(self._grounding_pass(grounded))
+                write_record(self.path / "grounding_passes.json", {"passes": passes})
+                if fault_identity(grounded)[:2] != fault_identity(applied)[:2]:
+                    raise ValueError("NEEDS_CONTEXT: the retaken physical capture grounds a different fault")
+                if belief_key(grounded) == belief_key(applied):
+                    return physical
+            raise ValueError("NEEDS_CONTEXT: grounded beliefs did not settle across retaken physical captures")
+        except (ValueError, asyncio.CancelledError):
+            if rows is not None:
+                restore_beliefs(context, self._observations, rows)
+                self._save_observations()
+            raise
+
+    def _grounding_pass(self, grounded: dict) -> dict:
+        physical = self._observations.get("physical_evidence") or {}
+        event = grounded["fault_event"]
+        return {"context_revision": self._observations.get("context_revision"),
+                "unresolved": deepcopy(physical.get("unresolved", [])),
+                "signals": [row["rule"] + ":" + str(row.get("resource_id") or row.get("part_name"))
+                            for row in event["signals"]],
+                "faulted_resources": deepcopy(event["faulted_resources"]), "failed_task_id": event["failed_task_id"],
+                "belief_updates": deepcopy(grounded["belief_updates"])}
+
+    def _grounded_fault(self) -> dict:
         grounded = ground_failure(self._observations)
         if not grounded["fault_event"]["detected"]:
             raise ValueError("NEEDS_CONTEXT: no failure is detectable from the recorded execution-monitoring facts")
-        if update_beliefs(self.runtime.context, self._observations, grounded):
-            self._observations["context_revision"] = self.runtime.context.revision
-        self._save_observations()
         return grounded
 
     def _pending_nodes(self) -> list[dict]:
@@ -1348,12 +1401,14 @@ class PartSlippageRecovery:
         if action == "execute" and (self._state.get("validation_contract_version") == 2
                                     or self._state.get("composition_validation_version") == 1):
             raise ValueError("Outline validation does not authorize execution; runtime CCA integration is pending")
+        outline_stopped = self._state["outline_status"] == "stopped"
+        composition_stopped = self._state["primitive_status"] == "stopped"
         operations = {
             "prepare": ({"blocked"}, self._begin),
-            "generate_outline": ({"outline_ready"}, self._generate_outline),
+            "generate_outline": ({"outline_ready"}, self._generate_fresh_outline if outline_stopped else self._generate_outline),
             "continue_outline": ({"outline_review"}, self._continue_outline),
-            "generate_primitives": ({"primitive_ready", "outline_review"} if self.offline else {"primitive_ready"},
-                                    self._generate_primitives_from_review),
+            "generate_primitives": ({"primitive_ready", "outline_review"} if self.offline or composition_stopped
+                                    else {"primitive_ready"}, self._generate_primitives_from_review),
             "execute": ({"ready_to_execute"}, self._execute),
         }
         if action in {"regenerate_outline", "regenerate_primitives"}:
@@ -1379,10 +1434,17 @@ class PartSlippageRecovery:
             self._schedule(operations[action][1])
         return self.snapshot()
 
+    async def _generate_fresh_outline(self) -> None:
+        # The stopped attempt keeps its records; a fresh request uses a new directory.
+        await self._prepare()
+        await self._generate_outline()
+
     async def _generate_primitives_from_review(self) -> None:
         if self._state["status"] == "outline_review":
             await self._continue_outline()
-        await self._generate_primitives()
+        # Gazebo Auto already composed inside Continue.
+        if self._state["status"] == "primitive_ready":
+            await self._generate_primitives()
 
     async def _execute(self) -> None:
         from cais_spade_llm.recovery_framework.slippage_execution import execute_generated_recovery
@@ -1426,6 +1488,54 @@ class PartSlippageRecovery:
         elif outcome.get("status") in {"blocked", "execution_unavailable", "held"}:
             self._publish(status="blocked", message=outcome.get("reason", "Assembly could not resume"),
                           outcome=outcome)
+
+    def generating_stage(self) -> str:
+        """Name the generation stage that ``stop_generation`` can cancel.
+
+        Returns:
+            ``"outline"``, ``"primitive"``, or ``""`` when no stage can be stopped.
+        """
+        if self._stopped or self._stage_stop is not None or self._task is None or self._task.done():
+            return ""
+        if self._state["primitive_status"] in {"preparing", "generating"}:
+            return "primitive"
+        if self._state["outline_status"] == "generating":
+            return "outline"
+        return ""
+
+    def stop_generation(self) -> dict:
+        """Cancel the running outline or composition stage and keep this run usable.
+
+        Offline workers finish their in-flight provider call first, and its
+        response is retained. A stopped composition keeps the accepted outline.
+
+        Returns:
+            The detached run snapshot.
+
+        Raises:
+            ValueError: No outline or composition generation is running.
+        """
+        if self._stage_stop is not None:
+            return self.snapshot()
+        stage = self.generating_stage()
+        if not stage:
+            raise ValueError("No recovery generation is running")
+        self._stage_stop = stage
+        self._offline_cancel.set()
+        self._generation += 1
+        self._task.get_loop().call_soon_threadsafe(self._task.cancel)
+        self._publish(message="Stopping after the current LLM call; captured responses are retained.")
+        return self.snapshot()
+
+    def _finish_stage_stop(self) -> None:
+        if self._stage_stop == "outline":
+            self._publish(status="outline_ready", outline_status="stopped", outline=[], primitive_status="waiting",
+                          message="Recovery outline stopped. Generate starts a fresh outline attempt.")
+        else:
+            self._publish(status="outline_review", primitive_status="stopped", primitives=[], composition_findings=[],
+                          composition_feasibility="not_checked", execution_authorized=False,
+                          message="Primitive composition stopped. The accepted outline is kept; "
+                                  "Generate starts a new composition attempt.")
 
     def stop(self, reason: str = "Stopped by operator") -> None:
         """Invalidate pending generation and cancel this run's owned operation."""

@@ -207,7 +207,7 @@ def place_targets(scene: dict, machine: dict, transform: list, current_pose: lis
     Recorded slots and workholding specify the destination part pose. Preserve
     that pose; the separate support calculation must establish resting contact.
     """
-    from cais_spade_llm.recovery_framework.kmr_gazebo import _at_dock, inverse
+    from cais_spade_llm.recovery_framework.kmr_gazebo import _at_dock
 
     dock = machine['KMR_docking_pose']
     slot = 'slots' in machine
@@ -223,8 +223,29 @@ def place_targets(scene: dict, machine: dict, transform: list, current_pose: lis
         raise ValueError('KMR placement needs observed attachment, TCP, base and declared fixture')
     if not _at_dock(base_pose, dock):
         raise ValueError('KMR is not docked at the declared destination')
+    return release_targets(scene, transform, current_pose, base_pose, [*fixture[:3], *quaternion(fixture[3:])])
+
+
+def release_targets(scene: dict, transform: list, current_pose: list, base_pose: list,
+                    destination: list) -> dict:
+    """Calculate TCP poses that put the held part at a world pose, wherever the base stands.
+
+    Args:
+        scene: The captured owner configuration.
+        transform: The observed grasp transform from TCP to part.
+        current_pose: The observed TCP pose.
+        base_pose: The observed base pose as position and quaternion.
+        destination: The part's intended world pose as position and quaternion.
+
+    Returns:
+        Approach, target, retreat and transport poses. Reachability is decided
+        by the motion planner and resting contact by observation after release.
+    """
+    from cais_spade_llm.recovery_framework.kmr_gazebo import inverse
+
+    if not all(_pose(value) for value in (transform, current_pose, base_pose, destination)):
+        raise ValueError('KMR release needs observed attachment, TCP, base and a destination pose')
     config = scene['KMR']['task_execution']
-    destination = [*fixture[:3], *quaternion(fixture[3:])]
     target = compose(destination, inverse(transform))
     if rotate(target[3:], [0., 0., 1.])[2] > -.999:
         raise ValueError('KMR placement requires a downward-facing grasp')

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Tentative symbolic bookkeeping for the existing multi-turn diagnostic mode."""
 
+import math
 import re
 from copy import deepcopy
 from typing import Any
@@ -137,6 +138,87 @@ def handoff_conflicts(session: dict, prepared: dict) -> list[dict]:
                     conflicts.append({"rule_id": rule["id"], "region": region, "resource_jids": sorted(occupants),
                                       "reason": f"{rule['id']}: {', '.join(sorted(occupants))} would occupy {region} when nominal work resumes"})
     return conflicts
+
+
+def prompt_context(session: dict, prepared: dict, fault: dict, *, outline: bool) -> dict:
+    """Collect the recorded handoff facts that a diagnostic prompt states.
+
+    Args:
+        session: Tentative planning state.
+        prepared: Recorded failure context.
+        fault: The prompt's fault event.
+        outline: Whether condition values are compared with the projected state.
+
+    Returns:
+        Selected checks, handoff conditions (with ``holds`` on outline turns), blocker reasons once
+        every condition holds, compact pending nominal tasks, the interrupted event, and the
+        diagnostic refs that have recorded data.
+    """
+    from cais_spade_llm.recovery_framework.outline_checks import selected_checks
+
+    from .multi_turn_context import diagnostic_refs
+
+    conditions = [{**{key: row.get(key) for key in ("role", "entity_kind", "entity", "field", "expected")},
+                   **({"holds": condition_holds(row, session, prepared)} if outline else {})}
+                  for row in recorded_conditions(prepared)]
+    blocked = (handoff_conflicts(session, prepared)
+               if outline and conditions and all(row["holds"] for row in conditions) else [])
+    roles = {identifier: suffix["role"] for role in ("recovery_replaced", "resume_suffix")
+             for suffix in _suffixes(prepared, role)
+             for identifier in [*suffix.get("pending_task_ids", []), suffix.get("entry_task_id")] if identifier}
+    tasks = []
+    for node in prepared.get("saved_pending_nodes", []):
+        params = node.get("params", {})
+        row = {"id": node.get("id"), "role": roles.get(node.get("id")),
+               "resource_jid": node.get("resource_jid") or prepared.get("observation_jids", {}).get(params.get("resource_id")),
+               "function_name": node.get("function_name"),
+               **{key: params[key] for key in ("part_name", "destination_location") if key in params}}
+        tasks.append({key: value for key, value in row.items() if value is not None})
+    interrupted = ({key: fault[key] for key in ("blocked_at_function", "focused_resource_jid")}
+                   if fault.get("blocked_at_function") and fault.get("focused_resource_jid") else {})
+    return {"checks": selected_checks(session), "conditions": conditions,
+            "blocked": [row["reason"] for row in blocked], "pending_tasks": tasks,
+            "interrupted": interrupted, "refs": diagnostic_refs(prepared)}
+
+
+def _within_reach(pose: dict, reach: dict) -> bool:
+    origin = reach.get("origin_pose") or {}
+    tolerance = reach.get("tolerance_m", 0.0)
+    values = (pose.get("x"), pose.get("y"), pose.get("z"), origin.get("x"), origin.get("y"),
+              reach.get("max_xy_radius_m"), reach.get("z_min_m"), reach.get("z_max_m"), tolerance)
+    if not all(isinstance(value, (int, float)) for value in values):
+        return False
+    return (math.hypot(pose["x"] - origin["x"], pose["y"] - origin["y"]) <= reach["max_xy_radius_m"] + tolerance
+            and reach["z_min_m"] - tolerance <= pose["z"] <= reach["z_max_m"] + tolerance)
+
+
+def pose_relations(pose: dict, regions: dict, locations: dict[str, set[str]], envelopes: dict[str, dict]) -> dict:
+    """Relate one recorded pose to declared regions, locations and pose envelopes.
+
+    Every resource is treated alike: it relates through the locations or the envelope
+    its declarations record, and one that records neither is reported as not
+    evaluated. Nothing here selects a resource or judges whether an action is feasible.
+
+    Args:
+        pose: World-frame position with x, y and z.
+        regions: Region name to its recorded record with ``bounds``.
+        locations: Every resource JID to its declared location tokens, possibly empty.
+        envelopes: Resource JID to its declared ``gripper_reach``.
+
+    Returns:
+        Containing regions, resources declaring a location that owns one of them, resources
+        whose envelope contains the pose, and resources declaring neither.
+    """
+    from cais_spade_llm.recovery_framework.failure_grounding import _regions_for
+
+    containing = {name: row["bounds"] for name, row in regions.items()
+                  if isinstance(row, dict) and row.get("bounds") and _inside(pose, row["bounds"])}
+    by_location = {jid: sorted(name for name in names if _regions_for(name, containing))
+                   for jid, names in sorted(locations.items())}
+    return {"containing_regions": sorted(containing),
+            "by_declared_location": {jid: names for jid, names in by_location.items() if names},
+            "by_declared_envelope": sorted(jid for jid, reach in envelopes.items() if _within_reach(pose, reach)),
+            "not_evaluated": sorted(jid for jid, names in locations.items() if not names and jid not in envelopes)}
 
 
 def nominal_rows(session: dict, prepared: dict) -> list[dict]:

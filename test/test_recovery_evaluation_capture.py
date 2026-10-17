@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """Capture-only isolation and factual readiness for the four existing failures."""
 
-import asyncio
 import ast
+import asyncio
 import hashlib
 import json
 from copy import deepcopy
@@ -373,6 +373,44 @@ def test_robot_capture_requires_failed_M1_approach_and_frozen_occupancy(monkeypa
             capture.verify_capture(row, 'ur5e-1 breakdown')
 
 
+@pytest.mark.parametrize('defect', [None, 'source', 'm1_active', 'm2_finished', 'kmr_moving', 'kmr_holding'])
+def test_gripper_fault_capture_requires_overlap_reporting_device_and_idle_KMR(monkeypatch, defect):
+    from cais_spade_llm.recovery_framework.recovery_observations import checkpoint_fact_fingerprint
+    from cais_spade_llm.resources import recovery_geometry
+
+    part = 'KET4_Square_4mm'
+    row = _robot_breakdown_capture_record()
+    row['capture_checkpoint']['machine_observations'] = {'M1': {'status': 'observed'}, 'M2': {'status': 'observed'}}
+    row['fault_reports'] = {'ur5e-1': {'reported_state': 'failed', 'source': 'gripper object detection'}}
+    row['processing_observations'] = {
+        'M1': {'active_job': None, 'jobs': {'trim-1': {'part_name': part, 'process_completed': True,
+                                                         'job_state': 'completed'}}},
+        'M2': {'active_job': 'trim-2', 'jobs': {'trim-2': {'part_name': 'RGOCG4-50_Round_4mm',
+                                                            'process_completed': False, 'job_state': 'running'}}}}
+    row['resource_states']['KMR'] = {'resource_state': 'idle', 'held_part': None, 'resource_location': 'Storage'}
+    row['inputs'] = {'scene': {'Storage': {'KMR_docking_pose': [-5.54, 2.13, 0, 0, 0, 1.5708]},
+                               'machines': [{'resource_id': 'M1', 'KMR_docking_pose': [-4.7, 2.2, 0, 0, 0, 1.5708]}]}}
+    row['physical_evidence']['resources']['KMR'] = {'base_pose': [-5.54, 2.13, 0.0, 0.0, 0.0, 0.7071, 0.7071]}
+    if defect == 'source':
+        row['fault_reports']['ur5e-1']['source'] = 'robot controller'
+    elif defect == 'm1_active':
+        row['processing_observations']['M1']['active_job'] = 'trim-1'
+    elif defect == 'm2_finished':
+        row['processing_observations']['M2']['jobs']['trim-2'].update(process_completed=True, job_state='completed')
+    elif defect == 'kmr_moving':
+        row['physical_evidence']['resources']['KMR']['base_pose'][:2] = [-3.0, 1.0]
+    elif defect == 'kmr_holding':
+        row['resource_states']['KMR'].update(resource_state='carrying', held_part='RGOCG4-50_Round_4mm')
+    row['capture_checkpoint']['facts_fingerprint'] = checkpoint_fact_fingerprint(row)
+    monkeypatch.setattr(recovery_geometry, '_checkpoint', lambda *_args, **_kwargs: {
+        'region_occupancy': {'M1.workholding': {'ur5e-1': True}}})
+    if defect is None:
+        assert capture.verify_capture(row, 'ur5e-1 breakdown')['part_name'] == part
+    else:
+        with pytest.raises(ValueError):
+            capture.verify_capture(row, 'ur5e-1 breakdown')
+
+
 @pytest.mark.parametrize('changed', [False, True])
 def test_robot_capture_freezes_after_observed_stop_and_rejects_changed_native_facts(tmp_path, monkeypatch, changed):
     from cais_spade_llm.recovery_framework import recovery_observations
@@ -436,7 +474,8 @@ def test_robot_capture_keeps_processing_acknowledgement_separate_from_machine_jo
 def test_robot_capture_wall_budget_override_is_private_and_preserves_other_scenarios(tmp_path, monkeypatch):
     from cais_spade_llm.recovery_framework import evaluation_conditions
 
-    original = {'KMR': {'arm_controller': '/KMR/arm'}, 'machines': []}
+    original = {'KMR': {'arm_controller': '/KMR/arm'}, 'machines': [
+        {'resource_id': rid, 'simulation_process': {'processing_time_sec': 5.}} for rid in ('M1', 'M2')]}
     source = tmp_path / 'scene.json'
     source.write_text(json.dumps(original))
     monkeypatch.setattr(evaluation_conditions, 'ROOT', tmp_path)
@@ -444,15 +483,31 @@ def test_robot_capture_wall_budget_override_is_private_and_preserves_other_scena
     result = evaluation_conditions.condition_setup(setup, 'ur5e-1 breakdown', 'normal', tmp_path)
     scene = json.loads(Path(result['scene_file']).read_text())
     assert scene['KMR']['arm_motion_wall_timeout_sec'] == 360.
+    assert [row['simulation_process']['processing_time_sec'] for row in scene['machines']] == [90., 60.]
     assert json.loads(source.read_text()) == original
     assert setup == {'scene_file': 'scene.json', 'simulation': {'speed': 1}}
-    assert evaluation_conditions.condition_setup(setup, 'Conveyor breakdown', 'normal', tmp_path) == setup
-    assert evaluation_conditions.condition_setup(setup, 'Machining breakdown during part processing', 'normal', tmp_path) == setup
+    # The Conveyor capture runs the same KMR motions, so it shares only the wall budget.
+    result = evaluation_conditions.condition_setup(setup, 'Conveyor breakdown', 'normal', tmp_path)
+    scene = json.loads(Path(result['scene_file']).read_text())
+    assert scene['KMR']['arm_motion_wall_timeout_sec'] == 360.
+    assert [row['simulation_process']['processing_time_sec'] for row in scene['machines']] == [5., 5.]
+    # Machining's shorter M1 trim finishes KET4 first, and M2 keeps trimming at the fault.
+    for condition, programs in (('normal', {'circle', 'square'}), ('changed', {'circle'})):
+        original['machines'][1]['program_options'] = {'circle': {}, 'square': {}}
+        source.write_text(json.dumps(original))
+        result = evaluation_conditions.condition_setup(
+            setup, 'Machining breakdown during part processing', condition, tmp_path)
+        scene = json.loads(Path(result['scene_file']).read_text())
+        assert scene['KMR']['arm_motion_wall_timeout_sec'] == 360.
+        assert [row['simulation_process']['processing_time_sec'] for row in scene['machines']] == [60., 90.]
+        assert set(scene['machines'][1]['program_options']) == programs
+        assert json.loads(source.read_text()) == original
 
 
 @pytest.mark.parametrize('timeout', [None, 360., 0., float('nan')])
 def test_kmr_arm_wall_budget_preserves_the_trajectory_and_requires_positive_finite_values(timeout):
     import math
+
     from cais_spade_llm.recovery_framework import kmr_gazebo
 
     tree = ast.parse(Path(kmr_gazebo.__file__).read_text())
@@ -545,6 +600,51 @@ def test_conveyor_capture_requires_both_pickups_unfinished_assembly_and_clear_pr
             capture.verify_capture(row, 'Conveyor breakdown')
 
 
+def _conveyor_capture_without_peer():
+    row = _conveyor_capture_record()
+    del row['setup']['failure_scenario']['additional_condition']
+    del row['failure']['pickups']['ur5e-4']
+    row.update(schema_version=capture.RAW_SCHEMA_VERSION,
+               fault_reports={'Conveyor': {'available': False, 'source': 'device controller'}},
+               requirements={'KET4_Square_4mm': [], 'gear_small': []})
+    row['failure']['pending_tasks'] = []
+    row['resource_states']['ur5e-4'] = {'held_part': None}
+    row['part_tracker']['gear_small'] = {'location': 'assembly_board-v1', 'processCompleted': [
+        {'process': 'print_part'}, {'process': 'assembly', 'target': 'Gear_Plate/Gear_Shaft_1'}]}
+    row['physical_evidence'].update(product_name='assembly_board-v1', parts={
+        name: {'name': model} for name, model in (('assembly_board-v1', 'assembly_board_v1'),
+                                                  ('gear_small', 'gear_small'), ('KET4_Square_4mm', 'KET4_Square_4mm'))},
+        physics_evidence={'attachments': [
+            {'model1': 'dual_robot', 'model2': 'KET4_Square_4mm', 'joint_evidence': {'fixed_joint': True}},
+            {'model1': 'assembly_board_v1', 'model2': 'gear_small', 'joint_evidence': {'fixed_joint': True}}]})
+    return row
+
+
+@pytest.mark.parametrize('defect', [None, 'pending', 'unassembled', 'unfixed', 'gripper', 'report', 'assembled', 'pickup'])
+def test_conveyor_capture_without_held_peer_requires_a_settled_cell(defect):
+    row = _conveyor_capture_without_peer()
+    attachments = row['physical_evidence']['physics_evidence']['attachments']
+    if defect == 'pending':
+        row['failure']['pending_tasks'] = [{'resource_id': 'KMR', 'event_name': 'move_to_resource'}]
+    elif defect == 'unassembled':
+        row['part_tracker']['gear_small']['processCompleted'] = [{'process': 'print_part'}]
+    elif defect == 'unfixed':
+        attachments.pop()
+    elif defect == 'gripper':
+        attachments[-1]['model1'] = 'dual_robot'
+    elif defect == 'report':
+        row['fault_reports'] = {}
+    elif defect == 'assembled':
+        row['part_tracker']['KET4_Square_4mm']['processCompleted'] = [{'process': 'assembly'}]
+    elif defect == 'pickup':
+        row['failure']['pickups'] = {}
+    if defect is None:
+        assert capture.verify_capture(row, 'Conveyor breakdown')['part_name'] == 'KET4_Square_4mm'
+    else:
+        with pytest.raises(ValueError, match='Conveyor capture'):
+            capture.verify_capture(row, 'Conveyor breakdown')
+
+
 def test_stationary_readiness_requires_complete_joint_and_custody_observations():
     row = {'jids': {'KMR': 'owner@localhost'}, 'captured_at': 'recorded', 'context_revision': 4,
            'physical_evidence': {'snapshot': {'resources': {'KMR': {'held_part': 'part',
@@ -584,8 +684,8 @@ def test_capture_waits_for_owned_preparation_and_nominal_idle():
 
 def test_capture_guards_reject_llm_and_recovery_dispatch(monkeypatch):
     from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-    from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
     from cais_spade_llm.recovery_framework import slippage_execution
+    from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
 
     methods = [(LlmAgent, name) for name in ('ask_llm', 'ask_llm_structured')]
     methods += [(PartSlippageRecovery, name) for name in ('_run_stage', '_generate_outline', '_generate_primitives', '_execute')]
@@ -653,6 +753,27 @@ def test_condition_setup_keeps_scene_override_private(tmp_path, monkeypatch):
         part_slippage_example.example_setup(scenario='Part slippage')
 
 
+def test_selected_seed_reproduces_only_a_randomly_timed_failure(tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import evaluation_conditions, part_slippage_example
+
+    scene = tmp_path / 'scene.json'
+    scene.write_text('{}')
+    drawn = {'scene_file': str(scene), 'failure_scenario': {'checkpoint': 'during_processing', 'seed': 7}}
+    monkeypatch.setattr(part_slippage_example, 'example_setup', lambda **kwargs: deepcopy(drawn))
+    monkeypatch.setattr(evaluation_conditions, 'condition_setup', lambda setup, *args: setup)
+    bridge = SimpleNamespace(ROS2_LAUNCH_CMDS={'gazebo_dual': 'ros2 launch world > log 2>&1'})
+    scenario = 'Machining breakdown during part processing'
+    capture.install_condition_setup(bridge, tmp_path, scenario, 'normal', 4000168541)
+    assert part_slippage_example.example_setup(scenario=scenario)['failure_scenario']['seed'] == 4000168541
+    recorded = json.loads((tmp_path / 'capture_setup.json').read_text())
+    assert recorded['setup']['failure_scenario']['seed'] == 4000168541
+    drawn['failure_scenario'] = {'checkpoint': 'during_place_lowering'}
+    monkeypatch.setattr(part_slippage_example, 'example_setup', lambda **kwargs: deepcopy(drawn))
+    capture.install_condition_setup(bridge, tmp_path, 'Part slippage', 'normal', 1)
+    with pytest.raises(ValueError, match='no randomly chosen time'):
+        part_slippage_example.example_setup(scenario='Part slippage')
+
+
 @pytest.mark.parametrize('scenario', list(capture.CHECKPOINTS))
 def test_capture_launch_keeps_kmr_map_and_navigation_services(tmp_path, scenario):
     bridge = SimpleNamespace(ROS2_LAUNCH_CMDS={'gazebo_dual': 'original'}, _ROS2_ENV='')
@@ -712,8 +833,8 @@ def test_evaluation_capture_pins_exact_implementation_and_inventory(tmp_path, mo
 def _capture_with_kmr_map(monkeypatch):
     import hashlib
 
-    from cais_spade_llm.recovery_framework import evaluation_conditions as conditions
     from cais_spade_llm.agents.central_controller import recovery_case_evidence
+    from cais_spade_llm.recovery_framework import evaluation_conditions as conditions
 
     # These cases exercise map and coordinate checks. The owning evidence
     # suite also tests this boundary with complete controller/physics records.
@@ -811,12 +932,15 @@ def test_changed_drop_bound_requires_exact_connection_between_map_and_base_axes(
 
 @pytest.mark.parametrize('frozen,stationary', [(True, True), (False, True), (True, False)])
 def test_capture_publishes_the_scene_from_its_checkpoint(tmp_path, monkeypatch, frozen, stationary):
-    import cais_spade_llm.ui_main
-    from cais_spade_llm.ui import bridge as bridge_module
     from cais_spade_llm.recovery_framework import (
-        environment_runtime, evaluation_conditions, outline_gazebo_evidence, part_slippage_example,
-        recovery_motion_preview, recovery_observations,
+        environment_runtime,
+        evaluation_conditions,
+        outline_gazebo_evidence,
+        part_slippage_example,
+        recovery_motion_preview,
+        recovery_observations,
     )
+    from cais_spade_llm.ui import bridge as bridge_module
 
     scene = {'scene_fingerprint': 'recorded-scene', 'model_fingerprint': 'recorded-model'}
     observations = {'run_id': 'run', 'captured_at': 'recorded', 'context_revision': 2,

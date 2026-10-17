@@ -435,13 +435,14 @@ def test_seeded_random_failure_uses_observed_overlap(machine):
 
 def test_new_case_and_programs_do_not_change_other_defaults():
     from cais_spade_llm.recovery_framework.part_slippage_example import example_setup
+    from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
     from cais_spade_llm.resources.gazebo_programs import validate_resource_programs
     scene = json.loads(SCENE_PATH.read_text())
     validate_resource_programs(scene)
     setup = example_setup(scenario='Machining breakdown during part processing')
     assert {'M1', 'M2', 'ur5e-2'} <= set(setup['permitted_resources'])
     assert setup['failure_scenario']['checkpoint'] == 'during_processing'
-    assert len(setup['selected_safety_files']) == 2
+    assert setup['selected_safety_files'] == default_safety_files('Machining breakdown during part processing')
     assert example_setup()['failure_scenario']['scenario'] == 'Part slippage'
     assert all(set(scene['resource_programs']['resources'][rid]['primitives']) == set(MACHINE_PRIMITIVES)
                for rid in ('M1', 'M2'))

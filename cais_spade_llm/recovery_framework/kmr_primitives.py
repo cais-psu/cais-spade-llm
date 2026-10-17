@@ -74,9 +74,12 @@ class KMRPrimitives:
         """Compute KMR pickup poses from the observed Storage part."""
         return await self._call('compute_pick_targets', {'initial': initial})
 
-    async def compute_place_targets(self, transform: list[float]) -> dict:
-        """Compute placement targets from the observed grasp transform."""
-        return await self._call('compute_place_targets', {'transform': transform})
+    async def compute_place_targets(self, transform: list[float],
+                                    part_pose: list[float] | None = None) -> dict:
+        """Compute placement targets from the observed grasp transform, for the recorded
+        destination or for an explicit world part_pose [x, y, z] or [x, y, z, qx, qy, qz, qw];
+        without a quaternion the held part keeps its current orientation."""
+        return await self._call('compute_place_targets', {'transform': transform, 'part_pose': part_pose})
 
     async def move_to_named_pose(self, pose_name: str) -> dict:
         """Move the arm to a configured home or transport posture."""
@@ -116,7 +119,7 @@ class KMRPrimitives:
         return await self._call('grasp_part', {'part_name': part_name, 'initial': initial})
 
     async def release_part(self, transform: list[float] | None = None) -> dict:
-        """Open, detach, and update the part collision geometry."""
+        """Open, detach, update the part collision geometry and observe where the part rests."""
         return await self._call('release_part', {'transform': transform})
 
     async def attach_part(self, part_name: str | None = None) -> dict:

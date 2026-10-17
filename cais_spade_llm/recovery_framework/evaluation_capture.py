@@ -12,8 +12,8 @@ import os
 import re
 import shlex
 import signal
-import subprocess
 import socket
+import subprocess
 import sys
 import time
 from copy import deepcopy
@@ -22,7 +22,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT
-from cais_spade_llm.recovery_framework.capture_files import RAW_SCHEMA_VERSION, write_capture
+from cais_spade_llm.recovery_framework.capture_files import (
+    BELIEFS_NAME,
+    RAW_SCHEMA_VERSION,
+    write_capture,
+)
 from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS, SUPPORTED_CHECKPOINTS
 
 logger = logging.getLogger(__name__)
@@ -140,7 +144,9 @@ def verify_capture(captured: dict, scenario: str) -> dict:
                     or not 0 <= job.get('processing_fraction', -1) < 1):
                 raise ValueError('Failure capture lacks overlapping unfinished processing: ' + rid)
         if captured.get('capture_checkpoint'):
-            from cais_spade_llm.recovery_framework.recovery_observations import processing_capture_compatibility
+            from cais_spade_llm.recovery_framework.recovery_observations import (
+                processing_capture_compatibility,
+            )
 
             if processing_capture_compatibility(captured)['status'] != 'supported':
                 raise ValueError('Frozen processing checkpoint is inconsistent')
@@ -152,40 +158,69 @@ def verify_capture(captured: dict, scenario: str) -> dict:
         raise ValueError('The checkpoint does not identify a captured affected part')
     if scenario == 'ur5e-1 breakdown':
         _verify_robot_breakdown_capture(captured)
-    if scenario == 'Conveyor breakdown' and configured.get('additional_condition') is not None:
-        from cais_spade_llm.resources.recovery_geometry import _checkpoint
-
-        other = configured['additional_condition']
-        pickups = failure.get('pickups', {})
-        machine = pickups.get('ur5e-1', {}).get('before', {}).get('M1', {})
-        if machine.get('resource_state') != 'completed' or machine.get('part_name') != part:
-            raise ValueError('Conveyor capture requires acknowledged pickup from completed M1')
-        for rid, held, origin in (('ur5e-1', configured['part_name'], 'M1'),
-                                  (other['resource_id'], other['part_name'], '3D Printing Station')):
-            acknowledgement = pickups.get(rid, {}).get('acknowledgement', {})
-            if (captured.get('resource_states', {}).get(rid, {}).get('held_part') != held
-                    or captured['part_tracker'].get(held, {}).get('location') != rid
-                    or acknowledgement.get('run_id') != captured['run_id']
-                    or acknowledgement.get('resource_id') != rid
-                    or acknowledgement.get('event_name') != 'pick_grasp'
-                    or acknowledgement.get('evidence') != 'resource'
-                    or acknowledgement.get('parameters', {}).get('part_name') != held
-                    or acknowledgement.get('parameters', {}).get('origin_resource_location') != origin
-                    or not pickups[rid].get('observations')):
-                raise ValueError('Conveyor capture lacks acknowledged retained pickup: ' + rid)
-            if any(row.get('process') == 'assembly'
-                   for row in captured['part_tracker'][held].get('processCompleted', [])):
-                raise ValueError('Conveyor capture requires both assemblies unfinished: ' + held)
-        if (part != configured['part_name'] or 'Conveyor' not in captured.get('unavailable_resources', [])
-                or captured.get('inputs', {}).get('scene', {}).get('Conveyor', {}).get('transport_enabled') is not False):
-            raise ValueError('Conveyor capture does not retain the unavailable transport')
-        physical = captured['physical_evidence']
-        observed = _checkpoint(physical['snapshot'], physical['geometry'], physical['resource_models'], index=0)
-        if observed['part_region_occupancy']['assembly_board-v1'][other['part_name']] is not False:
-            raise ValueError('Conveyor capture requires the printed part observed outside assembly_board-v1')
+    if scenario == 'Conveyor breakdown' and (configured.get('part_name') is not None
+                                             or configured.get('additional_condition') is not None):
+        _verify_conveyor_capture(captured)
     return {'checkpoint': failure['checkpoint'], 'run_id': failure['run_id'],
             'part_name': part, 'resource_id': configured['resource_id'],
             'source_paths': ['/failure', '/setup/failure_scenario', '/part_tracker/' + part]}
+
+
+def _verify_conveyor_capture(captured: dict) -> None:
+    """Require ur5e-1's retained pickup from completed M1 and the unavailable Conveyor transport."""
+    from cais_spade_llm.resources.recovery_geometry import _checkpoint
+
+    configured = captured['setup']['failure_scenario']
+    failure = captured['failure']
+    part = failure['part_name']
+    other = configured.get('additional_condition')
+    pickups = failure.get('pickups', {})
+    machine = pickups.get('ur5e-1', {}).get('before', {}).get('M1', {})
+    if machine.get('resource_state') != 'completed' or machine.get('part_name') != part:
+        raise ValueError('Conveyor capture requires acknowledged pickup from completed M1')
+    retained = [('ur5e-1', configured['part_name'], 'M1')]
+    if other is not None:
+        retained.append((other['resource_id'], other['part_name'], '3D Printing Station'))
+    for rid, held, origin in retained:
+        acknowledgement = pickups.get(rid, {}).get('acknowledgement', {})
+        if (captured.get('resource_states', {}).get(rid, {}).get('held_part') != held
+                or captured['part_tracker'].get(held, {}).get('location') != rid
+                or acknowledgement.get('run_id') != captured['run_id']
+                or acknowledgement.get('resource_id') != rid
+                or acknowledgement.get('event_name') != 'pick_grasp'
+                or acknowledgement.get('evidence') != 'resource'
+                or acknowledgement.get('parameters', {}).get('part_name') != held
+                or acknowledgement.get('parameters', {}).get('origin_resource_location') != origin
+                or not pickups[rid].get('observations')):
+            raise ValueError('Conveyor capture lacks acknowledged retained pickup: ' + rid)
+        if any(row.get('process') == 'assembly'
+               for row in captured['part_tracker'][held].get('processCompleted', [])):
+            raise ValueError('Conveyor capture requires each retained part unassembled: ' + held)
+    if (part != configured['part_name'] or 'Conveyor' not in captured.get('unavailable_resources', [])
+            or captured.get('inputs', {}).get('scene', {}).get('Conveyor', {}).get('transport_enabled') is not False):
+        raise ValueError('Conveyor capture does not retain the unavailable transport')
+    if (captured.get('schema_version') == RAW_SCHEMA_VERSION
+            and captured.get('fault_reports', {}).get('Conveyor', {}).get('available') is not False):
+        raise ValueError('Conveyor capture lacks the Conveyor fault report')
+    physical = captured['physical_evidence']
+    if other is not None:
+        observed = _checkpoint(physical['snapshot'], physical['geometry'], physical['resource_models'], index=0)
+        if observed['part_region_occupancy']['assembly_board-v1'][other['part_name']] is not False:
+            raise ValueError('Conveyor capture requires the printed part observed outside assembly_board-v1')
+        return
+    # With no held peer, the fault must find no task in progress and every other ordered part
+    # measured as fixed to the board, so only the machined part's delivery remains.
+    if failure.get('pending_tasks'):
+        raise ValueError('Conveyor capture requires no task in progress at the fault')
+    models = {name: row.get('name') for name, row in physical.get('parts', {}).items()}
+    board = models.get(physical.get('product_name'))
+    fixed = {row.get('model2') for row in (physical.get('physics_evidence') or {}).get('attachments') or []
+             if board and row.get('model1') == board and (row.get('joint_evidence') or {}).get('fixed_joint') is True}
+    for name in captured.get('requirements', {}):
+        if name != part and (models.get(name) not in fixed or not any(
+                row.get('process') == 'assembly'
+                for row in captured['part_tracker'].get(name, {}).get('processCompleted', []))):
+            raise ValueError('Conveyor capture requires every other part assembled and fixed to the board: ' + name)
 
 
 def _verify_robot_breakdown_capture(captured: dict) -> None:
@@ -237,12 +272,35 @@ def _verify_robot_breakdown_capture(captured: dict) -> None:
     if not any(observed['region_occupancy'].get(region, {}).get('ur5e-1') is True
                for region in ('M1.front_access', 'M1.side_access', 'M1.workholding')):
         raise ValueError('NEEDS_CONTEXT: ur5e-1 has no observed occupancy of the protected M1 area')
+    if not frozen.get('machine_observations'):
+        return
+    # The gripper-fault design: M2 still trims while the KMR, idle at a dock, can take over at M1.
+    if captured.get('fault_reports', {}).get('ur5e-1', {}).get('source') != 'gripper object detection':
+        raise ValueError('Robot breakdown fault must come from the gripper object detection')
+    records = captured.get('processing_observations', {})
+    m1, m2 = records.get('M1', {}), records.get('M2', {})
+    running = m2.get('jobs', {}).get(m2.get('active_job'), {})
+    if (m1.get('active_job') is not None
+            or not any(job.get('part_name') == part and job.get('process_completed') is True
+                       for job in m1.get('jobs', {}).values())
+            or running.get('job_state') != 'running' or running.get('process_completed') is not False):
+        raise ValueError('Robot breakdown requires M1 finished and M2 still processing at the frozen checkpoint')
+    kmr = values.get('KMR', {})
+    location = kmr.get('resource_location')
+    docks = {'Storage': captured['inputs']['scene']['Storage']['KMR_docking_pose'],
+             **{row['resource_id']: row['KMR_docking_pose'] for row in captured['inputs']['scene']['machines']}}
+    base = physical.get('resources', {}).get('KMR', {}).get('base_pose') or []
+    if (kmr.get('resource_state') != 'idle' or kmr.get('held_part') is not None or location not in docks
+            or len(base) < 2 or math.dist(base[:2], docks[location][:2]) > .05):
+        raise ValueError('Robot breakdown requires the KMR idle at a dock, not on a route')
 
 
 async def _freeze_robot_capture(runtime, captured: dict, directory: Path) -> dict:
     """Freeze the owned stopped robot scene and recapture its measured facts."""
     from cais_spade_llm.recovery_framework.recovery_observations import (
-        _cancel_checkpoint_motion, capture_observations, fingerprint,
+        _cancel_checkpoint_motion,
+        capture_observations,
+        fingerprint,
     )
 
     preparation = getattr(runtime, 'recovery_observation_preparation', None)
@@ -352,7 +410,9 @@ def capture_scene_image(bridge, runtime, captured: dict, observation_path: Path)
     if runtime.conveyor_fault.snapshot().get('visual', {}).get('status') != 'completed':
         raise ValueError('Scene image requires the acknowledged failure marker')
     frozen = captured.get('capture_checkpoint') if captured.get('scenario') == 'ur5e-1 breakdown' else None
-    if frozen is not None:
+    # A machine checkpoint unpauses the world after its frozen record; only a robot freeze is still paused.
+    paused_freeze = frozen is not None and not frozen.get('machine_observations')
+    if paused_freeze:
         native = runtime.recovery_observation_preparation.reader.snapshot(refresh=True)
         if (native.get('world_paused') is not True
                 or any(native.get(key) != frozen.get(key) for key in ('instance_id', 'simulation_time'))):
@@ -430,11 +490,12 @@ def capture_scene_image(bridge, runtime, captured: dict, observation_path: Path)
             'rendering': {'verified': True, 'pixel_stddev': float(scene.std()),
                           'nonblack_fraction': float((scene > 16).mean())},
             'execution_authorized': False}
-        if frozen is not None:
+        if paused_freeze:
             native = runtime.recovery_observation_preparation.reader.snapshot(refresh=True)
             if (native.get('world_paused') is not True
                     or any(native.get(key) != frozen.get(key) for key in ('instance_id', 'simulation_time'))):
                 raise ValueError('Robot checkpoint changed while its scene image was captured')
+        if frozen is not None:
             record['capture_checkpoint'] = deepcopy(frozen)
         write_record(observation_path.parent / 'failure_scene.json', record)
         return record
@@ -522,8 +583,8 @@ def prepare_private_workspace(directory: Path) -> Path:
 def install_capture_guards() -> list[str]:
     """Block generation and recovery dispatch while allowing nominal failure setup."""
     from cais_spade_llm.agents.shared_information.llm_agent import LlmAgent
-    from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
     from cais_spade_llm.recovery_framework import slippage_execution
+    from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
 
     calls: list[str] = []
 
@@ -568,7 +629,7 @@ def configure_bridge(bridge, directory: Path, domain: int, port: int, scenario: 
                          'export ROS_LOG_DIR=' + shlex.quote(str(directory / 'ros_logs')) + '; ')
 
 
-def install_condition_setup(bridge, directory: Path, scenario: str, condition: str) -> None:
+def install_condition_setup(bridge, directory: Path, scenario: str, condition: str, seed: int | None = None) -> None:
     """Apply only the selected private capture setup before its owned launch."""
     from cais_spade_llm.recovery_framework import part_slippage_example
     from cais_spade_llm.recovery_framework.evaluation_conditions import condition_setup
@@ -579,6 +640,11 @@ def install_condition_setup(bridge, directory: Path, scenario: str, condition: s
         if kwargs.get('scenario') != scenario:
             raise ValueError('Capture setup changed its selected scenario')
         setup = condition_setup(original(**kwargs), scenario, condition, directory)
+        if seed is not None:
+            # Only a randomly timed failure draws a seed; a selected seed reproduces that timing.
+            if 'seed' not in setup['failure_scenario']:
+                raise ValueError('The selected failure has no randomly chosen time to seed')
+            setup['failure_scenario']['seed'] = seed
         scene = Path(setup['scene_file'])
         if not scene.is_absolute():
             scene = ROOT / scene
@@ -600,7 +666,11 @@ def capture_implementation(directory: Path, purpose: str) -> dict | None:
         return None
     if purpose != 'evaluation':
         raise ValueError('Capture purpose must be development or evaluation')
-    from cais_spade_llm.recovery_framework.recovery_evaluation import _implementation_files, frozen_files, verify_frozen
+    from cais_spade_llm.recovery_framework.recovery_evaluation import (
+        _implementation_files,
+        frozen_files,
+        verify_frozen,
+    )
 
     manifest = {'files': frozen_files([]),
                 'implementation_files': sorted(str(path.relative_to(ROOT)) for path in _implementation_files(ROOT))}
@@ -619,17 +689,26 @@ async def run_capture(args) -> dict:
     os.environ.update(ROS_DOMAIN_ID=str(args.ros_domain),
                       GAZEBO_MASTER_URI=f'http://127.0.0.1:{args.gazebo_port}',
                       CAIS_KEEP_GAZEBO_ON_EXIT='1')
-    import cais_spade_llm.ui_main  # Only import compatibility; never invoke UI startup/cleanup.
+    # Imported for its sys.path setup, which the bridge's top-level agent_creator import needs;
+    # never invoke UI startup or cleanup.
+    import cais_spade_llm.ui_main  # noqa: F401
     import cais_spade_llm.ui.bridge as bridge_module
     from cais_spade_llm.recovery_framework import environment_runtime
-    from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
-    from cais_spade_llm.recovery_framework.recovery_observations import (
-        RECORDS, capture_observations, offline_preparation_missing, save_native_preview_model_from_capture,
+    from cais_spade_llm.recovery_framework.evaluation_conditions import (
+        apply_changed_condition,
+        verify_capture_condition,
     )
+    from cais_spade_llm.recovery_framework.failure_grounding import apply_grounding
     from cais_spade_llm.recovery_framework.outline_gazebo_evidence import _prepare_saved_capture
-    from cais_spade_llm.recovery_framework.recovery_motion_preview import capture_preview_scene
-    from cais_spade_llm.recovery_framework.evaluation_conditions import apply_changed_condition, verify_capture_condition
+    from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
     from cais_spade_llm.recovery_framework.recovery_evaluation import value_hash, verify_frozen
+    from cais_spade_llm.recovery_framework.recovery_motion_preview import capture_preview_scene
+    from cais_spade_llm.recovery_framework.recovery_observations import (
+        RECORDS,
+        capture_observations,
+        offline_preparation_missing,
+        save_native_preview_model_from_capture,
+    )
 
     # These are process-local constants; production source and shared files stay unchanged.
     bridge_module._USER_VERIFIED_PLAN = directory / 'bundle_store'
@@ -643,7 +722,7 @@ async def run_capture(args) -> dict:
     calls = install_capture_guards()
     bridge = bridge_module.SystemBridge()
     configure_bridge(bridge, directory, args.ros_domain, args.gazebo_port, args.scenario)
-    install_condition_setup(bridge, directory, args.scenario, args.condition)
+    install_condition_setup(bridge, directory, args.scenario, args.condition, getattr(args, 'seed', None))
     bridge.set_part_slippage_modes('manual', 'manual')
     example = example_for_bridge(bridge)
     from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
@@ -727,7 +806,7 @@ async def run_capture(args) -> dict:
                 raise TimeoutError('Recorded rest checks did not pass within the observation deadline: ' + repr(readiness['missing']))
             await asyncio.sleep(5)
 
-        if args.scenario == 'ur5e-1 breakdown':
+        if args.scenario == 'ur5e-1 breakdown' and not frozen_checkpoint:
             captured = await bridge._run_on_agent_runtime(_freeze_robot_capture(runtime, captured, directory))
         if frozen_checkpoint:
             scene = captured['planning_scene_capture']
@@ -740,7 +819,9 @@ async def run_capture(args) -> dict:
             captured['planning_scene_capture'] = {**scene, 'status': 'captured', 'compatibility': 'not_checked',
                 'physical_evidence_fingerprint': captured['physical_evidence']['evidence_fingerprint']}
         if args.scenario == 'ur5e-1 breakdown':
-            from cais_spade_llm.recovery_framework.recovery_observations import checkpoint_fact_fingerprint
+            from cais_spade_llm.recovery_framework.recovery_observations import (
+                checkpoint_fact_fingerprint,
+            )
 
             captured['capture_checkpoint']['facts_fingerprint'] = checkpoint_fact_fingerprint(captured)
             report['capture_checkpoint'] = deepcopy(captured['capture_checkpoint'])
@@ -753,6 +834,8 @@ async def run_capture(args) -> dict:
         write_record(directory / 'report.json', report)
         captured['prepared_recovery_request'] = await bridge._run_on_agent_runtime(
             _prepare_saved_capture(runtime, captured, recovery._observations['prepared_recovery_request'], observation_path))
+        # The capture's beliefs.json stores its grounding; offline attempts reuse it.
+        apply_grounding(captured['prepared_recovery_request'], captured)
         captured['missing'] = offline_preparation_missing(captured)
         captured['offline_ready'] = not captured['missing']
         write_capture(observation_path, captured)
@@ -765,7 +848,8 @@ async def run_capture(args) -> dict:
         if not isinstance(condition_evidence, dict) or not condition_evidence:
             raise ValueError('Condition verification returned no factual evidence')
         condition_record = {'version': 1, 'source': str(observation_path),
-            'source_sha256': sha256_file(observation_path), 'scenario': args.scenario,
+            'source_sha256': sha256_file(observation_path),
+            'preparation_sha256': sha256_file(observation_path.with_name(BELIEFS_NAME)), 'scenario': args.scenario,
             'condition': args.condition, 'purpose': args.purpose, 'capture_verified': True,
             'checkpoint_evidence': report['capture_verification'], 'condition_evidence': condition_evidence}
         if implementation is not None:
@@ -779,6 +863,7 @@ async def run_capture(args) -> dict:
             missing.append('Physical resource identities are incomplete')
         report.update(status='captured' if not missing else 'NEEDS_CONTEXT',
             observation_path=str(observation_path), observation_sha256=sha256_file(observation_path),
+            preparation_sha256=sha256_file(observation_path.with_name(BELIEFS_NAME)),
             captured_at=captured['captured_at'], missing=missing,
             source_run_id=captured['run_id'], resources=list(runtime.jids),
             physical_evidence_fingerprint=physical.get('evidence_fingerprint'),
@@ -844,11 +929,15 @@ def main() -> None:
     parser.add_argument('--settle-timeout', type=float, default=300.)
     parser.add_argument('--scene-image', action='store_true',
                         help='Save an owned Gazebo-window PNG at the final failure checkpoint')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Reproduce a randomly timed failure (Machining breakdown during processing)')
     args = parser.parse_args()
     if not 1 <= args.ros_domain <= 232 or not 1024 <= args.gazebo_port <= 65535:
         parser.error('Use an isolated ROS domain and an unprivileged Gazebo port')
     if any(not math.isfinite(value) or value <= 0 for value in (args.timeout, args.settle_timeout)):
         parser.error('Observation deadlines must be finite and positive')
+    if args.seed is not None and not 0 <= args.seed < 2 ** 32:
+        parser.error('The failure seed must be a 32-bit unsigned integer')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     os.chdir(ROOT)
     if str(ROOT) not in sys.path:

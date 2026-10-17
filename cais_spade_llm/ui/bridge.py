@@ -39195,12 +39195,6 @@ class SystemBridge:
 
         return default_observation_paths()
 
-    def get_worked_recovery_version(self) -> dict[str, Any]:
-        """Read the separate worked Part slippage archive without preparing a run."""
-        from cais_spade_llm.recovery_framework.worked_version import read_worked_version
-
-        return read_worked_version()
-
     async def start_failure_example(self) -> dict[str, Any]:
         """Start the selected simulation failure through the existing coordinator."""
         return await self.start_part_slippage_example()

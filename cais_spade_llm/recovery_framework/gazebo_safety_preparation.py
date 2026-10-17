@@ -1047,7 +1047,15 @@ class GazeboResourceObservation:
             if row["linear_speed"] > config["stationary_linear_speed_max"]
             or row["angular_speed"] > config["stationary_angular_speed_max"]
         }
-        state = deepcopy(self.provider.runtime.context.snapshot()[rid])
+        context = self.provider.runtime.context
+        state = deepcopy(context.snapshot()[rid])
+        custody = {}
+        if ("held_part" in state and rid in getattr(context, "fault_reports", {})
+                and hasattr(self.owner, "_held_part") and self.owner._held_part != state["held_part"]):
+            # After a resource reports a fault, the product's belief waits for execution
+            # monitoring; the gripper is checked against the robot's own custody report.
+            custody = {"belief_held_part": state["held_part"], "reported_held_part": deepcopy(self.owner._held_part)}
+            state["held_part"] = deepcopy(self.owner._held_part)
         model = record["models"][config["model"]]
         reference = config.get("reference_link")
         if native is not None:
@@ -1112,6 +1120,8 @@ class GazeboResourceObservation:
             ],
             "footprint": _envelope(links, pose),
         }
+        if custody:
+            physical["custody_after_fault_report"] = custody
         if frozen:
             physical["frozen_native_fingerprint"] = fingerprint({
                 key: value for key, value in record.items() if key != "observed_monotonic"})

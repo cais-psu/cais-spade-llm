@@ -1,0 +1,20 @@
+{
+  "_stop_after_multi_turn_phase": "outline",
+  "multi_turn_session_state": {
+    "current_phase": "primitive_generation",
+    "accepted_outline_prefix": [
+      {
+        "outline_id": "step1",
+        "resource_jid": "owner",
+        "event_name": "move_home",
+        "part_name": null,
+        "expected_start_state": {
+          "mode": "failed"
+        },
+        "expected_end_state": {
+          "mode": "idle"
+        }
+      }
+    ]
+  }
+}

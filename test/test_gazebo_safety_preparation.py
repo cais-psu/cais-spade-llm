@@ -723,6 +723,23 @@ def test_attached_part_capture_retains_measured_transform_and_geometry():
     assert record == before
 
 
+def test_reported_fault_checks_custody_against_the_robots_own_report():
+    observer, record = _held_observation_case()
+    record["attachments"] = []
+    record["models"]["robot"]["joints"]["finger"]["position"] = .1
+    with pytest.raises(ValueError, match="observed empty attachment set"):
+        observer.capture(record=record)
+    # The robot reported its fault and its own empty gripper; the product's belief still lags.
+    observer.owner._held_part = None
+    observer.provider.runtime.context.fault_reports = {"ur5e-4": {"reported_state": "failed"}}
+    captured = observer.capture(record=record)
+    assert captured["observation_state"]["held_part"] is None
+    assert captured["attachment"]["model_name"] is None
+    assert captured["custody_after_fault_report"] == {"belief_held_part": "gear_small", "reported_held_part": None}
+    observer.provider.runtime.context.snapshot = lambda: {"ur5e-4": {"held_part": None}}
+    assert "custody_after_fault_report" not in observer.capture(record=record)
+
+
 def test_owner_kinematics_and_collisions_keep_one_physics_snapshot():
     observer, record = _held_observation_case()
     observer.provider.reader.snapshot = Mock(side_effect=AssertionError("must retain acquired physics snapshot"))

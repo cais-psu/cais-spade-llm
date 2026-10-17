@@ -689,6 +689,27 @@ async def _handle_validated_event(*, session: dict, prepared: dict, response: di
     return "outline_ready" if complete else "need_next_task", turn
 
 
+def _event_state_fingerprint(session: dict, event: dict, current: str) -> str:
+    """Let explicit event arguments distinguish candidates that leave the modeled state unchanged.
+
+    A candidate reaching any other state is identified by that state alone, so
+    returning to an earlier state is still a repeat.
+    """
+    state = _comparison_state_fingerprint(session)
+    params = event.get("params")
+    return recovery_validation_fingerprint({"state": state, "params": params}) if params and state == current else state
+
+
+def _declares_params(session: dict, prepared: dict, event: dict) -> bool:
+    """Return whether every explicit argument is one the resource's own events declare."""
+    jid = event.get("resource_jid")
+    model = (session.get("recovery_des_models") or {}).get(jid) or (
+        (prepared.get("recovery_resources") or {}).get(jid) or {}).get("recovery_des_model") or {}
+    declared = {name for row in model.get("events", []) for name in row.get("parameter_bindings", {})}
+    params = event.get("params")
+    return isinstance(params, dict) and bool(params) and set(params) <= declared
+
+
 def _comparison_state_fingerprint(session: dict) -> str:
     """Compare modeled facts without counting generated record identities as progress."""
     ignored = {"source", "provenance", "captured_at", "recorded_at", "revision", "source_fingerprint",
@@ -774,9 +795,11 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
             response={"thought": response["thought"], "next_transition": deepcopy(event)}, planner=planner)
         valid = (audit.get("schema_valid") is True and audit.get("transition_validation", {}).get("status") == "not_checked"
                  if diagnostic else audit.get("transition_validation", {}).get("status") == "passed")
-        identity = _comparison_state_fingerprint(working) if valid else None
+        identity = ((_event_state_fingerprint(working, event, initial) if diagnostic
+                     else _comparison_state_fingerprint(working)) if valid else None)
         sequences.append({"candidate_index": index, "surface_events": [deepcopy(event)]})
         evaluation = {"candidate_index": index, "task": deepcopy(event), "valid": valid,
+            "explored_params": diagnostic and _declares_params(base, prepared, event),
             "validation_audit": audit, "decision": decision, "repeated_state": valid and identity in visited,
             "projected_symbolic_resources": deepcopy(working.get("symbolic_resources", {})),
             "projected_symbolic_parts": deepcopy(working.get("symbolic_parts", {})),
@@ -865,7 +888,12 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
         audit["proposal_revision_available"] = revision_available
         return ("need_context" if unresolved and not eligible and not revision_available else "need_revision"), audit
     working, decision, selected_audit, identity = branches[selected["candidate_index"]]
-    working["accepted_state_fingerprints"] = [*dict.fromkeys([*session.get("accepted_state_fingerprints", []), initial, identity])]
+    accepted = [initial, identity]
+    params = events[selected["candidate_index"]].get("params")
+    if diagnostic and params:
+        # Remember the arguments with the state they produced, so the same arguments are a repeat there.
+        accepted.append(recovery_validation_fingerprint({"state": _comparison_state_fingerprint(working), "params": params}))
+    working["accepted_state_fingerprints"] = [*dict.fromkeys([*session.get("accepted_state_fingerprints", []), *accepted])]
     session.pop("pending_outline_validation", None)
     session.update(working)
     audit.update(selected_audit)

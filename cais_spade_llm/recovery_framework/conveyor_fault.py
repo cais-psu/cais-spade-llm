@@ -413,7 +413,8 @@ class ConveyorFault:
                 context.revision += 1
                 if scenario == "Conveyor breakdown":
                     context.inputs["scene"]["Conveyor"]["transport_enabled"] = False
-                if scenario == "Machining breakdown during part processing" and configuration["checkpoint"] == "during_processing":
+                if (scenario == "Machining breakdown during part processing" and configuration["checkpoint"] == "during_processing"
+                        or scenario == "ur5e-1 breakdown"):
                     # Stop dispatch first; worker cancellation follows the frozen observation.
                     runtime.stopped = True
                     runtime.recovery_checkpoint_capturing = True
@@ -428,11 +429,30 @@ class ConveyorFault:
         # Operator cancellation must not discard evidence while a detach is in flight.
         return await asyncio.shield(self._injection_task)
 
+    async def _report_gripper_fault(self, rid: str) -> None:
+        """Let the robot report its own gripper fault while it keeps its motion capability."""
+        from cais_spade_llm.recovery_framework.failure_effects import observe_robot
+
+        runtime = self.runtime
+        context = runtime.context
+        self.evidence["robot_pose"] = await observe_robot(runtime, rid)
+        # The product's beliefs keep their acknowledged values until the fault is grounded.
+        with context.admission_lock:
+            for owner in runtime.resource_agents:
+                if owner.agent_name == rid:
+                    owner._current_state = "failed"
+            context.fault_reports[rid] = {"reported_state": "failed", "source": "gripper object detection",
+                                          "reported_at_unix": time.time()}
+            context.revision += 1
+
     async def _finish_injection(self) -> dict:
         runtime, configuration = self.runtime, self.configuration
         context = runtime.context
         rid, scenario = configuration["resource_id"], configuration["scenario"]
         try:
+            if scenario == "ur5e-1 breakdown":
+                # The report precedes the frozen capture so the checkpoint records it.
+                await self._report_gripper_fault(rid)
             if getattr(runtime, "recovery_checkpoint_capturing", False):
                 from cais_spade_llm.recovery_framework.recovery_observations import capture_machine_checkpoint
 
@@ -462,19 +482,6 @@ class ConveyorFault:
                 from cais_spade_llm.recovery_framework.failure_effects import slip_part
 
                 await slip_part(runtime, configuration, self.evidence)
-            elif scenario == "ur5e-1 breakdown":
-                from cais_spade_llm.recovery_framework.failure_effects import observe_robot
-
-                self.evidence["robot_pose"] = await observe_robot(runtime, rid)
-                # The robot reports its own fault and keeps its observed motion capability for recovery.
-                # The product's beliefs keep their acknowledged values until the fault is grounded.
-                with context.admission_lock:
-                    for owner in runtime.resource_agents:
-                        if owner.agent_name == rid:
-                            owner._current_state = "failed"
-                    context.fault_reports[rid] = {"reported_state": "failed", "source": "robot controller",
-                                                  "reported_at_unix": time.time()}
-                    context.revision += 1
             if scenario == "Machining breakdown during part processing" and self.evidence.get("source") != "gazebo_workholding_observation":
                 raise ValueError(self.evidence.get("observation_error", "Machine checkpoint observation was interrupted"))
             self.evidence["injection_status"] = "completed"

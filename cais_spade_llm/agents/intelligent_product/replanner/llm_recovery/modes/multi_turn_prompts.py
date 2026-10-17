@@ -118,6 +118,7 @@ _OUTLINE_SYMBOLIC_EVENT_SCHEMA: dict[str, Any] = {
         "resource_jid": {"type": "string"},
         "part_name": {"type": "string", "minLength": 1},
         "expected_end_state": deepcopy(_OUTLINE_STATE_SCHEMA),
+        "params": {"type": "object"},
         "rationale": {"type": "string"},
     },
     "required": [
@@ -1707,6 +1708,8 @@ def _accepted_transition_prefix_for_prompt(
             if field_name == "part_name" and not str(field_value or "").strip():
                 continue
             row[field_name] = deepcopy(field_value)
+        if task.get("params"):
+            row["params"] = deepcopy(task["params"])
         if hide_registered_functions and task.get("candidate_source") == "robot_task_program":
             row["candidate_source"] = task["candidate_source"]
             row["expected_end_state"] = deepcopy(task.get("expected_end_state") or {})
@@ -2482,6 +2485,8 @@ def _slim_primitive_catalog_for_prompt(catalog: list[dict[str, Any]]) -> list[di
 
 def _primitive_signature_card(
     primitive_catalogs_by_resource: dict[str, list[dict[str, Any]]],
+    *,
+    include_optional: bool = False,
 ) -> str:
     lines: list[str] = []
     for resource_jid in sorted(primitive_catalogs_by_resource.keys()):
@@ -2501,6 +2506,10 @@ def _primitive_signature_card(
             if not required:
                 params = dict(entry.get("params") or {})
                 required = [str(key).strip() for key in params if str(key).strip()]
+                if include_optional:
+                    required = [f"{key}?" for key in required]
+            elif include_optional:
+                required += [f"{key}?" for key in dict(entry.get("params") or {}) if str(key).strip() not in required]
             signatures.append(f"{name}({','.join(required)})")
         if signatures:
             lines.append(f"- {resource_jid}: " + "; ".join(signatures))
@@ -4272,6 +4281,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     ]
     if payload.get("outline_context"):
         sections += ["", "Fault Event", _inline_json(_slim_fault_event(llm_input.get("fault_event") or {}))]
+    if payload.get("outline_diagnostic"):
+        sections += ["", "Recovery Goals", _diagnostic_goals_text(payload["outline_diagnostic"])]
 
     if not is_single_pass and accepted_prefix:
         if is_candidate_mode:
@@ -4413,12 +4424,14 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
             *(["last_observed_pose is historical; projected_pose is unexecuted. Current observed_pose is unavailable after a projected move."]
               if scope and any(part.get("observed_pose_current") is False for part in prompt_projected_parts) else []),
             _fact_rows(prompt_projected_parts) if scope else _compact_json(prompt_projected_parts),
-            "Recovery Goals",
-            _compact_recovery_goals(
-                llm_input,
-                projected_parts=projected_parts,
-                current_recovery_blockers=current_recovery_blockers,
-            ),
+            *([] if payload.get("outline_diagnostic") else [
+                "Recovery Goals",
+                _compact_recovery_goals(
+                    llm_input,
+                    projected_parts=projected_parts,
+                    current_recovery_blockers=current_recovery_blockers,
+                ),
+            ]),
         ]
     )
 
@@ -4498,8 +4511,9 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
                 *candidate_part_rules,
                 *([] if scope else ["- A non-null `observed_pose` is grounded source evidence for its part."]),
                 (
-                    "- Author `event_name` and effects from recorded facts and public capabilities. "
-                    "Resource validators check whether the proposed condition is supported; primitive composition checks feasibility."
+                    "- Author `event_name` and effects from recorded facts and public capabilities."
+                    + ("" if chooses else " Resource validators check whether the proposed condition is supported; "
+                       "primitive composition checks feasibility.")
                     if scope else
                     "- `event_name` may be new, and the proposed transition need not be predefined. "
                     "Its intended resource condition must match a predefined successor. "
@@ -4590,10 +4604,46 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
     return f"Phase: {phase_title}\n\n[Prompt content for {phase} — not yet implemented]\n"
 
 
+def _diagnostic_goals_text(diagnostic: dict[str, Any]) -> str:
+    """State the recorded handoff obligations, their blockers and the pending nominal tasks."""
+    lines = ["Recovery ends when these recorded handoff conditions hold in the projected state; subsequent nominal "
+             "processing and delivery belong to the nominal flow. Owner bookkeeping is not a separate recovery task.",
+             _fact_rows(diagnostic["conditions"]),
+             *("Nominal handoff is blocked in the projected state: " + reason for reason in diagnostic["blocked"])]
+    if diagnostic["pending_tasks"]:
+        lines += ["Pending nominal tasks (recovery_replaced: covered by the recovery; resume_suffix: resumes after the handoff):",
+                  _fact_rows(diagnostic["pending_tasks"])]
+    return "\n".join(lines)
+
+
+def _diagnostic_notes_text(diagnostic: dict[str, Any], *, include_goals: bool) -> str:
+    """State what diagnostic mode bypasses and how unvalidated events use recorded facts."""
+    checks = diagnostic["checks"]
+    note = ("RA feasibility, CCA safety and physical validation are bypassed." if not any(checks.values()) else
+            "Requested outline checks: " + json.dumps(checks) + ". Enabled checks must pass before an event advances.")
+    lines = ["Diagnostic mode: " + note + " Selected events and propagated states are tentative. "
+             "Unchanged fields need not be repeated."]
+    if include_goals:
+        lines.append(_diagnostic_goals_text(diagnostic))
+    interrupted = diagnostic["interrupted"]
+    if interrupted:
+        lines.append(f"Interrupted event: {interrupted['blocked_at_function']} of {interrupted['focused_resource_jid']} "
+                     "did not complete. A resource_location changes only when an event completes; compare it with any "
+                     "recorded current_pose.")
+    lines += ["A part with null part_location is located only by its observed_pose; an event that picks it may omit "
+              "resource_location.",
+              "Where no supplied location token names a position, an event may give explicit coordinates in `params`, "
+              "with that location null."]
+    return "\n".join(lines)
+
+
 def _render_retrieved_context(payload: dict[str, Any], *, outline: bool) -> str:
+    diagnostic = payload.get("outline_diagnostic")
+    # The outline prompt states the goals near its top; other phases state them here.
+    notes = ["", "Diagnostic Mode", _diagnostic_notes_text(diagnostic, include_goals=not outline)] if diagnostic else []
     scope = payload.get("outline_context")
     if not scope:
-        return ""
+        return "\n".join(notes) + "\n" if notes else ""
     alternatives = [row for row in scope["resource_index"] if row["resource_jid"] not in scope["resource_jids"]]
     sections = []
     session = payload.get("session_state", {})
@@ -4605,6 +4655,7 @@ def _render_retrieved_context(payload: dict[str, Any], *, outline: bool) -> str:
         fault.get(key) for key in ("focused_resource_jid", "blocked_at_task_id", "blocked_at_function")
     ):
         sections += ["", "Interrupted task", _inline_json(payload["outline_interrupted_task"])]
+    sections += notes
     if outline:
         sections += ["", "Context retrieval",
             "Proposing events: omit `decision`/`context_requests` or use null/[]; never combine with need_context.",
@@ -4613,7 +4664,9 @@ def _render_retrieved_context(payload: dict[str, Any], *, outline: bool) -> str:
             *(["/safety_rules; /safety_rules/{specification}; /safety_rules/{specification}/instances; /regions; /regions/{region}/occupancy."]
               if "outline_safety_context" in payload else []),
             "static_capabilities supplies public declarations and job records; state_variables supplies public declarations. "
-            "Missing values are unknown. Retrieve necessary facts; do not invent facts or effects. Replies distinguish observations, declarations and projected states."]
+            "Missing values are unknown. Retrieve necessary facts; do not invent facts or effects. Replies distinguish observations, declarations and projected states.",
+            *(["Diagnostic refs:", *(f"- {ref}: {answers}" for ref, answers in diagnostic["refs"])]
+              if diagnostic and diagnostic["refs"] else [])]
     if payload.get("outline_served_context"):
         sections += ["", "Retrieved context", _retrieved_outline_context_text(payload)]
     if payload.get("outline_context_errors"):
@@ -4629,6 +4682,10 @@ def _render_retrieved_context(payload: dict[str, Any], *, outline: bool) -> str:
                     len(segments) == 3 and segments[1] == "safety_rules") or (
                     len(segments) == 4 and (segments[1] == "safety_rules" and segments[3] == "instances"
                                           or segments[1] == "regions" and segments[3] == "occupancy"))
+            if diagnostic:
+                from .multi_turn_context import is_diagnostic_ref
+
+                public = public or is_diagnostic_ref(ref)
             errors.append({"ref": ref, "error": "NEEDS_CONTEXT: requested public fact is unavailable"} if public
                           else {"error": "Unsupported context reference; use the listed public resource and part references."})
         sections += ["", "Missing context", _compact_json(errors)]

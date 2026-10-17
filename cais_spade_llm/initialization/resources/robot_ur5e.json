@@ -9,6 +9,17 @@
     "functions": "auto",
     "failure_scenarios": [],
     "gazebo": {
+      "kinematics": {
+        "source": "Universal Robots UR5e DH parameters; tool_tcp_offset_m is the RG2 gripper TCP below tool0",
+        "d1_m": 0.1625,
+        "a2_m": 0.425,
+        "a3_m": 0.3922,
+        "d4_m": 0.1333,
+        "d5_m": 0.0997,
+        "d6_m": 0.0996,
+        "tool_tcp_offset_m": 0.218,
+        "loose_part_tcp_height_band_m": [-0.05, 0.10]
+      },
       "static_capabilities": {
         "resource_type": "robot",
         "supports_manipulator_pick_place": true,

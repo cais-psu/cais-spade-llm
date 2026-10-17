@@ -65,6 +65,7 @@ async def execute_generated_recovery(recovery) -> None:
     """
     from cais_spade_llm.recovery_framework.diagnostics import write_record
     from cais_spade_llm.recovery_framework import ROOT
+    from cais_spade_llm.recovery_framework.kmr_agent import KMRResourceAgent
     from cais_spade_llm.recovery_framework.part_slippage_recovery import diagnostic_setup
     from cais_spade_llm.resources.gazebo_programs import current_program_revision
 
@@ -86,9 +87,12 @@ async def execute_generated_recovery(recovery) -> None:
     for task in tasks:
         owner = owners.get(task["resource_jid"])
         controller = getattr(owner, "_controller", None)
-        if (owner is None or owner.agent_name not in context.permitted_resources
-                or getattr(owner, "execution_mode", None) != "simulation"
-                or getattr(controller, "execution_mode", None) != "simulation"):
+        # The KMR runs its primitives on the Gazebo worker bound to this runtime.
+        mobile = isinstance(owner, KMRResourceAgent)
+        prepared = (getattr(owner, "environment_runtime", None) is runtime if mobile else
+                    getattr(owner, "execution_mode", None) == "simulation"
+                    and getattr(controller, "execution_mode", None) == "simulation")
+        if owner is None or owner.agent_name not in context.permitted_resources or not prepared:
             raise ValueError("Recovery requires the resource's prepared simulation controller")
         if not set(task.get("predecessors") or []).issubset(completed):
             raise ValueError("Primitive composition is not ordered after its predecessors")
@@ -105,11 +109,15 @@ async def execute_generated_recovery(recovery) -> None:
         }
         records.append(record)
         recovery._publish(execution=records, message=f"Executing {task['macro_name']} ({len(records)}/{len(tasks)}).")
-        controller._simulation_task_id = task_id
-        controller._simulation_task_run_id = context.run_id
-        controller._simulation_task_part = task.get("part_name")
-        controller._simulation_fault_request = None
-        controller._simulation_fault_evidence = None
+        if mobile:
+            # A release record belongs to the macro that produced it.
+            owner._released_part = None
+        else:
+            controller._simulation_task_id = task_id
+            controller._simulation_task_run_id = context.run_id
+            controller._simulation_task_part = task.get("part_name")
+            controller._simulation_fault_request = None
+            controller._simulation_fault_evidence = None
         execution = asyncio.create_task(owner.execute_recovery_macro(
             macro_name=task["macro_name"], primitive_steps=task["primitive_steps"],
             expected_start_state=task.get("task_metadata", {}).get("in_state") or None,
@@ -128,7 +136,8 @@ async def execute_generated_recovery(recovery) -> None:
                 raise ValueError(result.get("content") or "A recovery primitive did not complete")
             if recovery._stopped:
                 raise asyncio.CancelledError()
-            record["observations"] = await _reconcile_completion(runtime, owner, task, task_id, result)
+            reconcile = _reconcile_mobile_completion if mobile else _reconcile_completion
+            record["observations"] = await reconcile(runtime, owner, task, task_id, result)
             completed.add(task["outline_id"])
         except asyncio.CancelledError:
             record["status"] = "cancelled"
@@ -251,4 +260,175 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
             "product_before": products_before, "product_after": deepcopy(context.part_tracker),
             "observations": deepcopy(observed), "controller_result": deepcopy(result),
         })
+    return observed
+
+
+def _guard_holds(values: dict, field: str, rule: dict, params: dict) -> bool:
+    # The same typed comparison the environment model uses when it projects an event.
+    if len(rule) != 1:
+        return False
+    operator, expected = next(iter(rule.items()))
+    if operator.endswith("_from_param"):
+        expected = params.get(expected)
+    value = values.get(field)
+    equal = field in values and type(value) is type(expected) and value == expected
+    if operator in {"equals", "equals_from_param"}:
+        return equal
+    return operator in {"not_equals", "not_equals_from_param"} and not equal
+
+
+def _declared_consequence(context, event_names: set[str], location_field: str, location: str,
+                          part: str) -> tuple[str, dict] | None:
+    """Return an owner's own declared consequence of a part being taken from, or put at, a location.
+
+    The consequence is read from the owner's recorded handoff events, whichever
+    robot they were declared for, with ``{part_name}`` fields bound to the part.
+    """
+    from cais_spade_llm.resources.environment_models import _bound
+
+    params = {"part_name": part}
+    for rid, model in context.models.items():
+        resource = context.resources.get(rid)
+        if resource is None:
+            continue
+        for event in model.get("events", []):
+            bindings = event.get("parameter_bindings", {})
+            if (event.get("event_name") not in event_names
+                    or bindings.get(location_field) != {"equals": location}
+                    or bindings.get("resource_id", {}).get("equals") == rid):
+                continue
+            if all(_guard_holds(resource.valuation, _bound(field, params), rule, params)
+                   for field, rule in event.get("guards", {}).items()):
+                return rid, {_bound(field, params): params[rule["set_from_param"]] if "set_from_param" in rule
+                             else deepcopy(rule["set"]) for field, rule in event.get("updates", {}).items()}
+    return None
+
+
+def _observed_release(context, part: str, pose: list, settled: bool) -> tuple[str | None, dict, dict]:
+    """Assign custody of a released part from where it was observed to rest.
+
+    Returns:
+        The receiving resource (None for a surface no receiver declares, or a
+        part still moving when observation ended), its declared updates, and
+        the part's tracker entry with its observed pose.
+    """
+    from cais_spade_llm.resources.environment_models import product_state_from_custody
+    from cais_spade_llm.resources.environment_recovery import observed_receiver, storage_placement_conditions
+    from cais_spade_llm.resources.nominal_conveyor import conveyor_place_parameters
+
+    resting = dict(zip(("x", "y", "z", "qx", "qy", "qz", "qw"), map(float, pose), strict=True))
+    entry = deepcopy(context.part_tracker[part])
+    receiver = observed_receiver(context.inputs["scene"], context.models.get("Conveyor"), part, pose) if settled else None
+    if receiver is None:
+        # Like a dropped part: located only by its observed pose until picked again.
+        entry.update(state="misplaced", location=None, observed_pose=resting)
+        return None, {}, entry
+    rid, area = receiver
+    values = context.resources[rid].valuation
+    if rid == "Conveyor":
+        if values.get("belt_stopped") is not True or values.get("loading_reserved_by") is not None:
+            raise ValueError("The Conveyor must be stopped and unreserved to receive a part")
+        order = conveyor_place_parameters(context.models[rid], values, part, area)
+        updates = {f"part_location.{part}": area,
+                   **{key.removeprefix("next_"): value for key, value in order.items()}}
+    elif rid == "Buffer For Machined parts":
+        if values.get(area) is not None:
+            raise ValueError(f"{rid} {area} is already occupied")
+        updates = {area: part}
+    elif rid == "Storage":
+        conditions = storage_placement_conditions(context.models[rid], context.inputs["scene"], values, part)
+        updates = {field: rule["set"] for field, rule in conditions["updates"].items()}
+    else:
+        declared = _declared_consequence(context, {"place_release"}, "destination_location", area, part)
+        if declared is None or declared[0] != rid:
+            raise ValueError(f"{area} does not accept {part} in its current state")
+        updates = declared[1]
+    entry.update(**product_state_from_custody(part, rid, {**values, **updates}, context.product_name),
+                 observed_pose=resting)
+    return rid, updates, entry
+
+
+async def _reconcile_mobile_completion(runtime, owner, task: dict, task_id: str, result: dict) -> dict:
+    """Commit a KMR macro from its own measured base pose, custody and released part.
+
+    A picked part's source and a released part's receiver come from the owners'
+    declared consequences and from where the part was observed, not from the
+    generated end state.
+    """
+    context = runtime.context
+    state = deepcopy(getattr(owner, "_primitive_state", {}))
+    actor = context.resources[owner.agent_name]
+    declared = context.models[owner.agent_name]["state_variables"]
+    values = deepcopy(actor.valuation)
+    held_before = values.get("held_part")
+    for field in ("held_part", "resource_location"):
+        if field in state:
+            values[field] = deepcopy(state[field])
+    held_after = values.get("held_part")
+    end = task.get("expected_end_state") or {}
+    if "held_part" in end and end["held_part"] != held_after:
+        raise ValueError("Observed recovery custody differs from the generated end state")
+    if "domain" in declared.get("resource_location", {}) and values.get("resource_location") not in declared["resource_location"]["domain"]:
+        raise ValueError(f"Recovery cannot resume from resource_location={values.get('resource_location')}")
+    if held_before is not None and held_after is not None and held_after != held_before:
+        raise ValueError("A KMR macro cannot exchange one held part for another")
+    released = None
+    if held_before is not None and held_after is None:
+        record = getattr(owner, "_released_part", None) or {}
+        if record.get("part_name") != held_before or not record.get("pose"):
+            raise ValueError("A KMR release requires the observed resting place of the part")
+        released = (held_before, *_observed_release(context, held_before, record["pose"], record.get("settled") is True))
+    picked = source = None
+    if held_before is None and held_after is not None:
+        picked = held_after
+        if task.get("part_name") not in (None, picked):
+            raise ValueError(f"The KMR picked {picked}, not the generated event's {task['part_name']}")
+        entry = deepcopy(context.part_tracker[picked])
+        # A misplaced part has no owner to update; it was located only by its observed pose.
+        if entry["location"] is not None:
+            source = _declared_consequence(context, {"pick_grasp", "pick_part"}, "origin_resource_location",
+                                           entry["location"], picked)
+            if source is None:
+                raise ValueError(f"{entry['location']} declares no consequence of {picked} being taken")
+        entry.update(state=end.get("part_state") or "in_gripper", location=owner.agent_name, last_task=task_id)
+        entry.pop("observed_pose", None)
+    values["resource_state"] = "carrying" if held_after else "idle"
+    if "approached_part" in declared:
+        values["approached_part"] = None
+    observed = {"base_pose": deepcopy(state.get("base_pose")), "resource_location": values.get("resource_location"),
+                "held_part": held_after}
+    if released is not None:
+        observed["released"] = {"part_name": released[0], "receiver": released[1],
+                                "observed_pose": deepcopy(released[3]["observed_pose"])}
+    with context.admission_lock:
+        before, products_before = context.snapshot(), deepcopy(context.part_tracker)
+        actor.valuation = values
+        actor.revision += 1
+        actor.evidence = "resource"
+        changes = [source] if source is not None else []
+        if released is not None and released[1] is not None:
+            changes.append((released[1], released[2]))
+        for rid, updates in changes:
+            context.resources[rid].valuation.update(updates)
+            context.resources[rid].revision += 1
+            context.resources[rid].evidence = "resource"
+        if picked is not None:
+            context.part_tracker[picked] = entry
+        if released is not None:
+            context.part_tracker[released[0]] = {**released[3], "last_task": task_id}
+        context.revision += 1
+        runtime.agent.part_tracker = deepcopy(context.part_tracker)
+        context.transitions.append({
+            "recovery_task_id": task_id, "safety_status": "skipped",
+            "acknowledgement": {
+                "task_id": task_id, "run_id": context.run_id, "resource_id": owner.agent_name,
+                "event_id": task["outline_id"], "event_name": task.get("event_name", task["macro_name"]),
+                "parameters": {**deepcopy(task.get("task_params", {})), "part_name": picked or task.get("part_name")},
+                "status": "completed", "evidence": "resource",
+            },
+            "before": before, "after": context.snapshot(),
+            "product_before": products_before, "product_after": deepcopy(context.part_tracker),
+            "observations": deepcopy(observed), "controller_result": deepcopy(result),
+        })
+    owner._released_part = None
     return observed

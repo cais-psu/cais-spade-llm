@@ -2322,13 +2322,16 @@ def _classify_candidate_selection_progress(
 ) -> tuple[bool, list[str]]:
     """Classify no-op and label-only effects after model-based comparison."""
     delta_fields = _candidate_authored_delta_fields(candidate, evaluation)
+    # Without validation, explicit event arguments (for example a chosen pose)
+    # are the LLM's exploration; exact repeats are excluded by the state fingerprint.
+    explored = bool(evaluation.get("diagnostic_validation_bypass")) and evaluation.get("explored_params") is True
     if not delta_fields:
-        return False, ["no_state_change"]
+        return (True, []) if explored else (False, ["no_state_change"])
     if progressing:
         return True, []
-    if evaluation.get("diagnostic_validation_bypass") and set(delta_fields) & {
+    if evaluation.get("diagnostic_validation_bypass") and (explored or set(delta_fields) & {
         "part_location", "held_part", "job_state", "selected_program", "processCompleted",
-    }:
+    }):
         return True, []
     if all(
         field_name in {"resource_state", "current_state", "part_state"}

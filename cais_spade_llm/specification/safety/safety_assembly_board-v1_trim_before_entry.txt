@@ -1,0 +1,168 @@
+{
+  "mode": "predefined",
+  "version": 2,
+  "product_geometry": {
+    "path": "cais_spade_llm/specification/products/geometry/assembly_board-v1-recovery-framework.json",
+    "environment": "gazebo"
+  },
+  "catalog": {
+    "version": 2,
+    "specifications": [
+      {
+        "id": "SAFE_trim_before_assembly_board-v1_entry",
+        "requirement": "A part with a trim step may enter assembly_board-v1 only after its trim with the required result is completed.",
+        "formula": "(!ap001 U (ap002 & !ap001)) | G !ap001",
+        "aps": [
+          {
+            "label": "ap001",
+            "full": "{\"event\":{\"arguments\":{\"region\":\"$region\"},\"symbol\":\"part_region_entry\"},\"kind\":\"ap_event\",\"process\":\"*\",\"product\":\"$part\",\"resource\":\"*\"}",
+            "meaning": "The bound part begins touching or overlapping the bound region. Initial occupancy is not an entry; custody changes alone do not create entry.",
+            "definition": {
+              "event": {
+                "arguments": {
+                  "region": "$region"
+                },
+                "symbol": "part_region_entry"
+              },
+              "kind": "ap_event",
+              "process": "*",
+              "product": "$part",
+              "resource": "*"
+            }
+          },
+          {
+            "label": "ap002",
+            "full": "{\"kind\":\"ap_state\",\"process\":\"$process\",\"product\":\"$part\",\"resource\":\"*\",\"state\":{\"arguments\":{\"result\":\"$result\"},\"symbol\":\"processCompleted\"}}",
+            "meaning": "The bound part's explicitly complete processCompleted ledger contains the exact bound process and result record.",
+            "definition": {
+              "kind": "ap_state",
+              "process": "$process",
+              "product": "$part",
+              "resource": "*",
+              "state": {
+                "arguments": {
+                  "result": "$result"
+                },
+                "symbol": "processCompleted"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "requirement_scopes": [
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "KET4_Square_4mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "KET4_Square_4mm",
+          "process": "trim",
+          "result": "square"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "KET8_Square_8mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "KET8_Square_8mm",
+          "process": "trim",
+          "result": "square"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "KET12_Square_12mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "KET12_Square_12mm",
+          "process": "trim",
+          "result": "square"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "KET16_Square_16mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "KET16_Square_16mm",
+          "process": "trim",
+          "result": "square"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "RGOCG4-50_Round_4mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "RGOCG4-50_Round_4mm",
+          "process": "trim",
+          "result": "circle"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "RGOCG8-50_8mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "RGOCG8-50_8mm",
+          "process": "trim",
+          "result": "circle"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "RGOCG12-50_12mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "RGOCG12-50_12mm",
+          "process": "trim",
+          "result": "circle"
+        }
+      }
+    },
+    {
+      "specification": "SAFE_trim_before_assembly_board-v1_entry",
+      "physical_ap_bindings": {
+        "ap001": {
+          "part": "RGOCG16-50_16mm",
+          "region": "assembly_board-v1"
+        },
+        "ap002": {
+          "part": "RGOCG16-50_16mm",
+          "process": "trim",
+          "result": "circle"
+        }
+      }
+    }
+  ]
+}

@@ -120,7 +120,7 @@ def test_slippage_preset_resolves_current_bindings_and_returns_independent_draft
     failure["parameter_bindings"]["part_name"]["equals"] = "gear_large"
     assert descriptor == before_descriptor
     assert models == before_models
-    assert settings.slippage_preset(models, root=project)["drop_pose"]["y"] == 0.3
+    assert settings.slippage_preset(models, root=project)["drop_pose"] == {"x": 0.25, "y": 0.45, "z": 1.04}
 
 
 @pytest.mark.parametrize("missing", ["resource", "place_insert"])
@@ -156,7 +156,7 @@ def test_slippage_preset_save_reload_preserves_descriptor_and_selected_inputs(pr
                                 "orientation_quat": {"qx": 0, "qy": 0, "qz": 0, "qw": 1},
                                 "processCompleted": [{"process": "trim", "result": "square"}]}],
         "mode": "once",
-        "drop_pose": {"x": 0, "y": 0.3, "z": 1.04},
+        "drop_pose": {"x": 0.25, "y": 0.45, "z": 1.04},
         "require_upright": True,
         "orientation_quat": {"qx": 0, "qy": 0, "qz": 0, "qw": 1},
         "additional_condition": {"resource_id": "ur5e-3", "part_name": "KET4_Square_4mm"},

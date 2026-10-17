@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.recovery_framework.capture_files import BELIEFS_NAME
 from cais_spade_llm.recovery_framework.diagnostics import read_object, write_record
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,8 @@ def frozen_files(captures: list[dict], *, root: Path = ROOT) -> dict[str, str]:
     for capture in captures:
         source = Path(capture["source"]).resolve()
         files.add(source)
+        if source.with_name(BELIEFS_NAME).is_file():
+            files.add(source.with_name(BELIEFS_NAME))
         files.update(path for path in (source.parent / "native_preview_model").rglob("*") if path.is_file())
         files.update(Path(path) for path in capture.get("evidence_files", []))
     return {str(path.relative_to(root) if path.is_relative_to(root) else path): file_hash(path)
@@ -177,7 +180,9 @@ def prepare_batch(captures: list[dict], output: Path) -> dict:
         if (condition_record.get("implementation_fingerprint") != value_hash(implementation["files"])
                 or implementation["files"] != frozen_files([])):
             raise ValueError("Reserved capture was produced by a different implementation")
+        beliefs = source.with_name(BELIEFS_NAME)
         if (condition_record.get("source_sha256") != file_hash(source)
+                or condition_record.get("preparation_sha256") != (file_hash(beliefs) if beliefs.is_file() else None)
                 or condition_record.get("scenario") != row["scenario"]
                 or condition_record.get("condition") != row["condition"]
                 or condition_record.get("capture_verified") is not True):

@@ -1,0 +1,16 @@
+{
+  "outline": [
+    {
+      "outline_id": "step1",
+      "resource_jid": "owner",
+      "event_name": "move_home",
+      "part_name": null,
+      "expected_start_state": {
+        "mode": "failed"
+      },
+      "expected_end_state": {
+        "mode": "idle"
+      }
+    }
+  ]
+}

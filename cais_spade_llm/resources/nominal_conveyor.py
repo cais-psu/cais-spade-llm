@@ -123,14 +123,37 @@ def conveyor_load_parameters(
     Raises:
         ValueError: The part is already resident or the loading area is occupied.
     """
+    if loading_position not in ("loading_position_1", "loading_position_2"):
+        raise ValueError("Unknown Conveyor loading position")
+    return conveyor_place_parameters(model, valuation, part_name, loading_position)
+
+
+def conveyor_place_parameters(
+    model: dict[str, Any], valuation: dict[str, Any], part_name: str, location: str
+) -> dict[str, Any]:
+    """Calculate the spatial order after a part comes to rest at a belt location.
+
+    Args:
+        model: The Conveyor descriptor.
+        valuation: The pre-placement symbolic valuation.
+        part_name: Exact part identifier.
+        location: The observed location in ``CONVEYOR_LOCATIONS``.
+
+    Returns:
+        Parameters for the descriptor's declared order updates.
+
+    Raises:
+        ValueError: The part is already resident, or the location is occupied, in
+            which case the order of two parts within it is not observable.
+    """
     ordered = conveyor_parts(model, valuation)
     if part_name not in conveyor_known_parts(valuation) or part_name in ordered:
         raise ValueError("Conveyor cannot load an unknown or already resident part")
-    if loading_position not in ("loading_position_1", "loading_position_2"):
-        raise ValueError("Unknown Conveyor loading position")
-    if any(valuation[f"part_location.{part}"] == loading_position for part in ordered):
-        raise ValueError(f"Conveyor {loading_position} is occupied")
-    position = CONVEYOR_LOCATIONS.index(loading_position)
+    if location not in CONVEYOR_LOCATIONS:
+        raise ValueError("Unknown Conveyor location")
+    if any(valuation[f"part_location.{part}"] == location for part in ordered):
+        raise ValueError(f"Conveyor {location} is occupied")
+    position = CONVEYOR_LOCATIONS.index(location)
     ahead = [
         part
         for part in ordered
@@ -141,6 +164,33 @@ def conveyor_load_parameters(
         f"next_part_order.{part}": ordered.index(part) if part in ordered else None
         for part in conveyor_known_parts(valuation)
     }
+
+
+def conveyor_location_at(model: dict[str, Any], x: float, half_width: float) -> str | None:
+    """Name the belt location containing an observed position along the belt.
+
+    Args:
+        model: The Conveyor descriptor.
+        x: Observed world x of a part resting on the belt.
+        half_width: Half the extent of a loading area or the output nest along the belt.
+
+    Returns:
+        A location in ``CONVEYOR_LOCATIONS``, or None upstream of the first
+        loading area or beyond the output nest.
+    """
+    loading = {
+        row["loading_position"]: float(row["pose"][0])
+        for row in model["assignments"]["loading_positions"].values()
+    }
+    points = [loading["loading_position_1"], loading["loading_position_2"],
+              float(model["assignments"]["output_nest_pose"][0])]
+    for index, point in enumerate(points):
+        if abs(x - point) <= half_width:
+            return CONVEYOR_LOCATIONS[2 * index]
+    for index in range(2):
+        if min(points[index], points[index + 1]) < x < max(points[index], points[index + 1]):
+            return CONVEYOR_LOCATIONS[2 * index + 1]
+    return None
 
 
 def conveyor_advance_parameters(

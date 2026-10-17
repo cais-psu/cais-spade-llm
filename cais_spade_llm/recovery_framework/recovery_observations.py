@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from cais_spade_llm.recovery_framework import ROOT, SCENE_PATH
 from cais_spade_llm.recovery_framework.capture_files import (
-    PREPARATION_NAME, RAW_SCHEMA_VERSION, config_references, read_capture,
+    BELIEFS_NAME, RAW_SCHEMA_VERSION, config_references, read_capture,
 )
 from cais_spade_llm.recovery_framework.diagnostics import read_object, write_record
 
@@ -447,6 +447,12 @@ async def capture_machine_checkpoint(runtime, failure: dict) -> dict:
             raise ValueError("NEEDS_CONTEXT: " + "; ".join(row["reason"] for row in compatibility["checks"] if row["status"] != "supported"))
         for rid, record in jobs.items():
             if rid == failure.get("resource_id"):
+                continue
+            # A robot fault can follow its machine's completed job for the affected part;
+            # every other machine must still be processing when the world is frozen.
+            if record.get("active_job") is None and any(
+                    job.get("part_name") == failure.get("part_name") and job.get("process_completed") is True
+                    for job in record.get("jobs", {}).values()):
                 continue
             active = record.get("jobs", {}).get(record.get("active_job"), {})
             if active.get("job_state") != "running" or active.get("process_completed") is not False:
@@ -965,7 +971,8 @@ def capture_observations(runtime, failure: dict, *, include_physical: bool = Tru
     result["physical_evidence"] = (capture_recovery_physical_evidence(runtime) if include_physical else
                                    {"status": "pending", "reason": "Physical capture awaits nominal_idle"})
     result["resource_evidence"] = capture_resource_evidence(runtime, result["physical_evidence"])
-    if "processing_observations" in failure and configuration["scenario"] != "ur5e-1 breakdown":
+    if "processing_observations" in failure and (configuration["scenario"] != "ur5e-1 breakdown"
+                                                 or "checkpoint_processing_observations" in failure):
         result["processing_observations"] = deepcopy(failure.get("checkpoint_processing_observations", failure["processing_observations"]))
         result["processing_shutdown"] = deepcopy(failure.get("processing_shutdown", {}))
         for rid, record in result["processing_observations"].items():
@@ -1675,10 +1682,10 @@ def list_observations(*, root: Path = RECORDS) -> list[dict]:
             continue
         try:
             stat = path.stat()
-            preparation = directory / PREPARATION_NAME
+            beliefs = directory / BELIEFS_NAME
             summary, capture_fingerprint = _observation_list_summary(
                 path, root, stat.st_mtime_ns, stat.st_size,
-                preparation.stat().st_mtime_ns if preparation.is_file() else 0)
+                beliefs.stat().st_mtime_ns if beliefs.is_file() else 0)
         except (OSError, ValueError, TypeError):
             continue
         item = deepcopy(summary)
@@ -1789,7 +1796,7 @@ def _read_native_preview_model(source: Path, observations: dict, directory: Path
             or fingerprint(manifest.get('binding')) != fingerprint(binding)
             or not all(binding.values()) or manifest.get('execution_authorized') is not False):
         raise ValueError('Native preview model archive has stale capture or model bindings')
-    actual = json.loads(source.read_bytes())
+    actual = read_capture(source)
     if observation_fingerprint(actual) != binding['observation_fingerprint']:
         raise ValueError('Native preview model requires unchanged original observations')
     files = manifest.get('files')
@@ -1867,7 +1874,7 @@ def import_native_preview_model(observation_path: str | Path, *, parameters_path
     import tempfile
 
     source = Path(observation_path).resolve()
-    observations = json.loads(source.read_bytes())
+    observations = read_capture(source)
     scene = observations.get('planning_scene_capture') or {}
     parameters, verification_file, provenance_file = map(Path, (parameters_path, verification_path, provenance_path))
     verification, provenance = json.loads(verification_file.read_bytes()), json.loads(provenance_file.read_bytes())
@@ -2004,7 +2011,7 @@ async def save_native_preview_model_from_capture(observation_path: str | Path, *
             'expected_model_fingerprint': scene['model_fingerprint'], 'exact_native_model_match': True,
             'source_verification_sha256': _file_sha256(directory / 'verification.json'),
             'command_sent': False, 'execution_authorized': False})
-        if observation_fingerprint(json.loads(source.read_bytes())) != observation_fingerprint(observations):
+        if observation_fingerprint(read_capture(source)) != observation_fingerprint(observations):
             raise ValueError('Saved observations changed during native model verification')
         return import_native_preview_model(source, parameters_path=parameter_path,
             verification_path=directory / 'verification.json', provenance_path=directory / 'provenance.json')

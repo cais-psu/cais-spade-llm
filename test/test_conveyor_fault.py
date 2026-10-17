@@ -106,14 +106,16 @@ def _conveyor_condition(runtime, part):
         part_name=part, additional_condition={'resource_id': 'ur5e-4', 'part_name': 'gear_small'})
 
 
-def test_conveyor_example_configures_both_observed_pickups():
+def test_conveyor_example_configures_the_M1_pickup_without_a_held_peer():
     from cais_spade_llm.recovery_framework.part_slippage_example import example_setup
 
     setup = example_setup(scenario='Conveyor breakdown', outline_mode='manual', primitive_mode='manual')
     assert setup['failure_scenario']['part_name'] == 'KET4_Square_4mm'
-    assert setup['failure_scenario']['additional_condition'] == {
-        'resource_id': 'ur5e-4', 'part_name': 'gear_small'}
+    assert 'additional_condition' not in setup['failure_scenario']
     assert settings.validate_setup(setup)
+    setup['failure_scenario']['part_name'] = 'unobserved_part'
+    with pytest.raises(ValueError, match='eligible for ur5e-1'):
+        settings.validate_setup(setup)
 
 
 @pytest.mark.parametrize('condition', [
@@ -228,7 +230,12 @@ def test_breakdown_is_once_and_retains_custody_even_when_visualization_fails(
     visual = Mock(return_value={"status": visual_status})
     monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker", visual)
     before = deepcopy(runtime.context.part_tracker)
+    # Without a configured peer the checkpoint holds no robot; it latches on the M1 pickup.
+    assert not any(fault.holds_task({"resource_id": rid}) for rid in ("ur5e-1", "ur5e-3", "ur5e-4", "KMR"))
     assert asyncio.run(fault.after_acknowledgement())
+    assert set(fault.evidence["pickups"]) == {"ur5e-1"}
+    assert fault.evidence["pickups"]["ur5e-1"]["acknowledgement"]["task_id"] == "observed_pickup"
+    assert runtime.context.fault_reports["Conveyor"]["available"] is False
     assert runtime.stopped and runtime.outcome["failed_resource"] == "Conveyor"
     assert runtime.context.part_tracker == before
     assert runtime.context.snapshot()["ur5e-1"]["held_part"] == part
@@ -511,13 +518,29 @@ def test_partial_slippage_keeps_latch_and_reports_uncertainty(monkeypatch, stage
         controller.set_entity_pose.assert_not_called()
 
 
+def _frozen_machine_checkpoint(monkeypatch, runtime):
+    """Stand in for the Gazebo machine capture and record what it observed."""
+    seen = []
+
+    async def capture(owner, failure):
+        assert owner.recovery_checkpoint_capturing and owner.stopped
+        seen.append(deepcopy(owner.context.fault_reports.get("ur5e-1")))
+
+    monkeypatch.setattr("cais_spade_llm.recovery_framework.recovery_observations.capture_machine_checkpoint", capture)
+    return seen
+
+
 def test_robot_breakdown_retains_completed_part_in_M1_and_observed_pose(monkeypatch):
     runtime, part, _ = runtime_with_failure("ur5e-1 breakdown")
     monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
                         Mock(return_value={"status": "completed"}))
+    seen = _frozen_machine_checkpoint(monkeypatch, runtime)
     before = deepcopy(runtime.context.part_tracker)
     executors = dict(runtime.context.resources["ur5e-1"].executors)
     asyncio.run(runtime.conveyor_fault.trigger())
+    # The gripper's own report exists when the world is frozen for capture.
+    assert [row["source"] for row in seen] == ["gripper object detection"]
+    assert runtime.conveyor_fault.evidence["injection_status"] == "completed"
     assert runtime.context.part_tracker == before
     assert runtime.context.part_tracker[part]["location"] == "M1"
     assert runtime.context.resources["M1"].valuation["resource_state"] == "completed"
@@ -569,6 +592,7 @@ def test_robot_breakdown_latches_after_approach_before_next_dispatch(monkeypatch
     runtime, _, _ = runtime_with_failure("ur5e-1 breakdown")
     monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
                         Mock(return_value={"status": "completed"}))
+    _frozen_machine_checkpoint(monkeypatch, runtime)
     assert asyncio.run(runtime.conveyor_fault.after_acknowledgement()) is True
     assert runtime.stopped
     assert asyncio.run(runtime.conveyor_fault.after_acknowledgement()) is False
@@ -581,6 +605,7 @@ def test_failed_robot_retains_recorded_home_motion_capability(monkeypatch):
     runtime, _, _ = runtime_with_failure("ur5e-1 breakdown")
     monkeypatch.setattr("cais_spade_llm.recovery_framework.conveyor_fault.marker",
                         Mock(return_value={"status": "completed"}))
+    _frozen_machine_checkpoint(monkeypatch, runtime)
     asyncio.run(runtime.conveyor_fault.trigger())
     snapshot = {**runtime.context.resources["ur5e-1"].valuation,
                 "resource_state": runtime.context.fault_reports["ur5e-1"]["reported_state"],
