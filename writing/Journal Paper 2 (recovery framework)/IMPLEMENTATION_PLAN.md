@@ -1,5 +1,79 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Resource model correction — October 22, 2026 — APPROVED, stages 0–3 and 5 in progress (stage 4 dropped)
+
+**Why.** The user decided the plant models must be correct before the RA rebuild; the paper
+(Table 2, Section 2 models) changes afterwards. Seven items: (1) prompt display of per-part
+families and the fake "unknown" state; (2) the Conveyor's `advance_conveyor` missing from its
+recovery model; (3) shared events missing from passive resources' recovery models; (4)
+Conveyor/Buffer `move_relative` not recovery-selectable; (5) Conveyor/Buffer transport bundled in
+one step; (6) coupling through the part's location as in the semiconductor framework
+(`SemiconductorSimulation_testing-master`, `BufferAgent`/`RobotAgent`/`MachineAgent`); (7) the two
+unlinked M1/M2 state layers.
+
+**Findings that shape the plan.**
+- Nominal composition is already $\Vert_i G_i$: `nominal_des._event` (54-94) gives each participant
+  its own copy of a shared event holding only its own guards/updates, and
+  `project_nominal_event` (1184-1259) applies all copies atomically. What looks like "a robot writes
+  the Conveyor" is the Conveyor's own copy. The defect is on the recovery side:
+  `environment_recovery_descriptor` keeps only owned events (302-304), and draft nominal-connection
+  steps check the owner's guards but never apply its updates (`multi_turn_diagnostic` 1120-1294).
+- `advance_conveyor` is enumerated from capture-time belt residents
+  (`environment_recovery.py` 305-349), and `conveyor_advance_parameters` raises on an empty belt
+  (`nominal_conveyor.py` 219-220), so the Conveyor had no recovery event in the Machining capture.
+- Scene `resource_programs` (`initialization/recovery_framework_gazebo.json`, revision 5) marks
+  Conveyor/Buffer `move_relative` executable but not recovery-selectable; `gazebo_programs` lets only
+  robots/KMR add steps (180-181) and requires primitives = executors (256-257);
+  `WorkflowResourceAgent` has no recovery-step methods for transport.
+- Machine job state lives only in the worker's `MachineJobs`; DES `job_state`/`active_job` are never
+  written during nominal runs. `machine_part` (DES) ignores jobs; its saved program is one
+  `start_job` op. The duplicated pick events guard `loaded`+`paused|stopped` but keep a `completed`
+  capability source, and no copy exists for `interrupted`. No CCA rule reads job fields.
+- Non-robot recovery models are derived views (`capture_files.agent_declarations` keeps
+  `recovery_des_model` only for robots), so stages 0–1 can be re-derived offline.
+
+**Stages.**
+0. *Prompt display (no model change).* `multi_turn_outline_facts.py` 717 (`part_location.<part
+   name>` label) and 738-741 (no state word without a declared `resource_state`);
+   `recovery_resource_adapter.py` 127-134 stops writing "unknown" for new captures.
+1. *Recovery models (no nominal change).* Keep `advance_conveyor` as a declared event with unbound
+   `next_locations`/`delivered_part`; bind at validation against the projected state, never at
+   capture. Keep shared events in every participant's recovery model as passive copies (own
+   guards/updates, no `primitive_support` or composition; Conveyor load effects through
+   `nominal_conveyor`); this affects KMR and M1/M2 too. Apply owners' copies in draft
+   nominal-connection steps. Add an offline re-derivation of non-robot recovery models into the four
+   captures' `beliefs.json`. `neighbor_end_state` then states the passive participant's copy of a
+   shared recovery event.
+2. *Conveyor/Buffer primitives (nominal change).* Split transport into `detect_parts`,
+   `compute_transport_targets`, `move_relative` (clearance as its precondition, arrival as its
+   completion observation); recovery-selectable. Files: `workflow_task_programs.py`,
+   `gazebo_programs.py` (step and executor rules), `workflow_gazebo.py` (dispatch 145-151, split
+   605-653), scene `resource_programs` (revision bump), `WorkflowResourceAgent` recovery methods,
+   `environment_recovery.py` catalog/feasibility (80-107, 440-530), `recovery_case_evidence.py`
+   transport contract (563-760). `make bootstrap-gazebo`; one nominal Gazebo run.
+3. *Machine model (nominal change; design approved October 22).* One machine automaton
+   (approved: `resource_state` idle → loaded → running ⇄ paused, running|paused → stopped,
+   running → completed, picks from completed/paused/stopped → idle), with each part's job progress
+   as a part condition beside `processCompleted`, so a displaced job stays with its part;
+   `interrupted` is an observed fault state (Eqs. 2–3), not a nominal state. Files:
+   `environment_models._declare_machine_jobs`, `nominal_des` machine events, `machine_jobs.py`,
+   `workflow_gazebo` machine methods, `workflow_execution` validators, fault injection
+   (`conveyor_fault.py`, `failure_checkpoints.py`), `failure_grounding` rule A2,
+   `recovery_observations` compatibility checks, `evaluation_capture` requirements, prompt/projection
+   (`multi_turn_diagnostic` 387-428, outline facts), UI, `product/state.py`; about 40 tests
+   (`test_machine_jobs.py`).
+4. *Part-location coupling — DROPPED by the user (October 22).* Given the finding above, the nominal
+   model is already a correct shared-event composition; stage 1 fixes the recovery side. A semiconductor-style
+   redesign would replace slot variables across `nominal_des`, `environment_models`
+   (owners/custody/`project_transition`), `product/state.py`, slippage execution, composition, CCA
+   handoff evidence, UI and about 35 tests.
+5. *Recapture all four scenarios once* after stages 2–3 (shared Gazebo queue; archive superseded
+   captures first), then rerun drafts and start the RA rebuild on the corrected models.
+
+**Also stale after stages 2–3.** Program revision (old captures cannot execute in Gazebo,
+`delivery.py` 265-266), frozen `user_verified_safety/preview_inputs` (re-approval), saved
+proposal fingerprints (`saved_recovery_execution.py` 168-169).
+
 ## Validation removed for a clean rebuild — October 22, 2026 — contract-2 removal done, legacy path pending
 
 **Why.** RA feasibility had grown rules the paper does not have (planner custody checks under any
