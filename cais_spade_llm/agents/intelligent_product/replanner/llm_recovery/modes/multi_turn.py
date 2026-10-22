@@ -2360,6 +2360,8 @@ def _projected_state_value(
             "location",
         ),
         ("resource", "held_part"): ("held_part",),
+        # The derived pose condition reads the position the resource's current_pose records.
+        ("resource", "pose"): ("pose", "current_pose"),
         ("part", "part_state"): ("part_state", "current_state", "state"),
         ("part", "part_location"): ("part_location", "current_location", "location"),
     }
@@ -2456,6 +2458,12 @@ def _derive_candidate_outline_task(
         "params",
         "rationale",
     }
+    from .multi_turn_diagnostic import llm_selects_next_event
+
+    diagnostic = session_state.get("outline_diagnostic_bypass") is True
+    # Code applies neighbor_end_state unchecked, so it is accepted only while no outline check is enabled.
+    if llm_selects_next_event(session_state):
+        allowed_fields.add("neighbor_end_state")
     outline_id = str(candidate_task.get("outline_id") or "").strip()
     resource_jid = _task_resource_jid(candidate_task)
     event_name = str(candidate_task.get("event_name") or "").strip()
@@ -2497,19 +2505,11 @@ def _derive_candidate_outline_task(
             )
         ]
 
-    if "params" in candidate_task and not session_state.get("outline_diagnostic_bypass"):
+    if "params" in candidate_task:
         return None, [
             _candidate_schema_finding(
                 task=candidate_task,
-                reason="candidate params are accepted only when outline validation is bypassed",
-                evidence={"field": "params"},
-            )
-        ]
-    if "params" in candidate_task and not _finite_json_object(candidate_task["params"]):
-        return None, [
-            _candidate_schema_finding(
-                task=candidate_task,
-                reason="candidate params must be an object of finite JSON values",
+                reason="an event has no params; state a position as pose in expected_end_state",
                 evidence={"field": "params"},
             )
         ]
@@ -2628,8 +2628,14 @@ def _derive_candidate_outline_task(
                    or state_variables[name].get("private") is True
                    or str(name).startswith(("task_ctx.", "_"))
                    or state_variables[name].get("scope") == "part" and not part_name]
+        declared = sorted(name for name, row in state_variables.items()
+                          if row.get("private") is not True and not str(name).startswith(("task_ctx.", "_"))
+                          and (row.get("scope") != "part" or part_name))
         completeness_findings = ([_candidate_schema_finding(task=candidate_task,
-            reason="expected_end_state requires declared public fields and part_name for part-scoped fields",
+            reason=(f"expected_end_state may only use the variables declared for {resource_jid}"
+                    + (" and its part" if part_name else "") + f": {', '.join(declared)}"
+                    + (f"; not {', '.join(map(str, invalid))}" if invalid else "")
+                    + ("; part-scoped variables need part_name" if not part_name else "")),
             evidence={"field": "expected_end_state", "unexpected": invalid})]
             if invalid or not end_state else [])
     else:
@@ -2641,6 +2647,11 @@ def _derive_candidate_outline_task(
         )
     if completeness_findings:
         return None, completeness_findings
+    places, place_findings = _candidate_neighbor_end_state(
+        candidate_task=candidate_task, resource_jid=resource_jid, part_name=part_name,
+        known_resources=set(resources_by_jid), session_state=session_state)
+    if place_findings:
+        return None, place_findings
 
     start_state, start_state_findings = _generated_candidate_start_state(
         candidate_task=candidate_task,
@@ -2651,7 +2662,6 @@ def _derive_candidate_outline_task(
         state_variables=state_variables,
         declared_fields_only=declared_fields_only,
     )
-    diagnostic = session_state.get("outline_diagnostic_bypass") is True
     if start_state_findings and not diagnostic:
         return None, start_state_findings
 
@@ -2665,8 +2675,8 @@ def _derive_candidate_outline_task(
     }
     if part_name_present:
         validated_task["part_name"] = deepcopy(raw_part_name)
-    if candidate_task.get("params"):
-        validated_task["params"] = deepcopy(candidate_task["params"])
+    if places:
+        validated_task["neighbor_end_state"] = places
     if start_state_findings:
         validated_task["diagnostic_assumptions"] = [
             {"field": name, "reason": "start condition unknown; validation bypassed"}
@@ -2674,6 +2684,52 @@ def _derive_candidate_outline_task(
             for name in finding.get("evidence", {}).get("missing_projected_state_fields", [])
         ]
     return validated_task, []
+
+
+def _candidate_neighbor_end_state(
+    *,
+    candidate_task: dict[str, Any],
+    resource_jid: str,
+    part_name: str,
+    known_resources: set[str],
+    session_state: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Check the changes an event states for other resources its part's move affects.
+
+    Only the format is checked: each key is another resource and each variable one it declares.
+    Where the part went, and whether the stated values are right, is the LLM's claim.
+
+    Returns:
+        The stated changes keyed by resource JID, or a schema finding.
+    """
+    raw = candidate_task.get("neighbor_end_state")
+    if raw is None or raw == {}:
+        return {}, []
+
+    def refused(reason: str) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+        return {}, [_candidate_schema_finding(task=candidate_task, reason=reason, evidence={"field": "neighbor_end_state"})]
+
+    if not part_name:
+        return refused("neighbor_end_state states what moving the event's part changes, so the event needs part_name")
+    if not isinstance(raw, dict) or not all(isinstance(values, dict) and values for values in raw.values()):
+        return refused('neighbor_end_state maps each resource name to its changed variables: '
+                       '{"<resource name>": {"<variable>": <value>}}')
+    models = dict(session_state.get("recovery_des_models") or {})
+    places: dict[str, dict[str, Any]] = {}
+    for jid, values in raw.items():
+        if jid == resource_jid:
+            return refused(f"neighbor_end_state names {jid}, the event's own resource; give its changes in expected_end_state")
+        if jid not in known_resources:
+            return refused(f"neighbor_end_state keys are resource names; {jid} is not one")
+        declared = sorted(name for name, row in dict(models.get(jid, {}).get("state_variables") or {}).items()
+                          if row.get("private") is not True and not str(name).startswith(("task_ctx.", "_"))
+                          and row.get("scope") != "part")
+        invalid = [name for name in values if name not in declared]
+        if invalid:
+            return refused(f"neighbor_end_state for {jid} may only use its declared variables: "
+                           f"{', '.join(declared) or 'none'}; not {', '.join(map(str, invalid))}")
+        places[jid] = deepcopy(values)
+    return places, []
 
 
 def _commit_selected_candidate_task(
@@ -3574,11 +3630,9 @@ def _build_phase_prompt(
         )
         # Compute the configured candidate budget for this turn.
         if session_state.get("outline_diagnostic_bypass"):
-            from .multi_turn_diagnostic import llm_selects_next_event
-
             # Comparing unvalidated alternatives favours infeasible shortcuts, so
-            # without any validator the LLM proposes only the event it chooses.
-            candidate_bound = 1 if llm_selects_next_event(session_state) else 5
+            # without any validator the LLM chooses one of its own candidates.
+            candidate_bound = 5
         else:
             candidate_bound = _compute_enabled_candidate_bound(session_state, prepared_recovery_request)
         session_state["candidate_bound"] = candidate_bound
@@ -3622,7 +3676,13 @@ def _build_phase_prompt(
         from .multi_turn_context import scope_prompt_input
 
         prompt_input = scope_prompt_input(prompt_input, prepared_recovery_request, session_state)
-    if session_state.get("outline_diagnostic_bypass") and phase in {"grounding", "outline"}:
+    if session_state.get("outline_diagnostic_bypass") and session_state.get("outline_context_retrieval") and phase == "outline":
+        from .multi_turn_outline_facts import outline_template
+
+        # The failure-scoped prompt reads the full recorded state, not the filtered copy.
+        prompt_input["outline_template"] = outline_template(prepared_recovery_request, session_state)
+        session_state["outline_resource_names"] = prompt_input["outline_template"]["resource_names"]
+    elif session_state.get("outline_diagnostic_bypass") and phase in {"grounding", "outline"}:
         from .multi_turn_diagnostic import prompt_context
 
         prompt_input["outline_diagnostic"] = prompt_context(
@@ -3689,9 +3749,30 @@ def _get_response_schema(phase: str, session_state: dict[str, Any]) -> dict[str,
             else None
         ),
     )
-    if candidate_bound == 1 and session_state.get("outline_diagnostic_bypass"):
-        # The neurosymbolic schema fixes its own maximum; only this mode narrows it.
-        schema["schema"]["properties"]["candidate_events"]["maxItems"] = 1
+    if candidate_bound is not None and session_state.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import llm_selects_next_event
+        from .multi_turn_outline_facts import (
+            schema_with_neighbor_end_state,
+            schema_with_resource_names,
+            schema_without_params,
+        )
+
+        chooses = llm_selects_next_event(session_state)
+        if chooses:
+            schema["schema"]["properties"]["selected_candidate_index"] = {
+                "type": "integer", "minimum": 0, "maximum": candidate_bound - 1,
+                "description": "Index of the candidate you choose."}
+        decision = schema["schema"]["properties"].get("decision")
+        if decision is not None:
+            decision["enum"] = [*decision["enum"], "recovery_complete"]
+            decision["description"] = ("Use null for proposed events, need_context to request facts, or "
+                                       "recovery_complete when you judge the failure overcome.")
+        schema = schema_without_params(schema)
+        if chooses:
+            # Code applies neighbor_end_state unchecked, so only drafts without outline checks offer it.
+            schema = schema_with_neighbor_end_state(schema)
+        if session_state.get("outline_resource_names"):
+            schema = schema_with_resource_names(schema, session_state["outline_resource_names"])
     return schema
 
 
@@ -3712,6 +3793,7 @@ _ARTIFACT_TASK_KEYS = (
     "action_target",
     "expected_start_state",
     "expected_end_state",
+    "neighbor_end_state",
 )
 
 
@@ -4000,6 +4082,8 @@ def _compact_final_output_artifact_payload(payload: dict[str, Any]) -> dict[str,
         "current_phase",
         "accepted_trace_length",
         "primitive_program_complete",
+        "nominal_handoff",
+        "resource_names",
     ):
         if payload.get(key) not in (None, "", [], {}):
             compact[key] = deepcopy(payload.get(key))
@@ -5028,6 +5112,10 @@ def _append_final_output_turn(
         stage=stage,
         prepared_recovery_request=prepared_recovery_request,
     )
+    if session_state.get("outline_diagnostic_bypass"):
+        # The closing record states what code did after the outline ended, with names for review.
+        final_output["nominal_handoff"] = deepcopy(session_state.get("diagnostic_nominal_handoff") or {})
+        final_output["resource_names"] = deepcopy(session_state.get("outline_resource_names") or {})
     adapter_result = {"accepted": False, "reason": "Unvalidated multi_turn diagnostic"} if session_state.get("outline_diagnostic_bypass") else build_multi_turn_recovery_proposal(
         final_output_payload=final_output,
         prepared_recovery_request=prepared_recovery_request,
@@ -5960,6 +6048,8 @@ async def execute_multi_turn_recovery(
 
                 # 2. Call LLM
                 response_schema = _get_response_schema(current_phase, session_state)
+                call_options = ({"max_attempts": 1, "max_tool_rounds": 0}
+                                if session_state.get("outline_diagnostic_bypass") else {})
                 await _emit_progress(
                     session_state=session_state,
                     current_phase=current_phase,
@@ -5975,7 +6065,7 @@ async def execute_multi_turn_recovery(
                         prompt=prompt_text,
                         response_format=response_schema,
                         include_agent_instructions=False,
-                        **({"max_attempts": 1, "max_tool_rounds": 0} if session_state.get("outline_diagnostic_bypass") else {}),
+                        **call_options,
                     )
                 )
                 while True:

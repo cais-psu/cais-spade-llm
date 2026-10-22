@@ -18,6 +18,40 @@ from cais_spade_llm.ui.recovery_setup import FAILURE_SCENARIOS
 from cais_spade_llm.ui.refresh import PageRefresh
 
 
+def _value_text(value) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, dict) and all(isinstance(value.get(axis), (int, float)) for axis in "xy"):
+        return "(" + ", ".join(f"{key} {number:.3f}" for key, number in value.items() if isinstance(number, (int, float))) + ")"
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return ", ".join(" ".join(str(part) for part in item.values() if part not in (None, "")) for item in value)
+    return json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+
+
+def draft_rows(draft: dict) -> list[dict]:
+    """Rows of the recovery table: one per LLM recovery event, its end state listed per variable.
+
+    The LLM's values are listed as written; a value code added says so, with its reason. The nominal
+    steps that connect to the remaining plan are not recovery events; the handoff record shows them.
+    """
+    rows = []
+    for index, row in enumerate(draft.get("transition_trace", []), 1):
+        changes = row.get("condition_changes")
+        if changes is None:
+            # Drafts recorded before per-variable attribution list the LLM's end state as written.
+            changes = [{"entity": row.get("resource") or row.get("resource_jid"), "variable": name, "value": value,
+                        "by": "LLM"} for name, value in (row.get("expected_end_state") or {}).items()]
+        # Drafts saved before claims left condition_changes list them as "interrupted <task>" rows.
+        changes = [change for change in changes if not str(change.get("entity", "")).startswith("interrupted ")]
+        lines = [f"{change.get('entity')}  {change.get('variable')} = {_value_text(change.get('value'))}"
+                 + ("" if change.get("by") == "LLM" else f"  — {change.get('by')}"
+                    + (f" ({change['reason']})" if change.get("reason") else "")) for change in changes]
+        rows.append({"step": index, "event_name": row.get("event_name"),
+                     "resource": row.get("resource") or row.get("resource_jid"), "part_name": row.get("part_name"),
+                     "end_state": "\n".join(lines), "rationale": row.get("rationale") or ""})
+    return rows
+
+
 def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C901, PLR0915 - shared page controls
     """Render one bridge-owned workflow; navigation only stops page polling."""
     state = bridge.get_part_slippage_example()
@@ -189,9 +223,9 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
                 draft_status = ui.label().classes("text-amber-700")
                 draft_table = ui.table(columns=[
                     {"name": name, "label": label, "field": name, "align": "left"}
-                    for name, label in (("step", "Step"), ("event_name", "Event"), ("resource_jid", "Resource"),
-                        ("part_name", "Part"), ("expected_end_state", "Proposed end conditions"), ("rationale", "Rationale"))
-                ], rows=[], row_key="step").classes("w-full").props("wrap-cells")
+                    for name, label in (("step", "Step"), ("event_name", "Event"), ("resource", "Resource"),
+                        ("part_name", "Part"), ("end_state", "End state"), ("rationale", "Rationale"))
+                ], rows=[], row_key="step").classes("w-full").props("wrap-cells").style("white-space: pre-line")
                 draft_download = ui.button("Download draft", icon="download",
                     on_click=lambda: ui.download.file(bridge.get_part_slippage_example()["draft_path"])).props("flat dense")
             if key == "primitive":
@@ -350,9 +384,7 @@ def render_part_slippage(bridge, *, is_active=lambda: True) -> None:  # noqa: C9
         draft_download.set_visibility(bool(draft) and not current.get("busy"))
         if draft:
             draft_status.text = f"{draft['message']} Provider calls: {draft['provider_calls']}. Execution authorized: false."
-            draft_table.rows = [{"step": index, **{key: row.get(key) for key in ("event_name", "resource_jid", "part_name", "rationale")},
-                "expected_end_state": json.dumps(row.get("expected_end_state", {}), ensure_ascii=False)}
-                for index, row in enumerate(draft.get("transition_trace", []), 1)]
+            draft_table.rows = draft_rows(draft)
             draft_table.update()
         observed = current.get("observations") or {}
         signature = (current.get("observation_path"), current.get("selected_observation_path"),

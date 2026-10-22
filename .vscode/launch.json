@@ -18,8 +18,8 @@
                 "GAZEBO_MASTER_URI": "http://100.111.96.116:11345",
                 "CAIS_HOME_GAZEBO_IP": "100.108.30.10",
                 "CAIS_SPADE_LLM_MODEL": "gpt-5.4",
-                "CAIS_SPADE_REASONING_EFFORT": "low",
-                "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT": "low"
+                "CAIS_SPADE_REASONING_EFFORT": "medium",
+                "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT": "medium"
             }
         },
         {
@@ -33,8 +33,8 @@
             "env": {
                 "ROS_DOMAIN_ID": "42",
                 "CAIS_SPADE_LLM_MODEL": "gpt-5.4",
-                "CAIS_SPADE_REASONING_EFFORT": "low",
-                "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT": "low"
+                "CAIS_SPADE_REASONING_EFFORT": "medium",
+                "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT": "medium"
             }
         },
         {
@@ -48,8 +48,8 @@
             "env": {
                 "ROS_DOMAIN_ID": "42",
                 "CAIS_SPADE_LLM_MODEL": "gpt-5.4",
-                "CAIS_SPADE_REASONING_EFFORT": "low",
-                "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT": "low"
+                "CAIS_SPADE_REASONING_EFFORT": "medium",
+                "CAIS_SPADE_NON_FUNCTION_REASONING_EFFORT": "medium"
             }
         }
     ]

@@ -33,6 +33,8 @@ _FAILURE_GOAL_FIELDS = ("task_id", "resource_id", "goal_cancelled", "motion_stop
 _JOB_FIELDS = ("task_id", "job_state", "process_completed", "processing_fraction", "part_name")
 _PART_FIELDS = ("state", "location")
 _POSE_KEYS = ("x", "y", "z", "qx", "qy", "qz", "qw")
+# Fault report fields read on their own; every other recorded value is a reported condition.
+_REPORT_FIELDS = {"reported_state", "source", "reported_at_unix", "available"}
 
 
 @lru_cache(maxsize=1)
@@ -74,6 +76,10 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         # reporting device; only a device's own words are passed on.
         report_sources = {rid: row["source"] for rid, row in reports.items()
                           if isinstance(row.get("source"), str) and not row["source"].startswith("/")}
+        # Any other condition a device reports, such as a component not working, is its own words too.
+        report_conditions = {rid: conditions for rid, row in reports.items()
+                             if (conditions := {key: value for key, value in row.items()
+                                                if key not in _REPORT_FIELDS and isinstance(value, (str, bool, int, float))})}
         nodes = pending_nodes(failure, observations)
         sources = {"reported_fault_states": "/fault_reports/*/reported_state",
                    "pending_nodes": "/failure/{pending_tasks,continuations} without /acknowledgements"}
@@ -82,7 +88,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         # counts only when it is a configured fault report.
         reported = {rid: values["resource_state"] for rid, values in (observations.get("resource_states") or {}).items()
                     if isinstance(values, dict) and values.get("resource_state") in settings["fault_report_values"]}
-        report_sources = {}
+        report_sources, report_conditions = {}, {}
         nodes = observations.get("pending_nodes") or []
         sources = {"reported_fault_states": "/resource_states/*/resource_state", "pending_nodes": "/pending_nodes"}
     resources = physical.get("resources") or {}
@@ -99,6 +105,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
         "unavailable_resources": unavailable,
         "reported_fault_states": reported,
         "fault_report_sources": report_sources,
+        "fault_report_conditions": report_conditions,
         "controller_faults": {rid: str((row.get("controller_hold_observation") or {}).get("fault_reason") or "")
                               for rid, row in resources.items()},
         "attachments": {rid: (row.get("attachment") or {}).get("model_name")
@@ -121,6 +128,7 @@ def raw_failure_view(observations: dict, settings: dict | None = None) -> dict:
             "unavailable_resources": "/unavailable_resources",
             "reported_fault_states": sources["reported_fault_states"],
             "fault_report_sources": "/fault_reports/*/source",
+            "fault_report_conditions": "/fault_reports/* (other reported conditions)",
             "controller_faults": "/physical_evidence/resources/*/controller_hold_observation/fault_reason",
             "attachments": "/physical_evidence/resources/*/attachment/model_name",
             "fixture_attachments": "/physical_evidence/physics_evidence/attachments",
@@ -221,9 +229,10 @@ def detect_signals(raw: dict, expected: dict, settings: dict) -> list[dict]:
 
 
 def _reported_by(raw: dict, rid: str) -> dict:
-    # The device's own words are passed through; no component is inferred from them.
+    # The device's own words are passed through: the conditions it reports and its name. No
+    # component or condition is inferred from them.
     source = raw.get("fault_report_sources", {}).get(rid)
-    return {"reported_by": source} if source else {}
+    return {**raw.get("fault_report_conditions", {}).get(rid, {}), **({"reported_by": source} if source else {})}
 
 
 def _part_discrepancy(raw: dict, expected: dict, name: str, part: dict, margin: float) -> dict | None:
@@ -291,7 +300,8 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
         if holder:
             row.update(state="in_gripper", location=holder)
         else:
-            row.update(state="misplaced", location=None, observed_pose=_pose_record(raw["parts"][name]["pose"]))
+            # No label names a situation that was never anticipated; only the measured facts are kept.
+            row.update(state="unknown", location=None, observed_pose=_pose_record(raw["parts"][name]["pose"]))
         updates.append({"part_name": name, **{key: deepcopy(row[key]) for key in ("state", "location", "observed_pose")
                                               if key in row}})
     resources = deepcopy(expected["resources"])
@@ -505,6 +515,12 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
                   failed_resource_jid=event["failed_resource_jid"],
                   resource_state_before=deepcopy(event["resource_state_before"]),
                   affected_parts=deepcopy(event["affected_parts"]))
+    # Views stored at capture time give way to the grounded facts of each discrepant part.
+    for update in grounded["belief_updates"]:
+        facts = {key: deepcopy(update[key]) for key in ("state", "location", "observed_pose") if key in update}
+        for parts in (prepared.get("part_tracker"), (prepared.get("grounding_context") or {}).get("parts")):
+            if update.get("part_name") and isinstance(parts, dict) and isinstance(parts.get(update["part_name"]), dict):
+                parts[update["part_name"]].update(facts)
     for row in prepared["llm_input"].get("part_facts") or []:
         part = grounded["parts"].get(row.get("part_name"))
         if part:

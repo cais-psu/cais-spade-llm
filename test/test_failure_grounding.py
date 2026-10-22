@@ -72,7 +72,7 @@ def test_cancelled_goal_and_missing_part_ground_the_interrupted_task():
     event = grounded["fault_event"]
     assert [row["rule"] for row in event["signals"]] == ["A1", "C1"]
     assert (event["failed_task_id"], event["failed_function_name"], event["failed_resource_jid"]) == ("t2", "place_approach", "jid-a")
-    assert grounded["parts"]["peg"] == {"state": "misplaced", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
+    assert grounded["parts"]["peg"] == {"state": "unknown", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
     assert grounded["resources"]["arm_a"]["des_consistent"] is False
     assert "failure_type" not in event
 
@@ -121,6 +121,19 @@ def test_schema_two_reads_device_fault_reports_instead_of_beliefs():
     assert unavailable["belief_updates"] == []
 
 
+def test_a_condition_the_device_reports_is_passed_through_in_its_own_words():
+    report = {"arm_b": {"reported_state": "failed", "source": "gripper object detection", "gripper": "not working",
+                        "reported_at_unix": 1.0}}
+    grounded = grounding.ground_failure(capture_v2(fault_reports=report), settings=SETTINGS)
+    signal, = grounded["fault_event"]["signals"]
+    assert signal["values"] == {"resource_state": "failed", "gripper": "not working",
+                                "reported_by": "gripper object detection"}
+    assert grounding.prompt_fault_event(grounded)["detected_signals"][0]["gripper"] == "not working"
+    # A reported condition is a fact for the prompt; it does not change what the grounding identifies.
+    assert grounding.fault_identity(grounded) == grounding.fault_identity(
+        grounding.ground_failure(capture_v2(fault_reports={"arm_b": {"reported_state": "failed"}}), settings=SETTINGS))
+
+
 def test_the_reporting_device_is_passed_through_without_a_derived_label():
     report = {"arm_b": {"reported_state": "failed", "source": "gripper object detection"}}
     grounded = grounding.ground_failure(capture_v2(fault_reports=report), settings=SETTINGS)
@@ -154,7 +167,7 @@ def test_grounded_beliefs_update_the_live_context_and_the_recorded_copies():
     assert context.resources["arm_a"].valuation == record["resource_states"]["arm_a"] == {
         "resource_state": "failed", "held_part": None}
     assert context.part_tracker["peg"] == record["part_tracker"]["peg"] == {
-        "state": "misplaced", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
+        "state": "unknown", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
     assert (context.revision, context.resources["arm_a"].revision) == (5, 3)
     assert grounding.update_beliefs(context, record, grounding.ground_failure(capture_v2(), settings=SETTINGS)) == []
     assert context.revision == 5
@@ -209,7 +222,7 @@ OFFICIAL = {
     "capture_77666affc1b9468ca157cf366d706dc8": (["A1", "B2", "C1"], ["ur5e-4"], "environment_9", "place_approach"),
     "capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87": (["A2", "B2"], ["M1"], "environment_21", "machine_part"),
     "capture_3aed616530294a4bbdf353000fc69596": (["B2"], ["Conveyor"], "5a764b64795247fe927cef6fc1ef4d72_pending_0", "place_approach"),
-    "capture_d1ca51654ff7423193d1bd13b146964d": (["B2"], ["ur5e-1"], "cb6f780418494c8589b00b8ddc759ec7_pending_1", "pick_grasp"),
+    "capture_b2d4286af67c4567b4bc0d0fd5ee55c7": (["B2"], ["ur5e-1"], "d52dabb273c14fd0ad9629acbd317f78_pending_1", "pick_grasp"),
 }
 
 
@@ -347,8 +360,9 @@ def test_the_first_turn_is_the_outline_prompt_with_the_grounded_fault(tmp_path, 
     draft = outline_draft.OutlineDraft(observations, default_safety_files("Part slippage"), root=tmp_path)
     asyncio.run(draft.generate())
     prompt = provider.call_args_list[0].kwargs.get("prompt") or provider.call_args_list[0].args[0]
-    assert "Recovery Event Candidate Proposal" in prompt and provider.await_count == 1
-    assert '"detected_signals"' in prompt and "Part slippage" not in prompt and "during_place_lowering" not in prompt
+    assert "\nFailure\n" in prompt and provider.await_count == 1
+    assert "- ur5e-4 did not complete place_approach of gear_small (" in prompt and "task environment_9" in prompt
+    assert "Part slippage" not in prompt and "during_place_lowering" not in prompt
     assert draft.record["fault_grounding"]["failed_task_id"] == "environment_9"
     session = draft.prepared["multi_turn_session_state"]
     assert (session["turn_index"], session["current_phase"], session["turns"]) == (1, "outline", [])

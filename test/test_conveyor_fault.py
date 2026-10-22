@@ -538,8 +538,9 @@ def test_robot_breakdown_retains_completed_part_in_M1_and_observed_pose(monkeypa
     before = deepcopy(runtime.context.part_tracker)
     executors = dict(runtime.context.resources["ur5e-1"].executors)
     asyncio.run(runtime.conveyor_fault.trigger())
-    # The gripper's own report exists when the world is frozen for capture.
-    assert [row["source"] for row in seen] == ["gripper object detection"]
+    # The gripper's own report, with the condition it observes, exists when the world is frozen for capture.
+    assert [(row["source"], row["gripper"]) for row in seen] == [
+        ("gripper object detection", "not working (hardware fault, needs repair)")]
     assert runtime.conveyor_fault.evidence["injection_status"] == "completed"
     assert runtime.context.part_tracker == before
     assert runtime.context.part_tracker[part]["location"] == "M1"

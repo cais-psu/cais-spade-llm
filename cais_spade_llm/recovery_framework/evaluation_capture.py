@@ -27,7 +27,11 @@ from cais_spade_llm.recovery_framework.capture_files import (
     RAW_SCHEMA_VERSION,
     write_capture,
 )
-from cais_spade_llm.recovery_framework.failure_checkpoints import CHECKPOINTS, SUPPORTED_CHECKPOINTS
+from cais_spade_llm.recovery_framework.failure_checkpoints import (
+    CHECKPOINTS,
+    ROBOT_BREAKDOWN_GRIPPER_CONDITION,
+    SUPPORTED_CHECKPOINTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -275,8 +279,11 @@ def _verify_robot_breakdown_capture(captured: dict) -> None:
     if not frozen.get('machine_observations'):
         return
     # The gripper-fault design: M2 still trims while the KMR, idle at a dock, can take over at M1.
-    if captured.get('fault_reports', {}).get('ur5e-1', {}).get('source') != 'gripper object detection':
+    report = captured.get('fault_reports', {}).get('ur5e-1', {})
+    if report.get('source') != 'gripper object detection':
         raise ValueError('Robot breakdown fault must come from the gripper object detection')
+    if report.get('gripper') != ROBOT_BREAKDOWN_GRIPPER_CONDITION:
+        raise ValueError('Robot breakdown fault must report the gripper hardware fault: ' + ROBOT_BREAKDOWN_GRIPPER_CONDITION)
     records = captured.get('processing_observations', {})
     m1, m2 = records.get('M1', {}), records.get('M2', {})
     running = m2.get('jobs', {}).get(m2.get('active_job'), {})

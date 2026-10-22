@@ -373,7 +373,7 @@ def test_robot_capture_requires_failed_M1_approach_and_frozen_occupancy(monkeypa
             capture.verify_capture(row, 'ur5e-1 breakdown')
 
 
-@pytest.mark.parametrize('defect', [None, 'source', 'm1_active', 'm2_finished', 'kmr_moving', 'kmr_holding'])
+@pytest.mark.parametrize('defect', [None, 'source', 'condition', 'm1_active', 'm2_finished', 'kmr_moving', 'kmr_holding'])
 def test_gripper_fault_capture_requires_overlap_reporting_device_and_idle_KMR(monkeypatch, defect):
     from cais_spade_llm.recovery_framework.recovery_observations import checkpoint_fact_fingerprint
     from cais_spade_llm.resources import recovery_geometry
@@ -381,7 +381,8 @@ def test_gripper_fault_capture_requires_overlap_reporting_device_and_idle_KMR(mo
     part = 'KET4_Square_4mm'
     row = _robot_breakdown_capture_record()
     row['capture_checkpoint']['machine_observations'] = {'M1': {'status': 'observed'}, 'M2': {'status': 'observed'}}
-    row['fault_reports'] = {'ur5e-1': {'reported_state': 'failed', 'source': 'gripper object detection'}}
+    row['fault_reports'] = {'ur5e-1': {'reported_state': 'failed', 'source': 'gripper object detection',
+                                       'gripper': 'not working (hardware fault, needs repair)'}}
     row['processing_observations'] = {
         'M1': {'active_job': None, 'jobs': {'trim-1': {'part_name': part, 'process_completed': True,
                                                          'job_state': 'completed'}}},
@@ -393,6 +394,8 @@ def test_gripper_fault_capture_requires_overlap_reporting_device_and_idle_KMR(mo
     row['physical_evidence']['resources']['KMR'] = {'base_pose': [-5.54, 2.13, 0.0, 0.0, 0.0, 0.7071, 0.7071]}
     if defect == 'source':
         row['fault_reports']['ur5e-1']['source'] = 'robot controller'
+    elif defect == 'condition':
+        del row['fault_reports']['ur5e-1']['gripper']
     elif defect == 'm1_active':
         row['processing_observations']['M1']['active_job'] = 'trim-1'
     elif defect == 'm2_finished':

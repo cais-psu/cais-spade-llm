@@ -2778,7 +2778,8 @@ class ProductRecoveryController:
             else:
                 position = self.camera.observe(part_name)
                 if position is not None:
-                    entry["state"] = "misplaced"
+                    # The camera locates the part; its state is not labeled beyond that fact.
+                    entry["state"] = "unknown"
                     entry["position"] = position
                     entry["camera_verification"] = "detected"
                 else:

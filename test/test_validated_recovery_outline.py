@@ -1832,6 +1832,22 @@ def test_versioned_schema_keeps_legacy_suffix_only_for_legacy_attempts(outline_m
     assert uses_outline_evidence({"validation_contract_version": OUTLINE_VALIDATION_CONTRACT_VERSION})
 
 
+@pytest.mark.parametrize("outline_mode", ["incremental", "incremental_candidates_validated", "single_pass"])
+def test_contract_2_outline_event_gives_only_its_form(outline_mode):
+    declarations = _case()[0]["recovery_resources"][JID]["recovery_des_model"]["state_variables"]
+    schema = multi_turn_phase_response_schema("outline", validation_contract_version=2, outline_mode=outline_mode,
+                                              declared_state_variables_by_resource_jid={JID: declarations})
+    assert list(schema["schema"]["$defs"]) == ["outline_event"]
+    event = schema["schema"]["$defs"]["outline_event"]
+    assert not {"anyOf", "allOf"} & event.keys()
+    assert event["properties"]["expected_end_state"] == {"type": "object", "minProperties": 1}
+    assert event["properties"]["part_name"] == {"type": ["string", "null"], "minLength": 1}
+    # Holding a part without stating its location fits the form; the outline turn judges the names.
+    Draft202012Validator(schema["schema"]["$defs"]["outline_event"]).validate({
+        "outline_id": "local_fixture", "event_name": "pick_part", "resource_jid": JID, "part_name": "part_a",
+        "expected_end_state": {"held_part": "part_a"}, "rationale": "Local schema check"})
+
+
 def test_missing_nominal_capture_is_not_equivalent_to_completed_tasks():
     prepared, session, planner, _ = _case()
     session["symbolic_resources"][JID]["resource_state"] = "idle"

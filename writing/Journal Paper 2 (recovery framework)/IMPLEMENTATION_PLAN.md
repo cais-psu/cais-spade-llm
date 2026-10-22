@@ -1,5 +1,745 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Turn 1 recovery outline, validation off — October 19, 2026 — Part slippage done (uncommitted)
+
+**Status.** Part slippage recovery outline generation with every check off is done (user,
+October 19). All code below is uncommitted on `recovery-framework-journal`. The next step is
+the user's choice between validation (RA feasibility first) and the next failure scenario.
+`.vscode/launch.json` is set to `gpt-5.4` with reasoning effort `medium`. October 20: the first
+live Conveyor run with the buffer goal wandered around M1; after three wording fixes and a lookup
+fix (see Known issues, Conveyor), the rerun `draft_8bf5b6d05b6642098baedd8e25211852` used the KMR
+and handed off. October 20 evening: two live Machining runs; the transfer across the Conveyor is
+still open (see Known issues, Machining). October 21 night: neighbor records, `neighbor_end_state`,
+the general fixes batch, four runs, the bias review and the open decisions are under Known issues,
+"All four scenarios".
+
+**Core contribution (user-confirmed).** The nominal DES models are a closed process bound to
+designated regions and parts. The LLM creates new task-level recovery events and new state
+values beyond them. Primitive composition grounds those events later; feasibility and safety
+validation are added later.
+
+**Prompt principles (user decisions).**
+- Generic for any observable failure, including unexpected ones: no failure-type, signal-kind,
+  resource-type or scenario wording. Each grounded signal is stated by its name, subjects and
+  recorded values.
+- No bias toward the solution: no derived answers, no code-chosen relevance, no hints. Every
+  resource and part is listed the same way. Facts, not labels ("not held, not at any station").
+- Resource names, never JIDs, in the prompt and the UI. Details sit behind lookup references,
+  with no overlap between prompt and references. Safety rules are shown once.
+- The Recovery Goal is the interrupted work's outcome only. Recovery events may produce it or
+  leave it to declared nominal events. October 21: each goal line also names the recorded task that
+  normally produces it and the current reported fault of the resources that task needs, a recorded
+  fact (`(normally M1's machine_part; M1 unavailable)`), not a hint about what else could do it.
+- Process-chain propagation is future work in the paper.
+
+**The prompt now** (`multi_turn_prompts._render_failure_outline_prompt`, facts from
+`multi_turn_outline_facts.outline_template`): Task and Role (1–5 candidates, the LLM picks one
+with `selected_candidate_index`), Failure, Recovery Goal, Accepted events, Resources (`workspace`
+= the declared parameter domain of location-changing events: named places, `declared work envelope`,
+`coordinates (x, y, yaw)`, or `own location`; it replaced `serves` on October 19 so the terms fit any
+resource as a DES), Parts, Safety Rules, Candidate Rules, Looking Up Facts (`need_context`
+with 1–8 references), Retrieved context.
+
+**Prompt terms and their DES meaning (user, October 19).** The prompt uses plain words; each maps to
+one paper concept, so the same terms fit any resource and any failure. See also `PAPER_FRAMEWORK.md`.
+
+| Prompt term | DES meaning | Paper |
+| --- | --- | --- |
+| state (`idle; holds none; at Storage`) | current values of the resource's declared state variables | $\nu_i(x)$ |
+| `capabilities:` | what the resource's declarations allow; omitted when it declares none | resource capabilities in $\mathcal{K}$ (Fig. 5) |
+| `reachable locations` | places its declared events can take it to (`reachability` / `resource_location` domain) | Fig. 5 "reachable locations" |
+| `(normally <resource>'s <function>; <resource> <value>)` on a goal line | the recorded replaced task that normally produces the outcome, and the reported fault of each resource it needs (October 21) | the interrupted work $s_F$'s remaining nominal part |
+| `job control: <flag> <value>` | the resource's declared job-control flags, e.g. `resume_after_reload true, restart_stopped_jobs false` (October 20) | resource capabilities in $\mathcal{K}$ (Fig. 5) |
+| `places parts on <place> at <position>` | for a reachable place that keeps each part's position (a per-part variable), where its own declared events put a part this resource places there; a separate item, so the place name stays as declared (October 20) | the place's declared effect of the shared placement event in $G=\Vert_i G_i$ |
+| `workspace bounds` | a declared reach area (`gripper_reach`), detailed by the pose lookup (`/resources/<name>/pose_relations`); the "(look up)" tag was dropped on October 20 (user) | Fig. 5 "workspace bounds", $C_\rho$ |
+| `moves to any position (x, y, yaw)` | a declared event that sets its location from free numeric parameters | free parameters $\theta$ |
+| process, e.g. `trim (circle, square)` | declared `process` / `result` values of its events | processes it can run |
+| Knowledge Base section | the lookups served from recorded facts | knowledge base $\mathcal{K}$ |
+| recovery event, `expected_end_state` | a new event and the state it leads to, $Tr_i(x,e)=x'$ | $e_k^R$, $x_k^R$ |
+| "normal production takes over" | handoff to the remaining plan | Eq. 6, handoff condition $H$ |
+| `neighbor_end_state` (named `place_end_state` until October 21) | another resource's variables that the event's part move changes; that resource does not act | $\nu_j(x^R_k)$ in $G=\Vert_i G_i$ |
+
+`_capabilities` in `multi_turn_outline_facts.py` documents the rule. It replaced `serves`, `workspace`
+and `reachable`/`stationary` on October 19 (the user found motion-only terms robot-centric).
+
+**Step 0, conditions (October 19, uncommitted).** An end state is the paper's $v'_i$: "declared
+variable = new value" for what the event changes, and nothing else.
+- **Where the variables come from.** `multi_turn_diagnostic.declare_derived_conditions`, called by
+  `OutlineDraft`, adds two variables by the same rule for every resource:
+  - `pose`: from a primitive's declared `current_pose` effect (UR5e: x, y, z); failing that, from a
+    DES event's coordinate inputs (KMR: x, y, yaw);
+  - `processCompleted`: a part-scoped record, on resources whose events declare it as a product
+    effect. It is seeded from the recorded part history.
+- **Lookups.** `/resources/<name>/state_variables` and the new `/parts/<name>/state_variables` serve
+  the variables, with a rule: places, parts and positions must be known; other values may be new.
+- **Reply format and checks.** October 21 (user decision): the format gives only the event's form,
+  the same for every resource. `expected_end_state` is an object with at least one entry, and no
+  variable names are listed. The LLM takes the names from the lookups. The event check accepts
+  only declared names, and a refusal names the declared variables. `params` is gone; a position
+  is `pose`.
+- **Projection.** A stated `pose` becomes the resource's position for area checks and the
+  shared-area rule. When the event states a `pose` but no `resource_location`, code sets the
+  location to the named place whose recorded area contains the pose, or to none.
+- **Who set each value (October 19, cleanup).** `apply_tentative_effects` records on each event
+  `condition_changes`: one entry per changed variable, with `by` = `LLM` (a recovery event's end
+  state), `model` (a nominal step) or `code` plus a reason. Code entries are only consequences:
+  the location from a stated pose, a released holder, a place's unknown values, and interrupted
+  work whose declared outcome now holds. It replaced `derived_by_code`.
+- **Unknown values at a place.** When a part enters or leaves a place that is itself a resource,
+  and another resource's event moved it, that place's state and each variable that can hold the
+  part become unknown: either the declared values name the part (the buffer's `zone_1_part` to
+  `zone_4_part`, a machine's `part_name` and `staging_part`) or the variable records it now. This
+  replaced a fixed list (`part_name`, `resource_state`) that named machine fields on every place.
+  When the event states that place's change in `place_end_state` (below), nothing of it becomes
+  unknown and its unstated variables keep their values. October 21: a part's own entry
+  (`part_location.<part>`) counts too, and a place inside a resource (a staging tray) marks only the
+  owner variables its declared events set there; the prompt and lookups show these as "not stated".
+- **`place_end_state` (user-approved option A, October 20, uncommitted).** An event may also state
+  how moving its part changes another resource: `{"<resource name>": {"<variable>": <value>}}`.
+  - Why: an event may set only its own resource's and its part's variables, so a KMR setting KET4 in
+    the buffer could not say "zone 1"; code then marked zones 1–4 unknown and the handoff rested on
+    assumptions (`draft_8bf5b6d0`).
+  - Prompt rule (after the `expected_end_state` rule; rule 0 also names the field), shortened on
+    October 20 with the other Candidate Rules: "`place_end_state`: when moving the part changes
+    another resource (it arrives at or leaves it), that resource's own changed variables, not the
+    part's: {...}. That resource does not act; variables you leave out stay as they are."
+  - Shorter Candidate Rules (user, October 20; same meaning, about 170 words instead of 280): one
+    event per candidate with its fields (`event_name` = what it achieves, new names allowed;
+    `rationale` = the fact it relies on); where a resource works and what it handles; what
+    `expected_end_state` holds; `place_end_state` (only with every check off); "Use variable names
+    exactly as declared. Look up any fact or variable you rely on that is not shown."; completion.
+    Built by `_failure_outline_candidate_rules` from `_FAILURE_OUTLINE_EVENT_RULES`,
+    `_PLACE_END_STATE_RULE` and `_FAILURE_OUTLINE_CLOSING_RULES`.
+  - Offered only when every outline check is off (`llm_selects_next_event`): the rule
+    (`_failure_outline_candidate_rules`), the reply format (`schema_with_place_end_state`, in
+    `_get_response_schema`'s draft block) and acceptance in `_derive_candidate_outline_task`. No check
+    reads the field yet, so drafts with a check, and the validated path, keep the old rules and refuse
+    it (found by the code review: otherwise checked drafts would carry unchecked values).
+    `response_with_jids` maps the keys to JIDs and `_named_record` back to names.
+  - Check (`multi_turn._candidate_place_end_state`), format only: the event names a part; each key is
+    a resource other than the acting one; each variable is that resource's public, non-part declared
+    variable. Where the part went, and the values, are the LLM's claim. Outside drafts the field is
+    still refused as an unknown top-level field.
+  - Projection (`multi_turn_diagnostic._apply_place_end_state`): values applied as the LLM's
+    (`condition_changes` by `LLM`), removed from the place's unknown list, before holder release and
+    the unknown rule. A stated `held_part` on that resource also sets or clears the part's holder, so
+    both sides agree; custody notes skip a holder the event states as releasing the part.
+    `_event_identity` and `_ARTIFACT_TASK_KEYS` include the field. The Recovery turns view shows a
+    "Place changes" column when any event states one.
+  - Replay of `draft_8bf5b6d0` with the stated zone (scratch `place_end_state_replay.py`): step 3
+    shows `Buffer For Machined parts  zone_1_part = KET4_Square_4mm`, no unknown lines; handoff
+    complete with no assumptions; the buffer's row shows the zone.
+  - Paper: the other resource's part $\nu_j(x^R_k)$ of the intended end state in $G=\Vert_i G_i$;
+    that resource does not act, so it has no composition (Eq. 7 covers $i(k)$ only). The nominal
+    models already change other resources in one event (the KMR delivery sets the buffer's
+    `zone_1_part`; a staging-tray place sets the machine's `staging_part`).
+  - Gaps for step 2: with checks on, `validate_partial_event` runs before the projection, so CCA
+    labels (Eq. 13) and RA do not read `place_end_state` yet; nothing ties the acting resource's
+    release to the place variable it changes.
+  - Tests: `test_an_event_may_state_how_moving_its_part_changes_another_resource`,
+    `test_place_end_state_is_checked_for_format_only`,
+    `test_a_stated_holding_change_on_another_resource_is_also_the_parts`, plus the prompt, schema
+    (offered only with checks off), round-trip, draft-naming and turns-view tests.
+- **Draft table.** One row per LLM recovery event: Step, Event, Resource, Part, End state,
+  Rationale. The LLM's values read `entity  variable = value` with no label (user, 2026-10-20);
+  a value code added ends with `— code (reason)`. Claims of interrupted work ("interrupted <task>
+  completed") are no longer listed (user, October 20): they are not values of any resource or part,
+  and `_claim_interrupted_work` keeps them only for the handoff record; older drafts hide them. The connecting nominal steps are not rows; the
+  "Handoff to nominal work" card shows them with only the public values they change (no
+  `task_ctx.*`, no copied values). Drafts saved before this change show their end state as the
+  LLM's.
+- **Who writes what.** The LLM writes recovery events' end states (new values allowed). Code writes
+  nominal steps' end states, start states, unchanged variables and consistency follow-ons.
+- **Not done:** `pose` derived from a named place's geometry is deferred (the RA computes targets
+  from places in step 2).
+- **Data gaps for the manifests:** KMR `move_base` and the M1/M2 job primitives declare no effects;
+  the printer declares no `process` value.
+
+**Lookups.** `/parts/<name>/pose_relations` and `/resources/<name>/pose_relations` return
+containing regions, served stations that contain the pose, and the pose beside every declared
+work envelope (`xy_distance_m`, `max_xy_radius_m`, `z_m`, `z_range_m`, `tolerance_m`), never a
+verdict. Resources whose declarations do not bound the pose, including coordinate movers such
+as KMR, are listed as `not_evaluated`.
+
+**How a run ends, validation off.**
+- Only the LLM ends the outline, with `decision: "recovery_complete"`. Code neither refuses nor
+  answers it. Code never ends the outline by itself in this mode.
+- Code then searches declared nominal events, at most 6 steps
+  (`multi_turn_diagnostic.nominal_connection`), including the interrupted tasks with their
+  recorded parameters, for actors not reported faulted. It records the connection, or
+  `not_connected_reasons`, in the draft and in the closing turn ("Handoff to nominal work — no
+  LLM call" in the UI). A wrong declaration is the user's recorded failure.
+- The only replies code sends back are format problems and an exact repeat of an accepted event
+  in the same state. The run stops after 3 refused replies in the same state
+  (`selection_unresolved`), on repeated lookups with nothing new (`NEEDS_CONTEXT`), or at 20 turns
+  (`outline_draft.DRAFT_MAX_TURNS`, a cost limit; lowered from 80 on October 19).
+- Custody is recorded in the turn audit, not enforced, when every check is off. Placing a part
+  elsewhere releases its holder. A reported fault clears only for a state value the resource's
+  model declares.
+
+**What code decides (state in the paper).** The failure facts and reach distances are computed
+by code, and the LLM compares them. Reach uses declared cylinder envelopes. The final nominal
+steps after the declaration are found by code. Nothing judges feasibility or safety yet.
+
+**Files.** `modes/multi_turn_outline_facts.py` (new), `modes/multi_turn_prompts.py`,
+`modes/multi_turn.py`, `modes/multi_turn_diagnostic.py`, `modes/multi_turn_validated_event.py`,
+`modes/multi_turn_context.py` (all under `agents/intelligent_product/replanner/llm_recovery/`),
+`recovery_framework/outline_draft.py`, `failure_grounding.py`, `slippage_execution.py`,
+`agents/intelligent_product/product_recovery_controller.py`, `ui/components/recovery_turns.py`,
+`ui/components/part_slippage_recovery.py`, `ui/recovery_evidence.py`. Tests:
+`test_multi_turn_diagnostic.py`, `test_outline_draft.py`, `test_failure_grounding.py`,
+`test_part_slippage_recovery.py`, `test_project_pages.py`, `test_recovery_request_records.py`.
+Full suite on October 19: 190 failed, 5,729 passed; the failures are the known baseline set.
+
+**Runs on `capture_77666affc1b9468ca157cf366d706dc8` (Part slippage, schema 2), under
+`environment_runs/recovery/outline_drafts/`.**
+
+| Draft | Model, effort | Calls | Result |
+| --- | --- | --- | --- |
+| `draft_4579f38026dd4b0b8091b46553d12fef` | gpt-5.4, medium | 8 | Uses the `state_variables` and `pose_relations` lookups and `pose`; KET4 to the buffer, ur5e-3 takes gear_small, clears ur5e-4, assembles; nominal `move_home`, `pick_approach`, `pick_grasp` of KET4. Exposed the unclear table, the fixed-list unknown rule and a stale location after a stated pose (all fixed October 19) |
+| `draft_f7c5a94605c54baf83e8a03a21076c9a` | gpt-5.4, medium | 5 | Clears ur5e-4, looks up reach, ur5e-3 sets KET4 down and assembles gear_small, LLM declares complete; nominal connection ur5e-3 `pick_approach`, `pick_grasp` of KET4 |
+| `draft_85ee4684d69a43d2b615e9af6aba4b71` | gpt-5.4, low | 5 | Same plan and connection |
+| `draft_8bfa737c6a444de3b8668acda31c05c0` | gpt-5.4, medium | 6 | Same plan (before declaration was required); two lookup turns wasted by a since-fixed rejection |
+| `draft_f2a9fb151f71496c8333cd3c43971853` | gpt-5.4, medium | 9 | Failed: omitted `held_part`, custody refusals looped; fixed by recording custody and releasing placed parts |
+| `draft_9fb1a36de41342cb8a360475da42c667` | gpt-4o | 8 | Failed: no lookups, invented capabilities (ur5e-1 "serves" the board), assembled the gear three times, invalid fields; stopped `selection_unresolved` |
+
+Earlier drafts in that folder are superseded attempts from prompt development. They are
+small (22 MB in all) and can be removed once the user agrees.
+
+**Known issues and follow-ups.**
+- The template has only been run on Part slippage. Machining
+  (`capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87`), Conveyor
+  (`capture_3aed616530294a4bbdf353000fc69596`) and ur5e-1
+  (`capture_d1ca51654ff7423193d1bd13b146964d`) are untested with it.
+- Machining (`capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87`), October 20, gpt-5.4 medium, every check off:
+  - `draft_afb0689f4e214ee0b425c411289cb6df` (6 events, 8 calls): ur5e-1 put KET4 "at Conveyor" and
+    ur5e-2 took it "from Conveyor"; no event moved it along the belt. M2's pause, the RGOCG4 unload and
+    the square trim on M2 match the intended recovery. KET4 stayed in M2 and RGOCG4 on the tray; the
+    handoff was not connected ("no sequence of up to 6 declared nominal events reaches its next task").
+  - Cause: both robots listed a bare `Conveyor`. The Conveyor's own declared model puts a part ur5e-1
+    places at `loading_position_1` and one ur5e-2 places at `loading_position_2` (`place_release`,
+    `part_location.{part_name}`); its `advance_conveyor` moves parts downstream only. Its recovery
+    descriptor lists `advance_conveyor` only for parts already on the belt, so the empty belt showed no
+    capabilities. M1's loading position (x −4.05) is upstream of M2's (x −2.05), so the belt can carry
+    a part from M1 to M2; the scenario file's "No conveyor route" line does not match the model.
+  - Fix (uncommitted): `multi_turn_outline_facts._placement_positions` states, for a reachable place
+    that keeps each part's position, where its own declared events put a part this resource places
+    there (`places parts on Conveyor at loading_position_1` / `at loading_position_2`). Runs 2 and 3
+    showed it as `Conveyor (loading_position_1)`; it became a separate item after run 3 copied that
+    text into its values. `outline_draft._inputs`
+    keeps each owner's declared events as `environment_model_events`, because drafts with every check
+    off drop `resource_evidence`. Tests: `test_a_reachable_place_states_where_its_own_events_put_a_part_placed_there`,
+    `test_draft_states_the_position_a_place_declares_for_a_resource_placing_there`. No re-capture: all
+    four captures' `beliefs.json` hold these declarations.
+  - Rerun `draft_a48f24ab977e4d07a16cd2bd30ec5b59` (11 events, 16 calls, 537 s): the positions were
+    shown, but the same transfer recurred (step 7 places KET4 on the Conveyor, step 9 picks it up, no
+    belt move). The Conveyor was looked up only in turn 15, and its snapshot still showed
+    `part_location.KET4_Square_4mm: null` after the placement: the unknown-values rule does not cover a
+    per-part variable whose values are positions. Also: M1, the faulted machine, unloaded KET4 to its
+    tray itself; ur5e-2 picked RGOCG4 up and put it back on the tray; M2's interrupted job was cleared
+    (`job_state` None) with no resume. Handoff not connected, same reason.
+  - User decisions (October 20): the LLM states a place's position in `place_end_state`; code never
+    picks it, so option (a) above (code records the declared position) is dropped. Run 2 is recorded as a
+    validation-off failure: the LLM had the positions and still planned an impossible pick. Expected to
+    be caught by RA feasibility with physical evidence (Eq. 12, ur5e-2's reach), not by CCA.
+  - Fixed (user, October 21; uncommitted), the joint transition of a part move: in $G=\Vert_i G_i$ a part
+    move also changes the place's owner, and the LLM states that part ($\nu_j(x^R_k)$, `place_end_state`).
+    - Records in view: `_displayed_fields` and `_resource_row` show a resource's part records even when
+      empty, namely held_part, variables whose declared values name parts, and per-part entries
+      (`zone_1_part none`; `part_location: none (values loading_position_1, …, output_nest)`). They also
+      show the place inside the resource that a record belongs to, from the owner's declared events
+      (`staging_part none (M2 staging tray)`; `multi_turn_outline_facts.declared_record_places`; only
+      events by another resource count).
+    - Unstated means "not stated": `_mark_places_unknown`, through `_place_records`, also covers a part's
+      own entry (`part_location.<part>`) and, for a place inside a resource, only the owner variables its
+      declared events set there (M2's `staging_part`, not the rest of M2). The Resources row, its header
+      ("state not stated") and the snapshot lookup show "not stated" (`multi_turn_diagnostic.NOT_STATED`)
+      instead of the old value; the Resources header says what it means. Code still never picks a value;
+      draft records keep "unknown" with the reason.
+    - Tests: `test_a_part_s_own_entry_on_a_place_reads_not_stated_until_the_event_states_it`,
+      `test_a_place_inside_a_resource_changes_only_the_owner_record_its_events_declare`.
+    - As for a whole place, naming the owner in `place_end_state` states its change; values left out
+      stay as they are (the rule's own wording). Only an owner the event does not name is marked.
+    - General fixes batch (user, October 21 night; uncommitted). Proposals came from a read-only
+      workflow (`wf_b4e15fd3-ed8`: six proposers and one reviewer). They were applied in the
+      reviewer's order (A7, A9, A1, A3, A2, A5-snapshot, A8, A6, C18, A4, A5 merged, B10 with fix,
+      which includes B11) and pass 1109 tests across nine suites. No resource, part or scenario names
+      appear in the added code, and no scenario words in the rendered prompts.
+      - A1 `multi_turn._projected_state_value`: the derived `pose` reads `current_pose`, so a first
+        stated pose no longer records a false "start condition unknown".
+      - A2 `_resource_row`: a pose an earlier event stated reads "last stated pose", not "last measured".
+      - A3 `_clear_pose_of_unheld_part`: a part keeps a stated pose only while the stating resource holds it.
+      - A4 `faulted_replaced_work`, `_public_pending_tasks`: in drafts, `pending_tasks` leaves out
+        replaced work that needs a resource still reported faulted (reviewer's option a; the user may revisit).
+      - A5 `current_values`: in drafts, `/resources/<name>/state_variables` adds each variable's current
+        value ("not stated" where an event left it unstated), as the parts lookup does (option a).
+      - A5-snapshot: the snapshot lookup shows "not stated" also after the first accepted event.
+      - A6 `with_named_domains`: a lookup domain names a resource listed by JID and by name once.
+      - A7 `declare_derived_conditions`: `processCompleted` only on resources whose declared events add to it.
+      - A8: "Recovery Events So Far" uses the reply format's key `resource`.
+      - A9 `_inside`: a pose lies in a region only if it states every axis the region bounds; the
+        recorded reason reads "no named place's recorded area contains the stated pose".
+      - B10 `_neighbor_guards`, `_declaring_neighbors`: the handoff entry check and the connection search
+        also check the guards another resource's own declared events put on a joint event (for example
+        where a part must be to be picked there). A neighbor that declares such events joins the search
+        scope, so its own events (`advance_part`) can connect. Unstated, private or undeclared neighbor
+        values are recorded as assumptions rather than blocking (defaults the user may revisit).
+      - B11 `_bookkeeping_assumptions`: a connection step's private guards are recorded as assumptions.
+      - C18 `_normal_work`, `_part_normal_work`: each Recovery Goal line names the recorded task that
+        normally produces it and the current reported fault of the resources it needs, for example
+        `KET4_Square_4mm: process trim, result square (normally M1's machine_part; M1 unavailable)`.
+    - Runs after the batch (October 21, 02:13; every check off; each part move stated its neighbor's change):
+      - Part slippage `draft_32973b0d353b4e5c8e1cb2c7882c8607`: intended recovery; handoff complete. The
+        connection now includes the buffer's own three `advance_part` steps (zone 1 to zone 4) before
+        ur5e-3's pick (B10), and records ur5e-3's bookkeeping guards as assumptions (B11).
+      - Conveyor `draft_ac13c4b5a95f48d1893714444b155be3`: handoff complete. Detour: ur5e-1 put KET4 on
+        the M1 tray, took it back and loaded it into M1, so the KMR could pick it at M1. The KMR's
+        declared reachable locations are Storage, M1 and M2, not the trays, while the intended recovery
+        has the KMR collect from the M1 tray. Setup question: does the KMR reach the trays?
+      - Machining `draft_85d421ca5e4e4264a40a7c8434b42518`: paused M2, stated the belt position. Errors:
+        ur5e-2 took KET4 from `loading_position_1` (LLM; RA with physical evidence); M2 itself moved
+        RGOCG4 to its tray (LLM; no primitive, RA); completion once KET4 was trimmed, leaving RGOCG4
+        paused on the tray (LLM, with a missing fact: M2's line then shows only `job_state completed`,
+        and RGOCG4's paused job is out of view, item 14). Handoff correctly not connected.
+      - ur5e-1 `draft_e86e5ac20cc042d08f23a917a0497041`: handoff complete with the Conveyor assumption;
+        the KMR placed KET4 on the M2 tray, which is not among its declared reachable locations (LLM,
+        or the same tray-reach question); ur5e-2 then put it on the belt at `loading_position_2`.
+      - No clear code bug found, so no extra round. Only the stale `goal_lines` docstring was corrected:
+        the handoff status is never told to the LLM, by design.
+    - Fixed (user, October 21 morning; uncommitted):
+      - Item 14, jobs by part: `multi_turn_diagnostic.machine_jobs` and `_project_machine_jobs` keep
+        each resource's recorded jobs. A stated `job_state` changes the job of the part the resource
+        holds, or else its last retained job, as the declared variable's description says. A job stays
+        recorded when its part leaves. The Resources row shows them
+        (`jobs: RGOCG4-50_Round_4mm running (processing_fraction 0.051)`). The connection search
+        branches copy the record (`_branch`). Test:
+        `test_a_machine_keeps_each_job_by_its_part_so_a_paused_one_stays_in_view`.
+      - Bias items 2 and 3, prompt wording: the Task line now reads "only your recovery events change the
+        planned state; a job already running keeps running until an event pauses or stops it", and the
+        Recovery Goal header "Your events, and then normal production's remaining planned tasks, must
+        achieve it" (it was "Your events can achieve it, or leave the rest to normal production").
+      - 1110 tests pass across nine suites.
+      - Runs (09:57): Conveyor `draft_3e0bf4838fed4f7ababcef0f32c055ed` follows the intended recovery in
+        two events (ur5e-1 to the M1 tray, the KMR from the tray to buffer zone 1). Part slippage
+        `draft_7b6ae5719a2c4c58b438f95e6fb03d3b` is the intended recovery. ur5e-1
+        `draft_8a8b775ad1044d559f64e42d7c7e9159` takes the KMR, M2 tray, ur5e-2, belt route; it also
+        paused M2 "for recovery access" and never resumed it, yet the handoff reads complete (M2's next
+        entry guards only that M2 is loaded with RGOCG4). Machining `draft_7f6a8c0699f0400c8d721f4b3d81666d`
+        showed `jobs: RGOCG4-50_Round_4mm none`: a stated null `job_state` (no active job) was taken as the
+        job's state. Fixed: a null `job_state` leaves retained jobs as they are (test extended).
+      - Machining rerun `draft_9fff66c30f1745d38fbf7df88bdabdef` (14 calls): paused M2, staged RGOCG4,
+        stated every tray and belt change; the last prompt showed `jobs: RGOCG4-50_Round_4mm paused,
+        KET4_Square_4mm completed`. It still declared completion once KET4 was trimmed ("satisfies the
+        interrupted recovery goal"), with RGOCG4 paused on the tray; handoff not connected. It also took
+        KET4 from `loading_position_1` (LLM; RA) and moved RGOCG4 off and back onto the tray. Open (user
+        decision): the Recovery Goal covers only the interrupted outcome, and nothing states the paper's
+        handoff condition H, that normal production's remaining planned tasks must be able to continue.
+      - Decided (user, October 21): the completion rule states H (Eq. 6): "When you judge that normal
+        production's remaining planned tasks can continue from the state your events leave, return only
+        `thought` and `decision: "recovery_complete"`; normal production then takes over." It was "When you
+        judge the failure handled … normal production then takes over where it can", which contradicted
+        the paper. The LLM still decides completion; no verdict is given. The next-planned-task fact was
+        declined, as a fact surfaced only because a run failed.
+      - Prompt frozen (user, October 21). From here the outline prompt changes only where it disagrees with
+        the paper's formal definitions or where code states a fact wrongly. Other failures are LLM reasoning,
+        left to validation (Algorithm 1) and reported as validation-off results. Next: the validation-only
+        fixes (fingerprint and the rest), then the RA plus physical evidence trial.
+      - Machining with the frozen prompt, `draft_d84e7ef79e5a4cfd93abf0e2d781b6bf` (20 calls, 1264 s,
+        `draft_incomplete`, turn budget). The completion rule worked: it kept going after KET4's trim. It
+        reasoned "KET4 is stranded at Conveyor.loading_position_1, where ur5e-2 cannot take it to M2
+        directly", and used the KMR from the belt to M2; M2 trimmed KET4. Validation-off result (LLM
+        reasoning): step 3 stopped RGOCG4's job to select square despite `restart_stopped_jobs false`, so
+        H can never hold (pause-versus-stop trap; RA and CCA accept a declared stop, only H fails); step 1
+        used `interrupted` instead of `paused`; KET4 went belt, tray, belt (steps 4-8), spending the
+        budget. No code bug: M2's row read `jobs: RGOCG4-50_Round_4mm stopped, KET4_Square_4mm completed`.
+    - Bias review (October 21): no scenario words in the prompts, no resource names in the code, the
+      same seven safety files for all four scenarios, the same structure for every resource. Sources of
+      bias: (1) which facts were surfaced was chosen from these four runs' failures (medium; check on
+      held-out failures); (2) the Recovery Goal header "or leave the rest to normal production" invites
+      deferring work (medium); (3) the Task line "Until normal production takes over, only your recovery
+      events change the state" hides that running jobs progress (medium; the paper's monitors cover
+      running tasks); (4) omissions steer too: reach numbers, the Conveyor's movement, retained jobs,
+      the KMR's pose (low to medium); (5) a fault is repeated in Failure, Resources and Goal (low).
+    - Configuration note (setup data, not a framework bug; user, October 21): ur5e-1's and ur5e-2's
+      declared workspace bounds (`gripper_reach`, "computed from the robot kinematics for a top-down grasp
+      of a loose part", `workflow_execution._computed_gripper_reach`) span z 0.75–0.90 m from a base at
+      z 0.80, but their work places lie higher: `M1.staging`/`M2.staging` z 1.00–1.12,
+      `M1.workholding`/`M2.workholding` z 0.94–1.18, `Conveyor.loading_position_1`/`_2` z 1.015–1.065.
+      ur5e-3/ur5e-4 (base z 1.021, band 0.971–1.121) cover theirs. With RA on, correct tray, machine or
+      belt events of ur5e-1/ur5e-2 may be refused on reach height; fix the configured band or base height.
+    - Renamed (user, October 21): `place_end_state` is now `neighbor_end_state` in the prompt rule, the
+      reply format, the code (`_apply_neighbor_end_state`, `_candidate_neighbor_end_state`,
+      `schema_with_neighbor_end_state`, `_NEIGHBOR_END_STATE_RULE`), the Recovery turns column
+      ("Neighbor changes") and the tests. The name follows the semiconductor framework, where resources
+      that share a product state are neighbors. Drafts saved earlier keep `place_end_state`, which the
+      turns view and `OutlineDraft._named_record` still read. Entries above dated before October 21 keep
+      the old name.
+    - Runs, October 21 (00:36, all four scenarios, every check off): the LLM stated the place's change
+      for every part move (10 of 10; no "not stated" marks). Part slippage
+      `draft_c2e626318b0f4be5b2bdd4afbae483e5` and Conveyor `draft_c0fe26c3fc034fb193c467105bb1ca3e`
+      match their intended recoveries and hand off. ur5e-1 `draft_63aad79537be495b9764a4bb85ded9ab`
+      follows the intended KMR-to-belt route (KMR places KET4 at loading_position_1) and hands off with
+      the Conveyor assumption. Machining `draft_c652e2ee2c1047e898ab5c78d11071c9` stated every tray and
+      belt change, but ended with KET4 on the belt, saying normal production would carry it to M2 and
+      trim it (LLM reasoning; the handoff check reports the goal does not hold).
+  - Rerun `draft_2ec9936ee5d94a2d805a21f273bca4b2` (7 events, 11 calls, 518 s), same code: ur5e-1
+    unloaded KET4 from M1 to its tray; ur5e-2 unloaded RGOCG4 to M2's tray; the LLM reasoned with belt
+    positions and stated `Conveyor: part_location.RGOCG4-50_Round_4mm = loading_position_2` in
+    `place_end_state`. Failures: (1) it copied the display text into values (`part_location` and
+    `resource_location` "Conveyor (loading_position_1)"), which no check flagged; (2) it declared
+    completion with KET4 untrimmed on the belt ("normal production can complete the trim step"); the
+    handoff check refused it (Recovery Goal does not hold; M1 is still faulted); (3) it put the untrimmed
+    RGOCG4 on the belt, cleared M2's interrupted job, and moved the KMR to M1 and then Storage for no use.
+  - Done (user, October 20): the position is a separate item (`places parts on Conveyor at
+    loading_position_1`), so a copied place name is always a declared one.
+  - Run 4 `draft_1fe8f59879214db6b4b9908b178c1614` (8 events, 10 calls, 437 s): M2 paused; ur5e-1
+    unloaded KET4 to M1's tray; the KMR left M2 (rule 3); ur5e-2 unloaded RGOCG4; no copied display text.
+    Errors: (1) the same belt transfer (ur5e-1 places KET4 on the Conveyor, ur5e-2 loads it from there,
+    no belt move); LLM reasoning, expected to be caught by RA feasibility with physical evidence;
+    (2) no `place_end_state` for the Conveyor; LLM, plus the deferred unknown fix; (3) M2 stopped
+    RGOCG4's paused job to select square, so RGOCG4 can never resume; a missing fact, not reasoning:
+    M2 declares `job_control` (`resume_after_reload: true`, `restart_stopped_jobs: false`), but drafts
+    hide `job_control` (`outline_draft._HIDDEN`), and no recorded decision explains why; RA would accept
+    a declared stop and CCA has no rule against it, so validation does not supply it; (4) declared
+    complete with KET4 in M2 and RGOCG4 not resumed; LLM, refused by the nominal-continuation check
+    once it is on.
+  - Fixed (user, October 20; uncommitted): `job_control` is no longer in `outline_draft._HIDDEN` (the
+    set was added whole with the file in `c40aba2`, with no stated reason for it), and
+    `multi_turn_outline_facts._capabilities` states a resource's declared job-control flags by name and
+    value: `M2 … job control: resume_after_reload true, restart_stopped_jobs false` (M1 too). The
+    Resources header lists "where it places parts" and "job control". Tests:
+    `test_a_resource_states_its_declared_job_control_flags`,
+    `test_draft_states_a_resource_s_declared_job_control`.
+- All four scenarios, October 20 (22:31, user request; gpt-5.4 medium, every check off, settings and
+  safety files from each capture's latest draft; script `scenario_run.py` in this session's scratchpad).
+  Errors were classified by a read-only workflow (one analyst and one verifier per draft).
+  - Part slippage `draft_66d30ad65cc84e959dc726686fd62ae3` (4 events, 8 calls): matches the intended
+    recovery; handoff connected. The handoff holds only on ur5e-3's reduced pick model: the buffer's
+    own joint pick guard needs KET4 in `zone_4_part`, and the LLM put it in zone_1 (code check gap;
+    nothing in the prompt says where nominal work picks from the buffer). gear_small's process record
+    never gets the assembly that rule 5a reads.
+  - Conveyor breakdown `draft_87419318b57546379276f2f33257d0cb` (3 events, 7 calls): matches intended
+    steps 1–2; handoff connected on the LLM's stated `zone_1_part` only. LLM pose errors: the KMR's
+    buffer base pose lies inside the Conveyor footprint, and its tray pick pose cannot reach the tray.
+  - Machining `draft_0ca75fb5df3f4b298a1f389cafc14071` (7 events, 10 calls): stated
+    `Conveyor: part_location.KET4_Square_4mm = loading_position_1`, paused rather than stopped, but
+    ur5e-2 again took KET4 from loading_position_1, and step 7 "resumed" RGOCG4's paused job as KET4's
+    square trim. RGOCG4 was left paused on the tray; handoff correctly not connected.
+  - ur5e-1 breakdown `draft_42e06025bc8242978f07833491afdd25` (5 events, 8 calls): the handoff reads
+    complete but is not trustworthy. The check's only required entry is M2's RGOCG4 trim, which held at
+    capture; KET4's resumed Conveyor entry is dropped without notice (code check gap). KMR base poses
+    are physically impossible; part_state "completed" is a product-tracker value no resource declares.
+  - Validation set-up, verified in code: OutlineDraft refuses all three checks at once
+    (outline_draft.py:204), and only OutlineDraft uses this prompt (`outline_diagnostic_bypass`), so
+    all three checks run the validated workflow with the old prompt. CCA without physical evidence
+    cannot evaluate the selected occupancy rules (outline_checks.py:59). With any check on,
+    `place_end_state` is not offered (multi_turn.py:2462, 3770), and RA and CCA do not read it.
+    Expected from static reading only: with RA on in a draft, RA may answer NEEDS_CONTEXT on every
+    robot and KMR event, because drafts add derived `pose`/`processCompleted` to the models.
+  - Fixed (user, October 21; uncommitted): the handoff check no longer drops a resumed entry that no
+    declared event binds. `multi_turn_diagnostic.unbound_resume_entries` states each one, and `handoff`
+    adds it to `assumptions` ("no declared event of <resource> binds the resumed <function>; whether
+    nominal work continues there is not checked"). `required_nominal_entry_ids` is unchanged, so no
+    obligation changes. The draft message and the Recovery turns "Handoff to nominal work" card show
+    "assumed, not checked: …" next to "takes over". Of the four captures, only ur5e-1 has such an entry:
+    the Conveyor's `advance_conveyor` `pending_4` (its events are grounded on the empty belt at capture).
+    A replay of `draft_42e06025…` now records that assumption; saved drafts keep their old records.
+    Tests: `test_a_resumed_entry_no_declared_event_binds_is_stated_as_not_checked`, and the handoff
+    card case in `test_closing_turn_shows_the_nominal_handoff_by_resource_name`.
+  - Trial, RA feasibility plus physical evidence on (CCA off), Machining,
+    `draft_ed7cd24af1e24a24b1f0a6580a7cc419` (3 calls, 178 s): `NEEDS_CONTEXT`. RA refused every
+    candidate with "Resource declarations changed after capture" (outline_validation.py:377-379).
+    Cause: with checks on, `OutlineDraft` gives each resource its owner's model, then
+    `declare_derived_conditions` adds the draft's `pose`/`processCompleted` to that same model;
+    `validate_partial_event` fingerprints the extended model (outline_checks.py:146-150), and the owner's
+    own model no longer matches. RA also treats `pose` as undeclared (static reading), so the fingerprint
+    alone may not be the last blocker. Next step: the user's choice of fix.
+- Conveyor: the handoff is refused while the resumed work needs the broken Conveyor; a later
+  resume point is not chosen yet. The Conveyor declares no `resource_state` domain, so the
+  fault-clearing rule falls back to "state no longer equals the report".
+  - First run, `draft_7199f1650ca741a1948360ac0728b14d` (gpt-5.4 low, stopped by the user after
+    7 calls): ur5e-1 moved KET4 between the M1 staging tray, M1 and home five times and never
+    declared complete. Causes: (1) the Recovery Goal is the broken Conveyor's own fields
+    (`next_locations`, `delivered_part`), which no other resource can produce; (2) the capture
+    resumes nominal work at ur5e-1 placing KET4 onto the Conveyor, and its recorded handoff
+    conditions contradict each other (KET4 in ur5e-1's gripper and at `Buffer For Machined
+    parts`); (3) KMR declares only Storage, M1 and M2, and nothing in the prompt shows that it can
+    move to coordinates. Next step: resume at the first recorded entry that needs no faulted
+    resource (ur5e-3's pick from the buffer), state the goal as KET4's outcome there, and decide
+    how a coordinate-move capability is shown.
+  - Fixed October 19 (uncommitted): `multi_turn_diagnostic.resume_after_faults`, called by
+    `OutlineDraft`, moves resumed tasks that need a faulted resource (as actor or as a place) into
+    the replaced work and drops their recorded handoff conditions (`source_task_id`).
+    `handover_conditions` then states the goal as what the remaining resumed work needs of those
+    parts at their next remaining step. `resume_entries` keeps, per part, only the earliest resumed
+    entry in recorded plan order (a task's part is its `part_name`, else a known part another
+    non-place parameter names, such as `next_locations`); later steps follow from nominal work, so
+    their recorded conditions (`entry_conditions`) and entries are not handoff requirements. The
+    Conveyor goal is therefore "Buffer For Machined parts: zone_1_part KET4_Square_4mm" (the buffer
+    entry's declared guard; ur5e-3's later pick no longer counts). The ur5e-1 breakdown now restarts at
+    M2 and the Conveyor instead of also requiring the buffer and ur5e-3. Part slippage, Machining and
+    ur5e-1 breakdown goals are unchanged (checked by diff). An offline replay of ur5e-1 → M1 staging
+    tray, KMR → buffer, buffer receives KET4 in `zone_1_part` hands off to the buffer and ur5e-3;
+    without the buffer event, the handoff is recorded as not connected. The draft turn budget is now
+    20 (D). Coordinate moves (C) are still open; no live Conveyor run yet.
+  - Second run, the first with the buffer goal: `draft_6d122269bb53462f9059af8431928557` (gpt-5.4
+    medium, 7 calls, 4 events, stopped by the user on October 20). ur5e-1 set KET4 down at M1, moved
+    it to the M1 staging tray, took it back home and "stabilized" at M1. No turn mentioned the
+    buffer, the goal or the KMR, and the KMR was never looked up. Causes: (1) the Failure section
+    kept saying "KET4_Square_4mm: in_gripper, held by ur5e-1" as measured, while Resources said "not
+    re-measured", so the LLM undid its own steps ("The freshest failure report says ur5e-1 still has
+    KET4"); (2) it planned no route to the goal and waited for others ("pending conveyor recovery",
+    "for replan", "manual intervention"). The KMR row already shows it holds parts, works at M1 and
+    moves to any position, so no resource-specific change was made.
+  - Fixed October 20 (user-approved, uncommitted), wording only, in `_render_failure_outline_prompt`:
+    - Task and Role: "Until normal production takes over, only your recovery events change the
+      state." Between $s_F$ and $s_N$ only recovery events occur (Eqs. 5–6), with no human steps.
+    - "Plan how to get from the current state to the Recovery Goal. Propose 1–5 ways to do the next
+      step of that plan, then choose one with `selected_candidate_index`." `thought` gives the plan
+      in two short sentences (§5.1). The validated wording keeps "Do not select or rank candidates".
+    - Once events exist, the Failure header reads "What was detected and measured at the failure,
+      before your events. Resources and Parts below show the state after them." ($x_F$ versus
+      $x^R_{k-1}$.)
+    - Rejected by the user: "Normal production does not use a resource that has a fault". A faulted
+      resource may still act through its primitives (the RA judges), and an event can leave a fault
+      by setting another declared state; Part slippage's ur5e-4 reports `resource_state failed`.
+      Kept 1–5 candidates: they are $R_{\text{neural}}$, the validated mode checks each, and the
+      validation-off ablation keeps the same output.
+    - Test: `test_the_prompt_asks_for_a_plan_and_dates_the_failure_facts_once_events_exist`.
+    - Next: the user restarts the UI and reruns Conveyor (medium), then Part slippage once. Delete
+      the failed attempts `draft_6d122269…` (1.2 MB) and `draft_7199f165…` (1.1 MB) after the rerun
+      is compared.
+  - Third run, after those fixes: `draft_8bf5b6d05b6642098baedd8e25211852` (gpt-5.4 medium, 7 calls,
+    3 events, status `draft`). ur5e-1 stages KET4 on the M1 staging tray; the KMR takes it at M1;
+    the KMR places it in the buffer at pose (-0.68, 0.5, yaw 0); the LLM declares complete
+    ("ur5e-3 already has pending work to pick it from the buffer"). The handoff is complete with no
+    nominal steps; zone_1_part and zone_2_part count as assumptions because code marked the buffer's
+    zones unknown (the KMR event cannot state the buffer's variables). The thoughts aim at the goal
+    (turn 2: "The Conveyor fault blocks the intended transfer path from M1 toward the machined-parts
+    buffer"); it looked up the KMR in turn 1 and ur5e-3's and the KMR's pending tasks in turn 4.
+    For validation later: the stated KMR pose is the zone-1 slot itself, so the platform would stand
+    inside the buffer (RA); ur5e-1 stays at the M1 staging tray while the KMR works at M1
+    (`SAFE_M1_mutex`, CCA).
+  - Fourth run, with `place_end_state` and the shorter rules: `draft_0aa3406e820345c8bb72224a2ed9ef14`
+    (gpt-5.4 medium, 9 calls, 5 events). ur5e-1 stages KET4 on the M1 staging tray (states M1
+    `staging_part` = KET4 in `place_end_state`) and goes home to free M1; the KMR takes KET4 (states
+    `staging_part` = none), parks at (-1.35, -0.1, yaw 1.57) off the conveyor and buffer footprints;
+    ur5e-3 takes it from the KMR and sets it in the buffer (states `zone_1_part` = KET4 and the KMR's
+    `held_part` = none). The LLM declares complete; the handoff is complete with no assumptions and
+    no unknown lines. User question: why does ur5e-3 not assemble KET4 right away? The goal is the
+    restart condition of KET4's next planned step (the buffer's first advance), and the handoff only
+    lets normal production restart there; skipping planned steps whose outcome the recovery already
+    reached is not supported (an option for the user, see the October 20 answer).
+  - Checked October 20 (offline replay, scratch `kmr_route_replay.py`): a KMR route (ur5e-1 sets
+    KET4 down at M1; the KMR fetches it, drives beside the buffer and sets it in zone 1) and a
+    handover route (the KMR brings it, ur5e-3 sets it in the buffer) both end, after
+    `recovery_complete`, with a complete handoff. The buffer's zones are unknown after the transfer
+    and recorded as assumptions; only `goal_reached` stays false, which validation-off drafts do not
+    use. So the plan is reachable with the current code.
+  - Fixed October 20 (user-approved, uncommitted): `/resources/<name>/snapshot` of a resource an
+    event changed served failure-time values the projection never updates (live turn 5: ur5e-1
+    "placed" at the M1 staging tray with `gripper_state closed`, `held_part_location ur5e-1`); the
+    LLM had asked for it to settle its doubt. In a validation-off draft, `public_resource_snapshot`
+    now keeps, for a resource named by an accepted event or its `condition_changes`, only its
+    declared variables plus `_PROJECTED_SNAPSHOT_FIELDS` (identity, availability, pose records).
+    The rule sits before the version-2 early return that drafts take after the first event; the
+    validated path is unchanged. The Knowledge Base line now reads "every recorded value of a
+    resource; once your events change it, its expected values after them". Replaying the live run's
+    two events, the ur5e-1 snapshot is `{availability, named_poses, resource_jid}` plus the fields
+    the rows show. Test (accepts the event through `handle_validated_candidates`):
+    `test_a_changed_resource_snapshot_leaves_out_its_failure_time_values`.
+  - Open (not fixed, October 20):
+    - Fixed October 21: the reply format omitted resources that declare no `resource_state`
+      (buffer, Storage, Conveyor), so they could not have their own events, while the event check
+      would accept them (`_outline_candidates_response_schema` did not pass `declared_fields_only`).
+      It now passes the flag, and the contract-2 format is the same for every resource (see "Reply
+      format and checks"). Outlines drafted before this used the per-resource format, so re-run
+      them before comparing results. Test: `test_contract_2_outline_event_gives_only_its_form`.
+    - `/resources/<name>/pending_tasks` serves the recorded list, so it still shows replaced work
+      and a faulted resource's tasks as pending.
+    - Physical estimate from the review (unverified): buffer zone 1 is in the KMR arm's reach only if
+      the platform parks within about 5 cm; the buffer holds parts lying flat while the KMR places
+      upright; a KMR pick at M1 has never run live. This is for RA feasibility later.
+- ur5e-1 breakdown: M1 area bounds make ur5e-1 read as outside M1.
+- ur5e-1 breakdown goal: its Recovery Goal prints task parameters ("KET4_Square_4mm:
+  origin_resource_location M1, destination_location Conveyor, reserved_by ur5e-1, loading_position
+  loading_position_1") because ur5e-1's place onto the Conveyor declares no part effect and the
+  Conveyor's next step (`advance_conveyor`) declares no guard; the capture records no condition for
+  it either. Fix in the model declarations (a part effect on the place, or a Conveyor guard on the
+  loading position) when working on that scenario; this may need its models re-derived.
+  - First live run, October 20: `draft_16cfbce326e84d348411389ae6a15513` (gpt-5.4 medium, 3 calls,
+    1 event). The failed ur5e-1 redoes the failed grasp ("secure_KET4_Square_4mm_for_transfer") and
+    the LLM declares complete, leaving the Conveyor placement to ur5e-1; the KMR is never looked at.
+    The goal line names ur5e-1 (`reserved_by ur5e-1`), and the fault clears because the event gives
+    ur5e-1 a declared state ("picked"). The handoff check is empty for this capture: it reports
+    `complete` even before any event (the replaced place declares no effect, "completion assumed",
+    and no condition names KET4), so its "handoff complete" means nothing here.
+  - Intended recovery (the capture's design, generic KMR abilities): ur5e-1 moves home; the KMR picks
+    KET4 at M1, drives carrying it beside the conveyor and releases it on the belt (verified live
+    October 15); normal production carries it on. Alternative: the KMR brings it to M2's staging
+    tray and ur5e-2 loads the belt.
+  - Fixed October 20 (user-approved "fix 1", uncommitted): a replaced final step whose own model
+    declares no event for it is now checked by its part reaching the step's destination
+    (`multi_turn_diagnostic.destination_outcome`), in the goal text (`_work_outcome`), in
+    `_replaced_finals`/`open_replaced_work`/`goal_reached`, and in `_claim_interrupted_work` (only
+    the part resting at the destination, with no resource holding it, claims it, reason "<part>
+    reached <destination>"; an acting resource's same-named event no longer does). After the code
+    review: the step is open whenever the part does not rest at its destination (a later move away
+    reopens it), already-claimed work is not claimed again, and a resource's JID and name count as
+    the same destination (`_at_destination`). Four-capture diff: only ur5e-1 changes; its goal is
+    "KET4_Square_4mm: part_location Conveyor", and the handoff is no longer complete before any event.
+    Offline replays (scratch `ur5e1_routes_replay.py`): the intended KMR route claims the step and
+    hands off with no assumptions; the live run's retry also hands off, but visibly, through nominal
+    steps by ur5e-1 (`place_approach`, `place_insert` to the Conveyor), because its "picked" state
+    clears the fault. Test:
+    `test_a_replaced_step_its_model_cannot_describe_is_done_when_its_part_reaches_its_destination`.
+  - Next: re-run ur5e-1 breakdown once; if the LLM still has ur5e-1 grasp again, record it as a
+    validation-off failure that RA feasibility should catch (a grasp by a gripper that reports
+    failed).
+  - Step 2 note: the captured robot and Conveyor models are reduced (no `place_release` onto the
+    Conveyor, no Conveyor events); `nominal_des.py` declares them, and RA needs them.
+  - First run on the new capture: `draft_fbc45b44cbcc4fadae005eca67c96e51` (gpt-5.4 medium, 4 calls,
+    1 event). With "gripper not working" in the Failure section the LLM says "ur5e-1 cannot finish
+    the pick" and has the KMR move KET4 from M1 onto the Conveyor at loading position 1, stating M1
+    `part_name` none and the Conveyor slot in `place_end_state`; then `recovery_complete`. Handoff
+    complete. But ur5e-1 stays at M1 while the KMR works there ("retreat_failed_robot_from_M1" was a
+    candidate, not chosen), which breaks `SAFE_M1_mutex` during the KMR event; with validation off
+    nothing checks it (the handoff check only looks at shared areas at handoff). Record as a
+    validation-off safety failure; CCA (Eq. 13) should refuse the KMR event and send the LLM back to
+    move ur5e-1 first. Also: "interrupted place_approach completed" was credited through the KMR's
+    own same-named event (fixed effect `resource_state positioned`), a matching flaw the
+    complete-models work fixes.
+  - Follow-up (user, October 20): the area lookup told the LLM ur5e-1's position is in no M1 area
+    because it tests one measured point (the tool point, z 1.30, above `M1.workholding`), while the
+    recorded geometry shows the arm occupying `M1.front_access` and `M1.workholding`. The user judged
+    reporting that occupancy in the prompt to be biased (it states the fact that triggers the rule),
+    so it is not added. Only the wording changed: the pose_relations Knowledge Base line and the
+    lookup's basis now say "(one point, not its full extent)".
+  - Second run on the new capture: `draft_c92ace1067984b9096a6c2830229ed06` (same turn-1 facts as
+    `draft_fbc45b44`, plus the "(one point, not its full extent)" wording). This time the LLM first
+    moves ur5e-1 home ("First clear M1 so another recovery path can move KET4"), then invents
+    `reset_gripper_fault` (ur5e-1 back to idle) because "ur5e-1 is the only resource that can reach
+    both M1 and Conveyor", and re-picks KET4 with ur5e-1. Code accepts the reset with validation off
+    (a declared state leaves the reported fault); RA would refuse it (no primitive repairs a broken
+    gripper). Two runs, two different lapses: safety (fbc45b44) and feasibility (c92ace10).
+  - Option B (user, October 20): the report now says the gripper fault is a hardware fault that
+    needs repair, so a reset is not a valid reading (`failure_checkpoints.ROBOT_BREAKDOWN_GRIPPER_CONDITION`,
+    used by the fault injection and checked by `evaluation_capture`). `ur5e1_10` captured
+    `capture_b2d4286af67c4567b4bc0d0fd5ee55c7` (exit 0, verified, same starting state); its Failure
+    line reads "device_fault_report (ur5e-1): resource_state failed, gripper not working (hardware
+    fault, needs repair), reported_by gripper object detection". The default "ur5e-1 breakdown"
+    observations point to it. The two earlier ur5e-1 captures (`capture_d1ca5165…`,
+    `capture_129c6057…`), their run folders `ur5e1_08/` and `ur5e1_09/`, and their four drafts
+    (`draft_16cfbce3…`, `draft_0d6613d3…`, `draft_fbc45b44…`, `draft_c92ace10…`) were archived to
+    `/home/jongh/recovery_archives/20261020_ur5e1_superseded_captures/` (sha256 manifest, verified)
+    and deleted on October 20 at the user's request: 370 files, 1.16 GB. The list is in
+    `recapture_v2_20261015/ur5e1_08_09_deletion_list.json`.
+  - Complete-models investigation (October 20, read-only, workflow `wf_a4e9df59-85f`; proposal,
+    not implemented, pending the user's decision):
+    - Every capture stores the complete nominal plant in `physical_evidence.environment_models`
+      (12 resources, shared events by `event_id` with one side per participant = G = ||_i G_i;
+      `environment_models.project_transition` replays the recorded steps). All 31 recorded plan
+      steps of the four captures are declared there; the reduced `recovery_des_model` misses 6
+      (robots come from the robot task registry: no `place_release`; the Conveyor's converted model
+      has 0 events because its events are grounded on the empty belt at failure time).
+    - Swapping the models in directly breaks the working Part slippage draft and the ur5e-1 goal
+      (the matching code reads only the reduced format).
+    - Proposed design: keep the reduced model for everything the LLM writes (schema, capabilities,
+      place_end_state checks, derived pose/processCompleted, composition); bind each recorded plan
+      step to its declared joint event (all participants' sides) when the draft is created and use
+      that for the goal, claims, handoff H (guards of every participant) and the nominal redo; a
+      completeness check; then remove the destination fallback. Prototype: 31/31 bound, both
+      known-good drafts still hand off, prompts unchanged except two Part slippage lines; the
+      ur5e-1 handoff becomes stricter (the Conveyor's next step's guards).
+    - Two reviews ("revise") found what a complete version must also do: treat spliced recovery
+      nodes (a failure during a recovery) as accepted events, not model gaps; decide fault blocking
+      by participants, not location parameter names; treat a faulted participant's guards as unmet
+      (x_F, no fault value in the complete models); include product effects in claimed outcomes;
+      a generic alternatives policy (filter by joint guards); one joint-guard evaluator for H, redo
+      and the bounded search; move the s_N search to the complete plant (the prototype's ur5e-1
+      retry produced a wrong connection: a free registry approach to the board, then E#33); check
+      participants' guards on redo; one name/JID rule for written values; re-check claimed outcomes
+      at handoff; leave `outline_checks.validate_partial_handoff` rows unchanged. Estimate 2–3 days.
+  - Re-captured October 20 (user-approved): the ur5e-1 and Part slippage fault reports were
+    word-for-word the same ("failed", "gripper object detection") although only ur5e-1's gripper is
+    broken, so the LLM read ur5e-1's fault as a missed grasp and retried it (`draft_0d6613d3`,
+    stopped). Changes: `conveyor_fault._report_gripper_fault` adds `"gripper": "not working"` to
+    ur5e-1's report (Part slippage's report is unchanged); `failure_grounding` passes every other
+    recorded condition of a device report through as the device's own words (`_REPORT_FIELDS`);
+    `evaluation_capture._verify_robot_breakdown_capture` requires the condition. `ur5e1_09` captured
+    `capture_129c605761a940ba841b02ab243da444` (exit 0, verified, same starting state as
+    `capture_d1ca5165…`). Its Failure line reads "device_fault_report (ur5e-1): resource_state
+    failed, gripper not working, reported_by gripper object detection". The default "ur5e-1
+    breakdown" observations now point to it (`part_slippage_example._DEFAULT_OBSERVATIONS`). Paper:
+    A.1 (relevant resource conditions are observable). That capture was retired on October 20 with the
+    other superseded ur5e-1 data (archived first; see the option B entry).
+  - Live runs on the option B capture (October 20, gpt-5.4 medium, all checks off, run by Claude at
+    the user's request):
+    - `draft_df4f2479…` (ur5e-1): ur5e-1 moved out of M1 to the Conveyor (loading_position_1); the
+      KMR took KET4 from M1 and placed it on Conveyor loading_position_2 from pose (-2.05, -0.2, 0),
+      stating the Conveyor's slot; the LLM declared complete; handoff complete. No gripper reset.
+    - Code bug found there and fixed (user-approved): a take whose end state gives the part
+      `part_location: null` cleared the part's holder (`multi_turn_diagnostic._release_holders`
+      compared the holder only with the new location), so the prompt read "KMR … holds
+      KET4_Square_4mm" beside "KET4_Square_4mm completed, not held, not at any station" and the
+      table showed "held_by None — code (it was placed elsewhere)". Now code never overrides a
+      `held_part` the event states (the acting resource's end state, or `place_end_state` for another
+      resource): a stated taker stays the part's holder whatever location the part is given, and only
+      holders the event does not mention are released ("… is now held by <resource>"). Tests:
+      `test_a_resource_that_takes_a_part_holds_it_whatever_location_it_states` and a hand-over with
+      no location in `test_a_stated_holding_change_on_another_resource_is_also_the_parts`.
+      Replaying `draft_df4f2479…` gives "held by KMR" and the same handoff as recorded; the fix adds
+      no value the LLM did not state.
+    - Reruns with the fix, all declared complete with a complete handoff: Part slippage
+      `draft_4c0880a7…` (ur5e-4 retreats; ur5e-3 returns KET4 to the buffer, picks gear_small and
+      assembles it; nominal work re-picks KET4), Conveyor `draft_1f98b50e…` (ur5e-1 stages KET4 on the
+      M1 staging tray; one KMR event takes it to buffer zone 1, stating M1's and the buffer's changes),
+      ur5e-1 `draft_a3c0ad20…` (ur5e-1 to the M1 staging tray; the KMR takes KET4 from M1, "held by
+      KMR", and places it on the Conveyor).
+    - LLM choices left for RA/CCA (coverage check in progress): KMR end poses on or overlapping the
+      Conveyor footprint ((-1.35, 0.5) and (-5.0, 0.5)); the faulted ur5e-1 parked next to where the
+      KMR then works; one KMR event spanning drive, pick, drive and place.
+    - Open (asked by the user): with no `place_end_state` for the Conveyor, its per-part slot
+      `part_location.<part>` keeps its old value (null) while the part reads "at Conveyor":
+      `_mark_places_unknown` marks unknown only variables whose values name the part or that hold it
+      now, and misses a variable named after the part. Nothing reads the slot with checks off (the
+      goal uses the part's own location).
+- Machining: the capture's KMR lacks a `move_base` primitive (primitive stage).
+- Progress is not measured with validation off; per-turn goal metrics for analysis are not
+  recorded yet.
+- Primitive composition turn headers still show a JID.
+- An event that states both a `pose` and a `resource_location` keeps both, even when the pose lies
+  outside that place (`draft_4579f380` step 2: ur5e-3 at the buffer with a pose at x 0.25). With
+  checks off, code does not judge it; RA feasibility should.
+- The validated (checks on) path does not use the new template.
+- **Knowledge-base exposure (October 21, decided, not implemented).** Principle (user): one
+  knowledge base 𝒦 with the same *facts* in every stage and mode; nominal *procedures* only for the
+  RA, which grounds an already chosen event; the remaining plan stays visible to the outline as goals.
+  - Facts: resource and part state, capabilities, geometry, regions, reach, pose relations, safety
+    rules. Remaining plan as goals: `pending_tasks` and the goal line's "(normally …)". Procedures:
+    task contracts, primitive catalogs, contracts and signatures, capability decompositions.
+  - Today the outline menu differs by mode (`multi_turn_context.resolve_outline_context` and the
+    diagnostic refs at lines 695–710). Validation-off drafts serve `/geometry`, `/regions`,
+    `gripper_reach` and `pose_relations`; validated runs keep them private (line 767). This breaks the
+    experiment rule that all four ablation configurations get the same lookups.
+  - Drafts also serve `/resources/<jid>/primitives` (callable primitive signatures), the one
+    procedure leak into the outline. Remove it in both modes (scope rule: primitives appear only at
+    composition; user concern that nominal procedures would anchor the outline).
+  - Composition (`multi_turn_primitive_generation` resolver) lacks geometry, reach and pose relations.
+  - Planned change, to show the user as a diff first because the lookup list is part of the frozen
+    outline prompt: one shared resolver for facts; validated runs serve the same facts as drafts;
+    remove `primitives` from the outline; give composition geometry, reach and pose relations. Draw
+    experiment runs only from drafts made after the change. Check the anchoring concern with the
+    new-versus-nominal event counts (Table 7 in the figure mock-ups).
+
+**Next steps (options).**
+1. Run turn 1 on the other three captures with validation off, then fix anything the template
+   gets wrong for them.
+2. Repeat Part slippage 5–10 times per setting (gpt-5.4 medium, gpt-5.4 low, gpt-4o) for
+   baseline counts by failure type.
+3. Add validation, RA feasibility first, with custody inside it; then CCA safety and physical
+   evidence; then measure errors caught against the baseline.
+
 ## Schema-2 re-capture — October 15, 2026 — Stage 0 done; four Gazebo stages pending
 
 The user will re-capture all four failures in Gazebo, one scenario per stage. Every new
@@ -1132,7 +1872,7 @@ live recovery.
 
 | Failure scenario | Recovery outline | Primitive composition |
 | --- | --- | --- |
-| Part slippage | None. Attempt 17 was deleted on 2026-10-16 at the user's request (old version) | None. `offline_1bb1efac84d7443aa37238521ead3b68` was deleted on 2026-10-16 at the user's request |
+| Part slippage | No accepted (validated) outline. Unvalidated drafts with validation off, October 19: `draft_f7c5a94605c54baf83e8a03a21076c9a` (gpt-5.4 medium) and `draft_85ee4684d69a43d2b615e9af6aba4b71` (gpt-5.4 low) on `capture_77666affc1b9468ca157cf366d706dc8`; see the October 19 section. Attempt 17 was deleted on 2026-10-16 | None. `offline_1bb1efac84d7443aa37238521ead3b68` was deleted on 2026-10-16 at the user's request |
 | Machining breakdown during part processing | Successful failure capture retained; incomplete 28-event retry chain retired at the user's request to free disk space; no complete accepted outline | Pending |
 | Conveyor breakdown | Verified failure capture `capture_1b3f3d1d729a4701b94cff514c783130` retained and loaded in Recovery Offline; no accepted outline | None accepted |
 | ur5e-1 breakdown | Verified failure capture `capture_0a7fde8074b6426586b204204f2b3417` retained and loaded in Recovery Offline; no accepted outline | Pending |
@@ -1165,6 +1905,9 @@ The following records are under
 | Deleted 2026-10-16; was the accepted Part slippage recovery outline | `offline_470087fe7a92421abd624ea721aa2ca1` |
 | Deleted 2026-10-16; was the accepted Part slippage primitive composition | `offline_1bb1efac84d7443aa37238521ead3b68` |
 | Official Part slippage failure capture | `cf647a0930c64f018d672a27904811b0` |
+| Part slippage schema-2 capture used by the October 19 drafts | `capture_77666affc1b9468ca157cf366d706dc8` |
+| Part slippage outline drafts, validation off (keep for the paper's model comparison) | `outline_drafts/draft_f7c5a94605c54baf83e8a03a21076c9a`, `draft_85ee4684d69a43d2b615e9af6aba4b71`, `draft_8bfa737c6a444de3b8668acda31c05c0`, `draft_f2a9fb151f71496c8333cd3c43971853`, `draft_9fb1a36de41342cb8a360475da42c667` |
+| Conveyor breakdown outline drafts, validation off (keep for the paper's model comparison) | `outline_drafts/draft_8bf5b6d05b6642098baedd8e25211852` (works), `draft_0aa3406e820345c8bb72224a2ed9ef14` (works, with `place_end_state`). Failed, user to decide keep or delete: `draft_6d122269bb53462f9059af8431928557`, `draft_7199f1650ca741a1948360ac0728b14d` |
 | Official Machining breakdown during part processing failure capture | `capture_8beafdb8a01e444894cfaf41d29921fd` |
 | Native checkpoint records for the current Machining breakdown capture | `4a6d23fca53a4d4486ba50f9d005203a` |
 | Official ur5e-1 breakdown failure capture | `capture_0a7fde8074b6426586b204204f2b3417` |

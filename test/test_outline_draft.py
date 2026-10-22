@@ -21,6 +21,8 @@ from cais_spade_llm.agents.shared_information.llm_request_records import Request
 
 
 GROUNDED = {"thought": "Use the retained facts.", "decision": "grounded", "observations": []}
+# Only the LLM ends a draft, by declaring the recovery complete.
+DONE = {"thought": "The failure is overcome.", "decision": "recovery_complete"}
 
 
 def scripted_provider(monkeypatch, responses):
@@ -84,7 +86,7 @@ def observations(tmp_path):
 
 def response():
     return {"thought": "A supplied test draft, not a generated recovery.", "candidate_events": [{
-        "outline_id": "draft_step", "event_name": "Arbitrary task event", "resource_jid": "owner",
+        "outline_id": "draft_step", "event_name": "Arbitrary task event", "resource": "M2",
         "part_name": "KET4_Square_4mm", "expected_end_state": {"resource_state": "completed"},
         "rationale": "Assumption remains unvalidated."}]}
 
@@ -101,12 +103,12 @@ def test_draft_retrieval_generation_and_reload_never_validate(observations, tmp_
     monkeypatch.setattr(outline_draft.context, "public_outline_safety_context", forbidden)
     original = deepcopy(observations)
     provider = scripted_provider(monkeypatch, [{"thought": "Need facts", "decision": "need_context",
-        "context_requests": ["/resources/owner/snapshot", "/safety_rules", "/parts/KET4_Square_4mm/observed_pose"]}, response()])
+        "context_requests": ["/resources/owner/snapshot", "/safety_rules", "/parts/KET4_Square_4mm/observed_pose"]}, response(), DONE])
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path / "drafts")
     asyncio.run(draft.generate())
     assert draft.record["status"] == "draft"
     assert draft.record["transition_trace"][0]["event_name"] == response()["candidate_events"][0]["event_name"]
-    assert draft.record["provider_calls"] == 3
+    assert draft.record["provider_calls"] == 4
     assert "/resources/owner/snapshot" in draft.record["retrievals"]
     assert draft.record["checks"] == dict.fromkeys(("ra", "physical_evidence", "cca", "nominal_continuation"), "not_checked")
     assert "accepted_outline_prefix" not in draft.record
@@ -130,7 +132,9 @@ def test_draft_equal_reachability_context_and_schema_expressiveness(observations
     session = multi_turn.build_multi_turn_session_seed(draft.prepared)
     session["current_phase"] = "outline"
     payload, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
-    assert '"owner"' in prompt and '"second"' in prompt
+    # Both resources are stated by name with the same declared location; neither is preferred.
+    assert "\nM2 (resource)  idle; at M2; capabilities: reachable locations M2\n" in prompt
+    assert "\nsecond (resource)  state not recorded; capabilities: reachable locations M2\n" in prompt
     assert session.get("outline_requested_refs", []) == []
     schema = multi_turn._get_response_schema("outline", session)
     assert not list(Draft202012Validator(schema["schema"]).iter_errors(response()))
@@ -138,8 +142,42 @@ def test_draft_equal_reachability_context_and_schema_expressiveness(observations
     assert "transition_trace" not in schema["schema"]["properties"]
 
 
+def test_draft_states_the_position_a_place_declares_for_a_resource_placing_there(observations, tmp_path):
+    prepared = observations["prepared_recovery_request"]
+    prepared["recovery_resources"]["owner"]["static_capabilities"]["reachability"] = ["M2", "Belt"]
+    belt = deepcopy(prepared["recovery_resources"]["owner"])
+    belt.update(resource_jid="belt", static_capabilities={}, resource_evidence={"resource_id": "Belt",
+        "environment_models": {"Belt": {"events": [{"event_name": "place_release",
+            "updates": {"part_location.{part_name}": {"set": "loading_position_1"}},
+            "parameter_bindings": {"resource_id": {"equals": "M2"}, "destination_location": {"equals": "Belt"}}}]}}})
+    belt["recovery_snapshot"]["resource_jid"] = "belt"
+    prepared["recovery_resources"]["belt"] = belt
+    observations["jids"]["Belt"] = "belt"
+    draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
+    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
+    session["current_phase"] = "outline"
+    _, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
+    # The draft keeps the place's declared events, so the robot line states where its placement puts a part.
+    assert ("\nM2 (resource)  idle; at M2; capabilities: reachable locations M2, Belt; "
+            "places parts on Belt at loading_position_1\n") in prompt
+    assert "place_release" not in prompt
+
+
+def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
+    prepared = observations["prepared_recovery_request"]
+    prepared["recovery_resources"]["owner"]["static_capabilities"]["job_control"] = {
+        "version": 1, "resume_after_reload": True, "restart_stopped_jobs": False}
+    draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
+    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
+    session["current_phase"] = "outline"
+    _, prompt = multi_turn._build_phase_prompt(draft.prepared, session)
+    # The draft keeps the declared job control, so the LLM can tell a resumable pause from a final stop.
+    assert ("\nM2 (resource)  idle; at M2; capabilities: reachable locations M2; "
+            "job control: resume_after_reload true, restart_stopped_jobs false\n") in prompt
+
+
 @pytest.mark.parametrize("responses, expected_calls, status", [
-    ([{}, response()], 3, "draft"),
+    ([{}, response(), DONE], 4, "draft"),
     ([{}] * 8, 6, "draft_incomplete"),
     ([{"thought": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}] * 8, 3, "draft_incomplete"),
     ([json.JSONDecodeError("bad JSON", "?", 0), response()], 2, "draft_incomplete"),
@@ -147,6 +185,7 @@ def test_draft_equal_reachability_context_and_schema_expressiveness(observations
 def test_draft_budget_and_formatting_failures(observations, tmp_path, monkeypatch, responses, expected_calls, status):
     provider = scripted_provider(monkeypatch, responses)
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
+    assert draft.prepared["recovery_session"]["max_turns"] == outline_draft.DRAFT_MAX_TURNS == 20
     draft.prepared["recovery_session"]["max_turns"] = 6
     asyncio.run(draft.generate())
     assert provider.await_count == expected_calls
@@ -177,7 +216,7 @@ def test_draft_stop_retains_response_without_committing(observations, tmp_path, 
 
 
 def test_draft_reload_rejects_changed_source_and_accepted_labels(observations, tmp_path, monkeypatch):
-    scripted_provider(monkeypatch, [response()])
+    scripted_provider(monkeypatch, [response(), DONE])
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
     asyncio.run(draft.generate())
     path = draft.directory / "draft.json"
@@ -196,7 +235,7 @@ def test_draft_reload_rejects_changed_source_and_accepted_labels(observations, t
 def test_example_draft_actions_work_without_offline_worker(observations, tmp_path, monkeypatch):
     from cais_spade_llm.recovery_framework import part_slippage_example
     actual = outline_draft.OutlineDraft
-    provider = scripted_provider(monkeypatch, [response()])
+    provider = scripted_provider(monkeypatch, [response(), DONE])
     def factory(*args, **kwargs):
         draft = actual(*args, **kwargs, root=tmp_path / "drafts")
         return draft
@@ -219,7 +258,7 @@ def test_example_draft_actions_work_without_offline_worker(observations, tmp_pat
             with pytest.raises(ValueError, match="review only"):
                 await example.action(action)
         await example.action("load_draft")
-        assert provider.await_count == 2
+        assert provider.await_count == 3
         assert example.snapshot()["outline_draft"] == saved
         assert example.snapshot()["can_load_draft"] is True
     asyncio.run(run())
@@ -231,7 +270,7 @@ def test_start_fresh_keeps_empty_prefix_and_locks_generated_choices(observations
     actual = outline_draft.OutlineDraft
     monkeypatch.setattr(outline_draft, "OutlineDraft", lambda *args, **kwargs: actual(*args, **kwargs, root=tmp_path / "drafts"))
     monkeypatch.setattr(part_slippage_example, "read_observations", lambda path: deepcopy(observations))
-    provider = scripted_provider(monkeypatch, [response()])
+    provider = scripted_provider(monkeypatch, [response(), DONE])
     example = PartSlippageExample(SimpleNamespace(system_running=False))
     example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
         observation_path=observations["source_path"], check_ra_feasibility=False,
@@ -258,7 +297,7 @@ def test_start_fresh_keeps_empty_prefix_and_locks_generated_choices(observations
         state = await example.action("start_fresh")
         assert state["validation_checks_locked"] is False
         assert state["outline_draft"]["provider_calls"] == 0
-        assert provider.await_count == 2
+        assert provider.await_count == 3
 
     asyncio.run(run())
 
@@ -299,7 +338,7 @@ def test_generate_outline_fresh_freezes_choices_and_keeps_ui_responsive(observat
         return deepcopy(observations)
 
     monkeypatch.setattr(part_slippage_example, "read_observations", read)
-    provider = scripted_provider(monkeypatch, [response(), GROUNDED, response()])
+    provider = scripted_provider(monkeypatch, [response(), DONE, GROUNDED, response(), DONE])
     example = PartSlippageExample(SimpleNamespace(system_running=False))
     options = dict(source="offline", scenario=observations["scenario"], safety_files=[],
         observation_path=observations["source_path"], check_ra_feasibility=False, check_physical_evidence=False,
@@ -335,7 +374,7 @@ def test_generate_outline_fresh_freezes_choices_and_keeps_ui_responsive(observat
         assert second["run_id"] != first["run_id"]
         assert len(second["outline_draft"]["transition_trace"]) == 1
         assert len(threads) == 2 and all(t != threading.get_ident() for t in threads)
-        assert provider.await_count == 4
+        assert provider.await_count == 6
 
     asyncio.run(run())
 
@@ -400,6 +439,9 @@ def test_enabled_check_failure_does_not_advance_a_diagnostic_candidate(observati
 def test_enabled_checks_also_cover_nominal_handoff_before_committing(observations, tmp_path, monkeypatch):
     from cais_spade_llm.recovery_framework import outline_checks
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_diagnostic
+    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_facts import (
+        response_with_jids,
+    )
 
     draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
     session = multi_turn.build_multi_turn_session_seed(draft.prepared)
@@ -412,7 +454,8 @@ def test_enabled_checks_also_cover_nominal_handoff_before_committing(observation
     ])
     monkeypatch.setattr(outline_checks, "validate_partial_event", check)
     decision, audit = asyncio.run(multi_turn_diagnostic.handle_event(session=session, prepared=draft.prepared,
-        response={"next_transition": response()["candidate_events"][0]}, planner=draft.planner))
+        response={"next_transition": response_with_jids(response(), draft.prepared)["candidate_events"][0]},
+        planner=draft.planner))
     assert check.await_count == 2
     assert decision == "need_context"
     assert session["accepted_outline_prefix"] == []

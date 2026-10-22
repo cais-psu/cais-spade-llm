@@ -60,32 +60,73 @@ def _messages(messages: list[dict], *, pretty_json: bool = False) -> None:
             _text(message["tool_calls"])
 
 
+def _fields_text(value: object) -> str:
+    """State an end state or parameters as compact ``field: value`` pairs."""
+    if isinstance(value, dict):
+        return "; ".join(f"{key}: {json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else item}"
+                         for key, item in value.items())
+    return "" if value in (None, "") else str(value)
+
+
+def _places_text(value: object) -> str:
+    """State each other resource's stated changes as ``resource: field: value`` groups."""
+    if not isinstance(value, dict):
+        return ""
+    return " | ".join(f"{place}: {_fields_text(fields)}" for place, fields in value.items())
+
+
+def _event_rows(events: list, selected: object) -> list[dict]:
+    rows = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        rows.append({"row": index, "chosen": "✓" if type(selected) is int and index == selected else "",
+                     "event_name": event.get("event_name"),
+                     # The outline prompt names resources; older records carry JIDs.
+                     "resource": event.get("resource") or event.get("resource_jid"),
+                     "part_name": event.get("part_name"),
+                     "expected_end_state": _fields_text(event.get("expected_end_state")),
+                     "neighbor_end_state": _places_text(event.get("neighbor_end_state") or event.get("place_end_state")),
+                     "params": _fields_text(event.get("params")), "rationale": event.get("rationale") or ""})
+    return rows
+
+
 def _event_table(response: object) -> None:
     if not isinstance(response, dict):
         ui.label("Proposed events unavailable: response is not a JSON object.").classes("text-amber-700")
         return
     groups = []
     if isinstance(response.get("candidate_events"), list):
-        groups.append(("", response["candidate_events"]))
+        groups.append(("", response["candidate_events"], response.get("selected_candidate_index")))
     if isinstance(response.get("candidate_traces"), list):
-        groups.extend((f"Candidate {index + 1}", candidate.get("events", []))
+        groups.extend((f"Candidate {index + 1}", candidate.get("events", []), None)
                       for index, candidate in enumerate(response["candidate_traces"])
                       if isinstance(candidate, dict) and isinstance(candidate.get("events"), list))
     if isinstance(response.get("next_transition"), dict):
         suffix = response.get("transition_suffix")
-        groups.append(("", [response["next_transition"], *(suffix if isinstance(suffix, list) else [])]))
+        groups.append(("", [response["next_transition"], *(suffix if isinstance(suffix, list) else [])], None))
     if isinstance(response.get("transition_trace"), list):
-        groups.append(("", response["transition_trace"]))
-    if not any(events for _, events in groups):
+        groups.append(("", response["transition_trace"], None))
+    if not any(events for _, events, _ in groups):
         ui.label("No events proposed in this turn").classes("text-sm text-slate-500")
+        requests = response.get("context_requests")
+        if isinstance(requests, list) and requests:
+            ui.label("Requested context: " + ", ".join(str(ref) for ref in requests)).classes("text-sm")
         return
-    for label, events in groups:
+    for label, events, selected in groups:
         if label:
             ui.label(label).classes("font-semibold text-sm")
-        rows = [{"row": index, **{key: event.get(key) for key in ("event_name", "resource_jid", "part_name")}}
-                for index, event in enumerate(events) if isinstance(event, dict)]
-        ui.table(columns=[{"name": key, "label": label, "field": key, "align": "left"}
-                          for key, label in (("event_name", "Event"), ("resource_jid", "Resource"), ("part_name", "Part"))],
+        rows = _event_rows(events, selected)
+        columns = [("event_name", "Event"), ("resource", "Resource"), ("part_name", "Part"),
+                   ("expected_end_state", "End state"), ("neighbor_end_state", "Neighbor changes"), ("params", "Params"),
+                   ("rationale", "Rationale")]
+        if type(selected) is int:
+            columns.insert(0, ("chosen", "Chosen"))
+        if not any(row["neighbor_end_state"] for row in rows):
+            columns.remove(("neighbor_end_state", "Neighbor changes"))
+        if not any(row["params"] for row in rows):
+            columns.remove(("params", "Params"))
+        ui.table(columns=[{"name": key, "label": title, "field": key, "align": "left"} for key, title in columns],
                  rows=rows, row_key="row").classes("w-full").props("flat dense wrap-cells")
         if len(rows) != len(events):
             ui.label("Some proposed events are not JSON objects; see the full response.").classes("text-amber-700")
@@ -177,6 +218,68 @@ def _expansion(label: str, key: str, reader, render):
     return expansion, refresh
 
 
+def _final_output(data: dict) -> dict | None:
+    return next((result["payload"] for result in data["results"]
+                 if result["payload"].get("decision") == "final_output_ready"), None)
+
+
+def _named(value: object, names: dict) -> object:
+    """Replace resource JIDs with resource names in a recorded value, for display."""
+    if isinstance(value, str):
+        for jid in sorted(names, key=len, reverse=True):
+            value = value.replace(jid, names[jid])
+        return value
+    if isinstance(value, dict):
+        return {key: _named(item, names) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_named(item, names) for item in value]
+    return value
+
+
+def _steps_table(steps: list, names: dict) -> None:
+    rows = [{"step": index, "event_name": step.get("event_name"), "resource": _named(step.get("resource_jid"), names),
+             "part_name": step.get("part_name") or "", "expected_end_state": _fields_text(_named(step.get("expected_end_state"), names)),
+             "neighbor_end_state": _places_text({_named(place, names): _named(fields, names)
+                                              for place, fields in (step.get("neighbor_end_state") or step.get("place_end_state") or {}).items()})}
+            for index, step in enumerate(steps, 1) if isinstance(step, dict)]
+    columns = [("step", "Step"), ("event_name", "Event"), ("resource", "Resource"), ("part_name", "Part"),
+               ("expected_end_state", "End state"), ("neighbor_end_state", "Neighbor changes")]
+    if not any(row["neighbor_end_state"] for row in rows):
+        columns.remove(("neighbor_end_state", "Neighbor changes"))
+    ui.table(columns=[{"name": key, "label": title, "field": key, "align": "left"} for key, title in columns],
+             rows=rows, row_key="step").classes("w-full").props("flat dense wrap-cells")
+
+
+def _render_handoff(final: dict, tab: str) -> None:
+    """Show what code did after the outline ended: the accepted events, then the nominal handoff."""
+    names = final.get("resource_names") or {}
+    ui.label("Handoff to nominal work — no LLM call").classes("font-semibold")
+    if tab == "input":
+        ui.label("Accepted recovery events").classes("text-sm")
+        _steps_table(final.get("transition_trace") or [], names)
+        return
+    handoff = final.get("nominal_handoff") or {}
+    if not handoff:
+        ui.label("No handoff recorded for this run.").classes("text-sm text-slate-500")
+        return
+    if handoff.get("declared_complete_by_llm"):
+        ui.label("Ended by the LLM's recovery_complete.").classes("text-sm")
+    if handoff.get("complete"):
+        ui.label("Nominal work takes over.").classes("text-sm")
+        assumed = [row["reason"] for row in handoff.get("assumptions") or [] if row.get("reason")]
+        if assumed:
+            ui.label("Assumed, not checked: " + "; ".join(_named(assumed, names))).classes("text-sm text-amber-700")
+    else:
+        reasons = handoff.get("not_connected_reasons") or ["its recorded handoff conditions do not hold"]
+        ui.label("Nominal work cannot take over: " + "; ".join(_named(reasons, names))).classes("text-sm text-amber-700")
+    steps = handoff.get("nominal_connection") or []
+    if steps:
+        ui.label("Declared nominal events that connect to nominal work").classes("text-sm")
+        _steps_table(steps, names)
+    elif handoff.get("complete"):
+        ui.label("No nominal events were needed to connect.").classes("text-sm text-slate-500")
+
+
 def _code_grounding(data: dict) -> dict | None:
     return next((result["payload"]["code_grounding"] for result in data["results"]
                  if isinstance(result["payload"].get("code_grounding"), dict)), None)
@@ -184,6 +287,12 @@ def _code_grounding(data: dict) -> dict | None:
 
 def render_turn_content(data: dict, tab: str, *, state_key: str = "") -> None:
     """Separate exact model messages from runtime retrieval and validation."""
+    final = _final_output(data)
+    if final is not None:
+        _render_handoff(final, tab)
+        for result in data["results"]:
+            _download(result["path"], "Download runtime record")
+        return
     grounding = _code_grounding(data)
     if grounding is not None:
         ui.label("Code grounding — no LLM call").classes("font-semibold")
@@ -350,7 +459,9 @@ class RecoveryTurns:
                             row["refresh"].append(refresh)
                         self.rows[key] = row
                 row = self.rows[key]
-                row["label"].text = f"Turn {turn['turn']} · {turn['phase']} · {turn['status']}"
+                row["label"].text = (f"Turn {turn['turn']} · handoff to nominal work · no LLM call"
+                                     if turn["status"] == "final_output_ready" else
+                                     f"Turn {turn['turn']} · {turn['phase']} · {turn['status']}")
                 if turn.get("resource_jid"):
                     row["label"].text += f" · {turn['resource_jid']}"
                 row["data"] = turn

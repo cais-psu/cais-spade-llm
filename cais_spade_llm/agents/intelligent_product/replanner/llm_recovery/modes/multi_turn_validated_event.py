@@ -689,15 +689,28 @@ async def _handle_validated_event(*, session: dict, prepared: dict, response: di
     return "outline_ready" if complete else "need_next_task", turn
 
 
-def _event_state_fingerprint(session: dict, event: dict, current: str) -> str:
+def _event_state_fingerprint(session: dict, event: dict, current: str, *, by_event: bool = False) -> str:
     """Let explicit event arguments distinguish candidates that leave the modeled state unchanged.
 
     A candidate reaching any other state is identified by that state alone, so
-    returning to an earlier state is still a repeat.
+    returning to an earlier state is still a repeat. With ``by_event`` (the LLM
+    chooses), an event that changes no modeled fact is identified by itself, so
+    only its exact repeat in the same state is one.
     """
     state = _comparison_state_fingerprint(session)
+    if state != current:
+        return state
+    if by_event:
+        return _event_identity(state, event)
     params = event.get("params")
-    return recovery_validation_fingerprint({"state": state, "params": params}) if params and state == current else state
+    return recovery_validation_fingerprint({"state": state, "params": params}) if params else state
+
+
+def _event_identity(state: str, event: dict) -> str:
+    """Identify one event in one state, so proposing it there again is recognized as a repeat."""
+    return recovery_validation_fingerprint({"state": state, "event": {
+        key: event.get(key) for key in ("resource_jid", "event_name", "part_name", "expected_end_state", "neighbor_end_state",
+                                        "params")}})
 
 
 def _declares_params(session: dict, prepared: dict, event: dict) -> bool:
@@ -768,16 +781,42 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
     from .multi_turn_context import check_context_revision, handle_outline_context
 
     check_context_revision(prepared, planner)
+    diagnostic = session.get("outline_diagnostic_bypass") is True
+    chooses = False
+    if diagnostic:
+        from .multi_turn_diagnostic import handle_event, llm_selects_next_event
+        from .multi_turn_outline_facts import response_with_jids
+
+        response = response_with_jids(response, prepared)
+        chooses = llm_selects_next_event(session)
+        if response.get("decision") == "recovery_complete":
+            from .multi_turn_diagnostic import declare_recovery_complete
+
+            return declare_recovery_complete(session=session, prepared=prepared, response=response)
+        if response.get("decision") == "need_context":
+            # The response schema offers these fields on every reply; empty, they propose nothing.
+            response = {key: value for key, value in response.items()
+                        if key != "selected_candidate_index" and not (key == "candidate_events" and not value)}
     if response.get("decision") == "need_context":
         return await handle_outline_context(prepared=prepared, session=session, response=response, planner=planner)
     events = response.get("candidate_events")
-    if (set(response) - {"thought", "candidate_events", "decision", "context_requests"}
+    allowed = {"thought", "candidate_events", "decision", "context_requests"} | ({"selected_candidate_index"} if chooses else set())
+    if (set(response) - allowed
             or response.get("decision") is not None or response.get("context_requests", []) != []
             or not isinstance(response.get("thought"), str) or not isinstance(events, list)
             or not 1 <= len(events) <= 5 or any(not isinstance(event, dict) for event in events)
-            or len({event.get("outline_id") for event in events if isinstance(event.get("outline_id"), str)}) != len(events)):
+            # When the LLM chooses by index, outline_id is only a label; code numbers the accepted event.
+            or (not chooses and len({event.get("outline_id") for event in events
+                                     if isinstance(event.get("outline_id"), str)}) != len(events))):
         finding = {"constraint_owner": "planner", "constraint_code": "invalid_candidate_response",
                    "reason": "Return thought and one to five candidate_events with distinct outline_id values, or need_context."}
+        session.update(status="paused_after_outline_turn", outline_validation_findings=[finding])
+        return "need_revision", {"validation_findings": [finding]}
+    # Without validators the LLM chooses; a lone candidate is its own choice.
+    choice = response.get("selected_candidate_index", 0 if len(events) == 1 else None) if chooses else None
+    if chooses and (type(choice) is not int or not 0 <= choice < len(events)):
+        finding = {"constraint_owner": "planner", "constraint_code": "invalid_candidate_response",
+                   "reason": "Set selected_candidate_index to the index of the candidate_events item you choose."}
         session.update(status="paused_after_outline_turn", outline_validation_findings=[finding])
         return "need_revision", {"validation_findings": [finding]}
     base = {key: value for key, value in session.items()
@@ -785,9 +824,6 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
     initial = _comparison_state_fingerprint(session)
     visited = set(session.get("accepted_state_fingerprints", [])) | {initial}
     sequences, evaluations, branches = [], [], {}
-    diagnostic = session.get("outline_diagnostic_bypass") is True
-    if diagnostic:
-        from .multi_turn_diagnostic import handle_event
     for index, event in enumerate(events):
         working, context = deepcopy(base), deepcopy(prepared)
         event_handler = handle_event if diagnostic else handle_validated_event
@@ -795,7 +831,7 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
             response={"thought": response["thought"], "next_transition": deepcopy(event)}, planner=planner)
         valid = (audit.get("schema_valid") is True and audit.get("transition_validation", {}).get("status") == "not_checked"
                  if diagnostic else audit.get("transition_validation", {}).get("status") == "passed")
-        identity = ((_event_state_fingerprint(working, event, initial) if diagnostic
+        identity = ((_event_state_fingerprint(working, event, initial, by_event=chooses) if diagnostic
                      else _comparison_state_fingerprint(working)) if valid else None)
         sequences.append({"candidate_index": index, "surface_events": [deepcopy(event)]})
         evaluation = {"candidate_index": index, "task": deepcopy(event), "valid": valid,
@@ -815,7 +851,12 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
     eligible = [row for row in evaluations if row["valid"] and not row["repeated_state"]]
     complete = [row for row in eligible if row["diagnostic_handoff_complete"]] if diagnostic else [row for row in eligible if row["nominal_continuation_complete"]]
     selected = None
-    if complete:
+    if chooses:
+        chosen = evaluations[choice]
+        if chosen["valid"] and not chosen["repeated_state"]:
+            selected = chosen
+            selected["selection_status"] = "llm_selected"
+    elif complete:
         selected = min(complete, key=lambda row: comparison._candidate_effect_identifier(sequences[row["candidate_index"]]))
         selected["selection_status"] = "proposed_nominal_handoff" if diagnostic else "nominal_continuation_established"
     elif eligible:
@@ -833,15 +874,29 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
              "validation_contract_version": OUTLINE_VALIDATION_CONTRACT_VERSION,
              "outline_diagnostic_bypass": diagnostic,
              "execution_authorized": False}
+    if chooses:
+        audit["llm_selected_candidate_index"] = choice
     if selected is None:
-        findings = [finding for row in evaluations
+        considered = [evaluations[choice]] if chooses else evaluations
+        findings = [finding for row in considered
                     for finding in row["validation_audit"].get("validation_findings", [])]
-        findings.append({"constraint_owner": "planner", "constraint_code": "no_progressing_candidate",
-            "reason": "No candidate established a new supported state that reduces unresolved obligations or enables further work."})
+        if chooses:
+            task = considered[0]["task"]
+            # A refusal that already names the chosen event needs no second row.
+            if considered[0]["repeated_state"] or not findings:
+                reason = ("repeats an accepted event or returns to an earlier state." if considered[0]["repeated_state"]
+                          else "was not accepted.")
+                findings.append({"constraint_owner": "planner", "constraint_code": "selected_candidate_rejected",
+                                 "reason": f"Selected candidate {task.get('outline_id')} {reason}",
+                                 **{key: task[key] for key in ("outline_id", "event_name", "resource_jid", "part_name")
+                                    if task.get(key)}})
+        else:
+            findings.append({"constraint_owner": "planner", "constraint_code": "no_progressing_candidate",
+                "reason": "No candidate established a new supported state that reduces unresolved obligations or enables further work."})
         session.update(status="paused_after_outline_turn", outline_validation_findings=findings)
         if diagnostic:
-            unresolved = [row for row in evaluations if row["decision"] == "need_context"]
-            rejected = [row for row in evaluations if row["validation_audit"].get("checks") and not row["valid"]]
+            unresolved = [row for row in considered if row["decision"] == "need_context"]
+            rejected = [row for row in considered if row["validation_audit"].get("checks") and not row["valid"]]
             if unresolved or rejected:
                 session["status"] = "NEEDS_CONTEXT" if unresolved else "validation_rejected"
                 session["outline_check_results"] = deepcopy((unresolved or rejected)[0]["validation_audit"].get("checks", {}))
@@ -893,6 +948,9 @@ async def _handle_validated_candidates(*, session: dict, prepared: dict, respons
     if diagnostic and params:
         # Remember the arguments with the state they produced, so the same arguments are a repeat there.
         accepted.append(recovery_validation_fingerprint({"state": _comparison_state_fingerprint(working), "params": params}))
+    if chooses:
+        # The same chosen event in the state it produced is a repeat.
+        accepted.append(_event_identity(_comparison_state_fingerprint(working), events[selected["candidate_index"]]))
     working["accepted_state_fingerprints"] = [*dict.fromkeys([*session.get("accepted_state_fingerprints", []), *accepted])]
     session.pop("pending_outline_validation", None)
     session.update(working)

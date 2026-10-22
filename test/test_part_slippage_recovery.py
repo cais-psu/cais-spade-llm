@@ -172,7 +172,7 @@ def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(rec
     # The robot gripper is empty and the peg lies where it fell.
     context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None, None])
     asyncio.run(run())
-    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "misplaced"]
+    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "unknown"]
     assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
     assert context.part_tracker["peg"]["observed_pose"] == {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0,
                                                            "qw": 1}
@@ -180,7 +180,7 @@ def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(rec
     path = Path(recovery.snapshot()["observation_path"])
     assert "part_tracker" not in json.loads(path.read_text())
     views = json.loads((path.parent / BELIEFS_NAME).read_text())["views"]
-    assert views["part_tracker"]["peg"]["state"] == "misplaced"
+    assert views["part_tracker"]["peg"]["state"] == "unknown"
     assert views["resource_states"]["arm_a"] == {"resource_state": "failed", "held_part": None}
 
 
@@ -188,9 +188,9 @@ def test_live_grounding_settles_when_the_first_capture_missed_the_robot(recovery
     # Stage 1 on October 15: the first capture had no observation of the slipping robot.
     context, trackers, run = _live_grounding_case(recovery, monkeypatch, ["unobserved", None, None])
     asyncio.run(run())
-    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "in_gripper", "misplaced"]
+    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "in_gripper", "unknown"]
     assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
-    assert context.part_tracker["peg"]["state"] == "misplaced"
+    assert context.part_tracker["peg"]["state"] == "unknown"
     passes = json.loads((recovery.path / "grounding_passes.json").read_text())["passes"]
     assert [row["signals"] for row in passes] == [["B2:arm_a"], ["B2:arm_a", "C1:arm_a"], ["B2:arm_a", "C1:arm_a"]]
 
@@ -1064,7 +1064,7 @@ def test_KMR_release_into_a_buffer_zone_and_onto_an_undeclared_surface():
 
     part, context, runtime, owner, task = _kmr_release_fixture([0.25, 0.45, 1.025, 0.0, 0.0, 0.0, 1.0])
     asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
-    assert context.part_tracker[part]["state"] == "misplaced" and context.part_tracker[part]["location"] is None
+    assert context.part_tracker[part]["state"] == "unknown" and context.part_tracker[part]["location"] is None
     assert context.part_tracker[part]["observed_pose"] == {"x": 0.25, "y": 0.45, "z": 1.025, "qx": 0.0, "qy": 0.0,
                                                            "qz": 0.0, "qw": 1.0}
 
@@ -1090,13 +1090,13 @@ def test_KMR_release_uses_the_receiving_owner_declared_consequence(pose, receive
     assert owner._released_part is None
 
 
-def test_KMR_release_still_moving_when_observation_ended_is_a_misplaced_part():
+def test_KMR_release_still_moving_when_observation_ended_is_located_only_by_its_pose():
     from cais_spade_llm.recovery_framework.slippage_execution import _reconcile_mobile_completion
 
     part, context, runtime, owner, task = _kmr_release_fixture([-0.56, 0.5, 1.017, 0.0, 0.0, 0.0, 1.0])
     owner._released_part["settled"] = False
     asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
-    assert context.part_tracker[part]["state"] == "misplaced"
+    assert context.part_tracker[part]["state"] == "unknown"
     assert context.resources["Buffer For Machined parts"].valuation["zone_2_part"] is None
 
 
@@ -1525,9 +1525,11 @@ def test_malformed_outline_type_uses_preparation_error_without_provider_call(rec
     async def prepare(feedback=""):
         await previous(feedback)
         captured.append((recovery.path / "observations.json").read_bytes())
+        # The legacy schema reads declared types; the contract-2 schema gives only the event's form.
         multi_turn._get_response_schema("outline", {
-            "validation_contract_version": 2, "outline_mode": "incremental_validated",
+            "outline_mode": "incremental_validated",
             "recovery_des_models": {"recovery-resource-6@localhost": {"state_variables": {
+                "resource_state": {"scope": "resource"},
                 "active_job": {"type": None, "domain": ["environment_23"]}}}},
         })
 

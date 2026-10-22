@@ -321,7 +321,7 @@ def _observed_release(context, part: str, pose: list, settled: bool) -> tuple[st
     receiver = observed_receiver(context.inputs["scene"], context.models.get("Conveyor"), part, pose) if settled else None
     if receiver is None:
         # Like a dropped part: located only by its observed pose until picked again.
-        entry.update(state="misplaced", location=None, observed_pose=resting)
+        entry.update(state="unknown", location=None, observed_pose=resting)
         return None, {}, entry
     rid, area = receiver
     values = context.resources[rid].valuation
@@ -384,7 +384,7 @@ async def _reconcile_mobile_completion(runtime, owner, task: dict, task_id: str,
         if task.get("part_name") not in (None, picked):
             raise ValueError(f"The KMR picked {picked}, not the generated event's {task['part_name']}")
         entry = deepcopy(context.part_tracker[picked])
-        # A misplaced part has no owner to update; it was located only by its observed pose.
+        # A part located only by its observed pose has no owner to update.
         if entry["location"] is not None:
             source = _declared_consequence(context, {"pick_grasp", "pick_part"}, "origin_resource_location",
                                            entry["location"], picked)

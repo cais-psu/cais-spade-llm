@@ -2,10 +2,12 @@
 
 Date: 2026-10-13
 
-Last updated: 2026-10-14
+Last updated: 2026-10-21
 
 Status: Phase 1 documentation complete, revised on 2026-10-14 to make the
-four-rung component ladder the first study. Phase 2 partially delivered: the
+component ablation the first study, and on 2026-10-21 to replace the four-rung
+ladder with a 2 × 2 ablation (single-pass or incremental generation, with or
+without validation). Phase 2 partially delivered: the
 Experiments placeholder, navigation, and design download are available.
 The independent outline auditor (phase 3) is the next implementation step.
 No new experimental results are reported in this document.
@@ -15,10 +17,9 @@ No new experimental results are reported in this document.
 Build an Experiments page for Journal Paper 2 around three questions, in
 this order:
 
-1. **Component ladder.** Starting from an LLM alone and adding one framework
-   component at a time, what does each component change in the feasibility,
-   safety, and completeness of recovery outlines, and what does it cost?
-   (Study 1)
+1. **Component ablation.** What do validation and incremental generation each
+   change in the feasibility, safety, and completeness of recovery outlines,
+   and what do they cost? (Study 1)
 2. **End-to-end effectiveness.** Does the full framework produce complete
    validated recovery plans for each failure, and at what effort? (Study 2)
 3. **Enforcement contribution.** On fixed inputs, which infeasible or unsafe
@@ -52,39 +53,54 @@ execute recovery. A validated outline, a validated primitive composition,
 and observed recovery of production are distinct outcomes. Actual Gazebo or
 hardware recovery measurements require a later execution study.
 
-### Component ladder
+### Ablation configurations (2 × 2)
 
-Study 1 compares four rungs. Each rung adds one thing to the rung before it.
+Study 1 crosses two factors: how the outline is generated (single-pass or
+incremental) and whether events are validated (no validation, or RA and CCA
+validation). Reading across a row shows the effect of incremental generation;
+reading down a column shows the effect of validation.
 
-| Rung | Generation | Checks during generation |
+| | No validation | RA + CCA validation |
 | --- | --- | --- |
-| 1. LLM, single-turn | Whole outline in one response | None |
-| 2. LLM, multi-turn | One event per turn | None |
-| 3. LLM + RA | Multi-turn | RA feasibility + physical evidence |
-| 4. LLM + RA + CCA (full framework) | Multi-turn | RA + physical evidence + CCA safety |
+| **Single-pass** (whole outline in one answer) | Single-pass LLM | Single-pass + validation |
+| **Incremental** (one event per turn on a code-tracked state) | Incremental LLM | Full framework |
 
-**1. LLM, single-turn.** One request returns a complete recovery outline.
-The LLM decides every event and when the outline is finished. Code only parses
-the response and runs PA syntax and grounding checks. There is no retrieval
-during generation, so the prompt supplies up front the same public facts that
-the multi-turn rungs can request. This is the only rung in which the LLM alone
-makes every decision, and it is the paper's pure-LLM baseline.
+All four configurations get the same starting prompt (Failure, Recovery Goal,
+Resources, Parts, Safety Rules) and the same public context lookups
+(`need_context`) with the same lookup limit. The full set of observations does
+not fit in one prompt, so no configuration receives everything up front.
+Giving one configuration fewer facts would measure missing information rather
+than the generation method.
 
-**2. LLM, multi-turn.** The LLM proposes one event per turn. Between turns,
-code applies the proposed effects tentatively and shows the updated state in
-the next prompt; public context retrieval is available. Generation stops when
-the tentative state satisfies the nominal handoff conditions or the budget
-ends. Nothing checks feasibility, physical support, or safety. This rung is
-not LLM-only: code tracks state and decides when to stop.
+**Single-pass LLM.** The LLM may look up facts, then returns the complete
+recovery outline in one answer. Code computes no state between events and
+returns no findings; it only parses the answer and runs PA syntax and
+grounding checks. Several provider requests are possible (lookups), but there
+is one planning answer.
 
-**3. LLM + RA.** Rung 2 plus RA feasibility and RA physical evidence on each
-proposed event. A rejected event is not admitted, the state does not advance,
-and the findings are returned to the LLM.
+**Incremental LLM.** The LLM proposes one event per turn. Between turns, code
+applies the proposed effects tentatively and shows the updated projected state
+x<sup>R</sup><sub>k-1</sub> in the next prompt (Sec. 5.1, Eq. 11). Lookups are
+available. Nothing checks feasibility, physical support, or safety.
 
-**4. LLM + RA + CCA (full framework).** Rung 3 plus CCA safety for the
-selected specifications, using the projected state and monitor history.
-An event is admitted only when RA feasibility, physical evidence, and CCA
-safety all pass.
+**Single-pass + validation.** The LLM returns a complete outline as in
+Single-pass LLM. Code then computes the projected states and runs RA
+feasibility, RA physical evidence, and CCA safety on the events in order,
+stopping at the first failing event. On a rejection the LLM receives the
+findings and rewrites the whole outline. Repair from the failing event onward
+is not allowed, because that is incremental generation. Rewrites continue until
+an outline passes or the token budget ends.
+
+**Full framework.** Incremental LLM plus RA feasibility, RA physical evidence,
+and CCA safety on each proposed event, in that order. A rejected event is not
+admitted, the state does not advance, and the findings are returned so the LLM
+revises that one event. An event is admitted only when all three pass.
+
+Dropped on 2026-10-21: the former rung 3 (incremental with RA only). Its
+evidence for H2, outlines that pass RA but fail CCA, comes from the CCA
+rejections recorded in both validated configurations: RA runs first, so every
+CCA rejection is a proposal that passed RA. Study 3 supports this on fixed
+inputs.
 
 #### Why RA comes before CCA
 
@@ -93,45 +109,58 @@ as `SAFE_shared_area_mutex`, use RA physical evidence. Without it, CCA falls
 back to `state_only_projection` in
 [outline_checks.py](../../cais_spade_llm/recovery_framework/outline_checks.py)
 and pauses with `NEEDS_CONTEXT` when the selected predicates need occupancy
-evidence. A CCA-only rung would therefore not test safety for the selected
-specifications. Physical evidence stays with RA because RA owns it.
+evidence. A CCA-only configuration would therefore not test safety for the
+selected specifications. Physical evidence stays with RA because RA owns it.
 
-#### Held constant across rungs
+#### Held constant across configurations
 
 - The same frozen capture, selected safety specifications, model profile,
-  request policy, and public facts. Rung 1 uses a single-turn prompt; rungs
-  2–4 share the multi-turn prompts and schema versions.
-- PA syntax and grounding checks in every rung. They are preparation, not a
-  paper-level validation contribution.
-- One proposed event per turn in rungs 2–4. No candidate selection takes
-  place, so the symbolic selector is not part of Study 1. Record
-  `recovery_selection_mode` anyway; with a single proposal it has no choice
-  to make.
-- The turn budget and stopping rule in rungs 2–4. Each rung stops on its own
-  state: tentative in rung 2, RA-validated in rung 3, and RA- and
-  CCA-validated in rung 4. The independent audit, not the stopping rule,
-  decides whether an outline is complete.
-- Rung 1 gets one generation request. A malformed or incomplete response is
-  recorded as did not finish; only recorded transport retries are allowed.
+  request policy, starting prompt, lookups, lookup limit, and token budget.
+  The single-pass configurations use a reply format for a complete outline;
+  the incremental configurations share the per-event prompts and schema
+  versions.
+- PA syntax and grounding checks in every configuration. They are preparation,
+  not a paper-level validation contribution.
+- One proposed event per turn in the incremental configurations. No candidate
+  selection takes place, so the symbolic selector is not part of Study 1.
+  Record `recovery_selection_mode` anyway; with a single proposal it has no
+  choice to make.
+- The stopping rule. The LLM declares or returns a complete outline in all four
+  configurations; the independent audit, not the stopping rule, decides
+  whether an outline is complete. The termination rule for validated runs is
+  still open in [PAPER_FRAMEWORK.md](PAPER_FRAMEWORK.md); whichever rule is
+  chosen applies to both validated configurations.
+- A malformed or incomplete single-pass answer is recorded as did not finish
+  in Single-pass LLM, and as a rejected outline that counts against the budget
+  in Single-pass + validation. Only recorded transport retries are allowed.
+- Fact lookups are recorded per attempt in every configuration, so a
+  difference between single-pass and incremental generation can be checked
+  against a difference in lookups.
+- Before collection, the lookup menu must actually be the same. On
+  2026-10-21 validation-off drafts serve geometry, regions, reach, pose
+  relations and primitive signatures that validated runs do not. The decided
+  fix (same facts everywhere, no procedures in the outline) is recorded under
+  "Knowledge-base exposure" in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 #### Mapping to existing code identifiers
 
-Rung names are labels for configurations. They do not rename code
-identifiers. Preserve `pure_llm`, `neurosymbolic`, `outline_diagnostic_bypass`,
+Configuration names are labels. They do not rename code identifiers. Preserve
+`pure_llm`, `neurosymbolic`, `outline_diagnostic_bypass`,
 `incremental_validated`, `incremental_candidates_validated`, and
 `action_horizon` values exactly.
 
-| Rung | Generation setting | `check_ra_feasibility`, `check_physical_evidence`, `check_cca_safety` | Current availability |
+| Configuration | Generation setting | `check_ra_feasibility`, `check_physical_evidence`, `check_cca_safety` | Current availability |
 | --- | --- | --- | --- |
-| 1 | Complete outline in one response | all `false` | Not available. There is no standalone single-turn mode. `action_horizon="full"` prompt text asks for "a complete recovery outline trace" per candidate, but it is unverified on the `validation_contract_version` 2 path. Phase 4. |
-| 2 | One proposal per turn | all `false` | Not available as specified. **Start fresh** with all checks off proposes up to five candidates and selects with the symbolic comparator. Phase 4. |
-| 3 | One proposal per turn | `true`, `true`, `false` | Check selections exist. That the one-proposal path honors them needs verification. Phase 4. |
-| 4 | One proposal per turn | all `true` | Ran as Attempt 17 with `pure_llm` and `incremental_validated` on the legacy validated route. Phase 4 moves it onto the shared pipeline. |
+| Single-pass LLM | Lookups, then a complete outline in one answer | all `false` | Not available. There is no standalone single-pass mode. `action_horizon="full"` prompt text asks for "a complete recovery outline trace" per candidate, but it is unverified on the `validation_contract_version` 2 path. It can reuse the existing lookup handling and change only the reply format and when the loop ends. Phase 4. |
+| Incremental LLM | One proposal per turn | all `false` | Closest existing path: the validation-off outline draft used for the 19–21 October runs (`outline_diagnostic_bypass`; 1–5 candidates per turn, the LLM picks one with `selected_candidate_index`). Verify it against this definition in Phase 4. |
+| Single-pass + validation | Complete outline, checked after generation, rewritten whole on rejection | all `true` | Not available. Needs the independent audit component (phase 3) as the checker and a whole-outline regeneration loop. Phase 4. |
+| Full framework | One proposal per turn | all `true` | Ran as Attempt 17 with `pure_llm` and `incremental_validated` on the legacy validated route. Phase 4 moves it onto the shared pipeline. |
 
 Distinctions found in the current code on 2026-10-14:
 
 - The code identifier `pure_llm` names LLM candidate selection and retains
-  RA/CCA validation. It is not rung 1 and does not mean "no validation".
+  RA/CCA validation. It is not Single-pass LLM and does not mean "no
+  validation".
 - The Recovery page's **Start fresh** path
   ([outline_draft.py](../../cais_spade_llm/recovery_framework/outline_draft.py))
   fixes `outline_mode=incremental_candidates_validated`,
@@ -141,8 +170,8 @@ Distinctions found in the current code on 2026-10-14:
   [multi_turn_diagnostic.py](../../cais_spade_llm/agents/intelligent_product/replanner/llm_recovery/modes/multi_turn_diagnostic.py).
   With all checks unchecked, the symbolic comparator still chooses among
   candidates from their unvalidated tentative effects. That setting is not
-  rung 2.
-- Attempt 17, the only accepted outline, matches the rung 4 configuration on
+  Incremental LLM.
+- Attempt 17, the only accepted outline, matches the Full framework configuration on
   a different pipeline, with its production nominal-continuation proof. It
   remains a historical record and the auditor's positive control; it is not
   relabeled as a Study 1 trial.
@@ -150,74 +179,77 @@ Distinctions found in the current code on 2026-10-14:
   strict-expansion rule. Study 1 does not use the selector; the comparison
   belongs to possible study A.
 
-Rungs 2–4 must run on one shared generation pipeline. Comparing the legacy
-validated route with the Start fresh path would mix pipeline differences into
-the rung effect.
+The incremental configurations must run on one shared generation pipeline,
+and the validated configurations must use the same checkers. Comparing the
+legacy validated route with the Start fresh path would mix pipeline
+differences into the configuration effect.
 
 ## 2. Studies
 
-### Study 1: component ladder (first study)
+### Study 1: component ablation, 2 × 2 (first study)
 
-**Question:** Starting from an LLM alone, what does each added framework
-component change in the feasibility, safety, and completeness of recovery
-outlines, and what does it cost?
+**Question:** What do validation and incremental generation each change in
+the feasibility, safety, and completeness of recovery outlines, and what do
+they cost?
 
-| Step | What it adds |
+| Contrast | What it isolates |
 | --- | --- |
-| Rung 1 → rung 2 | Multi-turn generation: turn structure, tentative state tracking, retrieval, and the symbolic stopping rule together |
-| Rung 2 → rung 3 | RA feasibility and physical evidence, with rejection feedback |
-| Rung 3 → rung 4 | CCA safety, with rejection feedback |
-| Rung 1 → rung 4 | The whole framework |
-
-The rung 1 → 2 step changes several things at once. Report it as single-turn
-versus the multi-turn harness, not as the effect of turn count alone.
+| Single-pass LLM → Incremental LLM | Incremental generation on a code-tracked state, without validation |
+| Single-pass + validation → Full framework | Incremental generation when validation findings are used: one-event revisions instead of whole-outline rewrites (Sec. 5.1) |
+| Single-pass LLM → Single-pass + validation | Validation, with whole-outline rewrites |
+| Incremental LLM → Full framework | Validation, with per-event feedback: the framework's validation contribution |
 
 **Hypotheses, stated before collection.** These are measurements to collect,
 not promised results.
 
-- **H1:** Rungs 1 and 2 finish outlines that the audit marks infeasible,
-  physically unsupported, unsafe, or without nominal continuation.
-- **H2:** Rung 3 finishes outlines that pass RA but fail CCA safety, showing
-  that feasibility checking does not imply safety.
-- **H3:** Rung 4 finishes audited outlines, at a measured cost in turns,
-  tokens, and time relative to rungs 2 and 3.
+- **H1:** Single-pass LLM and Incremental LLM finish outlines that the audit
+  marks infeasible, physically unsupported, unsafe, or without nominal
+  continuation.
+- **H2:** In both validated configurations, CCA rejects proposals that passed
+  RA, showing that feasibility checking does not imply safety. Study 3 tests
+  the same point on fixed inputs.
+- **H3:** The Full framework finishes audited outlines, at a measured cost in
+  turns, tokens, and time relative to Incremental LLM.
+- **H4:** Within the same token budget, the Full framework finishes more
+  audited outlines than Single-pass + validation, with a larger difference for
+  longer recoveries.
 
-No directional hypothesis is set for rung 1 versus rung 2.
+No directional hypothesis is set for Single-pass LLM versus Incremental LLM.
+If H4 does not hold, the paper should not claim that validating each event
+during generation is better than validating complete outlines.
 
 **Endpoint: the outline stage.** Primitive composition is excluded from
 Study 1 because the retained composition still has
 `cca_composition_status=not_checked`. Extending Study 1 to primitive
 composition requires an equivalent composition audit.
 
-#### What the ladder can and cannot show
+#### What the ablation can and cannot show
 
-- **Eliminations by construction.** Rung 3 cannot finish an outline that
-  fails RA during generation, and rung 4 cannot finish one that fails RA or
-  CCA. The audit uses the same checkers. The disappearance of the infeasible
-  class at rung 3 and of the unsafe class at rung 4 therefore follows from
-  construction; do not present it as evidence. The ladder's evidence is:
-  - the violation rates of rungs 1 and 2;
-  - unsafe outlines that pass RA at rung 3;
-  - completion rates and cost of rungs 3 and 4;
-  - how often the LLM proposes events that rungs 3 and 4 reject.
-- **Practical baseline missing.** The ladder does not include an LLM whose
-  complete outlines are validated after generation and regenerated with the
-  findings under the same budget. That comparison justifies validating each
-  event during generation. It is possible study B and a likely reviewer
-  request.
-- **Completion dependency.** Rung 4 has completed an audited outline only for
-  `Part slippage` (Attempt 17). The retired `Machining breakdown during part
-  processing` attempt admitted 28 events without nominal continuation, and
-  `Conveyor breakdown` and `ur5e-1 breakdown` have no accepted outline. A
-  failure enters the Study 1 matrix only after rung 4 completes there; that
-  runtime work belongs to the broader roadmap.
+- **Eliminations by construction.** Neither validated configuration can finish
+  an outline that fails RA or CCA. The audit uses the same checkers. The
+  disappearance of the infeasible, physically unsupported, and unsafe classes
+  in those configurations therefore follows from construction; do not present
+  it as evidence. The ablation's evidence is:
+  - the violation rates of Single-pass LLM and Incremental LLM;
+  - CCA rejections of proposals that passed RA, in both validated
+    configurations;
+  - completion rates and cost of both validated configurations within the
+    same budget;
+  - how often each validated configuration is rejected, and why, reported for
+    every scenario regardless of which configuration completes more often.
+- **Completion dependency.** The Full framework has completed an audited
+  outline only for `Part slippage` (Attempt 17). The retired `Machining
+  breakdown during part processing` attempt admitted 28 events without nominal
+  continuation, and `Conveyor breakdown` and `ur5e-1 breakdown` have no
+  accepted outline. A failure enters the Study 1 matrix only after the Full
+  framework completes there; that runtime work belongs to the broader roadmap.
 - **One capture per failure.** Results are conditional on that starting
   state. Additional captures per failure would support broader claims.
 
 #### Independent outline audit
 
-Every finished outline from every rung goes through one audit that sends no
-feedback to any model:
+Every finished outline from every configuration goes through one audit that
+sends no feedback to any model:
 
 1. Start from the frozen capture.
 2. For each outline event in order, run RA feasibility, RA physical evidence,
@@ -238,8 +270,9 @@ The audit reuses the
 [outline check path](../../cais_spade_llm/recovery_framework/outline_checks.py),
 but it is new code. The roadmap records that checking an existing outline
 without generation has not been added, and Attempt 17's audit replays saved
-evidence that rungs 1 and 2 never produce. Study 3's fixed-input policy
-replay and possible study B use the same component.
+evidence that the configurations without validation never produce. Study 3's
+fixed-input policy replay and the checker of Single-pass + validation use the
+same component.
 
 #### Independent support for the audit
 
@@ -247,8 +280,9 @@ The paper treats the reviewed safety specifications and owner models as the
 definition of correct recovery, which is the usual basis of formal-methods
 evaluation. Strengthen this in two ways:
 
-- Review every violation the audit reports for rungs 1–3, and a sample of
-  their passes, against the specification text and observations. Record
+- Review every violation the audit reports for the configurations without
+  validation, every CCA rejection in the validated configurations, and a
+  sample of passes, against the specification text and observations. Record
   whether each is a real violation, a checker artifact, or missing evidence.
   Keep review notes outside model prompts and retrieval.
 - Later, replay selected outlines that the audit marks unsafe in Gazebo and
@@ -262,41 +296,52 @@ Definitions are in section 4.
 - Started attempts, generator-reported completion, and the audited outcome
   class of each attempt.
 - First failing event and the specification or owner check involved.
-- Rungs 3 and 4: proposals rejected during generation, by check.
-- Non-progress admissions for every rung, computed after the run.
+- Validated configurations: rejections by check (RA feasibility, physical
+  evidence, CCA safety) with the reason. For Single-pass + validation, count
+  whole-outline rewrites and record the first failing event of each rejected
+  outline; for the Full framework, count single-event revisions. A CCA
+  rejection is also a proposal that passed RA (H2).
+- Fact lookups per attempt, in every configuration.
+- Non-progress admissions for every configuration, computed after the run.
 - Turns, provider requests, retrieval turns, revisions, tokens, generation
   time, and audit time.
 
 #### Pilot and staging
 
-1. **Pilot**, after phases 3 and 4: `Part slippage`, all four rungs, three
-   repetitions each (12 attempts). It is the only failure where rung 4 has
-   completed. For scale, Attempt 17 took about 1,030 s, eight provider
-   requests, and about 52k tokens with `gpt-5.6-sol` at reasoning effort `low`.
-2. **Other failures**: add each failure as a frozen four-rung batch after
-   rung 4 completes there. Do not pool batches that ran under different code
-   manifests.
-3. **Confirmatory batch**: ten repetitions per rung, frozen after the pilot.
+1. **Pilot**, after phases 3 and 4: `Part slippage`, all four configurations,
+   three repetitions each (12 attempts). It is the only failure where the Full
+   framework has completed. For scale, Attempt 17 took about 1,030 s, eight
+   provider requests, and about 52k tokens with `gpt-5.6-sol` at reasoning
+   effort `low`. If time allows, add Single-pass LLM and Single-pass +
+   validation on the shortest and longest recoveries (`Conveyor breakdown`,
+   `Machining breakdown during part processing`) to see the direction of H4
+   early.
+2. **Other failures**: add each failure as a frozen four-configuration batch
+   after the Full framework completes there. Do not pool batches that ran
+   under different code manifests.
+3. **Confirmatory batch**: ten repetitions per configuration, frozen after the
+   pilot.
 
-**Primary figures:** audited outcome by rung, and effort by rung (see
-section 5). Add one worked example: a rung 2 outline event that the audit
-marks unsafe, with its CCA finding, beside the rung 4 outline for the same
-capture.
+**Primary results:** audited outcome by configuration, grouped by validation,
+with median tokens, time and lookups beside each bar; and a rejection table
+for both validated configurations (see sections 4 and 5). Add one worked
+example: an Incremental LLM outline event that the audit marks unsafe, with
+its CCA finding, beside the Full framework outline for the same capture.
 
 ### Study 2: end-to-end effectiveness of the full framework
 
-**Question:** Can the full framework (rung 4) produce a complete validated
+**Question:** Can the Full framework produce a complete validated
 recovery from each of the four unforeseen disruptions, and what effort does
 that require?
 
-Use the rung 4 configuration. Record the actual selection mode and generation
+Use the Full framework configuration. Record the actual selection mode and generation
 strategy, and hold them fixed within each reported configuration. Start with
 one model profile; additional models repeat this same study rather than
 creating another study.
 
 Run fresh attempts from matched saved captures through outline generation,
 primitive generation, and the required final checks. Study 2 may continue
-Study 1's rung 4 attempts through primitive composition; those remain the same
+Study 1's Full framework attempts through primitive composition; those remain the same
 attempts. Record these endpoints from the same attempt:
 
 - **Outline completion:** a complete validated outline with required
@@ -348,8 +393,9 @@ reviewed reference labels under four acceptance policies:
 Evaluate the policy decisions offline on identical inputs with the phase 3
 auditor. Collect relevant records from Studies 1 and 2 and supplement them
 with reviewed valid, infeasible, unsafe, interacting-composition, and
-missing-evidence regression cases. Rung 1 and rung 2 events that the Study 1
-audit flagged are naturally occurring infeasible and unsafe proposals. Keep
+missing-evidence regression cases. Events from Single-pass LLM and
+Incremental LLM that the Study 1 audit flagged are naturally occurring
+infeasible and unsafe proposals. Keep
 saved-run and synthetic origins visible. Study 3 reuses evidence rather than
 requiring four new complete generation runs for every earlier attempt.
 
@@ -387,10 +433,10 @@ Study 2 asks whether the full framework completes the whole planning pipeline
 for each failure. Study 3 explains, on fixed inputs, which gate prevents
 which error.
 
-Study 1 changes what the LLM sees during generation, because each added gate
+Study 1 changes what the LLM sees during generation, because validation
 also returns feedback. Study 3 removes gates on fixed inputs and says nothing
 about how generation would change. Studies can share inputs, attempts, and
-evidence, but their endpoints differ: rung-level audited outcomes,
+evidence, but their endpoints differ: configuration-level audited outcomes,
 attempt-level completion, and case-level validation errors. Do not count
 reused cases as new recovery attempts or present the studies as independent
 replications of the same result.
@@ -402,10 +448,10 @@ and do not need workers or figures in the first functional Experiments page.
 
 | Possible study | Additional question and controlled comparison | Useful measurements and figure |
 | --- | --- | --- |
-| A. LLM and symbolic candidate selection | With rung 4 checks, compare `pure_llm` and `neurosymbolic` selection over the same candidate pool size. Requires the selector correction in the [formal selection reference](JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md#current-mismatch-and-required-correction). A second analysis replays identical frozen candidate pools. | Valid selection, formal progress, non-progress admissions, completion within budget, and selection cost; paired dot plot or candidate decision graph. |
-| B. Generate-and-test versus incremental validation | A single-turn complete outline is checked by the same validators after generation and regenerated with the findings until an equal token budget ends, compared with rung 4. Rung 1 outputs are its first drafts. Tests whether validating each event during generation beats validating complete drafts; a likely reviewer request. | Audited completion within budget, cost to first valid outline, and both by recovery length; time-to-valid-outline curves. |
+| A. LLM and symbolic candidate selection | With the Full framework's checks, compare `pure_llm` and `neurosymbolic` selection over the same candidate pool size. Requires the selector correction in the [formal selection reference](JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md#current-mismatch-and-required-correction). A second analysis replays identical frozen candidate pools. | Valid selection, formal progress, non-progress admissions, completion within budget, and selection cost; paired dot plot or candidate decision graph. |
+| B. Generate-and-test versus incremental validation | Moved into Study 1 on 2026-10-21 as the Single-pass + validation configuration, compared with the Full framework (H4). What remains optional here is the extra view of when each configuration reaches a valid outline. | Time-to-valid-outline curves by tokens spent, using Study 1 attempts; no new attempts. |
 | C. Primitive generation granularity | From identical frozen accepted outlines, compare event-by-event programs with complete-program generation before feedback. Preserve owner models, catalogs, and specifications. | Complete-program acceptance, composition outcomes, revisions, time, and tokens; paired comparison panels. |
-| D. Separate RA feasibility and physical evidence rungs | Split rung 3 into RA feasibility only and RA feasibility with physical evidence. A CCA-only rung stays excluded because CCA spatial checks depend on physical evidence. | Audited outcome classes and cost per added check. |
+| D. Separate RA feasibility and physical evidence | Add incremental configurations with RA feasibility only, and with RA feasibility plus physical evidence (the former rung 3, dropped from Study 1 on 2026-10-21). A CCA-only configuration stays excluded because CCA spatial checks depend on physical evidence. | Audited outcome classes and cost per added check. |
 | E. Broader model/provider benchmarking | Expand Studies 1 and 2 to more model families, reasoning settings, and hosted or local providers when adapters are available. | Completion versus latency/cost tradeoffs and model-by-failure heatmaps. Ordinary additional-model runs remain part of Studies 1 and 2. |
 
 For possible study A, preserve actual candidate counts and malformed responses;
@@ -432,7 +478,7 @@ regenerate its outline. Possible study D remains offline with execution blocked.
   continuation of that batch; retain completed attempts under the old manifest.
 - Use a fresh isolated session for each attempt. Prior trial transcripts and
   accepted prefixes do not become hidden input to the next trial.
-- Randomize rung order within matched capture blocks using a recorded
+- Randomize configuration order within matched capture blocks using a recorded
   scheduling seed. Use a provider seed only where supported and record whether
   it was actually sent; a seed is not a guarantee of cross-model equivalence.
 - Default to three pilot repetitions. A separate confirmatory configuration
@@ -440,7 +486,8 @@ regenerate its outline. Possible study D remains offline with execution blocked.
   from confirmatory summaries. Ten repetitions are a configurable starting
   point, not a claim of adequate statistical power for every comparison.
 - Retain the existing session-turn budget of 80 and no overall deadline as
-  initial configurable defaults for multi-turn rungs. Record proposal, context,
+  initial configurable defaults for the incremental configurations, and give
+  the single-pass configurations the same token budget. Record proposal, context,
   tool, provider, and transport-retry counts separately. Freeze request
   timeouts, retry policy, and any additional token or time limits, including
   explicitly unset limits.
@@ -467,14 +514,14 @@ remove. Non-experiment recovery attempts keep the existing rule.
 
 ### Planned counts
 
-For Study 1, planned attempts equal captures × rungs × model profiles ×
+For Study 1, planned attempts equal captures × configurations × model profiles ×
 repetitions. The pilot is 1 × 4 × 1 × 3 = 12 attempts. One capture for each
 of four failures gives 48 pilot or 160 confirmatory attempts per model profile.
 
 For Study 2, planned attempts equal captures × model profiles × repetitions
-for the fixed rung 4 configuration. One capture for each of four failures
+for the fixed Full framework configuration. One capture for each of four failures
 gives 12 pilot or 40 confirmatory attempts per model profile; two conditions
-per failure give 24 or 80. Study 2 attempts that continue Study 1 rung 4
+per failure give 24 or 80. Study 2 attempts that continue Study 1 Full framework
 attempts are not additional attempts.
 
 Study 3 evaluates its unique reviewed cases under all four acceptance policies.
@@ -509,7 +556,7 @@ available, with estimation and missing components clearly identified.
 
 The required results are measurements to collect, not target percentages or
 promised improvements. Report failures and inconclusive comparisons as well as
-successes. Keep the rung-level and attempt-level outcomes of Studies 1 and 2
+successes. Keep the configuration-level and attempt-level outcomes of Studies 1 and 2
 distinct from the reviewed-case policy outcomes of Study 3.
 
 ### Measurement definitions
@@ -517,16 +564,18 @@ distinct from the reviewed-case policy outcomes of Study 3.
 | Measurement | Definition and reporting rule |
 | --- | --- |
 | Planned and started trials | Report both counts. A started trial has entered its isolated worker and opened its attempt record; zero-provider-call failures can still be started trials. Unavailable inputs and profiles remain visible as preflight exclusions. |
-| Generator-reported completion | The rung's own stopping rule fired, or rung 1 returned a complete outline. Never reported as completion without the independent audit. |
+| Generator-reported completion | The configuration's own stopping rule fired: the LLM declared the incremental outline complete, or a single-pass answer returned a complete outline (in Single-pass + validation, one that passed the checks). Never reported as completion without the independent audit. |
 | Audited outcome class | Study 1. One class per started attempt: passed, infeasible, physically unsupported, unsafe, no nominal continuation, unresolved, or did not finish (with its stop reason). Finished attempts are classified by the first failing check of the first failing event, in the fixed order RA feasibility, physical evidence, CCA safety, nominal continuation. |
 | First failing event | Study 1. One-based index of the first event that fails the audit, with every failing check, the specification or owner identifiers, and the original findings. Later events are not audited after failure. |
-| Rejected proposals during generation | Rungs 3 and 4: proposed events rejected by RA feasibility, physical evidence, or CCA safety during generation, counted per check and once in the proposal total. A context request is not a rejected proposal. |
-| Non-progress admissions | Admitted events that satisfy none of the three formal progress cases in the [formal selection reference](JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md#neurosymbolic-selection-method), computed after the run for every rung. Descriptive only; no rung in Study 1 selects by progress. |
+| Rejected proposals during generation | Validated configurations: proposed events (Full framework) or complete outlines (Single-pass + validation, at their first failing event) rejected by RA feasibility, physical evidence, or CCA safety, counted per check and once in the total, with the reason. Every CCA rejection is also a proposal that passed RA. Report for every scenario regardless of which configuration completes more often. A context request is not a rejected proposal. |
+| Revisions and rewrites | Full framework: single-event revisions after a rejection. Single-pass + validation: whole-outline rewrites. Different units; report both per attempt with medians. |
+| Fact lookups | Context lookups per attempt, in every configuration. Used to check whether a single-pass versus incremental difference comes with a difference in lookups. |
+| Non-progress admissions | Admitted events that satisfy none of the three formal progress cases in the [formal selection reference](JOURNAL_VALIDATION_AND_SELECTOR_ACTIONS.md#neurosymbolic-selection-method), computed after the run for every configuration. Descriptive only; no configuration in Study 1 selects by progress. |
 | Audited outline completion | Complete accepted outline with independently checked per-transition evidence and the required nominal-continuation result. An LLM completion claim or `outline_review` alone is insufficient. |
 | Primitive composition completion | Complete programs for the attempt's accepted outline with required resource feasibility, safety, and composition evidence. Report the conditional count among attempts that reached an accepted outline. Partial programs do not count as complete. |
 | Overall planning completion | Outline, primitive composition, and required final audits complete in the same attempt, divided by all started attempts for that fixed workflow configuration. This is an offline planning endpoint until execution is observed. |
 | Completion proportion | Audited completions divided by all started trials in the displayed input/treatment group. Break out infrastructure failures, cancellations, budget exhaustion, and unresolved results. Report recoverable and independently blocked reference conditions separately. |
-| First-draft validity | Possible study B metric. For complete generation, score the first entire draft before revision; for incremental generation, score first proposals per event and sequence completion without rejections. These are different output units. |
+| First-draft validity | Study 1 validated configurations. For complete generation, score the first entire draft before revision; for incremental generation, score first proposals per event and sequence completion without rejections. These are different output units. |
 | Valid selection | Possible study A metric: the selected candidate passes the common required validators for its frozen state. Record symbolic progress separately using the formal definition. |
 | Invalid-case acceptance | Accepted results divided by all scored cases whose independently reviewed reference label is invalid for that checker. Include numerator and denominator and report unresolved checker decisions separately. |
 | Valid-case rejection | Rejected results divided by all scored cases whose reference label is valid for that checker. Unknown reference cases remain a separate category. |
@@ -547,12 +596,12 @@ overlap, plot them as separate durations instead of a total decomposition.
 
 ### Statistical reporting
 
-- Report each model profile, rung, strategy, scenario, capture/condition,
+- Report each model profile, configuration, strategy, scenario, capture/condition,
   validation treatment, and pilot/confirmatory cohort separately before pooling.
 - Include counts and 95% Wilson intervals for within-input binary proportions.
   Repeated calls on one saved capture measure variability conditional on that
   capture; they do not constitute new physical failure observations.
-- For adjacent-rung contrasts on the same capture, report the difference in
+- For the four contrasts of the 2 × 2 on the same capture, report the difference in
   proportions with its interval. With three pilot repetitions, report counts
   and intervals without significance claims; the confirmatory batch carries
   the comparison.
@@ -573,12 +622,14 @@ overlap, plot them as separate durations instead of a total decomposition.
 
 ### Tables and exports required for the paper
 
-1. **Protocol table:** model profiles, rungs and their exact settings,
+1. **Protocol table:** model profiles, configurations and their exact settings,
    captures/conditions, fixed workflow and generation settings, budgets,
    repetitions, evidence versions, and exclusions.
-2. **Study 1 results:** audited outcome classes `n/N` per rung and failure,
-   first failing checks, rejected proposals during generation, non-progress
-   admissions, turns, tokens, and time.
+2. **Study 1 results:** audited outcome classes `n/N` per configuration and
+   failure, first failing checks, non-progress admissions, lookups, turns,
+   tokens, and time; and a rejection table for both validated configurations
+   side by side (completed, rewrites or revisions, RA rejections, CCA
+   rejections after RA, most common reason).
 3. **Study 2 results:** outline and overall completion `n/N` per failure and model,
    conditional primitive completion, latency, revisions, tokens, and stop stages.
 4. **Study 3 results:** unique reference cases, coverage, policy decisions, false
@@ -600,8 +651,8 @@ Study 1 figures; add the others with their studies.
 
 | Figure | Study and purpose | Axes and evidence requirements |
 | --- | --- | --- |
-| Audited outcome by rung | Study 1: show what each added component changes | One stacked proportion bar per rung, faceted by failure. Classes are mutually exclusive by the first-failing-check rule: passed, infeasible, physically unsupported, unsafe, no nominal continuation, unresolved, did not finish. Label `n/N`; all started attempts are the denominator. The caption states which eliminations follow from construction at rungs 3 and 4. |
-| Effort by rung | Study 1: show what each added component costs | Individual points with medians for turns, tokens, and time to audited completion, per rung. Show attempts that did not complete separately with their terminal times. |
+| Audited outcome by configuration | Study 1: show what validation and incremental generation each change | One stacked proportion bar per configuration, grouped as no validation (Single-pass LLM, Incremental LLM) and with validation (Single-pass + validation, Full framework), faceted by failure. Classes are mutually exclusive by the first-failing-check rule: passed, infeasible, physically unsupported, unsafe, no nominal continuation, unresolved, did not finish. Label `n/N`; all started attempts are the denominator. Median tokens, time and lookups beside each bar. The caption states that both validated configurations eliminate the infeasible, physically unsupported, and unsafe classes by construction. |
+| Effort by configuration (optional) | Study 1: show the spread of cost | Individual points with medians for tokens per attempt, per configuration. Show attempts that did not complete separately. Optional because the outcome figure carries the medians. |
 | Recovery completion by failure | Study 2: show whether the full workflow completes | Horizontal: the four exact failures. Vertical: completion proportion, with `n/N` and 95% intervals. Show outline and overall completion in separate panels with all started attempts as denominator. Put conditional primitive completion in its own table/panel with its denominator stated. Distinguish model profiles when more than one is evaluated. |
 | Validation-policy error plot | Study 3: show what feasibility and safety enforcement prevent | Horizontal: the four acceptance policies. Separate panels for infeasible acceptance, unsafe acceptance, and valid-case rejection; include counts, intervals, and unresolved outcomes. Preserve separate proposal/program units and avoid stacking overlapping error categories. |
 | One resource timeline or ordered event diagram | Study 2: explain the composed recovery | Lanes: exact resource identifiers. Use supported schedule time or explicitly ordinal steps. Show outline events, primitive programs, dependencies, and represented nominal work. Label offline schedules and all timing assumptions. |
@@ -625,16 +676,18 @@ stage, input origin, cohort, denominator, and evidence limits.
 ## 6. UI, records, and integration plan
 
 The `experiments` placeholder at `/recovery-framework?tab=experiments` is
-delivered. Build its first functional slice for Study 1: rung selection (all
-four rungs, each unavailable rung showing its reason), capture readiness,
+delivered. Build its first functional slice for Study 1: configuration
+selection (all four configurations, each unavailable one showing its reason),
+capture readiness,
 repetitions and budgets, the planned attempt matrix, explicit start/cancel
 controls, progress, audited outcome results, and exports. Add Study 2 and
 Study 3 controls afterwards. List Possible studies as deferred options without
 active controls.
 
-Only applicable combinations are selectable. An unsupported rung, stage, or
-missing input has a visible reason and cannot launch a misleading comparison.
-A failure where rung 4 has not completed is shown as not yet comparable.
+Only applicable combinations are selectable. An unsupported configuration,
+stage, or missing input has a visible reason and cannot launch a misleading
+comparison. A failure where the Full framework has not completed is shown as
+not yet comparable.
 
 Keep experiment records in a dedicated versioned directory under the existing
 recovery monitoring area. Each batch has a frozen configuration/manifest and
@@ -645,7 +698,7 @@ or reconnect does not launch duplicate work or discard completed results.
 Use recovery-framework-owned orchestration modules and isolated sequential
 workers. Extend the reserved evaluator in
 [recovery_evaluation.py](../../cais_spade_llm/recovery_framework/recovery_evaluation.py)
-with a versioned rung field rather than writing a second runner; it already
+with a versioned configuration field rather than writing a second runner; it already
 freezes inputs, isolates attempts, and blocks live calls. Preserve
 `SystemBridge` as the public boundary for existing live-runtime access; keep
 `cais_spade_llm/ui/bridge.py` read-only. The experiment worker uses saved
@@ -667,11 +720,15 @@ that a `neurosymbolic` value proves every intended stage is integrated. The
 Start fresh path sets `outline_diagnostic_bypass=true` even when every check
 is selected, so its all-checks-selected behavior must be verified against the
 legacy validated route before either is chosen as the shared pipeline for
-rungs 2–4.
+the incremental configurations.
 
-Rung 1 needs a single-turn prompt that supplies the same public facts the
-multi-turn rungs can retrieve. Build or verify it before the pilot; a prompt
-with less information would measure missing facts rather than turn structure.
+The single-pass configurations need a reply format for a complete outline
+that keeps the same starting prompt, lookups, and lookup limit as the
+incremental configurations. Build or verify it before the pilot; giving them
+less information would measure missing facts rather than the generation
+method. Single-pass + validation also needs a loop that checks the finished
+outline with the phase 3 audit component and asks for a whole-outline rewrite
+with the findings.
 
 The core pipeline needs verified primitive support, CCA checks, and final
 audits for each enabled scenario. The retained recovery handoff currently
@@ -694,14 +751,14 @@ phase 2 using the record format fixed in phase 4, then phases 5 onward.
 
 | Phase | Deliverable | Acceptance gate | Status |
 | --- | --- | --- | --- |
-| 1 | Separate experiment design document | Exact scenarios, studies, rung definitions, model extensibility, measurement definitions, figure specifications, and phase checklist; valid local references | Complete: 2026-10-13; revised 2026-10-14 |
-| 2 | Experiments tab and persistent configuration/results | Navigation preserves form state; capture readiness and trial counts are correct; Study 1 rung selection shows unavailable rungs with reasons; records and exports round-trip; no automatic model calls | Partial: placeholder, navigation, and design download delivered 2026-10-14; configuration and persistent records pending |
+| 1 | Separate experiment design document | Exact scenarios, studies, configuration definitions, model extensibility, measurement definitions, figure specifications, and phase checklist; valid local references | Complete: 2026-10-13; revised 2026-10-14 and 2026-10-21 |
+| 2 | Experiments tab and persistent configuration/results | Navigation preserves form state; capture readiness and trial counts are correct; Study 1 configuration selection shows unavailable configurations with reasons; records and exports round-trip; no automatic model calls | Partial: placeholder, navigation, and design download delivered 2026-10-14; configuration and persistent records pending |
 | 3 | Independent outline auditor | Attempt 17's outline passes, including nominal continuation. Reviewed negative controls fail at the expected event and check: one each for RA feasibility, physical support, `SAFE_shared_area_mutex`, `SAFE_gear_small_before_KET4_Square_4mm`, and nominal continuation (the mock `part_slippage` plans may supply the two safety cases if their events convert to the outline format). Missing evidence yields `unresolved`. No provider, Gazebo, controller, or feedback path. | Next |
-| 4 | Study 1 rungs and the `Part slippage` pilot | Rung 1 single-turn prompt with the same public facts. Rungs 2–4 on one shared pipeline with one proposal per turn and exact recorded settings. Rungs 1 and 2 make zero RA/CCA calls and receive no validation findings; rung 3 makes zero CCA calls. Experiment-record retention exception agreed. The pilot runs 12 attempts and every finished outline is audited. | Planned |
-| 5 | Study 1 on the remaining failures | Each added failure enters only after rung 4 completes an audited outline there (runtime roadmap dependency); each runs as a frozen four-rung batch | Planned |
+| 4 | Study 1 configurations and the `Part slippage` pilot | Single-pass reply format with the same prompt, lookups, and lookup limit. Incremental configurations on one shared pipeline with one proposal per turn and exact recorded settings. Single-pass + validation checks finished outlines with the phase 3 component and rewrites whole outlines. Single-pass LLM and Incremental LLM make zero RA/CCA calls and receive no validation findings. Experiment-record retention exception agreed. The pilot runs 12 attempts and every finished outline is audited. | Planned |
+| 5 | Study 1 on the remaining failures | Each added failure enters only after the Full framework completes an audited outline there (runtime roadmap dependency); each runs as a frozen four-configuration batch | Planned |
 | 6 | Study 2 end-to-end workers | Fresh isolated attempts; actual settings captured; outline, primitive, and overall endpoints verified; required RA/CCA/nominal evidence; cancellation and retained history | Planned |
 | 7 | Study 3 reviewed cases and policy replay | Identical inputs across four policies using the phase 3 auditor; independent labels; accurate acceptance and unresolved outcomes; zero live dispatch | Planned |
-| 8 | Reports and figures | Correct rung, attempt, and case denominators; measured outcome, completion, and policy-error plots; one evidence-backed recovery example; reproducible exports | Planned |
+| 8 | Reports and figures | Correct configuration, attempt, and case denominators; measured outcome, completion, and policy-error plots; one evidence-backed recovery example; reproducible exports | Planned |
 | 9 | Possible studies | Implement only a later selected comparison with its own frozen protocol; no changes to core interpretation. The selector correction belongs to possible study A. | Deferred |
 | 10 | Additional model adapters | Reuse core studies and records; preserve request/evidence contracts; show unsupported settings and missing usage | Later extension |
 
@@ -710,11 +767,12 @@ phase 2 using the record format fixed in phase 4, then phases 5 onward.
 - **Outline auditor:** positive and negative controls, first-failure
   classification, events not audited after failure, unresolved missing
   evidence, unchanged source hashes, and no model feedback path.
-- **Rung configuration:** each rung maps to exact recorded settings; rungs 1
-  and 2 make zero validator calls and receive no validation findings; rung 3
-  makes zero CCA calls; rung 1 receives the same public facts the multi-turn
-  rungs can retrieve; rungs 2–4 propose one event per turn and share the
-  stopping rule.
+- **Study 1 configurations:** each configuration maps to exact recorded
+  settings; Single-pass LLM and Incremental LLM make zero validator calls and
+  receive no validation findings; all four get the same prompt, lookups,
+  lookup limit, and token budget; the incremental configurations propose one
+  event per turn; Single-pass + validation rewrites the whole outline after a
+  rejection and never repairs from the failing event onward.
 - **Configuration and model transport:** exact settings and identities, supported
   and unsupported parameters, raw capture for tools/errors/retries, unavailable
   usage, and adapter parity with the initial connection.
@@ -759,7 +817,8 @@ identifiers only for trials that actually ran.
 | 2026-10-14 | 2, partial | Added the `experiments` tab and Journal 2 sidebar link at `/recovery-framework?tab=experiments`, a Coming soon placeholder, and the experiment-design download. Existing browser-history handling includes the new tab. All 84 project-page tests passed, including direct links, one retained placeholder, download target, and no bridge access. `poetry check` passed with existing metadata deprecation warnings; Python compilation and scoped whitespace checks passed. No experiment trials ran. | Complete phase 2 configuration, capture readiness, and persistent records before adding workers |
 | 2026-10-14 | Design focus | Reduced the required evaluation to full-workflow effectiveness and fixed-input feasibility/safety policy replay. Moved selector and generation-strategy comparisons to Possible studies. Clarified that both existing selector modes retain RA/CCA validation. Documentation changes only; no new experimental evidence. | Implement configuration and records for the two core studies first |
 | 2026-10-14 | Study reorder and method definitions | Made a method comparison Study 1 and defined three methods by decision authority. Former Studies 1 and 2 became Studies 2 and 3. Added the experiment-record retention rule pending an AGENTS.md exception. Superseded the same day by the four-rung ladder. Documentation only; no code changes or trials. | Superseded |
-| 2026-10-14 | Four-rung ladder | Replaced the three methods with the user-selected ladder: LLM single-turn, LLM multi-turn, LLM + RA, LLM + RA + CCA. Removed the separate LLM-with-validation method; one proposal per turn in rungs 2–4, so the symbolic selector moved to possible study A. Recorded construction-guaranteed eliminations, the missing generate-and-test baseline (possible study B), the rung 4 completion dependency, and current code availability for each rung. Documentation only; no code changes or trials. | Phase 3: independent outline auditor |
+| 2026-10-14 | Four-rung ladder | Replaced the three methods with the user-selected ladder: LLM single-turn, LLM multi-turn, LLM + RA, LLM + RA + CCA. Removed the separate LLM-with-validation method; one proposal per turn in rungs 2–4, so the symbolic selector moved to possible study A. Recorded construction-guaranteed eliminations, the missing generate-and-test baseline (possible study B), the rung 4 completion dependency, and current code availability for each rung. Documentation only; no code changes or trials. | Superseded on 2026-10-21 |
+| 2026-10-21 | 2 × 2 ablation | Replaced the four-rung ladder with a 2 × 2 (user decision): Single-pass LLM, Incremental LLM, Single-pass + validation, Full framework. All four get the same prompt, lookups, lookup limit, and token budget, because the full observations do not fit in one prompt. Single-pass + validation (former possible study B) rewrites whole outlines after a rejection. Dropped the former rung 3 (RA only); its H2 evidence comes from CCA rejections of RA-passed proposals in both validated configurations, now reported in a rejection table for every scenario. Added H4 and lookup counts. Figure mock-ups: https://claude.ai/artifact/Autf82GVVeYAGSWgc9CeLg. Documentation only; no code changes or trials. | Phase 3: independent outline auditor |
 
 ## 8. Repository references
 

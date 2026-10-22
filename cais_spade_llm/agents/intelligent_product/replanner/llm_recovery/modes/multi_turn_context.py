@@ -16,6 +16,11 @@ _RESOURCE_FIELDS = {
     "held_part_location", "current_location", "resource_location", "current_pose",
     "current_pose_captured_at", "current_pose_source", "projected_pose", "last_observed_pose", "gripper_state", "controller_ready", "named_poses", "availability",
 }
+# Recorded fields a projected resource snapshot keeps beside the resource's declared variables.
+_PROJECTED_SNAPSHOT_FIELDS = {
+    "resource_jid", "resource_type", "controller_ready", "named_poses", "availability", "current_pose",
+    "current_pose_source", "current_pose_captured_at", "projected_pose", "last_observed_pose",
+}
 _PART_FIELDS = {
     "part_name", "current_state", "part_state", "current_location", "part_location",
     "current_holder_resource_jid", "part_holder_resource_jid", "observed_pose",
@@ -350,7 +355,23 @@ def select_outline_context(prepared: dict, session: dict) -> dict:  # noqa: C901
 
 
 def public_resource_snapshot(prepared: dict, session: dict, jid: str) -> dict:
-    """Serve public declarations and state, excluding internal task/model fields."""
+    """Serve a resource's public declarations and state, excluding internal task and model fields.
+
+    In a validation-off draft, a resource that an accepted event changed keeps only its declared
+    variables and its identity, availability and pose records. Events update declared variables
+    only, so its other recorded values describe the failure and would contradict its projected state.
+
+    Args:
+        prepared: Prepared recovery request holding the recorded resources.
+        session: Planning session holding the projected state and the accepted events.
+        jid: Resource to describe.
+
+    Returns:
+        The resource's public fields.
+
+    Raises:
+        ValueError: ``NEEDS_CONTEXT`` when the resource is unknown.
+    """
     entries = prepared.get("recovery_resources", {})
     if jid not in entries:
         raise ValueError(f"NEEDS_CONTEXT: unknown resource {jid}")
@@ -364,16 +385,26 @@ def public_resource_snapshot(prepared: dict, session: dict, jid: str) -> dict:
             if declaration.get("scope", "resource") == "resource":
                 declared.add(name)
     resources, _ = _views(prepared, session)
+    from .multi_turn_diagnostic import NOT_STATED
+
+    # A value an accepted event changed without stating it is not stated, not its captured value.
+    projected = resources.setdefault(jid, {})
+    for name in session.get("diagnostic_unknown_owner_fields", {}).get(jid, []):
+        projected[name] = NOT_STATED
+        if name == "resource_state":
+            projected["current_state"] = NOT_STATED
+    changed = {name for task in session.get("accepted_outline_prefix", [])
+               for name in (task.get("resource_jid"),
+                            *(change.get("entity") for change in task.get("condition_changes") or []))}
+    if session.get("outline_diagnostic_bypass") and jid in changed:
+        fields &= declared | _PROJECTED_SNAPSHOT_FIELDS
     if session.get("validation_contract_version") == 2 and jid in session.get("derived_resource_snapshots", {}):
         if session.get("public_safety_context_version") != 1:
             return _fields(resources.get(jid, {}), fields)
         # New public context keeps projected values distinct from the unchanged
         # captured row. No state token is renamed or assigned through an alias.
         row = resources.get(jid, {})
-        retained = {"resource_jid", "resource_type", "controller_ready", "named_poses", "availability",
-                    "current_pose", "current_pose_source", "current_pose_captured_at",
-                    "projected_pose", "last_observed_pose"}
-        snapshot = _fields(row, fields & (declared | retained))
+        snapshot = _fields(row, fields & (declared | _PROJECTED_SNAPSHOT_FIELDS))
         sources = {key: "projected_state" if key in declared else "saved_observations" for key in snapshot}
         physical = session.get("projected_physical_evidence") or {}
         identities = [rid for rid, value in physical.get("jids", {}).items() if value == jid]
@@ -447,10 +478,36 @@ def public_part_snapshot(prepared: dict, session: dict, part_name: str) -> dict:
     return snapshot
 
 
+_CONDITION_KEYS = {"scope", "domain", "domain_complete", "type", "description", "fields", "items"}
+# How the listed values of a condition variable are read; shown with every variables lookup.
+_CONDITION_VALUES_RULE = ("A variable whose values name places, parts or positions must name a known one; for "
+                          "any other variable the domain lists the values normal production uses (domain_complete "
+                          "refers to normal production), and new values are allowed.")
+
+
 def _public_resource_state_variables(entry: dict) -> dict:
-    return {name: _fields(row, {"scope", "domain", "domain_complete", "type", "description"}) for name, row in
+    return {name: _fields(row, _CONDITION_KEYS) for name, row in
             (entry.get("recovery_des_model") or {}).get("state_variables", {}).items()
             if not row.get("private") and not name.startswith(("task_ctx.", "_"))}
+
+
+def _public_part_state_variables(prepared: dict, snapshot: dict) -> dict:
+    """Return a part's condition variables: every part-scoped variable a resource declares.
+
+    Each variable lists the resources whose events set it and the part's current value.
+    """
+    variables: dict[str, dict] = {}
+    for jid, entry in sorted(prepared.get("recovery_resources", {}).items()):
+        for name, row in _public_resource_state_variables(entry).items():
+            if row.get("scope") != "part":
+                continue
+            merged = variables.setdefault(name, {**{key: deepcopy(value) for key, value in row.items() if key != "domain"},
+                                                 "domain": [], "set_by": []})
+            merged["set_by"].append(jid)
+            merged["domain"].extend(value for value in row.get("domain") or [] if value not in merged["domain"])
+    for name, row in variables.items():
+        row["current_value"] = deepcopy(snapshot.get(name))
+    return variables
 
 
 def _held_part_interpretation(entry: dict, declarations: dict) -> dict:
@@ -572,6 +629,22 @@ def _public_task_contract(entry: dict, event: dict) -> dict:
     return result
 
 
+def _public_pending_tasks(prepared: dict, session: dict, entry: dict) -> list[dict]:
+    """Return a resource's remaining planned tasks with their public fields.
+
+    In a validation-off draft, replaced work that needs a resource still reported faulted is left
+    out: normal production cannot run it, so only the recovery replaces it.
+    """
+    replaced = set()
+    if session.get("outline_diagnostic_bypass"):
+        from .multi_turn_diagnostic import faulted_replaced_work
+
+        replaced = faulted_replaced_work(session, prepared)
+    return [{**_fields(task, {"id", "function_name", "status", "predecessors", "successors"}),
+             "params": _fields(task.get("params", {}), {"part_name", "destination_location", "origin_resource_location"})}
+            for task in entry.get("pending_tasks", []) if task.get("id") not in replaced]
+
+
 def _resource_fact(prepared: dict, session: dict, jid: str, field: str, ref: str) -> tuple[Any, str]:
     entry = prepared.get("recovery_resources", {}).get(jid, {})
     snapshot = public_resource_snapshot(prepared, session, jid)
@@ -586,11 +659,15 @@ def _resource_fact(prepared: dict, session: dict, jid: str, field: str, ref: str
     elif field == "capability_evidence":
         value = _public_capability_evidence(entry)
     elif field == "pending_tasks":
-        value = [{**_fields(task, {"id", "function_name", "status", "predecessors", "successors"}),
-                  "params": _fields(task.get("params", {}), {"part_name", "destination_location", "origin_resource_location"})}
-                 for task in entry.get("pending_tasks", [])]
+        value = _public_pending_tasks(prepared, session, entry)
     elif field == "state_variables":
         value = _public_resource_state_variables(entry)
+        if session.get("outline_diagnostic_bypass"):
+            from .multi_turn_outline_facts import current_values
+
+            # Validated prompts promise declarations only; drafts add current values, as parts do.
+            for name, current in current_values(jid, value, session).items():
+                value[name]["current_value"] = current
     elif field in snapshot:
         value = snapshot[field]
     else:
@@ -643,9 +720,13 @@ _REACH_RULE = (
     "a part located only by its observed_pose; station access follows each robot's reachability."
 )
 _POSE_RELATION_BASIS = (
-    "regions: recorded region bounds; locations: declared reachability, reachable_locations or "
+    "regions: recorded region bounds that contain the measured position (one point, not the full extent); "
+    "locations: declared reachability, reachable_locations or "
     "resource_location domain, where a region belongs to location L when it is named L or L.<sub>; "
-    "envelopes: declared gripper_reach. not_evaluated resources declare neither."
+    "envelopes: the pose beside each declared work envelope, which contains it when xy_distance_m is at most "
+    "max_xy_radius_m + tolerance_m and z_m lies within z_range_m widened by tolerance_m; not_evaluated: "
+    "resources whose declarations do not bound the pose, because they declare no envelope and either no "
+    "location or an event that moves them to coordinates."
 )
 
 
@@ -663,13 +744,15 @@ def diagnostic_refs(prepared: dict) -> list[tuple[str, str]]:
 
 def _pose_relations_fact(prepared: dict, session: dict, kind: str, name: str) -> dict:
     from .multi_turn_diagnostic import pose_relations
+    from .multi_turn_outline_facts import _coordinate_parameters
 
     field = "observed_pose" if kind == "parts" else "current_pose"
     pose = resolve_outline_context(prepared, session, f"/{kind}/{name}/{field}")["value"]
     locations = {jid: _recorded_locations(entry) or set(_resource_location_domain(entry))
                  for jid, entry in prepared.get("recovery_resources", {}).items()}
+    movers = {jid for jid, model in session.get("recovery_des_models", {}).items() if _coordinate_parameters(model)}
     return {field: pose, **pose_relations(pose, prepared.get("diagnostic_regions", {}), locations,
-                                          prepared.get("diagnostic_reach", {}))}
+                                          prepared.get("diagnostic_reach", {}), movers)}
 
 
 def _diagnostic_fact(prepared: dict, session: dict, ref: str) -> dict:
@@ -751,6 +834,9 @@ def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  #
         if field == "target":
             value = entry.get("target")
             source = "configuration"
+        elif field == "state_variables":
+            value = _public_part_state_variables(prepared, snapshot)
+            source = "declaration"
         elif field == "snapshot":
             value = snapshot
             source = "projected_state" if session.get("accepted_outline_prefix") else "saved_observations"
@@ -759,7 +845,7 @@ def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  #
             source = "saved_observations" if field in {"observed_pose", "last_observed_pose"} else "projected_state" if session.get("accepted_outline_prefix") else "saved_observations"
         else:
             raise ValueError(f"NEEDS_CONTEXT: {ref} is not available")
-        if session.get("public_safety_context_version") == 1 and field != "target":
+        if session.get("public_safety_context_version") == 1 and field not in {"target", "state_variables"}:
             sources = snapshot.get("field_sources", {})
             if field == "snapshot":
                 source = "projected_state" if "projected_state" in sources.values() else "saved_observations"
@@ -783,6 +869,8 @@ def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  #
             "accepted_trace_length": len(session.get("accepted_outline_prefix", []))}
     if session.get("public_safety_context_version") == 1 and source == "projected_state":
         fact.update(captured_at=None, source_observation_captured_at=captured_at)
+    if len(segments) == 4 and segments[3] == "state_variables" and session.get("outline_diagnostic_bypass"):
+        fact["values_rule"] = _CONDITION_VALUES_RULE
     if len(segments) == 4 and segments[1] == "resources" and segments[3] == "state_variables":
         interpretation = _held_part_interpretation(prepared["recovery_resources"][segments[2]], value)
         if interpretation:
@@ -900,18 +988,37 @@ def _remember_outline_context_results(prepared: dict, session: dict, entry: dict
     return new_information
 
 
+_PROPOSAL_FIELDS = ("candidate_events", "candidate_traces", "next_transition", "transition_trace", "transition_suffix",
+                    "selected_candidate_index")
+
+
+def _context_request_error(response: dict) -> str | None:
+    """Name what makes a need_context reply unusable, or return None when it can be served."""
+    refs = response.get("context_requests")
+    if not isinstance(refs, list) or not refs:
+        return "need_context requires context_requests with 1 to 8 references"
+    if len(refs) > 8:
+        return f"need_context allows at most 8 references; {len(refs)} were requested"
+    malformed = [str(ref) for ref in refs if not isinstance(ref, str) or not ref.startswith("/")]
+    if malformed:
+        return "each context request must be a reference starting with /: " + ", ".join(malformed)
+    proposals = [key for key in _PROPOSAL_FIELDS if key in response]
+    if proposals:
+        return "need_context cannot also carry " + ", ".join(proposals) + "; propose events in a later reply"
+    if not isinstance(response.get("thought"), str):
+        return "need_context requires thought as a string"
+    return None
+
+
 async def handle_outline_context(*, prepared: dict, session: dict, response: dict, planner: Any) -> tuple[str, dict]:
     """Serve one retrieval turn without committing or selecting candidate events."""
     check_context_revision(prepared, planner)
     refs = response.get("context_requests")
     entry: dict = {"context_requests": deepcopy(refs), "served_context": {}, "context_errors": []}
     new_information: bool | None = None
-    if (not isinstance(refs, list) or not refs or len(refs) > 8
-            or any(not isinstance(ref, str) or not ref.startswith("/") for ref in refs)
-            or any(key in response for key in ("candidate_events", "candidate_traces", "next_transition", "transition_trace", "transition_suffix", "selected_candidate_index"))):
-        entry["context_errors"] = [{"error": "need_context requires 1 to 8 references and no candidate events"}]
-    elif not isinstance(response.get("thought"), str):
-        entry["context_errors"] = [{"error": "need_context requires thought as a string"}]
+    error = _context_request_error(response)
+    if error:
+        entry["context_errors"] = [{"error": error}]
     else:
         for ref in dict.fromkeys(refs):
             try:

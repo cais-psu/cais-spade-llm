@@ -67,7 +67,7 @@ def recovery_turns(directory: Path, stage: str) -> list[dict[str, Any]]:
         row["recorded_order"] = min(row["recorded_order"], path.stat().st_mtime_ns)
         if path.name.endswith("_request.json"):
             row["turn"] = number
-        if fields.get("resource_jid"):
+        if fields.get("resource_jid") and phase == "primitive_generation":
             row["resource_jid"] = fields["resource_jid"]
         row["files"].append(str(path))
         if fields.get("decision"):

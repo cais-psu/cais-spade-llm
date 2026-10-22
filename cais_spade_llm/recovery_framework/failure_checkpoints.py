@@ -19,6 +19,9 @@ SUPPORTED_CHECKPOINTS["Machining breakdown during part processing"] = (
 SUPPORTED_CHECKPOINTS["Part slippage"] = (
     "during_place_lowering", "after_both_pickups_before_place",
 )
+# The condition ur5e-1's device reports for its broken gripper in the robot breakdown capture: a
+# hardware fault that only a repair fixes, unlike a missed grasp that reports the same device.
+ROBOT_BREAKDOWN_GRIPPER_CONDITION = "not working (hardware fault, needs repair)"
 
 
 def acknowledged_pickup(context, resource_id: str, part: str) -> dict | None:

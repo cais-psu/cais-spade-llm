@@ -62,7 +62,7 @@ def test_outline_draft_ui_shows_table_without_enabling_composition_or_execution(
             assert not item.enabled
     table = next(item for item in client.elements.values() if isinstance(item, ui.table)
                  and item.rows and item.rows[0].get("event_name") == "Arbitrary task event")
-    assert table.rows[0]["expected_end_state"] == '{"active_job": null}'
+    assert table.rows[0]["end_state"] == "owner  active_job = none"
     assert table.visible
     assert any(isinstance(item, ui.label) and "Execution authorized: false" in item.text
                for item in client.elements.values())
@@ -903,6 +903,12 @@ def test_output_separates_ra_physical_and_cca_evidence(recovery_browser):
     client.delete()
 
 
+def _proposal_row(index, event, chosen=""):
+    return {"row": index, "chosen": chosen, "event_name": event["event_name"],
+            "resource": event.get("resource") or event.get("resource_jid"), "part_name": event.get("part_name"),
+            "expected_end_state": "", "neighbor_end_state": "", "params": "", "rationale": ""}
+
+
 def test_output_lists_exact_proposals_before_responses_and_keeps_attempts(tmp_path, recovery_browser):
     from cais_spade_llm.ui.components.recovery_turns import render_turn_content
 
@@ -931,8 +937,8 @@ def test_output_lists_exact_proposals_before_responses_and_keeps_attempts(tmp_pa
         render_turn_content(data, "output", state_key="run:generation:turn:output")
     tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
     assert len(tables) == 2
-    assert tables[0].rows == [{"row": index, **event} for index, event in enumerate(events)]
-    assert tables[1].rows == [{"row": index, **event} for index, event in enumerate(reversed(events))]
+    assert tables[0].rows == [_proposal_row(index, event) for index, event in enumerate(events)]
+    assert tables[1].rows == [_proposal_row(index, event) for index, event in enumerate(reversed(events))]
     labels = [item for item in client.elements.values() if isinstance(item, ui.label)]
     response_title = next(item for item in labels if item.text == "LLM response")
     assert all(item.id < response_title.id for item in tables)
@@ -968,8 +974,48 @@ def test_output_grounding_and_retrieval_never_show_runtime_events(response):
     with client:
         render_turn_content(data, "output")
     assert not any(isinstance(item, ui.table) for item in client.elements.values())
-    assert any(isinstance(item, ui.label) and item.text == "No events proposed in this turn" for item in client.elements.values())
+    labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+    assert "No events proposed in this turn" in labels
+    assert ("Requested context: /parts" in labels) is (response.get("decision") == "need_context")
     client.delete()
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_closing_turn_shows_the_nominal_handoff_by_resource_name(complete):
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    names = {"robot-3@localhost": "ur5e-3", "robot-4@localhost": "ur5e-4"}
+    connection = [{"event_name": "pick_grasp", "resource_jid": "robot-3@localhost", "part_name": "KET4",
+                   "expected_end_state": {"part_location": "robot-3@localhost"}}]
+    handoff = {"complete": complete, "declared_complete_by_llm": True, "nominal_connection": connection if complete else [],
+               "not_connected_reasons": [] if complete else ["robot-4@localhost did the interrupted work and is still reported faulted"],
+               "assumptions": [{"task_id": "pending_4", "reason": "no declared event of robot-4@localhost binds the resumed "
+                                "advance_conveyor; whether nominal work continues there is not checked"}] if complete else []}
+    payload = {"decision": "final_output_ready", "resource_names": names, "nominal_handoff": handoff,
+               "transition_trace": [{"event_name": "gear_reseated", "resource_jid": "robot-3@localhost",
+                                     "part_name": "gear_small", "expected_end_state": {"part_state": "assembled"}}]}
+    data = {"captures": [], "results": [{"path": "final.txt", "payload": payload, "response": {}}], "prompts": []}
+    for tab in ("input", "output"):
+        client = Client(context.client.page)
+        with client:
+            render_turn_content(data, tab)
+        labels = [item.text for item in client.elements.values() if isinstance(item, ui.label)]
+        tables = [item for item in client.elements.values() if isinstance(item, ui.table)]
+        # The closing turn is code's record, so no LLM capture is expected.
+        assert "Handoff to nominal work — no LLM call" in labels
+        assert not {"Exact request capture missing.", "Raw LLM response capture missing."} & set(labels)
+        if tab == "input":
+            assert (tables[0].rows[0]["event_name"], tables[0].rows[0]["resource"]) == ("gear_reseated", "ur5e-3")
+        elif complete:
+            assert "Nominal work takes over." in labels
+            assert ("Assumed, not checked: no declared event of ur5e-4 binds the resumed advance_conveyor; whether "
+                    "nominal work continues there is not checked") in labels
+            assert tables[0].rows[0]["resource"] == "ur5e-3"
+            assert tables[0].rows[0]["expected_end_state"] == "part_location: ur5e-3"
+        else:
+            assert not tables and ("Nominal work cannot take over: ur5e-4 did the interrupted work and is still "
+                                   "reported faulted") in labels
+        client.delete()
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -1010,7 +1056,32 @@ def test_output_preserves_legacy_llm_event_formats_and_order(field):
     with client:
         render_turn_content(data, "output")
     table = next(item for item in client.elements.values() if isinstance(item, ui.table))
-    assert table.rows == [{"row": index, **event} for index, event in enumerate(events)]
+    assert table.rows == [_proposal_row(index, event) for index, event in enumerate(events)]
+    client.delete()
+
+
+def test_output_marks_the_chosen_candidate_with_its_resource_outcome_and_rationale():
+    from cais_spade_llm.ui.components.recovery_turns import render_turn_content
+
+    events = [{"event_name": "clear_board", "resource": "ur5e-4", "expected_end_state": {"resource_location": "home"},
+               "rationale": "Leave the shared area."},
+              {"event_name": "set_down_peg", "resource": "ur5e-3", "part_name": "KET4_Square_4mm",
+               "expected_end_state": {"held_part": None, "part_location": "Buffer For Machined parts"},
+               "params": {"pose": [0.1, 0.2, 1.0]}, "rationale": "Free the gripper."}]
+    content = json.dumps({"thought": "Choose one.", "candidate_events": events, "selected_candidate_index": 1})
+    data = {"captures": [{"path": "response.json", "status": "captured", "record": {
+        "kind": "provider_response", "raw_response": {"choices": [{"message": {"content": content}}]},
+    }}], "results": [], "prompts": []}
+    client = Client(context.client.page)
+    with client:
+        render_turn_content(data, "output")
+    table = next(item for item in client.elements.values() if isinstance(item, ui.table))
+    assert [column["label"] for column in table.columns] == [
+        "Chosen", "Event", "Resource", "Part", "End state", "Params", "Rationale"]
+    assert [row["chosen"] for row in table.rows] == ["", "✓"]
+    assert table.rows[1]["resource"] == "ur5e-3"
+    assert table.rows[1]["expected_end_state"] == "held_part: None; part_location: Buffer For Machined parts"
+    assert table.rows[1]["params"] == "pose: [0.1, 0.2, 1.0]" and table.rows[1]["rationale"] == "Free the gripper."
     client.delete()
 
 

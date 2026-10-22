@@ -33,11 +33,12 @@ from cais_spade_llm.ui.recovery_setup import (
 logger = logging.getLogger(__name__)
 
 # Schema-2 re-captures (2026-10-16); the schema-1 originals stay selectable as regression fixtures.
+# ur5e-1 breakdown was captured again on 2026-10-20 so its fault report states the gripper hardware fault.
 _DEFAULT_OBSERVATIONS = {
     "Part slippage": "capture_77666affc1b9468ca157cf366d706dc8",
     "Machining breakdown during part processing": "capture_4d1e4cc0fd9b4e07812ce7cbb01d2c87",
     "Conveyor breakdown": "capture_3aed616530294a4bbdf353000fc69596",
-    "ur5e-1 breakdown": "capture_d1ca51654ff7423193d1bd13b146964d",
+    "ur5e-1 breakdown": "capture_b2d4286af67c4567b4bc0d0fd5ee55c7",
 }
 
 

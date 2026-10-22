@@ -552,13 +552,17 @@ def test_turn_index_groups_attempts_and_reads_payloads_only_on_expansion(tmp_pat
     runtime = directory / "turns" / "turn_00003_outline.json"
     runtime.parent.mkdir()
     runtime.write_text(json.dumps({"turn_index": 3, "phase": "outline", "decision": "need_context",
-                                  "served_context": {"/parts": {"value": [{"part_name": "gear_small"}]}}}, indent=2))
+                                  "served_context": {"/parts": {"value": [{"part_name": "gear_small"}]},
+                                                     "/resources": {"value": [{"resource_jid": "ur5e-1@localhost"}]}}},
+                                 indent=2))
     original = recovery_evidence.read_json_cached
     reader = Mock(side_effect=AssertionError("turn indexing loaded a payload"))
     monkeypatch.setattr(recovery_evidence, "read_json_cached", reader)
     turns = recovery_evidence.recovery_turns(directory, "recovery_outline")
     assert len(turns) == 1
     assert turns[0]["turn"] == 3 and turns[0]["status"] == "need_context"
+    # An outline turn has no single resource, so a listed one never labels it.
+    assert "resource_jid" not in turns[0]
     reader.assert_not_called()
     monkeypatch.setattr(recovery_evidence, "read_json_cached", original)
     expanded = recovery_evidence.read_recovery_turn(directory, turns[0])

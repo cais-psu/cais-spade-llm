@@ -30,12 +30,14 @@ from cais_spade_llm.resources.machine.machine_jobs import public_processing_obse
 logger = logging.getLogger(__name__)
 
 _HIDDEN = context._PRIVATE_CONTEXT_FIELDS | {
-    "evaluation_support", "available_capability_fields", "capabilities", "job_control",
+    "evaluation_support", "available_capability_fields", "capabilities",
     "program_options", "supports_executable_recovery", "supports_manipulator_pick_place",
     "primitive_steps", "capability_decompositions", "allowed_execution_surface", "active_job",
 }
 _NOT_CHECKED = {name: "not_checked" for name in ("ra", "physical_evidence", "cca", "nominal_continuation")}
 DRAFTS = RECORDS / "outline_drafts"
+# A cost limit, not a progress judgment: a good draft takes about six LLM calls.
+DRAFT_MAX_TURNS = 20
 # Where equipment is and how large it is. Routes, docking poses, handling
 # assignments and transfer targets are left out so geometry gives no answer.
 _GEOMETRY_KEYS = ("world_pose", "size", "length", "width", "surface_height", "enclosure_dimensions_m", "stand_height_m")
@@ -127,6 +129,11 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
         for declaration in variables.values():
             if "active_job" in declaration.get("description", ""):
                 declaration.pop("description")
+        evidence = entry.get("resource_evidence") or {}
+        owner_model = (evidence.get("environment_models") or {}).get(evidence.get("resource_id")) or {}
+        if owner_model.get("events"):
+            # The owner's declared events state, for example, where another resource's placement puts a part.
+            row["environment_model_events"] = deepcopy(owner_model["events"])
         prepared["recovery_resources"][jid] = row
     # These are recorded failure-time owner fields, not projected successor facts.
     for rid, record in observations.get("processing_observations", {}).items():
@@ -156,7 +163,7 @@ def _inputs(observations: dict) -> tuple[dict, dict]:
     prepared["public_safety_context_version"] = 1
     prepared["recovery_session"] = {
         "outline_mode": "incremental_candidates_validated", "recovery_selection_mode": "neurosymbolic",
-        "outline_context_retrieval": True, "outline_diagnostic_bypass": True, "max_turns": 80,
+        "outline_context_retrieval": True, "outline_diagnostic_bypass": True, "max_turns": DRAFT_MAX_TURNS,
         "max_observations": 0, "action_horizon": "1", "candidate_proposal_budget": 5,
     }
     return prepared, {}
@@ -187,6 +194,11 @@ class OutlineDraft:
         from .failure_grounding import apply_grounding
 
         grounded = apply_grounding(self.prepared, observations)
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn, multi_turn_diagnostic
+
+        # A failure blocks every task that needs the failed resource, not only its own tasks.
+        moved = multi_turn_diagnostic.resume_after_faults(
+            self.prepared, multi_turn.build_multi_turn_session_seed(self.prepared))
         choices = dict(zip(CHECK_FIELDS, (check_ra_feasibility, check_physical_evidence, check_cca_safety)))
         if any(type(value) is not bool for value in choices.values()) or all(choices.values()):
             raise ValueError("Use the validated Recovery workflow when all three checks are enabled")
@@ -224,6 +236,10 @@ class OutlineDraft:
                                .get("robot_description", {}).get("value"))
                 if description:
                     self.prepared["physical_evidence"]["endpoint_robot_description"] = description
+        # A resource's conditions are the variables its model and its primitives declare (assumption A.2).
+        multi_turn_diagnostic.declare_derived_conditions(self.prepared, {
+            jid: entry.get("execution_primitive_catalog") or []
+            for jid, entry in observations["prepared_recovery_request"]["recovery_resources"].items()})
         self.provider = SavedRecoveryProduct(observations, resources, model=model, reasoning_effort=reasoning_effort)
         self.planner = ProcessPlanner(self.provider, [])
         self.planner.nodes = deepcopy(observations.get("pending_nodes", []))
@@ -247,6 +263,8 @@ class OutlineDraft:
             "llm_turns": [], "retrievals": [], "message": "Ready for an unvalidated multi_turn outline."}
         if grounded is not None:
             self.record["fault_grounding"] = deepcopy(grounded["fault_event"])
+        if moved:
+            self.record["resumed_tasks_replaced"] = moved
         ask = self.provider.ask_llm_structured
 
         async def recorded_ask(prompt: str, **kwargs):
@@ -265,7 +283,7 @@ class OutlineDraft:
     def snapshot(self) -> dict:
         """Present tentative events separately from accepted recovery results."""
         return {"status": self.record["status"], "message": self.record["message"],
-            "run_id": self.record["run_id"], "outline_draft": deepcopy(self.record),
+            "run_id": self.record["run_id"], "outline_draft": self._named_record(),
             "outline": [], "primitives": [], "execution": [], "outline_status": "unvalidated",
             "primitive_status": "waiting", "outline_safety_status": "not_checked",
             "execution_authorized": False, "artifact_directory": str(self.directory),
@@ -276,6 +294,50 @@ class OutlineDraft:
                                               or (self._task is not None and not self._task.done())),
             "can_generate_outline": self.record["status"] == "draft_ready",
             "draft_path": str(self.directory / "draft.json")}
+
+    def _named_record(self) -> dict:
+        """Return the draft with each event, and each connecting nominal step, naming its resources."""
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_facts import (
+            resource_names,
+            with_resource_names,
+        )
+
+        names = resource_names(self.prepared)
+        record = deepcopy(self.record)
+        for row in [*record["transition_trace"], *record.get("nominal_handoff", {}).get("nominal_connection", [])]:
+            row["resource"] = names.get(row.get("resource_jid"), row.get("resource_jid"))
+            if isinstance(row.get("expected_end_state"), dict):
+                row["expected_end_state"] = {field: names.get(value, value) if isinstance(value, str) else value
+                                             for field, value in row["expected_end_state"].items()}
+            # Drafts saved before October 21 call the field place_end_state.
+            for key in ("neighbor_end_state", "place_end_state"):
+                if isinstance(row.get(key), dict):
+                    row[key] = {names.get(place, place): values for place, values in row[key].items()}
+            for change in row.get("condition_changes") or []:
+                change["entity"] = names.get(change.get("entity"), change.get("entity"))
+                if isinstance(change.get("value"), str):
+                    change["value"] = names.get(change["value"], change["value"])
+                if change.get("reason"):
+                    change["reason"] = with_resource_names(change["reason"], names)
+        return record
+
+    def _finished_message(self) -> str:
+        """Say how the outline ended; a declared recovery nominal work cannot take over is kept for review."""
+        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_facts import (
+            resource_names,
+            with_resource_names,
+        )
+
+        handoff = self.record["nominal_handoff"]
+        if handoff.get("complete"):
+            assumed = "; ".join(row["reason"] for row in handoff.get("assumptions") or [] if row.get("reason"))
+            if not assumed:
+                return "Unvalidated multi_turn outline with proposed nominal handoff."
+            return with_resource_names(f"Unvalidated multi_turn outline with proposed nominal handoff; assumed, not "
+                                       f"checked: {assumed}.", resource_names(self.prepared))
+        reasons = "; ".join(handoff.get("not_connected_reasons") or ["its recorded handoff conditions do not hold"])
+        return with_resource_names(f"The LLM declared the recovery complete; nominal work cannot take over: {reasons}.",
+                                   resource_names(self.prepared))
 
     def _save(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -302,15 +364,16 @@ class OutlineDraft:
                 self.record["handoff_safety_blocks"] = deepcopy(self.session.get("diagnostic_handoff_safety_blocks", []))
                 status = self.session.get("status")
                 if status == "ready_for_primitive_generation":
-                    self.record.update(status="draft", message="Unvalidated multi_turn outline with proposed nominal handoff.")
+                    self.record.update(status="draft", message=self._finished_message())
                     break
                 if status not in {"paused_after_outline_turn", "running"}:
                     self.record.update(status="NEEDS_CONTEXT" if status == "NEEDS_CONTEXT" and any(self.record["validation_checks"].values()) else "draft_incomplete",
                         message="; ".join(row.get("reason", "") for row in self.session.get("outline_validation_findings", []))
                         or f"multi_turn stopped at {status}.")
                     break
-                if self.session.get("turn_index", 0) >= self.session.get("max_turns", 80):
-                    self.record.update(status="draft_incomplete", message="multi_turn reached its 80-turn budget.")
+                budget = self.session.get("max_turns", DRAFT_MAX_TURNS)
+                if self.session.get("turn_index", 0) >= budget:
+                    self.record.update(status="draft_incomplete", message=f"multi_turn reached its {budget}-turn budget.")
                     break
                 self._save()
             if self._stopped:

@@ -211,6 +211,12 @@ def _outline_state_field_schema(
         schema = {"type": deepcopy(declared_type)}
         if field_name in {"resource_state", "part_state", "held_part"} and "string" in type_names:
             schema["minLength"] = 1
+        fields = declaration.get("fields")
+        if "object" in type_names and isinstance(fields, list) and fields:
+            schema.update(properties={name: {"type": "number"} for name in fields}, required=list(fields),
+                          additionalProperties=False)
+        if "array" in type_names and isinstance(declaration.get("items"), dict):
+            schema["items"] = deepcopy(declaration["items"])
         return schema
     domain = list(declaration.get("domain") or [])
     if field_name in {"resource_state", "part_state"}:
@@ -287,7 +293,18 @@ def _outline_candidate_schema_definitions(  # noqa: C901 - retain historical sch
     ) = None,
     *, declared_fields_only: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Return mutually exclusive schemas for recovery candidate shapes."""
+    """Return mutually exclusive schemas for recovery candidate shapes.
+
+    Under ``declared_fields_only`` (contract 2) the outline event gives only its form, the same for
+    every resource. The LLM takes variable names from the knowledge base, and the outline turn checks
+    them against the resource's model.
+    """
+    if declared_fields_only:
+        event = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
+        event.pop("allOf", None)
+        event["properties"]["part_name"] = {"type": ["string", "null"], "minLength": 1}
+        event["properties"]["expected_end_state"] = {"type": "object", "minProperties": 1}
+        return {"outline_event": event}
     if declared_state_variables_by_resource_jid:
         resource_event_branches: list[dict[str, Any]] = []
         state_definitions: dict[str, dict[str, Any]] = {}
@@ -302,14 +319,12 @@ def _outline_candidate_schema_definitions(  # noqa: C901 - retain historical sch
                 if str(field_name).strip()
                 and dict(declaration or {}).get("private") is not True
                 and not str(field_name).startswith("task_ctx.")
-                and (not declared_fields_only or not str(field_name).startswith("_"))
             }
-            if not declarations or not declared_fields_only and "resource_state" not in declarations:
+            if "resource_state" not in declarations:
                 continue
             candidate_branches = _resource_candidate_event_schemas(
                 resource_jid=str(resource_jid),
                 declared_state_variables=declarations,
-                declared_fields_only=declared_fields_only,
             )
             for branch_kind, branch in zip(
                 ("resource_only", "part", "custody")[
@@ -362,17 +377,6 @@ def _outline_candidate_schema_definitions(  # noqa: C901 - retain historical sch
                 }
             }
 
-    if declared_fields_only:
-        declarations = {name: row for name, row in (declared_state_variables or {}).items()
-                        if not row.get("private") and not name.startswith(("task_ctx.", "_"))}
-        event = deepcopy(_OUTLINE_SYMBOLIC_EVENT_SCHEMA)
-        event.pop("allOf", None)
-        event["properties"]["part_name"] = {"type": ["string", "null"], "minLength": 1}
-        event["properties"]["expected_end_state"] = {
-            "type": "object", "additionalProperties": False, "minProperties": 1,
-            "properties": {name: _outline_state_field_schema(name, row) for name, row in declarations.items()},
-        }
-        return {"outline_event": event}
     expanded_event = _outline_symbolic_event_schema(declared_state_variables)
     state_properties = deepcopy(
         expanded_event["properties"]["expected_end_state"]["properties"]
@@ -479,7 +483,6 @@ def _resource_candidate_event_schemas(
     *,
     resource_jid: str,
     declared_state_variables: dict[str, dict[str, Any]],
-    declared_fields_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return compact exact-JID constraints for one RA's candidate branches."""
     state_properties = {
@@ -496,12 +499,12 @@ def _resource_candidate_event_schemas(
     resource_state_properties = {
         field_name: deepcopy(field_schema)
         for field_name, field_schema in state_properties.items()
-        if (declared_fields_only or field_name != "held_part") and field_scope(field_name) != "part"
+        if field_name != "held_part" and field_scope(field_name) != "part"
     }
     part_state_properties = {
         field_name: deepcopy(field_schema)
         for field_name, field_schema in state_properties.items()
-        if declared_fields_only or field_name != "held_part"
+        if field_name != "held_part"
     }
 
     def state_schema(
@@ -513,8 +516,7 @@ def _resource_candidate_event_schemas(
             "type": "object",
             "additionalProperties": False,
             "properties": deepcopy(properties),
-            "required": list(required or ([] if declared_fields_only else ["resource_state"])),
-            **({"minProperties": 1} if declared_fields_only else {}),
+            "required": list(required or ["resource_state"]),
         }
 
     def branch_schema(
@@ -551,7 +553,7 @@ def _resource_candidate_event_schemas(
         ),
     ]
     custody_fields = {"resource_state", "held_part", "part_state", "part_location"}
-    if not declared_fields_only and custody_fields.issubset(state_properties):
+    if custody_fields.issubset(state_properties):
         branches.append(
             branch_schema(
                 expected_end_state_schema=state_schema(
@@ -614,6 +616,7 @@ def _outline_candidates_response_schema(
     declared_state_variables_by_resource_jid: (
         dict[str, dict[str, dict[str, Any]]] | None
     ) = None,
+    declared_fields_only: bool = False,
 ) -> dict[str, Any]:
     normalized_bound = max(1, int(candidate_bound or 1))
     normalized_candidate_count: int | str
@@ -659,6 +662,7 @@ def _outline_candidates_response_schema(
     schema_definitions = _outline_candidate_schema_definitions(
         declared_state_variables,
         declared_state_variables_by_resource_jid,
+        declared_fields_only=declared_fields_only,
     )
     candidate_item_schema = {"$ref": "#/$defs/outline_event"}
     required = ["thought"]
@@ -881,7 +885,8 @@ def multi_turn_phase_response_schema(  # noqa: PLR0913
             schema = _outline_candidates_response_schema(
                 recovery_selection_mode="neurosymbolic", action_horizon="1",
                 declared_state_variables=declared_state_variables,
-                declared_state_variables_by_resource_jid=declared_state_variables_by_resource_jid)
+                declared_state_variables_by_resource_jid=declared_state_variables_by_resource_jid,
+                declared_fields_only=True)
         elif validation_contract_version == 2:
             schema = _outline_incremental_response_schema(
                 declared_state_variables=declared_state_variables,
@@ -1174,14 +1179,14 @@ def _candidate_event_label(
     finding: dict[str, Any] | None = None,
 ) -> str:
     outline_id = str(
-        task.get("outline_id") or task.get("task_id") or (finding or {}).get("task_id") or ""
+        task.get("outline_id") or task.get("task_id") or (finding or {}).get("outline_id")
+        or (finding or {}).get("task_id") or ""
     ).strip()
     resource_jid = str(
         _task_resource_jid(task) or (finding or {}).get("resource_jid") or ""
     ).strip()
     part_name = str(_task_part_name(task) or (finding or {}).get("part_name") or "").strip()
-    label_parts = [item for item in (outline_id, resource_jid, part_name) if item]
-    label = "/".join(label_parts) if label_parts else "anonymous_event"
+    label = "/".join(item for item in (outline_id, resource_jid, part_name) if item)
     target_ref = _task_target_ref(task, finding=finding)
     if target_ref:
         label += f"->{target_ref}"
@@ -1218,18 +1223,11 @@ def _finding_state_evidence_text(
     evidence = dict(finding.get("evidence") or {})
     resource_jid = str(_task_resource_jid(task) or finding.get("resource_jid") or "").strip()
     part_name = str(_task_part_name(task) or finding.get("part_name") or "").strip()
-    target_ref = _task_target_ref(task, finding=finding)
     resource_row = dict((resources_by_jid or {}).get(resource_jid) or {})
     part_row = dict((parts_by_name or {}).get(part_name) or {})
 
+    # The event label already names the resource, part and target.
     facts: list[str] = []
-    if resource_jid:
-        facts.append(f"resource_jid={resource_jid}")
-    if part_name:
-        facts.append(f"part_name={part_name}")
-    if target_ref:
-        facts.append(f"target_ref={target_ref}")
-
     checked_pose = dict(evidence.get("checked_pose") or finding.get("pose") or {})
     if checked_pose:
         facts.append(f"checked_pose=({_pose_xyz_text(checked_pose)})")
@@ -1294,7 +1292,7 @@ def _finding_state_evidence_text(
     if unsatisfied_predicates:
         facts.append("unsatisfied_predicates=" + ",".join(unsatisfied_predicates))
 
-    return "; ".join(facts) if facts else "projected_state_facts=not_available"
+    return "; ".join(facts)
 
 
 def _des_diagnostic_fields(finding: dict[str, Any]) -> dict[str, str]:
@@ -1465,27 +1463,23 @@ def _render_des_event_diagnostic(
         finding.get("constraint_code") or "validation_rejected"
     ).strip()
     reason = str(finding.get("reason") or "Candidate was rejected.").strip()
-    line = (
-        f"- candidate_event={_candidate_event_label(task=task, finding=finding)}"
-        f" | constraint_code={constraint_code}"
-        f" | reason={reason}"
-    )
+    label = _candidate_event_label(task=task, finding=finding)
+    fields = [f"candidate_event={label}"] if label else []
+    fields += [f"constraint_code={constraint_code}", f"reason={reason}"]
     evidence = dict(finding.get("evidence") or {})
+    state_evidence = "" if evidence else _finding_state_evidence_text(
+        task=task,
+        finding=finding,
+        resources_by_jid=resources_by_jid,
+        parts_by_name=parts_by_name,
+    )
     if evidence:
-        line += f" | evidence={_inline_json(evidence)}"
-    else:
-        line += (
-            " | state_evidence="
-            + _finding_state_evidence_text(
-                task=task,
-                finding=finding,
-                resources_by_jid=resources_by_jid,
-                parts_by_name=parts_by_name,
-            )
-        )
+        fields.append(f"evidence={_inline_json(evidence)}")
+    elif state_evidence:
+        fields.append(f"state_evidence={state_evidence}")
     if _finding_durable(finding):
-        line += " | persistence=diagnosis persists until the relevant projected state facts change"
-    return line
+        fields.append("persistence=diagnosis persists until the relevant projected state facts change")
+    return "- " + " | ".join(fields)
 
 
 def _candidate_diagnostic_signature(
@@ -1708,8 +1702,6 @@ def _accepted_transition_prefix_for_prompt(
             if field_name == "part_name" and not str(field_value or "").strip():
                 continue
             row[field_name] = deepcopy(field_value)
-        if task.get("params"):
-            row["params"] = deepcopy(task["params"])
         if hide_registered_functions and task.get("candidate_source") == "robot_task_program":
             row["candidate_source"] = task["candidate_source"]
             row["expected_end_state"] = deepcopy(task.get("expected_end_state") or {})
@@ -3855,6 +3847,10 @@ def _outline_recorded_reach_reason(reason: Any) -> bool:
         + number + r", " + number + r"\] m)", reason) is not None
 
 
+_CODE_AUTHORED_FEEDBACK = {"selected_candidate_rejected", "recovery_complete_format", "custody_discontinuity",
+                           "invalid_candidate_response", "candidate_schema_violation"}
+
+
 def _outline_feedback_for_prompt(
     row: dict[str, Any], public_fields: set[str], *, resource_fields: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
@@ -3918,8 +3914,6 @@ def _outline_feedback_for_prompt(
         "unknown_location_token": "The proposed location is not declared for this resource.",
         "validation_state_stale": "The recorded start state differs from the candidate start state.",
         "held_part_location_mismatch": "held_part and part_location do not describe the same ResourceAgent transition",
-        "custody_discontinuity": "A resource cannot handle a part held by another resource, "
-            "and a resource holds at most one part.",
         "safety_rule_violation": "The proposed transition violates a selected safety requirement; the recorded rule and AP values are included.",
         "safety_validation_unavailable": "NEEDS_CONTEXT: selected safety requirements could not be established from the recorded evidence.",
         "physical_motion_rejected": "The checked owner motion intersects recorded geometry. This result applies to that motion; alternative motions have not been exhausted.",
@@ -3953,6 +3947,9 @@ def _outline_feedback_for_prompt(
                 result['reason'] = 'Recorded public conditions block the supported owner declarations; safety specifications were not checked.'
             if _outline_recorded_reach_reason(row.get("reason")) and capability.get("checks"):
                 result["reason"] = "The calculated target is outside the recorded owner motion capability."
+    elif row.get("constraint_code") in _CODE_AUTHORED_FEEDBACK:
+        # These reasons are written by the outline code from public facts, so they are shown as written.
+        result["reason"] = row.get("reason")
     elif row.get("constraint_code"):
         result["reason"] = "Recorded validation or comparison result; see the constraint code and public evidence."
     return result
@@ -4088,6 +4085,8 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
         for key in ("outline_validation_findings", "candidate_rejection_feedback", "primitive_escalation_diagnostics", "pruned_actions", "turns"):
             session_state[key] = [_outline_feedback_for_prompt(row, public_fields, resource_fields=resource_fields)
                                   for row in session_state.get(key, []) if isinstance(row, dict)]
+    if payload.get("outline_template"):
+        return _render_failure_outline_prompt(payload, session_state)
     if session_state.get("validation_contract_version") == 2 and not session_state.get("outline_diagnostic_bypass"):
         return _render_validated_event_prompt(payload, session_state)
     custody_state_declared = _public_custody_state_is_declared(
@@ -4582,6 +4581,126 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     return "\n".join(sections).strip() + "\n"
 
 
+# Candidate Rules about the event's resource and end state, and about closing; the optional
+# neighbor_end_state rule sits between them.
+_FAILURE_OUTLINE_EVENT_RULES = (
+    "- Use a resource only where it works (a reachable location, a position within its workspace bounds, or a "
+    "position it moves to) and for what it handles (parts it holds, processes it runs). Working at one place says "
+    "nothing about another.",
+    "- `expected_end_state`: the new value of each declared variable the event changes, for its resource and its "
+    "part only. Values may be new, but places, parts and positions must be known; give an unnamed position as "
+    "`pose`.",
+)
+_NEIGHBOR_END_STATE_RULE = (
+    "- `neighbor_end_state`: when moving the part changes another resource (it arrives at or leaves it), that "
+    "resource's own changed variables, not the part's: {\"<resource name>\": {\"<variable>\": <value>}}. That "
+    "resource does not act; variables you leave out stay as they are.")
+_FAILURE_OUTLINE_CLOSING_RULES = (
+    "- Use variable names exactly as declared. Look up any fact or variable you rely on that is not shown.",
+    "- When you judge that normal production's remaining planned tasks can continue from the state your events "
+    "leave, return only `thought` and `decision: \"recovery_complete\"`; normal production then takes over.",
+)
+
+
+def _failure_outline_candidate_rules(*, neighbor_end_state: bool) -> tuple[str, ...]:
+    """Return the Candidate Rules; ``neighbor_end_state`` is offered only when no outline check is enabled.
+
+    Code applies a stated ``neighbor_end_state`` without checking it, so drafts with checks keep the rule
+    that an event states only its own resource and its part.
+    """
+    place_field = "`neighbor_end_state` (if needed), " if neighbor_end_state else ""
+    return (
+        "- One event per candidate, by one resource: `outline_id`, `event_name` (what it achieves; new names "
+        f"allowed), `resource`, `part_name` (if a part is involved), `expected_end_state`, {place_field}`rationale` "
+        "(the fact it relies on).",
+        *_FAILURE_OUTLINE_EVENT_RULES,
+        *((_NEIGHBOR_END_STATE_RULE,) if neighbor_end_state else ()),
+        *_FAILURE_OUTLINE_CLOSING_RULES,
+    )
+
+
+def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[str, Any]) -> str:
+    """Render the outline prompt that states every resource and part alike, by name.
+
+    Args:
+        payload: Prompt input carrying ``outline_template`` built from the recorded capture.
+        session_state: Tentative planning state with public feedback rows.
+
+    Returns:
+        Prompt text in which resource JIDs are replaced by resource names.
+    """
+    from .multi_turn_diagnostic import llm_selects_next_event
+    from .multi_turn_outline_facts import with_named_domains, with_resource_names
+
+    template = payload["outline_template"]
+    accepted = list(session_state.get("accepted_outline_prefix") or [])
+    selection = (
+        "Plan how to get from the current state to the Recovery Goal. Propose 1–5 ways to do the next step of that "
+        "plan, then choose one with `selected_candidate_index`."
+        if llm_selects_next_event(session_state) else
+        "Plan how to get from the current state to the Recovery Goal. Propose 1–5 ways to do the next step of that "
+        "plan. Do not select or rank candidates; the enabled outline checks validate each one."
+    )
+    recorded = ("Expected after the events so far, not re-measured." if accepted
+                else "Recorded at the failure.")
+    # The failure facts stay as measured; once events exist they are older than the projected state.
+    measured = ("What was detected and measured at the failure, before your events. Resources and Parts below "
+                "show the state after them." if accepted
+                else "What was detected and measured, stated the same way for every resource.")
+    sections = [
+        "Task and Role",
+        "You are the recovery planner. A failure interrupted normal production. Until normal production takes "
+        "over, only your recovery events change the planned state; a job already running keeps running until "
+        "an event pauses or stops it.",
+        selection,
+        "Give your plan in `thought` (two short sentences) and keep each `rationale` to one.",
+        "", "Failure", measured,
+        *template["failure"],
+        "", "Recovery Goal", "What the interrupted work was meant to achieve. Your events, and then normal "
+        "production's remaining planned tasks, must achieve it.",
+        *(template["goal"] or ["(none recorded)"]),
+    ]
+    if accepted:
+        # Listed under the reply format's keys; with_resource_names below turns the JIDs into names.
+        events = [{("resource" if key == "resource_jid" else key): value for key, value in row.items()}
+                  for row in _accepted_transition_prefix_for_prompt(accepted, hide_registered_functions=True)]
+        sections += ["", "Recovery Events So Far (planned, not executed)", _compact_json(events),
+                     "Resources and Parts already include these events. Do not propose them again."]
+    sections += _top_validation_feedback_section(
+        summary=_outline_immediate_validation_feedback_summary(
+            outline_validation_findings=list(session_state.get("outline_validation_findings") or []),
+            candidate_rejection_feedback=list(session_state.get("candidate_rejection_feedback") or []),
+            primitive_escalation_diagnostics=list(session_state.get("primitive_escalation_diagnostics") or []),
+            feedback_render_style=_feedback_render_style_token(session_state)),
+        label="Validation Feedback")
+    sections += [
+        "", "Resources", f"{recorded} Every resource is listed the same way: its state, then the capabilities it "
+        "declares (reachable locations, where it places parts, workspace bounds, positions it moves to, processes it "
+        "runs, job control). A resource's "
+        "condition is the variables its model declares; request `/resources/<name>/state_variables` for them and "
+        "their allowed values. A value your events changed without stating it reads \"not stated\".",
+        *template["resources"],
+        "", "Parts", "A part's condition is its variables: its state, where it is, who holds it, and its process "
+        "record; request `/parts/<name>/state_variables` for them.", *template["parts"],
+        "", "Safety Rules", "Your events, and normal production after them, must keep these rules.",
+        _compact_safety_rules(dict(payload.get("llm_input") or {})),
+        "", "Candidate Rules", *_failure_outline_candidate_rules(neighbor_end_state=llm_selects_next_event(session_state)),
+        "", "Knowledge Base",
+        "Request facts from the knowledge base by returning only `thought`, `decision: \"need_context\"` and 1–8 "
+        "`context_requests` from the list below; they are added to the next prompt before you propose events. When "
+        "proposing events, omit `decision` and `context_requests`.",
+        *template["refs"],
+    ]
+    if payload.get("outline_served_context"):
+        named = {**payload, "outline_served_context": with_named_domains(payload["outline_served_context"],
+                                                                          template["resource_names"])}
+        sections += ["", "Retrieved context", _retrieved_outline_context_text(named)]
+    if payload.get("outline_context_errors"):
+        sections += ["", "Missing context", _compact_json([
+            {key: error[key] for key in ("ref", "error") if key in error} for error in payload["outline_context_errors"]])]
+    return with_resource_names("\n".join(sections).strip() + "\n", template["resource_names"])
+
+
 # ---------------------------------------------------------------------------
 # Prompt renderer
 # ---------------------------------------------------------------------------
@@ -4595,6 +4714,8 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
     if phase == "grounding":
         return _render_grounding_prompt(payload) + _render_retrieved_context(payload, outline=False)
     if phase == "outline":
+        if payload.get("outline_template"):
+            return _render_outline_prompt(payload)
         return _render_outline_prompt(payload) + _render_retrieved_context(payload, outline=True)
     if phase == "primitive_generation":
         return _render_primitive_generation_prompt(payload)
@@ -4702,22 +4823,28 @@ def _retrieved_outline_context_text(payload: dict[str, Any]) -> str:
     observation = payload.get('outline_observation_source') or {}
     displayed_shared = {key: value for key, value in shared.items() if key not in observation or observation[key] != value}
     lines = ["Shared source metadata: " + _inline_json(displayed_shared)] if displayed_shared else []
-    resources = _outline_prompt_resource_facts(_projected_outline_resources(
-        llm_input=payload.get("llm_input", {}), session_state=payload.get("session_state", {})))
-    parts = _outline_prompt_part_facts(_projected_outline_parts(
-        llm_input=payload.get("llm_input", {}), session_state=payload.get("session_state", {})))
-    shown = {"resources": {row["resource_jid"]: row for row in resources},
-             "parts": {row["part_name"]: row for row in parts}}
+    template = payload.get("outline_template")
+    if template:
+        # The failure-scoped prompt has no capability or field sections; only Current State repeats facts.
+        shown, place = template["shown"], "above"
+    else:
+        resources = _outline_prompt_resource_facts(_projected_outline_resources(
+            llm_input=payload.get("llm_input", {}), session_state=payload.get("session_state", {})))
+        parts = _outline_prompt_part_facts(_projected_outline_parts(
+            llm_input=payload.get("llm_input", {}), session_state=payload.get("session_state", {})))
+        shown = {"resources": {row["resource_jid"]: row for row in resources},
+                 "parts": {row["part_name"]: row for row in parts}}
+        place = "in Current DES State"
     for ref, fact in facts.items():
         row = {key: deepcopy(value) for key, value in fact.items() if key not in shared}
         already_shown = ""
-        if (ref == "/resources" and payload.get("phase") == "outline"
+        if (not template and ref == "/resources" and payload.get("phase") == "outline"
                 and {item['resource_jid'] for item in row.get('value', [])}
                 == {item['resource_jid'] for item in payload.get("outline_context", {}).get("resource_index", [])}):
             row.pop("value", None)
             already_shown = "Value already shown in Resource Capabilities."
         segments = ref.split("/")
-        if len(segments) == 4 and segments[1] == "resources" and segments[3] == "static_capabilities":
+        if not template and len(segments) == 4 and segments[1] == "resources" and segments[3] == "static_capabilities":
             index = next((item for item in payload.get("outline_context", {}).get("resource_index", [])
                           if item["resource_jid"] == segments[2]), {})
             value = row.get("value")
@@ -4729,7 +4856,7 @@ def _retrieved_outline_context_text(payload: dict[str, Any]) -> str:
                 if row["value"] != value:
                     already_shown = "Repeated fields are in Resource Capabilities."
         current = shown.get(segments[1], {}).get(segments[2], {}) if len(segments) == 4 else {}
-        if (len(segments) == 4 and segments[1] == "resources" and segments[3] == "state_variables"
+        if (not template and len(segments) == 4 and segments[1] == "resources" and segments[3] == "state_variables"
                 and payload.get("phase") == "outline" and payload.get("session_state", {}).get("validation_contract_version") != 2):
             declarations = payload.get("outline_resource_fields", {}).get(segments[2], {})
             if declarations.get("value") == row.get("value"):
@@ -4744,10 +4871,10 @@ def _retrieved_outline_context_text(payload: dict[str, Any]) -> str:
                 repeated = [key for key, item in value.items() if key in current and current[key] == item]
                 if repeated:
                     row["value"] = {key: item for key, item in value.items() if key not in repeated}
-                    already_shown = "Fields already shown in Current DES State: " + ", ".join(repeated)
+                    already_shown = f"Fields already shown {place}: " + ", ".join(repeated)
             elif field in current and current[field] == value:
                 row.pop("value", None)
-                already_shown = "Value already shown in Current DES State: " + field
+                already_shown = f"Value already shown {place}: " + field
         lines.append(ref + ": " + _inline_json(row))
         if already_shown:
             lines.append(already_shown)

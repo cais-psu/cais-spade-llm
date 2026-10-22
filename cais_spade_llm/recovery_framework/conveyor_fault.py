@@ -13,6 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from cais_spade_llm.recovery_framework import ROOT
+from cais_spade_llm.recovery_framework.failure_checkpoints import ROBOT_BREAKDOWN_GRIPPER_CONDITION
 
 logger = logging.getLogger(__name__)
 CHECKPOINT = "after_M1_pick_before_release"
@@ -430,7 +431,11 @@ class ConveyorFault:
         return await asyncio.shield(self._injection_task)
 
     async def _report_gripper_fault(self, rid: str) -> None:
-        """Let the robot report its own gripper fault while it keeps its motion capability."""
+        """Let the robot report its own gripper fault while it keeps its motion capability.
+
+        The report states the observed condition, a gripper hardware fault that needs repair, beside
+        the reporting device, so the fault is told apart from a lost part that reports the same device.
+        """
         from cais_spade_llm.recovery_framework.failure_effects import observe_robot
 
         runtime = self.runtime
@@ -442,7 +447,7 @@ class ConveyorFault:
                 if owner.agent_name == rid:
                     owner._current_state = "failed"
             context.fault_reports[rid] = {"reported_state": "failed", "source": "gripper object detection",
-                                          "reported_at_unix": time.time()}
+                                          "gripper": ROBOT_BREAKDOWN_GRIPPER_CONDITION, "reported_at_unix": time.time()}
             context.revision += 1
 
     async def _finish_injection(self) -> dict:
