@@ -4657,12 +4657,10 @@ async def _handle_outline_phase(
 ) -> tuple[str, dict[str, Any]]:
     """Dispatch outline handling according to configured outline mode."""
     if session_state.get("validation_contract_version") == 2:
-        from .multi_turn_validated_event import handle_validated_candidates, handle_validated_event
+        from .multi_turn_validated_event import handle_validated_candidates
 
-        handler = (handle_validated_candidates if session_state.get("outline_mode") == "incremental_candidates_validated"
-                   and "next_transition" not in parsed_response else handle_validated_event)
-        return await handler(session=session_state, prepared=prepared_recovery_request,
-                             response=parsed_response, planner=planner)
+        return await handle_validated_candidates(session=session_state, prepared=prepared_recovery_request,
+                                                 response=parsed_response, planner=planner)
     if session_state.get("outline_context_retrieval") and parsed_response.get("decision") == "need_context":
         from .multi_turn_context import handle_outline_context
 

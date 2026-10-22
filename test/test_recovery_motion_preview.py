@@ -433,73 +433,6 @@ def test_route_calculation_cannot_insert_a_detour_between_mandatory_endpoints():
         preview_result_record(prepared, response)
 
 
-@pytest.mark.parametrize("defect", [None, "stage", "start", "scene", "request", "targets", "capabilities", "artifact"])
-def test_installed_route_requires_exact_stage_source_and_strict_replay(tmp_path, monkeypatch, defect):
-    from cais_spade_llm.recovery_framework import recovery_motion_preview as preview
-    from cais_spade_llm.resources.resource_safety_preparation import (
-        install_outline_cartesian_route, validate_outline_cartesian_route,
-    )
-    from cais_spade_llm.resources.robot.recovery_capability import check_outline_motion_capabilities
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint as fingerprint
-
-    monkeypatch.setattr(preview, "_ROUTE_RECORDS", tmp_path)
-    request, response, capabilities = route_calculation()
-    original_motion = {"mode": "cartesian", "waypoints": copy.deepcopy(request["waypoints"])}
-    task = {"resource_jid": "ur5e-3@localhost"}
-    state = {"resources": {"ur5e-3": {"joint_names": ["joint"], "joint_positions": [0.], "held_part": None}}, "parts": {}}
-    contract = {"version": 5, "endpoint": {"current_pose": {"set_from_param": "target_pose"}},
-        "motion_capability_evidence": {"motion_requests": [original_motion], "static_capabilities": capabilities,
-            "result": check_outline_motion_capabilities(motion_requests=[original_motion],
-                static_capabilities=capabilities, frame="world", resource_jid=task["resource_jid"])}}
-    identity = fingerprint(contract)
-    prepared = {"resource_id": "ur5e-3", "task": task, "motion_requests": [original_motion],
-        "event_record": {"contract_id": identity, "contract_fingerprint": identity},
-        "physical_evidence": {"physical_preview_contract_version": 5, "snapshot": state,
-            "resource_models": {"ur5e-3": {"event_projection_contracts": {identity: contract}}}}}
-    proof = preview.archive_cartesian_route(request, response)
-    before = copy.deepcopy(prepared)
-    updated = install_outline_cartesian_route(prepared_preview=prepared, motion_index=0,
-        search_request=request, route_proof=proof, progress={"physical_evidence": {"snapshot": state}})
-    assert prepared == before
-    new_contract = updated["physical_evidence"]["resource_models"]["ur5e-3"]["event_projection_contracts"][updated["event_record"]["contract_id"]]
-    assert new_contract["endpoint"] == contract["endpoint"]
-    route = new_contract["cartesian_routes"]["0"]
-    assert route["requires_composition_validation"] and not route["execution_authorized"]
-    assert '"edges":' not in json.dumps(new_contract)
-    native = {key: request[key] for key in ("resource_id", "capture_fingerprint", "proposal_fingerprint", "scene_fingerprint", "model_fingerprint")}
-    native.update(stage_index=0, request_fingerprint=route["replay_request_fingerprint"])
-    motion = updated["motion_requests"][0]
-    if defect == "stage":
-        native["stage_index"] = 1
-    elif defect == "start":
-        state["resources"]["ur5e-3"]["held_part"] = "part"
-    elif defect == "scene":
-        native["scene_fingerprint"] = "changed"
-    elif defect == "request":
-        native["request_fingerprint"] = fingerprint(request)
-    elif defect == "targets":
-        motion["waypoints"][0]["position"]["x"] += .1
-    elif defect == "capabilities":
-        capabilities["gripper_reach"]["tolerance_m"] = .1
-    elif defect == "artifact":
-        route["artifact"]["sha256"] = "changed"
-    if defect is None:
-        validate_outline_cartesian_route(route=route, state=state, native=native, motion_request=motion, static_capabilities=capabilities)
-        for version in (3, 4):
-            prepared["physical_evidence"]["physical_preview_contract_version"] = version
-            with pytest.raises(ValueError, match="version-five"):
-                install_outline_cartesian_route(prepared_preview=prepared, motion_index=0,
-                    search_request=request, route_proof=proof, progress={"physical_evidence": {"snapshot": state}})
-        prepared["physical_evidence"]["physical_preview_contract_version"] = 5
-        prepared.update(custody_operation={"kind": "grasp"}, custody_motion_index=0)
-        with pytest.raises(ValueError, match="custody departure"):
-            install_outline_cartesian_route(prepared_preview=prepared, motion_index=0,
-                search_request=request, route_proof=proof, progress={"physical_evidence": {"snapshot": state}})
-    else:
-        with pytest.raises(ValueError):
-            validate_outline_cartesian_route(route=route, state=state, native=native, motion_request=motion, static_capabilities=capabilities)
-
-
 def cartesian_failure():
     """Return bound diagnostics without upgrading a partial motion result."""
     prepared, response = request(), result()
@@ -897,21 +830,6 @@ def test_collision_identities_use_recorded_model_declarations_and_preserve_sourc
         observed_collision_identities('unknown', dict(observed, name='unknown'), world_path=world, models_path=models)
 
 
-def test_preview_owner_records_include_untouched_part_collision_identities():
-    from cais_spade_llm.recovery_framework.outline_gazebo_evidence import _scene_owner_records
-
-    identity = {'status': 'recorded', 'model_name': 'gear_small',
-                'collision_objects': [{'id': 'gear_small/link/collision'}],
-                'source_files': {'model.sdf': 'hash'}, 'observation': {'pose': [0., 0., 0., 0., 0., 0., 1.]}}
-    observations = {'jids': {}, 'physical_evidence': {
-        'parts': {'gear_small': {'collision_scene_identity': identity}}}}
-    payloads, targets = _scene_owner_records(observations, {'planning_scene': {}})
-    assert payloads == {'parts/gear_small': identity}
-    assert targets == {}
-    payloads['parts/gear_small']['model_name'] = 'changed'
-    assert observations['physical_evidence']['parts']['gear_small']['collision_scene_identity'] == identity
-
-
 def projection_fixture():
     pose = lambda x: {"position": {"x": x, "y": 0., "z": 0.}, "orientation": {"x": 0., "y": 0., "z": 0., "w": 1.}}
     obj = {"id": "captured-42", "header": {"frame_id": "world"}, "operation": 0,
@@ -932,44 +850,6 @@ def projection_fixture():
     payload = {"ur5e-3": {"model_name": "gear_small", "collision_objects": [{"id": "captured-42"}]}}
     targets = {"ur5e-3": {"link_name": "tool", "touch_links": ["tool"]}}
     return scene, physical, payload, targets
-
-
-@pytest.mark.parametrize('held,expected', [(None, 'ready'), ('gear_small', 'NEEDS_CONTEXT')])
-def test_outline_binding_requirements_preserve_peer_scene_without_unused_attachments(monkeypatch, held, expected):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence as evidence
-
-    scene, physical, payload, targets = projection_fixture()
-    physical['snapshot']['resources']['ur5e-4']['held_part'] = held
-    physical['snapshot']['resources']['ur5e-4'].pop('current_pose')
-    physical['resource_models'].pop('ur5e-4')
-    targets['ur5e-4'] = {'link_name': 'peer_tool', 'touch_links': ['peer_tool']}
-    monkeypatch.setattr(evidence, '_scene_owner_records', lambda *_: (payload, targets))
-    original = copy.deepcopy((scene, physical))
-    checked = evidence._prepare_scene_object_bindings(observations={'physical_evidence': physical},
-        scene_capture=scene, task={'expected_end_state': {'held_part': 'gear_small'}}, resource_id='ur5e-3')
-    assert checked['status'] == expected, checked
-    assert (scene, physical) == original
-    assert scene['planning_scene']['robot_state']['joint_state']['name'] == ['slider', 'peer']
-    assert scene['planning_scene']['world']['collision_objects'][1]['id'] == 'unrelated-object'
-    if held is None:
-        assert checked['required_attachment_resources'] == ['ur5e-3']
-    else:
-        assert any('/ur5e-4/' in ref for ref in checked['context_requests'])
-        assert checked['interval_complete'] is False
-
-
-def test_missing_collision_identity_returns_its_source_paths(monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence as evidence
-
-    scene, physical, payload, targets = projection_fixture()
-    scene['planning_scene']['world']['collision_objects'] = []
-    monkeypatch.setattr(evidence, '_scene_owner_records', lambda *_: (payload, targets))
-    checked = evidence._prepare_scene_object_bindings(observations={'physical_evidence': physical},
-        scene_capture=scene, task={}, resource_id='ur5e-3')
-    assert checked['status'] == 'NEEDS_CONTEXT'
-    assert 'captured-42' in checked['reason']
-    assert '/physical_evidence/parts/gear_small/collision_scene_identity' in checked['context_requests']
-    assert checked['command_sent'] is False and checked['execution_authorized'] is False
 
 
 def test_scene_object_binding_owner_records_survive_exact_json_roundtrip():
@@ -1446,45 +1326,6 @@ def test_mating_wire_discards_parsed_injection_from_an_unresolved_response():
     response.update(status="NEEDS_CONTEXT", path_complete=False, fraction=0., trajectory={},
         mating_contact_evidence_json="", mating_contact_evidence={"pairs_complete": True})
     assert "mating_contact_evidence" not in preview_result_record(prepared, response)
-
-
-def test_owner_projection_cache_rechecks_exact_route_artifact_bytes(tmp_path, monkeypatch):
-    from pathlib import Path
-    from types import SimpleNamespace
-    from cais_spade_llm.recovery_framework import recovery_motion_preview as preview
-    from cais_spade_llm.resources import recovery_geometry as geometry
-    from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
-
-    monkeypatch.setattr(preview, '_ROUTE_RECORDS', tmp_path)
-    request_record, response, _ = route_calculation()
-    proof = preview.archive_cartesian_route(request_record, response)
-    binding = {'conditions_fingerprint': 'fixture-conditions'}
-    contract = {'cartesian_routes': {'0': proof}}
-    scene = {'jids': {'ur5e-3': 'ur5e-3@localhost'}, 'resource_models': {
-        'ur5e-3': {'event_projection_contracts': {'contract': contract}}},
-        'event_evidence': [{'contract_id': 'contract', 'contract_fingerprint': 'contract', 'binding': binding}]}
-    calls = []
-    def project(**kwargs):
-        calls.append(1)
-        try:
-            preview.read_cartesian_route(proof)
-        except ValueError as exc:
-            return {'status': 'needs_context', 'unresolved': [str(exc)]}
-        return {'status': 'projected', 'interval_complete': True, 'unresolved': [],
-            'command_sent': False, 'execution_authorized': False,
-            'provenance': {'binding': binding, 'contract_fingerprint': 'contract'}}
-    monkeypatch.setattr(geometry, 'project_recovery_outline_event', project)
-    owner = SimpleNamespace(jid='ur5e-3@localhost')
-    args = {'task': {'resource_jid': owner.jid}, 'recovery_snapshot': {}, 'recovery_des_model': {},
-            'physical_input': {'physical_evidence': scene}}
-    first = ResourceAgent.project_recovery_outline_event(owner, **args)
-    assert ResourceAgent.project_recovery_outline_event(owner, **args) == first and calls == [1]
-    path = Path(proof['artifact']['path'])
-    path.write_text(path.read_text() + ' ')
-    unresolved = ResourceAgent.project_recovery_outline_event(owner, **args)
-    assert unresolved['status'] == 'needs_context' and 'artifact changed' in unresolved['unresolved'][0]
-    assert calls == [1, 1]
-    assert owner._outline_event_projection_cache is None
 
 
 @pytest.fixture

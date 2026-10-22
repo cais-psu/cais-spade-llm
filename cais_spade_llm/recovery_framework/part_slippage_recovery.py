@@ -13,7 +13,7 @@ from typing import Any
 
 from openai import OpenAIError
 
-from cais_spade_llm.recovery_framework import ROOT, fingerprint
+from cais_spade_llm.recovery_framework import ROOT
 from cais_spade_llm.recovery_framework.capture_files import (
     RAW_SCHEMA_VERSION,
     pending_nodes,
@@ -168,230 +168,12 @@ class PartSlippageRecovery:
         """Return detached progress without starting or advancing any work."""
         with self._lock:
             state = deepcopy(self._state)
-            session = self._prepared.get("multi_turn_session_state", {})
-            state["can_prepare_gazebo_evidence"] = bool(
-                not self._stopped and state.get("validation_contract_version") == 2
-                and session.get("pending_outline_validation") and state["status"] == "blocked")
             if self._outline_request:
                 from .primitive_composition import composition_readiness
 
                 state["composition_readiness"] = composition_readiness(self._outline_request)
             return state
 
-    async def retry_outline_validation(self, evidence: dict) -> None:
-        """Retry a saved proposal using new evidence, without another LLM call."""
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_validated_event import (
-            retry_pending_event,
-        )
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-            archive_nominal_continuation, write_recovery_validation_record,
-        )
-
-        if self._stopped:
-            raise asyncio.CancelledError()
-        session = self._prepared.get("multi_turn_session_state", {})
-        if not session.get("pending_outline_validation"):
-            raise ValueError("There is no pending outline proposal to validate")
-        generation = self._generation
-        working = deepcopy(session)
-        supplement = evidence.get("resource_evidence_capture")
-        if supplement is not None:
-            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import checkpoint_differences
-            from cais_spade_llm.recovery_framework.recovery_observations import observation_fingerprint
-
-            if evidence.get("source_observation_fingerprint") != observation_fingerprint(self._observations):
-                raise ValueError("Supplementary validation evidence belongs to another observation capture")
-            differences = checkpoint_differences(self._observations, supplement)
-            if differences:
-                raise ValueError("Supplementary validation evidence changes the checkpoint: " + "; ".join(differences))
-            owners = getattr(self.agent, "resources", {})
-            for jid, facts in supplement.get("resource_evidence", {}).items():
-                if jid not in self._prepared.get("recovery_resources", {}):
-                    raise ValueError("Supplementary validation evidence identifies an unknown resource")
-                owner = owners.get(jid) if isinstance(owners, dict) else None
-                install = getattr(owner, "install_recovery_resource_evidence", None)
-                verified = (install(observations=supplement, source_fingerprint=evidence["source_observation_fingerprint"])
-                            if callable(install) else deepcopy(facts))
-                working.setdefault("validation_resource_context", {}).setdefault(jid, {})["resource_evidence"] = verified
-            capture_record = {"source_observation_fingerprint": evidence["source_observation_fingerprint"],
-                              "observations": deepcopy(supplement)}
-            captures = working.setdefault("validation_resource_evidence_captures", [])
-            if capture_record not in captures:
-                captures.append(capture_record)
-        if "projected_physical_evidence" not in working:
-            working["projected_physical_evidence"] = deepcopy(self._prepared.get("physical_evidence") or {})
-        physical = working["projected_physical_evidence"]
-        preview_physical = evidence.get("physical_evidence") or {}
-        template_fields = ("planning_scene_capture", "planning_scene_configuration")
-        if any(field in preview_physical for field in template_fields):
-            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import _saved_planning_scene
-
-            preview_observations = self._offline_preview_observations() if self.offline else self._observations
-            captured = _saved_planning_scene(preview_observations)
-            configuration = preview_observations.get("inputs", {}).get("scene", {})
-            expected = {"planning_scene_capture": captured, "planning_scene_configuration": {
-                key: deepcopy(configuration[key]) for key in ("robots", "planning_scene_mounting_contacts") if key in configuration}}
-            if captured is None or any(field not in preview_physical or preview_physical[field] != expected[field]
-                                       for field in template_fields):
-                raise ValueError("Preview planning scene template differs from the immutable observations")
-            pending_scene = working["pending_outline_validation"].get("projected_physical_evidence")
-            for target in (physical, pending_scene):
-                if target is None:
-                    continue
-                for field in template_fields:
-                    if field in target and target[field] != expected[field]:
-                        raise ValueError("Preview changes an existing planning scene template")
-                    target[field] = deepcopy(expected[field])
-        for field in ("scene_object_bindings", "support_collision_object_bindings"):
-            value = (evidence.get("physical_evidence") or {}).get(field)
-            if value is None:
-                continue
-            if not isinstance(value, dict):
-                raise ValueError(f"Preview {field} must contain recorded mappings")
-            for key, binding in value.items():
-                recorded = physical.setdefault(field, {})
-                if key in recorded and recorded[key] != binding:
-                    raise ValueError(f"Preview changes an existing {field} mapping")
-                recorded[key] = deepcopy(binding)
-        preview_models = (evidence.get("physical_evidence") or {}).get("resource_models", evidence.get("resource_models", {}))
-        for rid, model in preview_models.items():
-            current = physical.setdefault("resource_models", {}).setdefault(rid, {})
-            for field in ("event_projection_contracts", "named_joint_poses"):
-                for key, value in model.get(field, {}).items():
-                    recorded = current.setdefault(field, {})
-                    if key in recorded and recorded[key] != value:
-                        raise ValueError("Preview changes an existing owner model declaration")
-                    recorded[key] = deepcopy(value)
-        for record in evidence.get("event_evidence", []):
-            if record not in physical.setdefault("event_evidence", []):
-                physical["event_evidence"].append(deepcopy(record))
-        if evidence.get("physical_capability_rejected") is True:
-            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import pending_outline_event
-            from cais_spade_llm.recovery_framework.outline_validation import rejected_outline_capability_projection
-
-            task = pending_outline_event(self)
-            entry = self._prepared["recovery_resources"][task["resource_jid"]]
-            pending = working["pending_outline_validation"]
-            snapshot = pending.get("recovery_snapshot", working.get("derived_resource_snapshots", {}).get(
-                task["resource_jid"], entry["recovery_snapshot"]))
-            scene = pending.get("projected_physical_evidence", physical)
-            owners = getattr(self.agent, "resources", {})
-            owner = owners.get(task["resource_jid"]) if isinstance(owners, dict) else None
-            if owner is None:
-                owner = next((resource for resource in getattr(self.runtime, "resource_agents", [])
-                              if str(resource.jid) == task["resource_jid"]), None)
-            if owner is None:
-                raise ValueError("Rejected capability requires its owning resource evidence")
-            record = {key: deepcopy(evidence[key]) for key in ("status", "validation_status", "physical_capability_rejected",
-                "capability_result", "event_record_binding", "resource_evidence_fingerprint", "static_capabilities_fingerprint",
-                "motion_requests", "task", "reason") if key in evidence}
-            rejected_outline_capability_projection(record=record, task=task, recovery_snapshot=snapshot,
-                recovery_des_model=entry["recovery_des_model"], physical_evidence=scene,
-                resource_evidence=owner.get_recovery_resource_evidence(), static_capabilities=owner.static_capabilities)
-            if record not in physical.setdefault("rejected_capability_evidence", []):
-                physical["rejected_capability_evidence"].append(record)
-        if evidence.get("physical_motion_unresolved") is True:
-            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import pending_outline_event
-            from cais_spade_llm.recovery_framework.outline_validation import incomplete_outline_motion_projection
-
-            task = pending_outline_event(self)
-            entry = self._prepared["recovery_resources"][task["resource_jid"]]
-            pending = working["pending_outline_validation"]
-            snapshot = pending.get("recovery_snapshot", working.get("derived_resource_snapshots", {}).get(
-                task["resource_jid"], entry["recovery_snapshot"]))
-            scene = pending.get("projected_physical_evidence", physical)
-            owners = getattr(self.agent, "resources", {})
-            owner = owners.get(task["resource_jid"]) if isinstance(owners, dict) else None
-            if owner is None:
-                owner = next((resource for resource in getattr(self.runtime, "resource_agents", [])
-                              if str(resource.jid) == task["resource_jid"]), None)
-            if owner is None:
-                raise ValueError("Incomplete motion requires its owning resource evidence")
-            record = {key: deepcopy(evidence[key]) for key in ("status", "validation_status", "physical_motion_unresolved",
-                "incomplete_motion", "event_record_binding", "resource_evidence_fingerprint", "task", "reason") if key in evidence}
-            incomplete_outline_motion_projection(record=record, task=task, recovery_snapshot=snapshot,
-                recovery_des_model=entry["recovery_des_model"], physical_evidence=scene,
-                resource_evidence=owner.get_recovery_resource_evidence())
-            if record not in physical.setdefault("incomplete_event_evidence", []):
-                physical["incomplete_event_evidence"].append(record)
-        if evidence.get("physical_motion_rejected") is True:
-            from cais_spade_llm.recovery_framework.outline_gazebo_evidence import pending_outline_event
-            from cais_spade_llm.recovery_framework.outline_validation import rejected_outline_motion_projection
-
-            pending = working["pending_outline_validation"]
-            task = pending_outline_event(self)
-            entry = self._prepared["recovery_resources"][task["resource_jid"]]
-            snapshot = pending.get("recovery_snapshot", working.get("derived_resource_snapshots", {}).get(
-                task["resource_jid"], entry["recovery_snapshot"]))
-            scene = pending.get("projected_physical_evidence", physical)
-            record = {key: deepcopy(evidence[key]) for key in ("status", "validation_status", "physical_motion_rejected",
-                "rejected_motion", "event_record_binding", "task", "reason", "continuous_mating_rejected",
-                "mating_rejection", "mating_replay_preparation", "rejected_stage_index", "native_requests", "motion_results",
-                "physical_endpoint_rejected", "endpoint_rejection", "endpoint_replay_preparation", "nominal_snap_result")
-                if key in evidence}
-            if (record.get("continuous_mating_rejected") is True or record.get("physical_endpoint_rejected") is True) and scene is not physical:
-                scene = deepcopy(scene)
-                for field in ("scene_object_bindings", "support_collision_object_bindings"):
-                    for key, value in physical.get(field, {}).items():
-                        target = scene.setdefault(field, {})
-                        if key in target and target[key] != value:
-                            raise ValueError("Preview changes a pending motion object mapping")
-                        target[key] = deepcopy(value)
-                for rid, model in physical.get("resource_models", {}).items():
-                    for field in ("event_projection_contracts", "named_joint_poses"):
-                        for key, value in model.get(field, {}).items():
-                            target = scene.setdefault("resource_models", {}).setdefault(rid, {}).setdefault(field, {})
-                            if key in target and target[key] != value:
-                                raise ValueError("Preview changes a pending motion owner declaration")
-                            target[key] = deepcopy(value)
-            rejected_outline_motion_projection(record=record, task=task, recovery_snapshot=snapshot,
-                recovery_des_model=entry["recovery_des_model"], physical_evidence=scene)
-            if record not in physical.setdefault("rejected_event_evidence", []):
-                physical["rejected_event_evidence"].append(record)
-        async def validate() -> tuple[str, dict]:
-            return await retry_pending_event(
-                prepared=self._prepared, session=working, planner=self.agent.process_planner)
-
-        if self.offline:
-            def validate_saved() -> tuple[str, dict]:
-                return asyncio.run(retry_pending_event(prepared=deepcopy(self._prepared),
-                    session=working, planner=self.agent.process_planner))
-
-            decision, turn = await self._offline_work(validate_saved)
-        else:
-            decision, turn = await validate()
-        if self._stopped or generation != self._generation:
-            raise asyncio.CancelledError()
-        directory = Path(self._state["artifact_directory"])
-        turns = directory / "recovery_outline" / "turns"
-        turns.mkdir(parents=True, exist_ok=True)
-        source_turn = turn.get("source_turn_index") or turn.get("turn_index") or session.get("turn_index", 0)
-        turn.update(turn_index=source_turn, phase="outline", decision=decision,
-                    validation_only=True, request_sent=False)
-        def persist() -> None:
-            if archive_nominal_continuation(self._prepared, working, turn, decision=decision) is None:
-                write_recovery_validation_record(turns.parent, turn)
-            write_record(directory / "validation_resume.json", {"multi_turn_session_state": working})
-
-        if self.offline:
-            await self._offline_work(persist)
-        else:
-            persist()
-        self._prepared["multi_turn_session_state"] = working
-        if decision == "outline_ready":
-            working["current_phase"] = "primitive_generation"
-            self._outline_request = deepcopy(self._prepared)
-            write_record(directory / "outline_request.json", self._outline_request)
-            write_record(directory / "outline.json", {"outline": working["accepted_outline_prefix"]})
-            self._publish(status="outline_review", outline_status="completed", outline=working["accepted_outline_prefix"],
-                outline_safety_status="passed" if self._prepared.get("outline_safety_specifications") else "not_selected",
-                message="Outline validation completed. Review before continuing; execution remains disabled.")
-        elif decision in {"need_next_task", "need_revision"}:
-            self._publish(status="outline_ready", outline_status="ready", outline=working.get("accepted_outline_prefix", []),
-                message="Validation retried. Generate continues the outline from the recorded result.")
-        else:
-            self._publish(status="blocked", outline_status="NEEDS_CONTEXT", outline=working.get("accepted_outline_prefix", []),
-                message="NEEDS_CONTEXT: " + str(working.get("outline_validation_findings") or "Required evidence is unavailable"))
 
     def _publish(self, **values: Any) -> None:
         with self._lock:
@@ -547,12 +329,11 @@ class PartSlippageRecovery:
         await self._prepare()
         if self._stopped:
             raise asyncio.CancelledError()
-        message = f"{self._state['scenario']} observed. Recovery outline is ready to generate."
+        message = (f"{self._state['scenario']} observed and saved. Generate an unvalidated outline from the saved "
+                   "observations in Offline.")
         if compatibility_missing:
-            message += " Physical validation remains NEEDS_CONTEXT: " + "; ".join(compatibility_missing)
+            message += " Processing capture compatibility: " + "; ".join(compatibility_missing)
         self._publish(status="outline_ready", outline_status="ready", message=message)
-        if self._generate_on_begin is True or (not self.offline and self._generate_on_begin is None and self._state["outline_mode"] == "auto"):
-            await self._generate_outline()
 
     def _new_artifact_directory(self) -> Path:
         self._generation += 1
@@ -577,16 +358,7 @@ class PartSlippageRecovery:
                       primitive_artifact_directory=str(directory / "recovery_primitves"))
         saved = self._observations.get("prepared_recovery_request")
         if saved and (self.offline or self._observations.get("offline_ready")):
-            if self.offline:
-                def install():
-                    missing = offline_preparation_missing(self._observations)
-                    if missing:
-                        raise ValueError("NEEDS_CONTEXT: " + ", ".join(missing))
-                    self._install_prepared(deepcopy(saved), directory, feedback)
-
-                await self._offline_work(install)
-            else:
-                self._install_prepared(deepcopy(saved), directory, feedback)
+            # The capture already holds its prepared request; drafts read it from the saved observations.
             return
         if self.offline:
             raise ValueError("NEEDS_CONTEXT: saved capture has no prepared_recovery_request; see missing observations")
@@ -715,316 +487,7 @@ class PartSlippageRecovery:
                                                         cancel_event=self._offline_cancel)
         if missing:
             raise ValueError("NEEDS_CONTEXT: " + ", ".join(missing))
-        self._install_prepared(prepared, directory, feedback)
 
-    def _install_prepared(
-        self, prepared: dict, directory: Path, feedback: str, *, new_attempt: bool = True,
-        source_directory: Path | None = None, require_nominal_complete: bool = False,
-    ) -> None:
-        from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
-            _build_phase_prompt,
-            _seed_grounded_part_pose_observations,
-            build_multi_turn_session_seed,
-        )
-
-        if self._stopped:
-            raise asyncio.CancelledError()
-        context = self.runtime.context
-        if require_nominal_complete and (new_attempt or prepared.get("validation_contract_version") != 2
-                or prepared.get("nominal_continuation_artifact_version") != 1
-                or not isinstance(prepared.get("saved_pending_nodes"), list)):
-            raise ValueError("Saved outline requires its recorded task index and bound nominal continuation")
-        if not new_attempt and prepared.get("nominal_continuation_artifact_version") == 1:
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-                nominal_continuation_context_binding, read_nominal_continuation,
-            )
-
-            if prepared.get("source_observation_fingerprint") != observation_fingerprint(self._observations):
-                raise ValueError("Saved nominal continuation belongs to another observation capture")
-            saved_session = prepared.get("multi_turn_session_state", {})
-            nominal = saved_session.get("nominal_continuation_evidence", {})
-            if require_nominal_complete and (not isinstance(nominal, dict) or "artifact_reference" not in nominal):
-                raise ValueError("Saved outline requires its bound complete nominal continuation")
-            if "artifact_reference" in nominal:
-                if source_directory is None:
-                    raise ValueError("Saved nominal continuation requires its verified source generation")
-                proof = read_nominal_continuation(nominal, directory=source_directory / "recovery_outline",
-                    context_binding=nominal_continuation_context_binding(saved_session, prepared))
-                if require_nominal_complete and (proof.get("complete") is not True or proof.get("status") != "passed"
-                        or proof.get("execution_authorized") is not False
-                        or not isinstance(proof.get("tasks"), list)
-                        or not isinstance(proof.get("replaced_task_ids"), list)
-                        or not isinstance(proof.get("replacement_evidence"), dict)):
-                    raise ValueError("Saved outline nominal continuation is incomplete or does not retain execution control")
-        restore = getattr(self.agent, "restore_recovery_resource_evidence", None)
-        if callable(restore):
-            restore({} if new_attempt else prepared.get("multi_turn_session_state", {}),
-                    source_fingerprint=observation_fingerprint(self._observations))
-        if not new_attempt:
-            with self._lock:
-                self._state.pop("primitive_support_semantics", None)
-            self._prepared = deepcopy(prepared)
-            self._context_revision = self._observations.get("context_revision", context.revision)
-            self._proposal = {}
-            self._imported_proposal = None
-            self._imported_observations = None
-            self._outline_request = {}
-            provenance = deepcopy(prepared.get("attempt_provenance", {}))
-            if provenance:
-                write_record(directory / "attempt_provenance.json", provenance)
-            self._publish(
-                validation_contract_version=prepared.get("validation_contract_version"),
-                **({"primitive_support_semantics": prepared["primitive_support_semantics"]}
-                   if "primitive_support_semantics" in prepared else {}),
-                imported_recovery=False, execution_authorized=False,
-                attempt_provenance=provenance,
-                provenance_path=str(directory / "attempt_provenance.json") if provenance else "",
-            )
-            return
-        prepared.pop("multi_turn_session_state", None)
-        prepared["nominal_continuation_artifact_version"] = 1
-        prepared["source_observation_fingerprint"] = observation_fingerprint(self._observations)
-        prepared["outline_only"] = self._state["outline_only"]
-        prepared["operator_assistance"] = deepcopy(self._state["operator_assistance"])
-        if "code_grounding" not in prepared:
-            # A grounded request states detection facts instead of these recorded labels.
-            recorded_failure = prepared.get("failure_context_raw", {}).get("failure_context", {})
-            for target in (prepared.setdefault("llm_input", {}).setdefault("fault_event", {}),
-                           prepared.setdefault("context_summary", {}).setdefault("fault_event", {})):
-                if isinstance(recorded_failure.get("failure_mode"), str):
-                    target["failure_type"] = recorded_failure["failure_mode"]
-                checkpoint = _recorded_checkpoint(self._observations)
-                if checkpoint:
-                    target["checkpoint"] = checkpoint
-        for field in ("unavailable_resources", "nominal_permitted_resources", "recovery_permitted_resources"):
-            if field in self._observations:
-                prepared[field] = deepcopy(self._observations[field])
-        prepared["offline_recovery"] = self.offline
-        if self.offline:
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_resource_adapter import (
-                adapt_recovery_resource_snapshot, recovery_resource_capabilities,
-            )
-            from cais_spade_llm.resources.resource_profile import resource_snapshot_declared_fields
-            from cais_spade_llm.resources.resource_primitives import build_synthesis_primitive_catalog
-
-            for jid, entry in prepared.get("recovery_resources", {}).items():
-                evidence = self._observations.get("resource_evidence", {}).get(jid, {})
-                if not isinstance(evidence.get("snapshot"), dict):
-                    continue
-                owner = self.agent.resources[jid]
-                owner_evidence = owner.get_recovery_resource_evidence()
-                recorded_model = entry.get("recovery_des_model") or {}
-                if (not recorded_model.get("descriptor_fingerprint")
-                        and not (entry.get("resource_type") != "robot" and
-                                 owner_evidence.get("environment_models", {}).get(owner_evidence.get("resource_id")))):
-                    # Older captures retain physical facts for resources without
-                    # a recovery descriptor. A dependent event must request that
-                    # descriptor; unrelated resources do not block preparation.
-                    entry["resource_evidence"] = owner_evidence
-                    continue
-                prepare_capabilities = getattr(owner, "prepare_current_scene_capabilities", None)
-                if callable(prepare_capabilities):
-                    calculation = prepare_capabilities()
-                    if calculation:
-                        prepared.setdefault("scene_capability_calculations", {})[jid] = calculation
-                snapshot = owner.get_recovery_snapshot()
-                model = owner.recovery_des_model(snapshot=snapshot)
-                variables = model.get("state_variables", {})
-                entry["recovery_snapshot"] = adapt_recovery_resource_snapshot(
-                    resource_jid=jid, resource_type=entry["resource_type"], snapshot=snapshot,
-                    modeled_state=entry.get("modeled_state", {}), state_variables=variables)
-                entry["recovery_des_model"] = model
-                entry["recovery_des_model_fingerprint"] = model["descriptor_fingerprint"]
-                entry["resource_core"] = deepcopy(entry["recovery_snapshot"]["resource_core"])
-                entry["resource_facets"] = deepcopy(entry["recovery_snapshot"]["resource_facets"])
-                entry["static_capabilities"] = deepcopy(owner.static_capabilities)
-                entry["resource_evidence"] = owner.get_recovery_resource_evidence()
-                if entry.get("resource_type") != "robot" and evidence.get("environment_models"):
-                    catalog = deepcopy(model.get("primitive_catalog", []))
-                    entry["execution_primitive_catalog"] = catalog
-                    entry["primitive_catalog"] = build_synthesis_primitive_catalog(primitive_catalog=catalog) or []
-                    entry["recovery_adapter"] = recovery_resource_capabilities(
-                        entry["resource_type"], primitive_catalog=catalog)
-                facts = resource_snapshot_declared_fields(snapshot, variables)
-                for row in prepared.get("llm_input", {}).get("observed_runtime_state", {}).get("resources", []):
-                    if row.get("resource_jid") == jid:
-                        for name, declaration in variables.items():
-                            if declaration.get("scope", "resource") == "resource":
-                                row.pop(name, None)
-                        row.update(deepcopy(facts))
-                if jid == prepared.get("ra_jid"):
-                    prepared["recovery_snapshot"] = deepcopy(entry["recovery_snapshot"])
-        from cais_spade_llm.recovery_framework.outline_validation import (
-            OUTLINE_VALIDATION_CONTRACT_VERSION,
-            load_outline_specifications,
-            outline_evidence_requirements,
-        )
-
-        prepared["validation_contract_version"] = OUTLINE_VALIDATION_CONTRACT_VERSION
-        from .outline_evidence_policy import OUTLINE_EVIDENCE_POLICY_VERSION
-
-        prepared["outline_evidence_policy_version"] = OUTLINE_EVIDENCE_POLICY_VERSION
-        prepared.setdefault("recovery_session", {}).update(
-            outline_mode="incremental_candidates_validated", recovery_selection_mode="neurosymbolic",
-            outline_context_retrieval=True, action_horizon="1", candidate_bound=5, candidate_count="auto")
-        prepared["primitive_support_semantics"] = "successor_primitive_union"
-        prepared["nominal_continuation_semantics"] = "recorded_unfinished_tasks"
-        prepared["public_safety_context_version"] = 1
-        prepared["physical_evidence"] = deepcopy(self._observations.get("physical_evidence") or {})
-        prepared["physical_evidence"]["physical_preview_contract_version"] = 7
-        prepared["physical_evidence"]["owner_projection_clock_version"] = 1
-        physical = prepared["physical_evidence"]
-        for jid, calculation in prepared.get("scene_capability_calculations", {}).items():
-            rid = calculation["resource_id"]
-            if rid in physical.get("resource_models", {}):
-                physical["resource_models"][rid]["static_capabilities"] = deepcopy(calculation["static_capabilities"])
-        from .outline_endpoint_evidence import POLICY_VERSION
-
-        physical["endpoint_evidence_policy_version"] = POLICY_VERSION
-        physical["outline_evidence_policy_version"] = OUTLINE_EVIDENCE_POLICY_VERSION
-        description = (self._observations.get("planning_scene_capture") or {}).get("robot_description")
-        if description is not None:
-            physical["endpoint_robot_description"] = description
-        if "processing_observations" in self._observations:
-            from cais_spade_llm.recovery_framework.recovery_observations import (
-                processing_capture_compatibility, recorded_processing_fields,
-            )
-
-            physical["machine_job_control_version"] = 1
-            physical["processing_observations"] = deepcopy(self._observations["processing_observations"])
-            physical["unavailable_resources"] = deepcopy(self._observations.get("unavailable_resources", []))
-            physical["processing_observation_source"] = {
-                "run_id": self._observations["run_id"], "path": "failure/processing_observations",
-                "kind": "failure-time owner records; shutdown is recorded separately"}
-            physical["processing_capture_compatibility"] = processing_capture_compatibility(self._observations)
-            for rid, record in physical["processing_observations"].items():
-                collections = (physical.get("snapshot", {}).get("resources", {}),
-                               physical.get("environment_valuation", {}))
-                if not any(rid in collection for collection in collections):
-                    continue
-                fields = recorded_processing_fields(record, resource_id=rid,
-                    run_id=self._observations["run_id"], inputs=self._observations.get("inputs") or {})
-                for collection in collections:
-                    if rid in collection:
-                        collection[rid].update(deepcopy(fields))
-                physical.setdefault("processing_field_sources", {})[rid] = {
-                    "fields": sorted(fields), "source": f"/processing_observations/{rid}",
-                    "revision": record["revision"], "simulation_time": record.get("simulation_clock_sec"),
-                    "kind": "recorded machine owner fields; physical measurements remain separate"}
-        for rid, jid in physical.get("jids", {}).items():
-            entry = prepared.get("recovery_resources", {}).get(jid, {})
-            if "static_capabilities" not in entry:
-                continue
-            model = physical.setdefault("resource_models", {}).setdefault(rid, {})
-            recorded = entry["static_capabilities"]
-            if "static_capabilities" in model and model["static_capabilities"] != recorded:
-                raise ValueError("Recorded resource static_capabilities conflict with the physical model")
-            model["static_capabilities"] = deepcopy(recorded)
-        for jid, evidence in self._observations.get("resource_evidence", {}).items():
-            if jid in prepared.get("recovery_resources", {}):
-                prepared["recovery_resources"][jid]["resource_evidence"] = (
-                    self.agent.resources[jid].get_recovery_resource_evidence() if self.offline else deepcopy(evidence))
-        if "pending_nodes" in self._observations:
-            prepared["saved_pending_nodes"] = deepcopy(self._observations["pending_nodes"])
-        prepared["completed_task_ids"] = deepcopy(self._observations.get("completed_task_ids") or [])
-        prepared["observation_jids"] = deepcopy(self._observations.get("jids") or {})
-        prepared["monitor_history"] = deepcopy(self._observations.get("monitor_history") or {})
-        prepared["outline_monitor_context"] = deepcopy(self._observations.get("outline_monitor_context") or {})
-        prepared["outline_safety_specifications"] = load_outline_specifications(
-            self.runtime.setup.get("selected_safety_files", []), ROOT)
-        from cais_spade_llm.recovery_framework.recovery_observations import restore_recorded_resource_geometry
-
-        prepared["physical_evidence"]["outline_safety_specifications"] = deepcopy(prepared["outline_safety_specifications"])
-        prepared["physical_evidence"] = restore_recorded_resource_geometry(
-            prepared["physical_evidence"], self._observations.get("inputs") or {})
-        write_record(directory / "recorded_geometry_supplements.json",
-                     prepared["physical_evidence"].get("recorded_geometry_supplements", {}))
-        prepared["outline_evidence_requirements"] = outline_evidence_requirements(prepared)
-        write_record(directory / "outline_evidence_requirements.json", prepared["outline_evidence_requirements"])
-        self._publish(validation_contract_version=OUTLINE_VALIDATION_CONTRACT_VERSION,
-                      primitive_support_semantics=prepared["primitive_support_semantics"],
-                      outline_safety_status="pending", execution_authorized=False)
-        prepared["source_observation_captured_at"] = self._observations.get("captured_at")
-        prepared["source_observation_run_id"] = self._observations.get("run_id")
-        prepared["source_context_revision"] = self._observations.get("context_revision", context.revision)
-        prepared["recovery_session"].update(
-            reasoning_mode="multi_turn", max_turns=80,
-            outline_context_retrieval=True,
-            session_id=f"{context.run_id}_{self._generation:04d}",
-        )
-        prepared["recovery_feedback"] = feedback
-        prepared["recovery_debug"].update(artifact_directory=str(directory), per_turn_debug_dir=str(directory))
-        prepared["prompt_safety_rules"] = _prompt_safety_rules(self.runtime.setup.get("selected_safety_files", []))
-        from cais_spade_llm.recovery_framework.diagnostics import validator_fingerprint
-
-        source = getattr(self.runtime, "source_observation_path", None) if self.offline else self.path / "observations.json"
-        source_sha256 = None
-        if source and Path(source).is_file():
-            with Path(source).open("rb") as stream:
-                digest = hashlib.sha256()
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-                source_sha256 = digest.hexdigest()
-        provenance = {
-            "version": 1,
-            "capture": {"run_id": self._observations.get("run_id"),
-                        "captured_at": self._observations.get("captured_at"),
-                        "context_revision": self._observations.get("context_revision"),
-                        "observation_fingerprint": observation_fingerprint(self._observations),
-                        "source_sha256": source_sha256},
-            "configuration_fingerprint": fingerprint(self._observations["inputs"]) if "inputs" in self._observations else None,
-            "model_fingerprint": self._observations.get("planning_scene_capture", {}).get("model_fingerprint"),
-            "safety_specifications": [
-                {"path": name, "sha256": hashlib.sha256((Path(name) if Path(name).is_absolute() else ROOT / name).read_bytes()).hexdigest()}
-                for name in self.runtime.setup.get("selected_safety_files", [])],
-            "implementation_fingerprint": validator_fingerprint(),
-            "operator_assistance": deepcopy(self._state["operator_assistance"]),
-            "unassisted": not feedback and not self._state["operator_assistance"],
-        }
-        prepared["attempt_provenance"] = provenance
-        write_record(directory / "attempt_provenance.json", provenance)
-        self._publish(attempt_provenance=provenance, provenance_path=str(directory / "attempt_provenance.json"))
-        write_record(directory / "prompt_safety_rules.json", {
-            "prompt_safety_rules": prepared["prompt_safety_rules"], "safety_status": "skipped",
-        })
-        if self.offline:
-            tracker = prepared.setdefault("part_tracker", {})
-            grounded_parts = prepared.get("grounding_context", {}).get("parts", {})
-            captured_parts = self._observations.get("part_tracker", {})
-            for name in grounded_parts.keys() | captured_parts.keys():
-                recorded = captured_parts.get(name) or grounded_parts.get(name, {})
-                entry = tracker.setdefault(name, deepcopy(recorded))
-                pose = recorded.get("observed_pose") or grounded_parts.get(name, {}).get("observed_pose")
-                if not entry.get("observed_pose") and pose:
-                    entry["observed_pose"] = deepcopy(pose)
-        from cais_spade_llm.recovery_framework.recovery_observations import restore_recorded_public_facts
-
-        write_record(directory / "recorded_public_fact_sources.json",
-                     restore_recorded_public_facts(prepared, self._observations))
-        apply_grounding(prepared, self._observations)
-        prepared["multi_turn_session_seed"] = build_multi_turn_session_seed(prepared)
-        prepared["multi_turn_session_seed"]["public_safety_context_version"] = prepared["public_safety_context_version"]
-        if self.offline and "code_grounding" not in prepared:
-            # A grounded seed already holds the grounded part poses.
-            _seed_grounded_part_pose_observations(prepared, prepared["multi_turn_session_seed"])
-        # An outline prompt updates candidate state; the preview leaves the seed unchanged.
-        preview, prompt = _build_phase_prompt(prepared, deepcopy(prepared["multi_turn_session_seed"]))
-        write_record(directory / "input_preview.json", {
-            "request_sent": False, "preview_status": "not sent", "prompt_input": preview, "prompt": prompt,
-        })
-        write_record(directory / "inputs.json", {
-            "run_id": context.run_id, "safety_status": "skipped", "failure": self._failure,
-            "prepared_recovery_request": prepared,
-            "llm_settings": deepcopy(getattr(self.agent, "llm_settings", {})),
-            "source_observation_fingerprint": observation_fingerprint(self._observations),
-        })
-        self._prepared = prepared
-        self._context_revision = self._observations.get("context_revision", context.revision)
-        self._proposal = {}
-        self._imported_proposal = None
-        self._imported_observations = None
-        self._outline_request = {}
-        self._publish(imported_recovery=False)
 
     async def _capture_physical_evidence(self) -> dict:
         from cais_spade_llm.recovery_framework.recovery_observations import (
@@ -1128,23 +591,11 @@ class PartSlippageRecovery:
         self._prepared["_stop_after_multi_turn_phase"] = stage
         if self.offline and stage == "primitive":
             self.agent._composition_cancel_event = self._offline_cancel
-        preview_attempts: set[str] = set()
         provider_turns = 0
         while True:
             if self._stopped or generation != self._generation:
                 raise asyncio.CancelledError()
             prepared = self._prepared
-            session = prepared.get("multi_turn_session_state", {})
-            if self.offline and stage == "outline" and session.get("pending_outline_validation"):
-                await self._prepare_offline_outline_evidence(preview_attempts)
-                session = self._prepared.get("multi_turn_session_state", {})
-                if (session.get("current_phase") in {"primitive_generation", "finalize"}
-                        and session.get("accepted_outline_prefix")):
-                    return session
-                if session.get("pending_outline_validation"):
-                    continue
-                self._publish(status="generating_outline", outline_status="generating",
-                              message="Continuing recovery outline after recorded validation.")
             if provider_turns >= 80:
                 raise ValueError(f"{stage} exceeded its generation budget")
             provider_turns += 1
@@ -1178,8 +629,6 @@ class PartSlippageRecovery:
             final = session.get("final_output", {})
             if stage == "primitive" and final.get("primitive_program_complete") is True:
                 return session
-            if self.offline and stage == "outline" and session.get("pending_outline_validation"):
-                continue
             if session.get("status") not in {
                 "paused_after_outline_turn", "ready_for_primitive_generation", "paused_after_primitive_turn",
                 "paused_after_primitive_generation",
@@ -1213,135 +662,6 @@ class PartSlippageRecovery:
             raise asyncio.CancelledError()
         return result
 
-    def _offline_preview_observations(self, archive: dict | None = None) -> dict:
-        """Read a verified private model view without modifying saved inputs."""
-        from cais_spade_llm.recovery_framework.recovery_observations import (
-            native_preview_observations, read_native_preview_model,
-        )
-
-        source = getattr(self.runtime, "source_observation_path", None)
-        if not source:
-            # Existing callers without a companion retain their exact capture.
-            return self._observations
-        if archive is None:
-            archive = read_native_preview_model(source, self._observations)
-        return native_preview_observations(self._observations, archive)
-
-    async def _prepare_offline_outline_evidence(self, attempted: set[str]) -> None:
-        """Calculate saved-model evidence and retry the unchanged pending task."""
-        from .outline_endpoint_evidence import endpoint_policy
-
-        if endpoint_policy(self._prepared.get("physical_evidence") or {}):
-            session = self._prepared.get("multi_turn_session_state", {})
-            raise ValueError("NEEDS_CONTEXT: recovery outline validation requires additional facts or corrected candidate bindings. "
-                + str(session.get("outline_validation_findings") or "Required validation evidence is unavailable"))
-        from cais_spade_llm.recovery_framework.outline_gazebo_evidence import (
-            pending_outline_event, prepare_owner_event_evidence,
-        )
-        from cais_spade_llm.recovery_framework.recovery_motion_preview import preview_recovery_motion_from_files
-        from cais_spade_llm.recovery_framework.recovery_observations import (
-            _file_sha256, fingerprint, read_native_preview_model,
-        )
-        from cais_spade_llm.resources.recovery_geometry import outline_event_binding
-
-        source = getattr(self.runtime, "source_observation_path", None)
-        if not source:
-            raise ValueError("NEEDS_CONTEXT: the saved observation path is required")
-        session = self._prepared["multi_turn_session_state"]
-        pending = session["pending_outline_validation"]
-        if pending.get("kind") == "nominal" and not isinstance(pending.get("task"), dict):
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-                nominal_continuation_context_binding, read_nominal_continuation,
-            )
-
-            proof = read_nominal_continuation(session.get("nominal_continuation_evidence") or {},
-                directory=Path(self._state["artifact_directory"]) / "recovery_outline",
-                context_binding=nominal_continuation_context_binding(session, self._prepared))
-            reasons = [str(row["reason"]) for row in proof.get("failures", []) if row.get("reason")]
-            raise ValueError("NEEDS_CONTEXT: " + str(proof.get("reason", "Nominal continuation is unresolved"))
-                             + (": " + "; ".join(dict.fromkeys(reasons)) if reasons else ""))
-        task = pending_outline_event(self)
-        entry = self._prepared["recovery_resources"][task["resource_jid"]]
-        snapshot = deepcopy(pending.get("recovery_snapshot", session.get("derived_resource_snapshots", {}).get(
-            task["resource_jid"], entry["recovery_snapshot"])))
-        physical = deepcopy(pending.get("projected_physical_evidence", session.get(
-            "projected_physical_evidence", self._prepared["physical_evidence"])))
-        owner = self.agent.resources[task["resource_jid"]]
-        resource_evidence = owner.get_recovery_resource_evidence()
-        archive = None
-        observations = deepcopy(self._observations)
-        from cais_spade_llm.recovery_framework.recovery_observations import projection_capture_compatibility
-
-        compatibility = projection_capture_compatibility(physical=physical, task=task,
-                                                         resource_evidence=resource_evidence)
-        if (resource_evidence.get("resource_type") in {"robot", "kmr"}
-                and compatibility["status"] != "NEEDS_CONTEXT"):
-            archive = read_native_preview_model(source, self._observations)
-            observations = self._offline_preview_observations(archive)
-        else:
-            recorded_sha256 = self._prepared.get("attempt_provenance", {}).get("capture", {}).get("source_sha256")
-            if not recorded_sha256 or _file_sha256(Path(source)) != recorded_sha256:
-                raise ValueError("NEEDS_CONTEXT: saved observations changed or lack their recorded source fingerprint")
-        identity = fingerprint({"task": task, "binding": outline_event_binding(
-            task, snapshot, entry["recovery_des_model"], physical), "resource_evidence": resource_evidence,
-            "manifest_sha256": archive["manifest_sha256"] if archive is not None else None})
-        if identity in attempted:
-            raise ValueError("NEEDS_CONTEXT: saved-model calculations provide no additional evidence for this proposal: "
-                + str(session.get("outline_validation_findings") or pending))
-        attempted.add(identity)
-        directory = Path(self._state["artifact_directory"]) / "offline_validation" / identity
-        directory.mkdir(parents=True, exist_ok=True)
-        self._publish(status="generating_outline", outline_status="generating",
-                      message="Calculating physical evidence from the saved scene; Gazebo is not required.")
-
-        async def preview(request, **kwargs) -> dict:
-            if archive is None:
-                raise ValueError("NEEDS_CONTEXT: this resource has no recorded native preview model")
-            kwargs.pop("action_name", None)
-            return await preview_recovery_motion_from_files(request, model_archive=archive,
-                artifact_directory=directory, **kwargs)
-
-        def calculate() -> dict:
-            evidence = asyncio.run(prepare_owner_event_evidence(owner, task=task, recovery_snapshot=snapshot,
-                recovery_des_model=deepcopy(entry["recovery_des_model"]), physical_evidence=physical,
-                resource_evidence=resource_evidence, observations=observations, cancel_event=self._offline_cancel,
-                preview_call=preview, allow_live_capture=False))
-            write_record(directory / "evidence.json", evidence)
-            return evidence
-
-        evidence = await self._offline_work(calculate)
-        if evidence.get("status") == "NEEDS_CONTEXT":
-            from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-                write_recovery_validation_record,
-            )
-
-            write_recovery_validation_record(Path(self._state["artifact_directory"]) / "recovery_outline", {
-                "turn_index": pending.get("source_turn_index", session.get("turn_index", 0)),
-                "source_turn_index": pending.get("source_turn_index", session.get("turn_index", 0)),
-                "phase": "outline", "decision": "need_context", "validation_only": True, "request_sent": False,
-                "validation_stages": [{"validator_role": "ResourceAgent", "stage": "physical_projection",
-                                       "evidence": deepcopy(evidence)}],
-            })
-            message = "NEEDS_CONTEXT: " + str(evidence.get("reason") or "Required saved physical evidence is unavailable")
-            self._publish(status="blocked", outline_status="NEEDS_CONTEXT", outline_safety_status="unresolved",
-                          message=message)
-            raise ValueError(message)
-        await self.retry_outline_validation(evidence)
-
-    async def _generate_outline(self) -> None:
-        self._publish(status="generating_outline", outline_status="generating", primitive_status="waiting",
-                      outline=[], primitives=[], message="Generating recovery outline.")
-        session = await self._run_stage("outline")
-        self._outline_request = deepcopy(self._prepared)
-        write_record(Path(self._state["artifact_directory"]) / "outline_request.json", self._outline_request)
-        write_record(Path(self._state["artifact_directory"]) / "outline.json",
-                     {"outline": session["accepted_outline_prefix"]})
-        self._publish(status="outline_review", outline_status="completed",
-                      outline=session["accepted_outline_prefix"],
-                      outline_safety_status="passed" if self._prepared.get("outline_safety_specifications") else "not_selected",
-                      message="Recovery outline completed with RA and CCA validation. Execution validation remains pending.")
-        if not self.offline and not self._state["outline_only"] and self._state["outline_mode"] == "auto":
-            await self._continue_outline()
 
     async def _continue_outline(self) -> None:
         from .primitive_composition import start_composition_attempt
@@ -1401,31 +721,25 @@ class PartSlippageRecovery:
         if action == "execute" and (self._state.get("validation_contract_version") == 2
                                     or self._state.get("composition_validation_version") == 1):
             raise ValueError("Outline validation does not authorize execution; runtime CCA integration is pending")
-        outline_stopped = self._state["outline_status"] == "stopped"
         composition_stopped = self._state["primitive_status"] == "stopped"
         operations = {
             "prepare": ({"blocked"}, self._begin),
-            "generate_outline": ({"outline_ready"}, self._generate_fresh_outline if outline_stopped else self._generate_outline),
             "continue_outline": ({"outline_review"}, self._continue_outline),
             "generate_primitives": ({"primitive_ready", "outline_review"} if self.offline or composition_stopped
                                     else {"primitive_ready"}, self._generate_primitives_from_review),
             "execute": ({"ready_to_execute"}, self._execute),
         }
-        if action in {"regenerate_outline", "regenerate_primitives"}:
+        if action == "regenerate_primitives":
             if status not in {"outline_review", "primitive_ready", "ready_to_execute", "offline_completed", "blocked"}:
                 raise ValueError("Wait for the current stage before regenerating")
 
             async def regenerate() -> None:
-                if action == "regenerate_outline":
-                    await self._prepare(feedback)
-                    await self._generate_outline()
-                else:
-                    if not self._outline_request:
-                        raise ValueError("Generate the recovery outline first")
-                    from .primitive_composition import start_composition_attempt
+                if not self._outline_request:
+                    raise ValueError("Generate the recovery outline first")
+                from .primitive_composition import start_composition_attempt
 
-                    await start_composition_attempt(self, feedback=feedback)
-                    await self._generate_primitives()
+                await start_composition_attempt(self, feedback=feedback)
+                await self._generate_primitives()
 
             self._schedule(regenerate)
         else:
@@ -1434,10 +748,6 @@ class PartSlippageRecovery:
             self._schedule(operations[action][1])
         return self.snapshot()
 
-    async def _generate_fresh_outline(self) -> None:
-        # The stopped attempt keeps its records; a fresh request uses a new directory.
-        await self._prepare()
-        await self._generate_outline()
 
     async def _generate_primitives_from_review(self) -> None:
         if self._state["status"] == "outline_review":

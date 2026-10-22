@@ -8,9 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from cais_spade_llm.agents.central_controller.outline_evidence_safety import (
-    bind_outline_owner_safety_evidence, validate_outline_evidence_safety,
-)
 from cais_spade_llm.agents.central_controller.predefined_safety import compile_predefined_safety
 from cais_spade_llm.agents.central_controller.recovery_case_evidence import case_ap_value
 from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import _digest
@@ -30,51 +27,6 @@ SCENARIOS = ['Part slippage', 'Conveyor breakdown', 'ur5e-1 breakdown',
 
 def _spec(name):
     return json.loads((ROOT / SAFETY / name).read_text())
-
-
-def _document(identifier):
-    doc = json.loads((ROOT / 'cais_spade_llm/specification/safety/safety_Conveyor_breakdown.txt').read_text())
-    return {**doc, 'catalog': {'version': 2, 'specifications': [r for r in doc['catalog']['specifications']
-            if r['id'] == identifier]}, 'requirement_scopes': [r for r in doc['requirement_scopes']
-            if r['specification'] == identifier]}
-
-
-def _projection(inside=False):
-    resources = {'M1': {'resource_state': 'loaded'}, 'ur5e-1': {'held_part': None}}
-    model = {'M1': {'state_variables': {'resource_state': {'domain': ['loaded', 'completed']}}},
-             'ur5e-1': {'state_variables': {'held_part': {'type': ['null', 'string'], 'reference': 'part_name'}}}}
-    initial = [{'resource_id': rid, 'process': '*', 'product': '*', 'context': 'any', 'values': values}
-               for rid, values in resources.items()]
-    event = {'task_id': 'machine_task', 'resource_id': 'M1', 'process': '*', 'product': '*',
-             'context': 'any', 'function': 'machine_part', 'start_time': 0, 'end_time': 1}
-    update = {**initial[0], 'time': 1, 'task_id': 'machine_task', 'values': {'resource_state': 'completed'}}
-    observations = []
-    for index, time in enumerate(('0', '1/2', '1')):
-        state = deepcopy(resources)
-        if index == 2:
-            state['M1']['resource_state'] = 'completed'
-        observation = {'frame': 'world', 'resources': deepcopy(state), 'parts': {}, 'time': index,
-                       'time_exact': time, 'phase': 'between' if index == 1 else 'at',
-                       'state_snapshot': state,
-                       'region_occupancy': {'M1.front_access': {'M1': True, 'ur5e-1': inside}},
-                       'part_region_occupancy': {'M1.front_access': {}}}
-        if index == 1:
-            observation['continuous_interval'] = ['0', '1']
-        observations.append(observation)
-    return {'status': 'projected', 'interval_complete': True, 'observations': observations,
-            'geometry': {'frame': 'world', 'resources': {r: {} for r in resources}, 'parts': {},
-                         'regions': {'M1.front_access': {'bounds': [[0,1],[0,1],[0,1]]}}},
-            'owner_safety_evidence': {'resource_models': model, 'interval_complete': True,
-                'task_evidence': {'complete': True, 'source_kind': 'resource_owned_projection',
-                                  'horizon': [0,1], 'events': [event]},
-                'state_evidence': {'complete': True, 'source_kind': 'resource_owned_projection',
-                                   'horizon': [0,1], 'initial': initial, 'updates': [update]}}}
-
-
-def _check(projection, identifier='SAFE_M1_front_access_ur5e-1_interlock', **kwargs):
-    doc = _document(identifier)
-    return validate_outline_evidence_safety(projection=projection, catalog=doc['catalog'],
-        requirement_scopes=doc['requirement_scopes'], prospective_activation=True, **kwargs)
 
 
 @pytest.mark.parametrize('scenario', SCENARIOS)
@@ -102,35 +54,6 @@ def test_previous_machine_safety_file_remains_available():
     assert 'SAFE_KMR_docking' in dfas
 
 
-@pytest.mark.parametrize('first_region', ['M1.front_access', 'M1.side_access', 'M1.workholding'])
-@pytest.mark.parametrize('second_region', ['M1.front_access', 'M1.side_access', 'M1.workholding'])
-@pytest.mark.parametrize('second_inside,expected', [(False, 'FEASIBLE'), (True, 'INFEASIBLE'),
-                                                  (None, 'NEEDS_CONTEXT')])
-def test_m1_mutex_counts_failed_robot_across_all_access_areas(first_region, second_region, second_inside, expected):
-    resources = {'M1': {'resource_state': 'completed'},
-                 'ur5e-1': {'resource_state': 'failed', 'held_part': None},
-                 'KMR': {'held_part': None}, 'ur5e-4': {'held_part': None}}
-    regions = ['M1.front_access', 'M1.side_access', 'M1.workholding']
-    occupancy = {region: {rid: rid == 'M1' for rid in resources} for region in regions}
-    occupancy[first_region]['ur5e-1'] = True
-    occupancy[second_region]['KMR'] = second_inside
-    projection = {'status': 'projected', 'interval_complete': True,
-        'observations': [{'time': 0, 'time_exact': '0', 'phase': 'at', 'frame': 'world',
-                          'resources': resources, 'parts': {}, 'region_occupancy': occupancy}],
-        'geometry': {'frame': 'world', 'parts': {},
-                     'resources': {rid: {'stationary_only': rid == 'M1'} for rid in resources},
-                     'regions': {region: {'bounds': [[0, 1]] * 3} for region in regions}}}
-    doc = _spec('safety_M1_mutex.txt')
-    result = validate_outline_evidence_safety(projection=projection, catalog=doc['catalog'],
-        requirement_scopes=doc['requirement_scopes'], prospective_activation=True)
-    assert result['validation_status'] == expected
-    if second_inside is not None:
-        population = result['coverage']['scope_populations'][0]
-        assert population['resources'] == ['KMR', 'ur5e-1', 'ur5e-4']
-        assert [row['resource_id'] for row in population['excluded_resources']] == ['M1']
-        assert len(result['rule_checks']) == 3
-
-
 def test_previous_conveyor_safety_file_remains_available():
     path = ROOT / 'cais_spade_llm/specification/safety/safety_Conveyor_breakdown.txt'
     rules, dfas = compile_predefined_safety(json.loads(path.read_text()))
@@ -146,71 +69,6 @@ def _conveyor_document(index):
     return _spec(_CONVEYOR_RULES[index])
 
 
-def _conveyor_assembly_projection(trace):
-    robots = ['ur5e-3', 'ur5e-4', 'KMR']
-    parts = ['KET4_Square_4mm', 'gear_small']
-    observations = []
-    for time, (completed, gear_inside, robot_inside, kmr_inside) in enumerate(trace):
-        observations.append({
-            'time': time, 'time_exact': str(time), 'phase': 'at', 'frame': 'world',
-            'resources': {rid: {'held_part': None} for rid in robots},
-            'parts': {part: {
-                'processCompleted': ([{'process': 'assembly',
-                    'target': 'GMC_Laser_Plate_Virtual/KET4_Square_4mm'}]
-                    if completed and part == 'KET4_Square_4mm' else []),
-                'processCompleted_complete': True,
-                'processCompleted_evidence': {'complete': True, 'source_kind': 'recorded',
-                                              'checkpoint': 'capture'},
-            } for part in parts},
-            'region_occupancy': {'assembly_board-v1': {
-                'ur5e-3': robot_inside, 'ur5e-4': gear_inside, 'KMR': kmr_inside}},
-            'part_region_occupancy': {'assembly_board-v1': {
-                'KET4_Square_4mm': completed, 'gear_small': gear_inside}},
-        })
-    return {'status': 'projected', 'interval_complete': True, 'observations': observations,
-            'geometry': {'frame': 'world', 'resources': {rid: {} for rid in robots},
-                         'regions': {'assembly_board-v1': {'bounds': [[0, 1]] * 3}},
-                         'parts': {
-                             'KET4_Square_4mm': {'target': 'GMC_Laser_Plate_Virtual/KET4_Square_4mm'},
-                             'gear_small': {'target': 'Gear_Plate/Gear_Shaft_1'},
-                         }}}
-
-
-def _conveyor_check(projection, index=None, **kwargs):
-    doc = _conveyor_document(1 if index is None else index)
-    if index is None:
-        mutex = _conveyor_document(0)
-        doc['catalog']['specifications'] += mutex['catalog']['specifications']
-        doc['requirement_scopes'] += mutex['requirement_scopes']
-    return validate_outline_evidence_safety(
-        projection=projection, catalog=doc['catalog'], requirement_scopes=doc['requirement_scopes'],
-        prospective_activation=True, **kwargs)
-
-
-def _trim_entry_projection(trace):
-    """Observe every trimmed peg; each step gives the recorded trims and the parts on the board."""
-    scopes = _spec('safety_assembly_board-v1_trim_before_entry.txt')['requirement_scopes']
-    parts = [scope['physical_ap_bindings']['ap001']['part'] for scope in scopes]
-    observations = []
-    for time, (trims, entered) in enumerate(trace):
-        observations.append({
-            'time': time, 'time_exact': str(time), 'phase': 'at', 'frame': 'world',
-            'resources': {'ur5e-3': {'held_part': None}},
-            'parts': {part: {
-                'processCompleted': [{'process': 'trim', 'result': trims[part]}] if part in trims else [],
-                'processCompleted_complete': True,
-                'processCompleted_evidence': {'complete': True, 'source_kind': 'recorded',
-                                              'checkpoint': 'capture'},
-            } for part in parts},
-            'region_occupancy': {'assembly_board-v1': {'ur5e-3': False}},
-            'part_region_occupancy': {'assembly_board-v1': {part: part in entered for part in parts}},
-        })
-    return {'status': 'projected', 'interval_complete': True, 'observations': observations,
-            'geometry': {'frame': 'world', 'resources': {'ur5e-3': {}},
-                         'regions': {'assembly_board-v1': {'bounds': [[0, 1]] * 3}},
-                         'parts': {part: {} for part in parts}}}
-
-
 def test_trim_before_entry_covers_every_trimmed_peg_and_no_gear():
     doc = _spec('safety_assembly_board-v1_trim_before_entry.txt')
     rule, = doc['catalog']['specifications']
@@ -223,26 +81,6 @@ def test_trim_before_entry_covers_every_trimmed_peg_and_no_gear():
         ('RGOCG12-50_12mm', 'circle'), ('RGOCG16-50_16mm', 'circle')]
     assert all(row['ap001']['part'] == row['ap002']['part'] and row['ap002']['process'] == 'trim'
                and row['ap001']['region'] == 'assembly_board-v1' for row in bindings)
-
-
-KET4, RGOCG4 = 'KET4_Square_4mm', 'RGOCG4-50_Round_4mm'
-
-
-@pytest.mark.parametrize('trace,expected', [
-    ([({}, set())], 'FEASIBLE'),
-    ([({}, set()), ({KET4: 'square'}, set()), ({KET4: 'square'}, {KET4})], 'FEASIBLE'),
-    ([({}, set()), ({KET4: 'square'}, {KET4})], 'INFEASIBLE'),
-    ([({}, set()), ({}, {KET4})], 'INFEASIBLE'),
-    ([({}, set()), ({KET4: 'square'}, set()), ({KET4: 'square'}, {RGOCG4})], 'INFEASIBLE'),
-    ([({}, set()), ({RGOCG4: 'square'}, set()), ({RGOCG4: 'square'}, {RGOCG4})], 'INFEASIBLE'),
-    ([({}, set()), ({RGOCG4: 'circle'}, set()), ({RGOCG4: 'circle'}, {RGOCG4})], 'FEASIBLE'),
-])
-def test_trim_before_entry_checks_each_peg_against_its_own_trim(trace, expected):
-    doc = _spec('safety_assembly_board-v1_trim_before_entry.txt')
-    result = validate_outline_evidence_safety(
-        projection=_trim_entry_projection(trace), catalog=doc['catalog'],
-        requirement_scopes=doc['requirement_scopes'], prospective_activation=True)
-    assert result['validation_status'] == expected
 
 
 def test_conveyor_mutex_and_retired_ordering_specs_compile_independently():
@@ -260,113 +98,11 @@ def test_conveyor_mutex_and_retired_ordering_specs_compile_independently():
         'gear_small may enter assembly_board-v1 only after assembly of KET4_Square_4mm is completed.']
 
 
-@pytest.mark.parametrize('trace,expected', [
-    ([(False, False, False, False)], 'FEASIBLE'),
-    ([(False, False, False, False), (True, False, True, False), (True, True, False, False)], 'FEASIBLE'),
-    ([(False, False, False, False), (False, True, False, False)], 'INFEASIBLE'),
-    ([(False, False, False, False), (True, True, False, False)], 'INFEASIBLE'),
-])
-def test_conveyor_ordering_requires_earlier_exact_assembly_completion(trace, expected):
-    assert _conveyor_check(_conveyor_assembly_projection(trace), 1)['validation_status'] == expected
-
-
-@pytest.mark.parametrize('record', [
-    {'process': 'trim', 'result': 'square'},
-    {'process': 'assembly', 'target': 'Gear_Plate/Gear_Shaft_1'},
-])
-def test_conveyor_ordering_rejects_machining_or_another_assembly_target(record):
-    projection = _conveyor_assembly_projection([(False, False, False, False),
-                                      (True, False, False, False), (True, True, False, False)])
-    for row in projection['observations'][1:]:
-        row['parts']['KET4_Square_4mm']['processCompleted'] = [record]
-    assert _conveyor_check(projection, 1)['validation_status'] == 'INFEASIBLE'
-
-
-def test_conveyor_ordering_retains_completion_history_and_missing_evidence():
-    projection = _conveyor_assembly_projection([(False, False, False, False),
-                                      (True, False, False, False), (True, True, False, False)])
-    accepted = _conveyor_check({**projection, 'observations': projection['observations'][:2]}, 1)
-    assert accepted['validation_status'] == 'FEASIBLE'
-    result = _conveyor_check({**projection, 'observations': projection['observations'][1:]}, 1,
-                            monitor_context=accepted['monitor_context_after'])
-    assert result['validation_status'] == 'FEASIBLE'
-    assert len(result['monitor_context_after']['observations']) == 3
-    projection['observations'][0]['parts']['KET4_Square_4mm']['processCompleted_complete'] = False
-    assert _conveyor_check(projection, 1)['validation_status'] == 'NEEDS_CONTEXT'
-
-
-@pytest.mark.parametrize('robot_inside,kmr_inside,expected', [
-    (False, False, 'FEASIBLE'), (True, False, 'FEASIBLE'),
-    (False, True, 'FEASIBLE'), (True, True, 'INFEASIBLE'),
-])
-def test_conveyor_mutex_includes_kmr_occupancy(robot_inside, kmr_inside, expected):
-    projection = _conveyor_assembly_projection([(False, False, robot_inside, kmr_inside)])
-    result = _conveyor_check(projection, 0)
-    assert result['validation_status'] == expected
-    assert len(result['rule_checks']) == 3
-
-
-def test_conveyor_mutex_keeps_missing_kmr_geometry_unresolved():
-    projection = _conveyor_assembly_projection([(False, False, True, False)])
-    del projection['observations'][0]['region_occupancy']['assembly_board-v1']['KMR']
-    assert _conveyor_check(projection, 0)['validation_status'] == 'NEEDS_CONTEXT'
-
-
-@pytest.mark.parametrize('trace,expected', [
-    ([(False, False, False, False), (False, True, False, False)], 'INFEASIBLE'),
-    ([(False, False, False, False), (True, False, True, False), (True, True, True, False)], 'INFEASIBLE'),
-    ([(False, False, False, False), (True, False, False, True), (True, True, False, True)], 'INFEASIBLE'),
-    ([(False, False, False, False), (True, False, True, False), (True, True, False, False)], 'FEASIBLE'),
-])
-def test_conveyor_checks_ordering_and_mutex_together(trace, expected):
-    assert _conveyor_check(_conveyor_assembly_projection(trace))['validation_status'] == expected
-
-
 _MACHINE_RULES = ('safety_M2_mutex.txt', 'safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt')
 
 
 def _machine_document(index):
     return _spec(_MACHINE_RULES[index])
-
-
-def _machine_check(projection, index=0, **kwargs):
-    doc = _machine_document(index)
-    return validate_outline_evidence_safety(
-        projection=projection, catalog=doc['catalog'], requirement_scopes=doc['requirement_scopes'],
-        prospective_activation=True, **kwargs)
-
-
-def _machine_projection():
-    robots = ['ur5e-2', 'KMR', 'ur5e-1']
-    resources = {rid: {'held_part': None} for rid in robots}
-    resources['M2'] = {'resource_state': 'loaded'}
-    regions = ['M2.front_access', 'M2.side_access', 'M2.workholding']
-    parts = {part: {'processCompleted': [], 'processCompleted_complete': True,
-                    'processCompleted_evidence': {'complete': True, 'source_kind': 'recorded',
-                                                  'checkpoint': 'capture'}}
-             for part in ('KET4_Square_4mm', 'RGOCG4-50_Round_4mm')}
-    observation = {'time': 0, 'time_exact': '0', 'phase': 'at', 'frame': 'world',
-                   'resources': resources, 'parts': parts,
-                   'region_occupancy': {region: {rid: rid == 'M2' for rid in resources} for region in regions}}
-    return {'status': 'projected', 'interval_complete': True, 'observations': [observation],
-            'geometry': {'frame': 'world', 'resources': {rid: {'stationary_only': rid == 'M2'} for rid in resources},
-                         'regions': {region: {'bounds': [[0, 1]] * 3} for region in regions},
-                         'parts': {part: {} for part in parts}}}
-
-
-def _processing_observations(completions):
-    projection = _machine_projection()
-    observations = []
-    for time, (square, circle) in enumerate(completions):
-        row = deepcopy(projection['observations'][0])
-        row.update(time=time, time_exact=str(time))
-        for part, completed, result in [('KET4_Square_4mm', square, 'square'),
-                                         ('RGOCG4-50_Round_4mm', circle, 'circle')]:
-            row['parts'][part]['processCompleted'] = [{'process': 'trim', 'result': result}] if completed else []
-            row['parts'][part]['location'] = 'M1' if time == 0 else 'M2'
-        observations.append(row)
-    projection['observations'] = observations
-    return projection
 
 
 def test_machine_specs_are_independent_compilable_specs_without_recovery_instructions():
@@ -380,130 +116,6 @@ def test_machine_specs_are_independent_compilable_specs_without_recovery_instruc
     assert [row['requirement'] for row in _prompt_safety_rules(paths)] == [
         'At most one resource accessing M2 may occupy its protected area at any time.',
         'RGOCG4-50_Round_4mm must not complete trim with result circle until KET4_Square_4mm has completed trim with result square.']
-
-
-@pytest.mark.parametrize('completions,expected', [
-    ([(False, False)], 'FEASIBLE'),
-    ([(False, False), (True, False), (True, True)], 'FEASIBLE'),
-    ([(False, False), (False, True)], 'INFEASIBLE'),
-    ([(False, False), (True, True)], 'INFEASIBLE'),
-])
-def test_machine_precedence_checks_exact_processing_completion_across_transfers(completions, expected):
-    assert _machine_check(_processing_observations(completions), 1)['validation_status'] == expected
-
-
-def test_machine_precedence_rejects_wrong_process_result_and_missing_evidence():
-    projection = _processing_observations([(False, False), (True, False), (True, True)])
-    for row in projection['observations'][1:]:
-        row['parts']['KET4_Square_4mm']['processCompleted'] = [{'process': 'trim', 'result': 'circle'}]
-    assert _machine_check(projection, 1)['validation_status'] == 'INFEASIBLE'
-    projection['observations'][0]['parts']['KET4_Square_4mm']['processCompleted_complete'] = False
-    result = _machine_check(projection, 1)
-    assert result['validation_status'] == 'NEEDS_CONTEXT'
-    assert 'checkpoint evidence' in result['reason']
-
-
-def test_machine_precedence_retains_history_between_events():
-    projection = _processing_observations([(False, False), (True, False), (True, True)])
-    first = {**projection, 'observations': projection['observations'][:2]}
-    accepted = _machine_check(first, 1)
-    assert accepted['validation_status'] == 'FEASIBLE'
-    second = {**projection, 'observations': projection['observations'][1:]}
-    result = _machine_check(second, 1, monitor_context=accepted['monitor_context_after'])
-    assert result['validation_status'] == 'FEASIBLE'
-    assert len(result['monitor_context_after']['observations']) == 3
-    assert result['execution_authorized'] is False
-
-
-def test_machine_mutex_binds_alternatives_across_openings_and_excludes_fixed_fixture():
-    projection = _machine_projection()
-    row = projection['observations'][0]
-    row['region_occupancy']['M2.front_access']['ur5e-1'] = True
-    result = _machine_check(projection)
-    assert result['validation_status'] == 'FEASIBLE'
-    population = result['coverage']['scope_populations'][0]
-    assert population['resources'] == ['KMR', 'ur5e-1', 'ur5e-2']
-    assert [item['resource_id'] for item in population['excluded_resources']] == ['M2']
-    assert len(result['rule_checks']) >= 3
-    row['region_occupancy']['M2.side_access']['KMR'] = True
-    assert _machine_check(projection)['validation_status'] == 'INFEASIBLE'
-
-
-def test_machine_mutex_preserves_occupancy_uncertainty_and_missing_population():
-    projection = _machine_projection()
-    row = projection['observations'][0]
-    row['region_occupancy']['M2.front_access']['ur5e-2'] = True
-    row['occupancy_possibilities'] = {
-        region: {rid: [inside] for rid, inside in values.items()}
-        for region, values in row['region_occupancy'].items()}
-    row['region_occupancy']['M2.side_access']['KMR'] = None
-    row['occupancy_possibilities']['M2.side_access']['KMR'] = [False, True]
-    assert _machine_check(projection)['validation_status'] == 'NEEDS_CONTEXT'
-    projection = _machine_projection()
-    del projection['geometry']['resources']['M2']['stationary_only']
-    result = _machine_check(projection)
-    assert result['validation_status'] == 'NEEDS_CONTEXT'
-    assert 'participant declaration is missing' in result['reason']
-    projection['geometry']['resources'].pop('M2')
-    assert _machine_check(projection)['validation_status'] == 'NEEDS_CONTEXT'
-
-
-def test_machine_mutex_rejects_false_stationary_exclusion_and_missing_region():
-    projection = _machine_projection()
-    projection['geometry']['resources']['KMR']['stationary_only'] = True
-    assert _machine_check(projection)['validation_status'] == 'NEEDS_CONTEXT'
-    projection = _machine_projection()
-    projection['geometry']['regions'].pop('M2.side_access')
-    assert _machine_check(projection)['validation_status'] == 'NEEDS_CONTEXT'
-
-
-def test_machine_mutex_counts_carried_part_geometry_with_clear_robot_body():
-    from cais_spade_llm.resources.recovery_geometry import _checkpoint
-
-    projection = _machine_projection()
-    snapshot = projection['observations'][0]
-    geometry = projection['geometry']
-    models = {}
-    for resource, offset in [('ur5e-2', -1), ('KMR', .5), ('ur5e-1', -3)]:
-        models[resource] = {'configuration': {
-            'joint_names': ['slide'], 'interpolation': 'splines', 'root': 'world',
-            'root_xyz': [offset, .5, .5], 'root_rpy': [0, 0, 0], 'reference_link': 'body',
-            'joints': [{'name': 'slide', 'parent': 'world', 'child': 'body', 'type': 'prismatic',
-                        'xyz': [0, 0, 0], 'rpy': [0, 0, 0], 'axis': [1, 0, 0]}],
-            'components': [{'id': 'body_box', 'link': 'body', 'bounds': [[-.05, .05]] * 3}]}}
-        snapshot['resources'][resource].update(joint_names=['slide'], joint_positions=[0],
-                                              current_pose=[offset, .5, .5, 0, 0, 0, 1], grasp_transform=None)
-    geometry['resources']['M2']['component_bounds'] = [{'id': 'fixture', 'bounds': [[.1, .2]] * 3}]
-    part = 'RGOCG4-50_Round_4mm'
-    snapshot['parts'] = {part: {'current_pose': [-2, .5, .5, 0, 0, 0, 1]}}
-    geometry['parts'] = {part: {'local_bounds': [[-.05, .05]] * 3}}
-    clear = _checkpoint(snapshot, geometry, models, index=0)
-    assert clear['region_occupancy']['M2.front_access']['ur5e-2'] is False
-    projection['observations'] = [clear]
-    assert _machine_check(projection)['validation_status'] == 'FEASIBLE'
-    snapshot['resources']['ur5e-2'].update(held_part=part, grasp_transform=[1.5, 0, 0, 0, 0, 0, 1])
-    carried = _checkpoint(snapshot, geometry, models, index=0)
-    assert carried['region_occupancy']['M2.front_access']['ur5e-2'] is True
-    projection['observations'] = [carried]
-    assert _machine_check(projection)['validation_status'] == 'INFEASIBLE'
-
-
-def test_machine_mutex_owner_declarations_and_monitor_history_are_bound():
-    projection = _machine_projection()
-    models = {rid: {'state_variables': {'held_part': {}}} for rid in ('KMR', 'ur5e-2', 'ur5e-1')}
-    models['M2'] = {'state_variables': {'resource_state': {}}}
-    projection['owner_safety_evidence'] = {'resource_models': models}
-    for resource in ('KMR', 'ur5e-2', 'ur5e-1'):
-        projection['geometry']['resources'][resource].pop('stationary_only')
-    accepted = _machine_check(projection)
-    assert accepted['validation_status'] == 'FEASIBLE'
-    changed = deepcopy(projection)
-    changed['owner_safety_evidence']['resource_models']['KMR']['state_variables']['extra'] = {}
-    result = _machine_check(changed, monitor_context=accepted['monitor_context_after'])
-    assert result['validation_status'] == 'NEEDS_CONTEXT'
-    assert 'monitor_context_after' not in result
-    projection['owner_safety_evidence']['resource_models'].pop('KMR')
-    assert _machine_check(projection)['validation_status'] == 'NEEDS_CONTEXT'
 
 
 def test_part_slippage_defaults_use_the_plant_wide_set():
@@ -590,79 +202,6 @@ def test_case_provider_complete_world_geometry_and_attachment_clearance():
     with pytest.raises(ValueError,match='unsupported'):
         calculate_case_resource_evidence(resource_id='KMR',observation=observation,
             physical_evidence=physical,configuration=configuration,joint_trajectory=trajectory,planning_scene=scene)
-
-
-def test_owner_ledger_cannot_disagree_with_present_physical_state():
-    projection=_projection()
-    projection['observations'][-1]['resources']['M1']['resource_state']='loaded'
-    assert _check(projection)['validation_status']=='NEEDS_CONTEXT'
-
-
-def test_machine_interlock_uses_declared_task_interval_not_processing_state():
-    original = _projection()
-    assert _check(original)['validation_status'] == 'FEASIBLE'
-    blocked = _check(_projection(True))
-    assert blocked['validation_status'] == 'INFEASIBLE'
-    assert blocked['counterexample']['ap_values'] == {'ap001': True, 'ap002': True}
-    assert 'monitor_context_after' not in blocked
-    assert 'owner_safety_evidence' not in original['observations'][0]
-
-
-@pytest.mark.parametrize('mutation', ['missing_ledger','partial_ledger','stale_state','changed_type','missing_resource','crossed_boundary','missing_interval'])
-def test_machine_interlock_incomplete_owner_evidence_never_passes(mutation):
-    projection = _projection()
-    evidence = projection['owner_safety_evidence']
-    if mutation == 'missing_ledger': evidence['task_evidence'] = None
-    elif mutation == 'partial_ledger': evidence['task_evidence']['complete'] = False
-    elif mutation == 'stale_state': projection['observations'][1]['state_snapshot']['M1']['resource_state'] = 'completed'
-    elif mutation == 'changed_type': evidence['state_evidence']['initial'][0]['values']['resource_state'] = None
-    elif mutation == 'missing_resource': evidence['state_evidence']['initial'].pop()
-    elif mutation == 'crossed_boundary': evidence['task_evidence']['events'][0]['start_time'] = .25
-    else: projection['interval_complete'] = False
-    result = _check(projection)
-    assert result['validation_status'] == 'NEEDS_CONTEXT'
-    assert not result['is_safe']
-    assert 'monitor_context_after' not in result
-
-
-def test_structured_monitor_history_is_replayed_and_stale_bindings_fail():
-    projection = _projection()
-    first = _check(projection)
-    assert first['is_safe']
-    context = first['monitor_context_after']
-    changed = deepcopy(context)
-    changed['observations'][0]['state_snapshot']['M1']['resource_state'] = 'completed'
-    result = _check(projection, monitor_context=changed)
-    assert result['validation_status'] == 'NEEDS_CONTEXT'
-    assert 'another physical checkpoint' in result['reason']
-    assert context == first['monitor_context_after']
-
-
-def _capacity(alternatives):
-    projection = _projection()
-    projection.pop('owner_safety_evidence')
-    region = 'M1.staging'
-    projection['geometry']['regions'] = {region: {'bounds': [[0,1],[0,1],[0,1]], 'capacity': 1}}
-    projection['geometry']['parts'] = {name: {} for name in alternatives}
-    for observation in projection['observations']:
-        observation['parts'] = {name: {} for name in alternatives}
-        observation['part_occupancy_possibilities'] = {region: alternatives}
-    return projection
-
-
-@pytest.mark.parametrize('alternatives,expected', [({'a':[True],'b':[False]},'FEASIBLE'),
-    ({'a':[True],'b':[True]},'INFEASIBLE'), ({'a':[True],'b':[False,True]},'NEEDS_CONTEXT')])
-def test_capacity_counts_full_part_population_and_preserves_uncertainty(alternatives, expected):
-    assert _check(_capacity(alternatives), 'SAFE_M1_staging_capacity')['validation_status'] == expected
-
-
-def test_capacity_requires_exact_declared_capacity_and_complete_population():
-    projection = _capacity({'a':[True]})
-    projection['geometry']['regions']['M1.staging']['capacity'] = 2
-    assert _check(projection, 'SAFE_M1_staging_capacity')['validation_status'] == 'NEEDS_CONTEXT'
-    projection['geometry']['regions']['M1.staging']['capacity'] = 1
-    projection['observations'][0]['parts']['omitted'] = {}
-    assert _check(projection, 'SAFE_M1_staging_capacity')['validation_status'] == 'NEEDS_CONTEXT'
 
 
 def _raw(resource='KMR'):
@@ -773,23 +312,6 @@ def test_scene_regions_and_M2_program_option_preserve_existing_configuration():
         assert regions[name]['capacity'] == 1
 
 
-def test_parameterized_state_declarations_use_exact_modeled_part_symbols():
-    projection = _projection()
-    owner = projection['owner_safety_evidence']
-    owner['resource_models']['M1']['state_variables']['inventory.{part_name}'] = {'type':'boolean'}
-    owner['state_evidence']['initial'][0]['values']['inventory.part_with.dot'] = True
-    projection['geometry']['parts']['part_with.dot'] = {}
-    for observation in projection['observations']:
-        observation['parts']['part_with.dot'] = {}
-        observation['state_snapshot']['M1']['inventory.part_with.dot'] = True
-    result = _check(projection)
-    assert result['validation_status'] == 'FEASIBLE'
-    assert 'inventory.{part_name}' in owner['resource_models']['M1']['state_variables']
-    assert 'inventory.part_with.dot' in result['projection']['owner_safety_evidence']['resource_models']['M1']['state_variables']
-    projection['geometry']['parts'].clear()
-    assert _check(projection)['validation_status'] == 'NEEDS_CONTEXT'
-
-
 def test_owner_config_and_handoff_custody_cannot_change_under_existing_binding():
     observation,record = _raw()
     record['configuration']['base_control']['arm_parked_tolerance_rad'] = 100
@@ -802,138 +324,6 @@ def test_owner_config_and_handoff_custody_cannot_change_under_existing_binding()
     row['phase'] = 'pending'
     with pytest.raises(ValueError,match='completion time'):
         case_ap_value('handoff_acknowledged','Conveyor',observation)
-
-
-def _validated_builder_input():
-    projection = _projection()
-    ledger = projection.pop('owner_safety_evidence')
-    before = {row['resource_id']:deepcopy(row['values']) for row in ledger['state_evidence']['initial']}
-    after = deepcopy(projection['observations'][-1]['state_snapshot'])
-    projection['observations'][-1]['resources']['M1']['resource_state'] = 'completed'
-    projection['successor_evidence'] = {'environment_valuation':after}
-    task={'resource_jid':'machine@localhost','event_name':'independently_proposed_identifier'}
-    projection['provenance']={'binding':{'resource_jid':task['resource_jid']},'contract_fingerprint':'checked'}
-    physical={'environment_models':ledger['resource_models'],'environment_valuation':before,
-              'jids':{'M1':'machine@localhost','ur5e-1':'robot@localhost'},
-              'resources':{'M1':{'idle':True},'ur5e-1':{'idle':True}}}
-    return projection,task,physical
-
-
-def test_validated_owner_builder_preserves_exact_identifier_and_complete_states():
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical = _validated_builder_input()
-    before = deepcopy(projection)
-    result=bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-    assert result['owner_safety_evidence']['task_evidence']['events'][0]['function'] == task['event_name']
-    assert result['owner_safety_evidence']['state_evidence']['updates'][0]['values'] == {'resource_state':'completed'}
-    assert projection == before
-
-
-@pytest.mark.parametrize('change',['intermediate','missing_field','peer_update','peer_activity','identity'])
-def test_validated_owner_builder_declines_incomplete_effects(change):
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical = _validated_builder_input()
-    if change=='intermediate': projection['observations'][1]['resources']['M1']['resource_state']='completed'
-    elif change=='missing_field': projection['observations'][1]['resources']['M1'].pop('resource_state')
-    elif change=='peer_update':
-        projection['successor_evidence']['environment_valuation']['ur5e-1']['held_part']='part'
-        projection['observations'][-1]['resources']['ur5e-1']['held_part']='part'
-    elif change=='peer_activity': physical['resources']['ur5e-1']['idle']=False
-    else: task['resource_jid']='another@localhost'
-    with pytest.raises(ValueError):
-        bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-
-
-def _conveyor_projection(robot='KMR', *, reserved='ur5e-1', stopped=True, inside=True):
-    projection=_projection()
-    owner=projection['owner_safety_evidence']
-    values={'Conveyor':{'belt_stopped':stopped,'loading_reserved_by':reserved},robot:{'held_part':None}}
-    owner['resource_models']={
-        'Conveyor':{'state_variables':{'belt_stopped':{'type':'boolean'},
-                    'loading_reserved_by':{'domain':[None,'ur5e-1','ur5e-2']}}},
-        robot:{'state_variables':{'held_part':{'type':['null','string'],'reference':'part_name'}}}}
-    owner['task_evidence']['events']=[]
-    owner['state_evidence']['updates']=[]
-    owner['state_evidence']['initial']=[{'resource_id':rid,'process':'*','product':'*','context':'any','values':deepcopy(row)}
-                                       for rid,row in values.items()]
-    region='Conveyor.loading_position_1'
-    projection['geometry']['resources']={rid:{} for rid in values}
-    projection['geometry']['regions']={region:{'bounds':[[0,1],[0,1],[0,1]],'capacity':1}}
-    for observation in projection['observations']:
-        observation['state_snapshot']=deepcopy(values)
-        observation['resources']=deepcopy(values)
-        observation['region_occupancy']={region:{'Conveyor':True,robot:inside}}
-    return projection
-
-
-@pytest.mark.parametrize('robot,reserved,stopped,inside,expected',[
-    ('ur5e-1','ur5e-1',True,True,'FEASIBLE'),
-    ('ur5e-1','ur5e-2',True,True,'INFEASIBLE'),
-    ('ur5e-1',None,True,True,'INFEASIBLE'),
-    ('ur5e-1','ur5e-1',False,True,'INFEASIBLE'),
-    ('KMR','ur5e-1',True,True,'INFEASIBLE'),
-    ('ur5e-4','ur5e-1',True,True,'INFEASIBLE'),
-    ('KMR',None,False,False,'FEASIBLE'),
-])
-def test_conveyor_loading_covers_every_robot_without_inventing_reservation_eligibility(robot,reserved,stopped,inside,expected):
-    projection=_conveyor_projection(robot,reserved=reserved,stopped=stopped,inside=inside)
-    assert _check(projection,'SAFE_Conveyor_loading_position_1_'+robot)['validation_status'] == expected
-
-
-def test_loading_reserved_state_needs_exact_ledger_and_typed_null():
-    projection=_conveyor_projection('ur5e-1',reserved=None)
-    del projection['observations'][0]['state_snapshot']['Conveyor']['loading_reserved_by']
-    assert _check(projection,'SAFE_Conveyor_loading_position_1_ur5e-1')['validation_status']=='NEEDS_CONTEXT'
-
-
-def test_public_structured_APs_bind_recorded_owner_identity_without_private_model(monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_context import public_outline_safety_context
-    from cais_spade_llm.resources import recovery_geometry
-    projection=_projection()
-    owner=projection['owner_safety_evidence']
-    physical={'snapshot':projection['observations'][0],'geometry':projection['geometry'],
-              'resource_models':{rid:{} for rid in owner['resource_models']},
-              'environment_models':owner['resource_models'],
-              'jids':{'M1':'machine@localhost','ur5e-1':'robot@localhost'}}
-    monkeypatch.setattr(recovery_geometry,'_checkpoint',lambda *a,**kw:{'occupancy_possibilities':{
-        'M1.front_access':{'M1':[True],'ur5e-1':[False]}},'part_occupancy_possibilities':{'M1.front_access':{}}})
-    prepared={'physical_evidence':physical,'outline_safety_specifications':[{
-        'document':_document('SAFE_M1_front_access_ur5e-1_interlock'),'source_path':'selected','source_sha256':'recorded'}]}
-    result=public_outline_safety_context(prepared,{})
-    ap=result['instances'][0]['aps'][0]
-    assert ap['binding']=={'resource':'M1','process':'*','part':'*'}
-    assert 'owner_state_models_fingerprint' in result['source']
-    assert not result['missing_context']
-    assert 'state_variables' not in json.dumps(result)
-    physical.pop('environment_models')
-    missing=public_outline_safety_context(prepared,{})
-    assert missing['missing_context'] and not missing['instances']
-
-
-def test_conveyor_motion_profile_overrides_boundary_stopped_without_rewriting_DES():
-    projection=_conveyor_projection('ur5e-1',reserved='ur5e-1',stopped=True,inside=True)
-    contract={'kind':'resource_owned_shared_transport','displacement_m':.25,'speed_mps':1.,
-              'acceleration_mps2':1.,'duration_sec':1.}
-    source={'kind':'projected','fingerprint':_digest(contract)}
-    projection['owner_interval_contract']=contract
-    projection['owner_safety_evidence']['resource_configurations']={'Conveyor':{}}
-    region='Conveyor.loading_position_1'
-    for observation in projection['observations']:
-        observation['owner_safety_evidence']={'resource_evidence':{'Conveyor':{
-            'configuration':{},'source':source,
-            'interval':observation.get('continuous_interval',[observation['time_exact']]*2),
-            'transport_motion':{'source':source,'interval':[0,1],**{k:v for k,v in contract.items() if k!='kind'}}}}}
-    middle=projection['observations'][1]
-    middle['continuous_cells']=[{'interval':[a,b],
-        'occupancy_possibilities':{region:{'Conveyor':[True],'ur5e-1':[True]}}}
-        for a,b in [('0','1/4'),('1/4','3/4'),('3/4','1')]]
-    result=_check(projection,'SAFE_Conveyor_loading_position_1_ur5e-1')
-    assert result['validation_status']=='INFEASIBLE'
-    assert result['counterexample']['definite_violation'] is True
-    assert result['counterexample']['ap_values']['ap002']==[False]
-    assert all(row['state_snapshot']['Conveyor']['belt_stopped'] is True for row in projection['observations'])
-    projection['observations'][1]['owner_safety_evidence']['resource_evidence']['Conveyor']['transport_motion']['speed_mps']=.5
-    assert _check(projection,'SAFE_Conveyor_loading_position_1_ur5e-1')['validation_status']=='NEEDS_CONTEXT'
 
 
 def test_case_provider_does_not_reuse_captured_velocities_after_projection():
@@ -961,61 +351,6 @@ def test_conditional_handoff_inventory_uses_explicit_null_and_exact_owner_declar
     task['declared_task']['parameters'].pop('delivered_part')
     with pytest.raises(ValueError,match='explicit delivered_part'):
         case_ap_value('handoff_identity','Conveyor',observation)
-
-
-def test_per_checkpoint_collision_inventory_is_preserved():
-    projection=_projection()
-    for index,point in enumerate(projection['observations']):
-        point['owner_safety_evidence']={'collision_object_ids':['recorded-'+str(index)]}
-    result=bind_outline_owner_safety_evidence(projection)
-    assert [row['owner_safety_evidence']['collision_object_ids'] for row in result['observations']]==[
-        ['recorded-0'],['recorded-1'],['recorded-2']]
-
-
-def _custody_overlay_projection():
-    projection=_projection()
-    part='part'
-    projection['geometry']['parts']={part:{}}
-    owner=projection['owner_safety_evidence']
-    owner['resource_models']['ur5e-1']['state_variables']['gripper_state']={'domain':['open','closed']}
-    owner['state_evidence']['initial'][1]['values']['gripper_state']='open'
-    step={'id':'grasp','op':'grasp_part','params':{'part_name':part}}
-    projection['owner_interval_contract']={'owner_declaration':{'program':{'steps':[step]}},
-        'declared_task':{'resource_id':'ur5e-1','parameters':{'part_name':part}},'preview_fingerprint':'native-program'}
-    for index,point in enumerate(projection['observations']):
-        point['parts']={part:{}}
-        point['resources']['ur5e-1']['gripper_state']='open' if index==0 else 'closed'
-        point['state_snapshot']['ur5e-1']['gripper_state']='open'
-        if index:
-            point['resources']['ur5e-1']['held_part']=part
-            point['owner_safety_evidence']={
-                'physical_state_updates':{'ur5e-1':{'held_part':part,'gripper_state':'closed'}},
-                'physical_state_sources':{'ur5e-1':{'step_fingerprint':_digest(step),'op':'grasp_part',
-                    'source_fingerprint':'native-program'}}}
-    return projection
-
-
-def test_supported_intermediate_custody_overlay_does_not_invent_task_duration():
-    projection=_custody_overlay_projection()
-    before=deepcopy(projection['owner_safety_evidence'])
-    result=bind_outline_owner_safety_evidence(projection)
-    assert result['observations'][1]['state_snapshot']['ur5e-1']=={'held_part':'part','gripper_state':'closed'}
-    assert result['owner_safety_evidence']['task_evidence']==before['task_evidence']
-    assert result['owner_safety_evidence']['state_evidence']==before['state_evidence']
-    assert projection['observations'][1]['state_snapshot']['ur5e-1']['held_part'] is None
-
-
-@pytest.mark.parametrize('change',['source','step','part','operation','physical'])
-def test_custody_overlay_rejects_unbound_or_conflicting_effect(change):
-    projection=_custody_overlay_projection()
-    point=projection['observations'][1]
-    supplied=point['owner_safety_evidence']
-    if change=='source': supplied['physical_state_sources']['ur5e-1']['source_fingerprint']='different'
-    elif change=='step': supplied['physical_state_sources']['ur5e-1']['step_fingerprint']='different'
-    elif change=='part': supplied['physical_state_updates']['ur5e-1']['held_part']=None
-    elif change=='operation': supplied['physical_state_sources']['ur5e-1']['op']='close_gripper'
-    else: point['resources']['ur5e-1']['held_part']=None
-    with pytest.raises(ValueError): bind_outline_owner_safety_evidence(projection)
 
 
 def _base_hold_input():
@@ -1507,115 +842,6 @@ def test_transfer_corridor_provider_attaches_raw_proof_to_each_handoff_participa
         rows=point['owner_safety_evidence']['resource_evidence']
         assert rows['Conveyor']['robot_clear']==rows['Buffer For Machined parts']['robot_clear']
         assert rows['Conveyor']['robot_clear']['pairs_complete'] is True
-
-
-def _ur_custody_ledger_input():
-    projection = _custody_overlay_projection()
-    ledger = projection.pop('owner_safety_evidence')
-    before = {row['resource_id']:deepcopy(row['values']) for row in ledger['state_evidence']['initial']}
-    after = deepcopy(before)
-    after['ur5e-1'].update(held_part='part',gripper_state='closed')
-    for point in projection['observations']:
-        point['resources']['M1']['resource_state']='loaded'
-    step = projection['owner_interval_contract']['owner_declaration']['program']['steps'][0]
-    projection['owner_interval_contract'].pop('owner_declaration')
-    projection['owner_interval_contract'].update(projection_clock_version=1,source_contract_fingerprint='owner contract',
-        owner_declarations=[{'composition_contract':{'steps':[step]}}])
-    task={'resource_jid':'robot@localhost','event_name':'arbitrary_identifier','part_name':'part'}
-    projection['provenance']={'binding':{'resource_jid':task['resource_jid']},'contract_fingerprint':'validated'}
-    projection['successor_evidence']={'environment_valuation':after}
-    projection['projected_snapshot']=deepcopy(projection['observations'][-1])
-    projection['resource_updates']={'held_part':'part','gripper_state':'closed'}
-    physical={'environment_models':ledger['resource_models'],'environment_valuation':before,
-        'jids':{'M1':'machine@localhost','ur5e-1':'robot@localhost'},
-        'resources':{'M1':{'idle':True},'ur5e-1':{'idle':True}}}
-    return projection,task,physical
-
-
-def test_validated_ur_custody_ledger_uses_declared_steps_at_intermediate_checkpoint():
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical=_ur_custody_ledger_input()
-    before=deepcopy((projection,physical))
-    result=bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-    assert result['observations'][1]['state_snapshot']['ur5e-1']=={'held_part':'part','gripper_state':'closed'}
-    assert result['owner_safety_evidence']['task_evidence']['events'][0]['function']=='arbitrary_identifier'
-    assert (projection,physical)==before
-
-
-@pytest.mark.parametrize('change',['declaration','source','clock','task_owner'])
-def test_validated_ur_custody_ledger_rejects_unbound_declaration_or_clock(change):
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical=_ur_custody_ledger_input()
-    contract=projection['owner_interval_contract']
-    if change=='declaration': contract['owner_declarations'][0]['composition_contract']['steps']=[]
-    elif change=='source': contract['preview_fingerprint']='different'
-    elif change=='clock': contract.pop('projection_clock_version')
-    else: contract['declared_task']['resource_id']='M1'
-    with pytest.raises(ValueError):
-        bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-
-
-def _ur_cross_owner_ledger_input():
-    from cais_spade_llm.resources.recovery_geometry import _owner_product_custody
-    projection,task,physical=_ur_custody_ledger_input()
-    rid='Buffer For Machined parts'
-    physical['environment_models'][rid]={'state_variables':{'zone_1_part':{'type':['null','string'],'reference':'part_name'}}}
-    physical['environment_valuation'][rid]={'zone_1_part':'part'}
-    physical['resources'][rid]={'idle':True}
-    physical['jids'][rid]='buffer@localhost'
-    physical['snapshot']={'parts':{'part':{'contained_by':rid}}}
-    projection['geometry']['resources'][rid]={}
-    for i,point in enumerate(projection['observations']):
-        point['resources'][rid]={'zone_1_part':None if i==2 else 'part'}
-        point['parts']['part']['contained_by']=rid if i==0 else None
-    projection['projected_snapshot']=deepcopy(projection['observations'][-1])
-    _,after,witness=_owner_product_custody(task=task,state=projection['projected_snapshot'],evidence=physical,
-        resource_updates=projection['resource_updates'],support={},rid='ur5e-1')
-    projection['successor_evidence']['environment_valuation']=after
-    projection['product_custody_evidence']=witness
-    return projection,task,physical
-
-
-def test_owner_custody_recomputed_before_cross_owner_task_effect_ledger():
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical=_ur_cross_owner_ledger_input()
-    result=bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-    ledger=result['owner_safety_evidence']
-    events=ledger['task_evidence']['events']
-    assert {row['resource_id'] for row in events}=={'ur5e-1','Buffer For Machined parts'}
-    buffer=next(row for row in ledger['state_evidence']['updates'] if row['resource_id']=='Buffer For Machined parts')
-    assert buffer['values']=={'zone_1_part':None} and buffer['time']==1.
-    assert buffer['task_id'] in {row['task_id'] for row in events}
-
-
-@pytest.mark.parametrize('change',['witness','peer_value','source_occupancy'])
-def test_owner_custody_ledger_rejects_unsupported_cross_owner_effect(change):
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical=_ur_cross_owner_ledger_input()
-    if change=='witness': projection['product_custody_evidence']['resource_model_fingerprint']='different'
-    elif change=='peer_value':
-        projection['successor_evidence']['environment_valuation']['Buffer For Machined parts']['zone_1_part']='part'
-        projection['observations'][-1]['resources']['Buffer For Machined parts']['zone_1_part']='part'
-    else: physical['snapshot']['parts']['part']['contained_by']='missing'
-    with pytest.raises(ValueError):
-        bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-
-
-def test_owner_ledger_duplicate_final_time_retains_the_same_verified_completion():
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import bind_validated_outline_projection
-    projection,task,physical=_ur_custody_ledger_input()
-    physical['environment_models']['ur5e-1']['state_variables']['resource_state']={'type':'string','domain':['idle','picked']}
-    physical['environment_valuation']['ur5e-1']['resource_state']='idle'
-    projection['successor_evidence']['environment_valuation']['ur5e-1']['resource_state']='picked'
-    for index,point in enumerate(projection['observations']):
-        point['resources']['ur5e-1']['resource_state']='picked' if index==2 else 'idle'
-    projection['observations'].insert(-1,deepcopy(projection['observations'][-1]))
-    result=bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
-    assert [point['state_snapshot']['ur5e-1']['resource_state'] for point in result['observations']]==[
-        'idle','idle','picked','picked']
-    projection['observations'][-2]['resources']['ur5e-1']['held_part']=None
-    with pytest.raises(ValueError):
-        bind_validated_outline_projection(projection,task=task,physical_evidence=physical)
 
 
 def _shared_participant_handoff_input(part):

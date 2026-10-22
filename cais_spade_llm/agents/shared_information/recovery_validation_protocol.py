@@ -7,11 +7,6 @@ import json
 from copy import deepcopy
 from typing import Any
 
-RECOVERY_OUTLINE_PHYSICAL_VALIDATE = "recovery_outline_physical_validate"
-RECOVERY_OUTLINE_PHYSICAL_VALIDATED = "recovery_outline_physical_validated"
-RECOVERY_OUTLINE_SAFETY_VALIDATE = "recovery_outline_safety_validate"
-RECOVERY_OUTLINE_SAFETY_VALIDATED = "recovery_outline_safety_validated"
-
 
 def recovery_validation_fingerprint(value: Any) -> str:
     """Return a stable fingerprint without changing any formal-system token."""
@@ -65,35 +60,7 @@ def recovery_validation_stage(  # noqa: PLR0913
     return row
 
 
-def recovery_validation_reply_matches(
-    payload: dict[str, Any],
-    *,
-    request_id: str,
-    recovery_session_id: str,
-    turn_index: int,
-    state_fingerprint: str,
-) -> bool:
-    """Return whether a reply belongs to the active validation request."""
-    try:
-        reply_turn_index = int(payload.get("turn_index") or 0)
-    except (TypeError, ValueError):
-        return False
-    return bool(
-        str(payload.get("request_id") or "").strip() == str(request_id or "").strip()
-        and str(payload.get("recovery_session_id") or "").strip()
-        == str(recovery_session_id or "").strip()
-        and reply_turn_index == int(turn_index or 0)
-        and str(payload.get("state_fingerprint") or "").strip()
-        == str(state_fingerprint or "").strip()
-    )
-
-
 __all__ = [
-    "RECOVERY_OUTLINE_PHYSICAL_VALIDATE",
-    "RECOVERY_OUTLINE_PHYSICAL_VALIDATED",
-    "RECOVERY_OUTLINE_SAFETY_VALIDATE",
-    "RECOVERY_OUTLINE_SAFETY_VALIDATED",
     "recovery_validation_fingerprint",
-    "recovery_validation_reply_matches",
     "recovery_validation_stage",
 ]

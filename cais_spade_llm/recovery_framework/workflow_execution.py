@@ -93,11 +93,6 @@ class WorkflowResourceAgent(ResourceAgent):
             kwargs['resource_evidence'] = self.get_recovery_resource_evidence()
         return check_environment_primitive_capability(**kwargs)
 
-    def project_recovery_outline_event(self, **kwargs) -> dict:
-        """Keep declared symbolic effects separate from physical interval evidence."""
-        from cais_spade_llm.resources.environment_recovery import project_environment_event
-
-        return project_environment_event(**kwargs)
 
     async def teardown(self) -> None:
         """Cancel owned Gazebo execution before the agent is removed."""

@@ -92,15 +92,10 @@ def response():
 
 
 def test_draft_retrieval_generation_and_reload_never_validate(observations, tmp_path, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
-    from cais_spade_llm.recovery_framework import offline_recovery, outline_endpoint_evidence, primitive_composition
+    from cais_spade_llm.recovery_framework import primitive_composition
 
     forbidden = Mock(side_effect=AssertionError("No admission, projection, or composition in draft generation"))
-    monkeypatch.setattr(multi_turn_validated_event, "validate_event", forbidden)
-    monkeypatch.setattr(offline_recovery, "create_offline_recovery", forbidden)
-    monkeypatch.setattr(outline_endpoint_evidence, "project_bounded_successor", forbidden)
     monkeypatch.setattr(primitive_composition, "start_composition_attempt", forbidden)
-    monkeypatch.setattr(outline_draft.context, "public_outline_safety_context", forbidden)
     original = deepcopy(observations)
     provider = scripted_provider(monkeypatch, [{"thought": "Need facts", "decision": "need_context",
         "context_requests": ["/resources/owner/snapshot", "/safety_rules", "/parts/KET4_Square_4mm/observed_pose"]}, response(), DONE])
@@ -110,7 +105,7 @@ def test_draft_retrieval_generation_and_reload_never_validate(observations, tmp_
     assert draft.record["transition_trace"][0]["event_name"] == response()["candidate_events"][0]["event_name"]
     assert draft.record["provider_calls"] == 4
     assert "/resources/owner/snapshot" in draft.record["retrievals"]
-    assert draft.record["checks"] == dict.fromkeys(("ra", "physical_evidence", "cca", "nominal_continuation"), "not_checked")
+    assert "checks" not in draft.record and "validation_checks" not in draft.record
     assert "accepted_outline_prefix" not in draft.record
     assert draft.record["pipeline"] == "execute_multi_turn_recovery"
     assert draft.snapshot()["outline"] == [] and draft.snapshot()["execution_authorized"] is False
@@ -177,8 +172,9 @@ def test_draft_states_a_resource_s_declared_job_control(observations, tmp_path):
 
 
 @pytest.mark.parametrize("responses, expected_calls, status", [
-    ([{}, response(), DONE], 4, "draft"),
-    ([{}] * 8, 6, "draft_incomplete"),
+    ([response(), DONE], 3, "draft"),
+    # Nothing checks a reply; one code cannot read ends the draft with its error.
+    ([{}, response(), DONE], 2, "draft_incomplete"),
     ([{"thought": "Need facts", "decision": "need_context", "context_requests": ["/resources"]}] * 8, 3, "draft_incomplete"),
     ([json.JSONDecodeError("bad JSON", "?", 0), response()], 2, "draft_incomplete"),
 ])
@@ -221,7 +217,8 @@ def test_draft_reload_rejects_changed_source_and_accepted_labels(observations, t
     asyncio.run(draft.generate())
     path = draft.directory / "draft.json"
     record = json.loads(path.read_text())
-    record["checks"]["cca"] = "passed"
+    # A draft saved with an outline check enabled is not an unvalidated draft.
+    record["validation_checks"] = {"check_cca_safety": True}
     path.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="unvalidated"):
         outline_draft.load_draft(path, observations, root=tmp_path)
@@ -251,7 +248,6 @@ def test_example_draft_actions_work_without_offline_worker(observations, tmp_pat
     async def run():
         await example.action("generate_outline_only")
         await example._draft._task
-        assert example._offline is None
         assert example.snapshot()["outline_draft"]["status"] == "draft"
         saved = deepcopy(example.snapshot()["outline_draft"])
         for action in ("continue_outline", "generate_primitives", "execute", "test_in_gazebo"):
@@ -273,8 +269,7 @@ def test_start_fresh_keeps_empty_prefix_and_locks_generated_choices(observations
     provider = scripted_provider(monkeypatch, [response(), DONE])
     example = PartSlippageExample(SimpleNamespace(system_running=False))
     example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
-        observation_path=observations["source_path"], check_ra_feasibility=False,
-        check_physical_evidence=False, check_cca_safety=False)
+        observation_path=observations["source_path"])
     first = example.prepare_offline()
     assert first["status"] == "draft_ready" and first["outline_draft"]["transition_trace"] == []
     assert first["can_generate_outline"] is True
@@ -287,36 +282,36 @@ def test_start_fresh_keeps_empty_prefix_and_locks_generated_choices(observations
         assert fresh["outline"] == fresh["primitives"] == fresh["outline_draft"]["transition_trace"] == []
         assert json.loads((example._draft.directory / "draft.json").read_text())["provider_calls"] == 0
         await example.action("generate_outline")
-        assert example.snapshot()["validation_checks_locked"] is True
+        assert example.snapshot()["busy"] is True
         await example._draft._task
-        assert example.snapshot()["validation_checks_locked"] is True
-        with pytest.raises(ValueError, match="Start fresh"):
+        # The generated draft keeps the safety selections it was generated with.
+        with pytest.raises(ValueError, match="Reset example"):
             example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
-                observation_path=observations["source_path"], check_ra_feasibility=True,
-                check_physical_evidence=False, check_cca_safety=False)
+                observation_path=observations["source_path"])
         state = await example.action("start_fresh")
-        assert state["validation_checks_locked"] is False
+        assert state["can_generate_outline"] is True
         assert state["outline_draft"]["provider_calls"] == 0
         assert provider.await_count == 3
 
     asyncio.run(run())
 
 
-def test_deferred_checks_do_not_load_prepare_or_write(observations, tmp_path, monkeypatch):
-    from cais_spade_llm.recovery_framework import part_slippage_example, offline_recovery
+def test_deferred_preferences_do_not_load_prepare_or_write(observations, tmp_path, monkeypatch):
+    from cais_spade_llm.recovery_framework import part_slippage_example
+    from cais_spade_llm.recovery_framework.recovery_case_safety import default_safety_files
 
     forbidden = Mock(side_effect=AssertionError("Preferences must stay lightweight"))
     monkeypatch.setattr(part_slippage_example, "read_observations", forbidden)
     monkeypatch.setattr(part_slippage_example, "observation_summary", forbidden)
     monkeypatch.setattr(outline_draft, "OutlineDraft", forbidden)
-    monkeypatch.setattr(offline_recovery, "create_offline_recovery", forbidden)
     example = PartSlippageExample(SimpleNamespace(system_running=False))
+    defaults = default_safety_files(observations["scenario"])
     started = time.monotonic()
     for index in range(30):
-        state = example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
-            observation_path=observations["source_path"], check_ra_feasibility=bool(index % 2),
-            check_physical_evidence=bool(index % 3), check_cca_safety=bool(index % 5), defer_preparation=True)
-        assert state["can_generate_outline"] and state["validation_checks_locked"] is False
+        state = example.set_options(source="offline", scenario=observations["scenario"],
+            safety_files=[] if index % 2 else defaults, observation_path=observations["source_path"],
+            defer_preparation=True)
+        assert state["can_generate_outline"] and not state["busy"]
         assert not state.get("run_id")
     assert time.monotonic() - started < 1
     forbidden.assert_not_called()
@@ -341,14 +336,13 @@ def test_generate_outline_fresh_freezes_choices_and_keeps_ui_responsive(observat
     provider = scripted_provider(monkeypatch, [response(), DONE, GROUNDED, response(), DONE])
     example = PartSlippageExample(SimpleNamespace(system_running=False))
     options = dict(source="offline", scenario=observations["scenario"], safety_files=[],
-        observation_path=observations["source_path"], check_ra_feasibility=False, check_physical_evidence=False,
-        check_cca_safety=False, defer_preparation=True)
+        observation_path=observations["source_path"], defer_preparation=True)
     example.set_options(**options)
     options["safety_files"] = list(example.safety_files)
 
     async def run():
         state = await example.action("generate_outline_fresh")
-        assert state["busy"] and state["validation_checks_locked"]
+        assert state["busy"]
         for _ in range(100):
             if entered.is_set():
                 break
@@ -356,18 +350,17 @@ def test_generate_outline_fresh_freezes_choices_and_keeps_ui_responsive(observat
         assert entered.is_set()
         provider.assert_not_called()
         with pytest.raises(ValueError):
-            example.set_options(**{**options, "check_ra_feasibility": True})
+            example.set_options(**{**options, "safety_files": []})
         with pytest.raises(ValueError):
             await example.action("generate_outline_fresh")
         release.set()
         await example._task
         first = example.snapshot()
         assert first["outline_draft"]["status"] == "draft"
-        assert not first["validation_checks_locked"]
+        assert not first["busy"]
         record = deepcopy(first["outline_draft"])
-        example.set_options(**{**options, "check_cca_safety": True})
-        assert example.snapshot()["outline_draft"] == record
         example.set_options(**options)
+        assert example.snapshot()["outline_draft"] == record
         await example.action("generate_outline_fresh")
         await example._task
         second = example.snapshot()
@@ -395,8 +388,7 @@ def test_stage_stop_on_a_fresh_outline_stops_before_any_provider_call(observatio
     provider = scripted_provider(monkeypatch, [response()])
     example = PartSlippageExample(SimpleNamespace(system_running=False))
     example.set_options(source="offline", scenario=observations["scenario"], safety_files=[],
-        observation_path=observations["source_path"], check_ra_feasibility=False, check_physical_evidence=False,
-        check_cca_safety=False, defer_preparation=True)
+        observation_path=observations["source_path"], defer_preparation=True)
 
     async def run():
         await example.action("generate_outline_fresh")
@@ -414,53 +406,6 @@ def test_stage_stop_on_a_fresh_outline_stops_before_any_provider_call(observatio
     asyncio.run(run())
     provider.assert_not_called()
     assert not (tmp_path / "drafts").exists()
-
-
-def test_enabled_check_failure_does_not_advance_a_diagnostic_candidate(observations, tmp_path, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_checks
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_validated_event
-
-    draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
-    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
-    session["check_cca_safety"] = True
-    before = deepcopy(session["symbolic_resources"])
-    check = AsyncMock(return_value=({"ra": "not_checked", "physical_evidence": "not_checked", "cca": "NEEDS_CONTEXT"},
-        {}, {"reason": "Mutex occupancy evidence is unavailable"}))
-    monkeypatch.setattr(outline_checks, "validate_partial_event", check)
-    decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(session=session,
-        prepared=draft.prepared, response=response(), planner=draft.planner))
-    assert decision == "need_context" and session["status"] == "NEEDS_CONTEXT"
-    assert session["accepted_outline_prefix"] == []
-    assert session["symbolic_resources"] == before
-    assert not session.get("outline_monitor_context")
-    assert audit["candidate_evaluations"][0]["valid"] is False
-
-
-def test_enabled_checks_also_cover_nominal_handoff_before_committing(observations, tmp_path, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_checks
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_diagnostic
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_facts import (
-        response_with_jids,
-    )
-
-    draft = outline_draft.OutlineDraft(observations, [], root=tmp_path)
-    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
-    session["check_ra_feasibility"] = True
-    before = deepcopy(session["symbolic_resources"])
-    check = AsyncMock(side_effect=[
-        ({"ra": "passed", "physical_evidence": "not_checked", "cca": "not_checked"}, {}, {}),
-        ({"ra": "NEEDS_CONTEXT", "physical_evidence": "not_checked", "cca": "not_checked"},
-         {"reason": "Recorded nominal entry is unresolved"}, {}),
-    ])
-    monkeypatch.setattr(outline_checks, "validate_partial_event", check)
-    decision, audit = asyncio.run(multi_turn_diagnostic.handle_event(session=session, prepared=draft.prepared,
-        response={"next_transition": response_with_jids(response(), draft.prepared)["candidate_events"][0]},
-        planner=draft.planner))
-    assert check.await_count == 2
-    assert decision == "need_context"
-    assert session["accepted_outline_prefix"] == []
-    assert session["symbolic_resources"] == before
-    assert audit["nominal_handoff_checks"][0]["checks"]["ra"] == "NEEDS_CONTEXT"
 
 
 def test_scene_geometry_describes_layout_without_routes_docks_or_assignments():

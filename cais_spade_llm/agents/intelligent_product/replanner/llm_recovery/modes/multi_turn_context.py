@@ -129,18 +129,6 @@ def _views(prepared: dict, session: dict) -> tuple[dict, dict]:
         llm_input=prepared.get("llm_input", {}), session_state=session)}
     parts = {row["part_name"]: row for row in _projected_outline_parts(
         llm_input=prepared.get("llm_input", {}), session_state=session)}
-    invalidated = session.get("projected_physical_evidence", {}).get("invalidated_geometry", {})
-    if invalidated:
-        from cais_spade_llm.recovery_framework.outline_evidence_policy import remove_invalidated_pose
-
-        physical = session["projected_physical_evidence"]
-        for rid in invalidated.get("resources", {}):
-            row = resources.get(physical.get("jids", {}).get(rid))
-            if row is not None:
-                remove_invalidated_pose(row)
-        for part in invalidated.get("parts", {}):
-            if part in parts:
-                remove_invalidated_pose(parts[part])
     physical = session.get("projected_physical_evidence") or {}
     for rid, job in physical.get("unresolved_processing", {}).items():
         row = resources.get(physical.get("jids", {}).get(rid), {})
@@ -424,12 +412,6 @@ def public_resource_snapshot(prepared: dict, session: dict, jid: str) -> dict:
         snapshot["field_sources"] = {key: source for key, source in sources.items() if key in snapshot}
         return snapshot
     result = {**entry.get("recovery_snapshot", {}), **resources.get(jid, {})}
-    physical = session.get("projected_physical_evidence") or {}
-    if any(physical.get("jids", {}).get(rid) == jid
-           for rid in physical.get("invalidated_geometry", {}).get("resources", {})):
-        from cais_spade_llm.recovery_framework.outline_evidence_policy import remove_invalidated_pose
-
-        remove_invalidated_pose(result)
     return _fields(result, fields)
 
 
@@ -549,84 +531,6 @@ def _held_part_interpretation(entry: dict, declarations: dict) -> dict:
         "declared_part_name_updates": updates,
         "rule": " ".join(rules),
     }
-
-
-def _task_contract_events(entry: dict, ref: str) -> list[dict]:
-    model = entry.get("recovery_des_model") or {}
-    events = model.get("events")
-    if not isinstance(events, list):
-        raise ValueError(f"NEEDS_CONTEXT: saved task declarations are not recorded for {ref}")
-    return [row for row in events if isinstance(row, dict) and not row.get("private")
-            and isinstance(row.get("event_name"), str)]
-
-
-def _public_task_value(value: Any, private_fields: set[str]) -> bool:
-    if isinstance(value, str):
-        return not (value.startswith(("task_ctx.", "_")) or value in private_fields)
-    if isinstance(value, dict):
-        allowed = {"$arg", "$step", "$state", "$add", "$sub", "$mul", "$div", "path"}
-        return (set(value) <= allowed
-                and all(_public_task_value(item, private_fields) for item in value.values()))
-    if isinstance(value, list):
-        return all(_public_task_value(item, private_fields) for item in value)
-    return value is None or isinstance(value, (bool, int, float))
-
-
-def _public_task_contract(entry: dict, event: dict) -> dict:
-    declarations = (entry.get("recovery_des_model") or {}).get("state_variables", {})
-    private_fields = {name for name, row in declarations.items()
-                      if row.get("private") or name.startswith(("task_ctx.", "_"))}
-    public_fields = set(declarations) - private_fields
-    result = {"event_name": event["event_name"]}
-    omitted = {section for section in ("guards", "updates", "primitive_support") if section not in event}
-    for section, operators in (("guards", {"equals", "not_equals", "equals_from_param", "not_equals_from_param", "exists"}),
-                               ("updates", {"set", "set_from_param"})):
-        result[section] = {}
-        for field, condition in event.get(section, {}).items():
-            if (field in public_fields and isinstance(condition, dict) and set(condition) <= operators
-                    and all(_public_task_value(item, private_fields) for item in condition.values())):
-                result[section][field] = deepcopy(condition)
-            else:
-                omitted.add(section)
-    bindings = {}
-    for name, binding in event.get("parameter_bindings", {}).items():
-        if (_public_task_value(name, private_fields) and isinstance(binding, dict)
-                and set(binding) <= {"location_type"}
-                and all(_public_task_value(item, private_fields) for item in binding.values())):
-            bindings[name] = deepcopy(binding)
-        else:
-            omitted.add("parameter_bindings")
-    if bindings:
-        result["parameter_bindings"] = bindings
-    result.update(_fields(event, {"requires_part_binding"}))
-    catalog = {row["name"]: row for row in entry.get("execution_primitive_catalog", []) if "name" in row}
-    support = []
-    for step in event.get("primitive_support", []):
-        if not isinstance(step, dict) or not isinstance(step.get("primitive"), str):
-            omitted.add("primitive_support")
-            continue
-        row = {"primitive": step["primitive"]}
-        params = {}
-        declared_params = catalog.get(step["primitive"], {}).get("params", {})
-        for name, value in step.get("params", {}).items():
-            if (name in declared_params and _public_task_value(name, private_fields)
-                    and not (isinstance(declared_params[name], dict) and declared_params[name].get("private"))
-                    and _public_task_value(value, private_fields)):
-                params[name] = deepcopy(value)
-            else:
-                omitted.add("primitive_support")
-        if params:
-            row["params"] = params
-        if step.get("when"):
-            omitted.add("primitive_support")
-        support.append(row)
-    if "primitive_support" in event:
-        result["primitive_support"] = support
-    result["partial"] = bool(omitted)
-    if omitted:
-        result["omitted_sections"] = sorted(omitted)
-        result["note"] = "Private or unsupported declarations are omitted; this is not a complete task contract."
-    return result
 
 
 def _public_pending_tasks(prepared: dict, session: dict, entry: dict) -> list[dict]:
@@ -798,9 +702,7 @@ def resolve_outline_context(prepared: dict, session: dict, ref: str) -> dict:  #
             ref.split("/")[1:2] in (["safety_rules"], ["regions"], ["geometry"]) or is_diagnostic_ref(ref)):
         return _diagnostic_fact(prepared, session, ref)
     if ref.split("/")[1:2] in (["safety_rules"], ["regions"]):
-        if session.get("public_safety_context_version") != 1:
-            raise ValueError("Unsupported context reference")
-        return public_safety_context_fact(prepared, session, ref)
+        raise ValueError("Unsupported context reference")
     resources, parts = _views(prepared, session)
     segments = ref.split("/")
     if not ref.startswith("/") or any(not segment for segment in segments[1:]):
@@ -912,12 +814,6 @@ def scope_prompt_input(payload: dict, prepared: dict, session: dict) -> dict:
         state[key] = {name: row for name, row in state.get(key, {}).items() if name in parts}
     payload["recovery_resources"] = {jid: row for jid, row in payload["recovery_resources"].items() if jid in resources}
     payload["outline_context"] = scope
-    if session.get("public_safety_context_version") == 1 and not session.get("outline_diagnostic_bypass"):
-        safety_context = public_outline_safety_context(prepared, session)
-        payload["outline_safety_context"] = compact_public_safety_context(
-            safety_context, resource_jids=resources, part_names=parts)
-        payload["outline_safety_feedback_bindings"] = safety_feedback_bindings(
-            safety_context, session.get("outline_validation_findings") or [])
     payload["outline_resource_fields"] = {jid: resolve_outline_context(prepared, session, f"/resources/{jid}/state_variables")
                                           for jid in sorted(resources)}
     # Automatic inclusion has no effect on LLM-requested retrieval history.
@@ -1057,222 +953,3 @@ async def handle_outline_context(*, prepared: dict, session: dict, response: dic
     return "need_context", entry
 
 
-def public_outline_safety_context(prepared: dict, session: dict) -> dict:
-    """Calculate endpoint occupancy using only saved or accepted physical facts."""
-    from cais_spade_llm.agents.central_controller.offline_safety_grounding import _rules
-    from cais_spade_llm.agents.central_controller.ppr_ap import physical_ap_kind
-    from cais_spade_llm.agents.central_controller.reviewed_primitive_program_safety import _catalog, _ap_binding
-    from cais_spade_llm.resources.recovery_geometry import _checkpoint
-
-    accepted = session.get("accepted_outline_prefix") or []
-    physical = session.get("projected_physical_evidence")
-    if physical is None and not accepted:
-        physical = prepared.get("physical_evidence")
-    physical = physical if isinstance(physical, dict) else {}
-    snapshot = physical.get("snapshot")
-    snapshot = snapshot if isinstance(snapshot, dict) else {}
-    geometry = physical.get("geometry") or {}
-    models = physical.get("resource_models") or {}
-    # Event contracts and earlier preview records do not define this endpoint's
-    # geometry and must not recursively enter either public facts or their hash.
-    configuration = {rid: model.get("configuration") for rid, model in models.items()}
-    source = {
-        "source": "model_calculation",
-        "basis": "projected_state" if accepted or physical.get("provenance", {}).get("kind") == "projected" else "saved_observations",
-        "captured_at": prepared.get("source_observation_captured_at", prepared.get("prepared_at_utc")),
-        "source_run_id": prepared.get("source_observation_run_id"),
-        "source_context_revision": prepared.get("source_context_revision"),
-        "accepted_trace_length": len(accepted),
-        "coverage": "endpoint",
-        "model_fingerprint": recovery_validation_fingerprint(configuration),
-        "geometry_fingerprint": recovery_validation_fingerprint(geometry),
-        "snapshot_fingerprint": recovery_validation_fingerprint(snapshot),
-        "resource_identity_fingerprint": recovery_validation_fingerprint(physical.get("jids")),
-        "specifications_fingerprint": recovery_validation_fingerprint(prepared.get("outline_safety_specifications") or []),
-        "execution_authorized": False,
-    }
-    source["revision"] = recovery_validation_fingerprint({key: source[key] for key in (
-        "basis", "source_context_revision", "accepted_trace_length", "model_fingerprint",
-        "geometry_fingerprint", "snapshot_fingerprint", "resource_identity_fingerprint", "specifications_fingerprint")})
-    result = {"specifications": [], "instances": [], "regions": [], "current_occupancy": {}, "source": source,
-              "missing_context": []}
-    resources = snapshot.get("resources") or {}
-    jids = physical.get("jids") or {}
-    selected_regions, selected_resources, selected_parts = set(), set(), set()
-    for record in prepared.get("outline_safety_specifications") or []:
-        document = record.get("document") or {}
-        catalog = document.get("catalog") or {}
-        raw = catalog.get("specifications") or []
-        scopes = document.get("requirement_scopes") or []
-        try:
-            definitions = _catalog(deepcopy(catalog), structured_groundings=True)
-        except (KeyError, TypeError, ValueError, IndexError):
-            result["missing_context"].append({"ref": "/safety_rules", "source_sha256": record.get("source_sha256"),
-                "reason": "NEEDS_CONTEXT: selected safety declarations do not match the supported public schema"})
-            continue
-        for definition in raw:
-            # Exact captured public declarations, not compiled monitor internals.
-            result["specifications"].append({
-                **{key: deepcopy(definition[key]) for key in ("id", "requirement", "formula", "aps") if key in definition},
-                "requirement_scopes": [_public_safety_scope(scope, definition["aps"]) for scope in scopes
-                    if scope.get("specification") == definition.get("id")],
-                "source_path": record.get("source_path"), "source_sha256": record.get("source_sha256"),
-            })
-        try:
-            state_required = any(physical_ap_kind(ap) in {None, "loading_reserved_by"}
-                                 for definition in definitions.values() for ap in definition["aps"])
-            recorded = physical.get("environment_models") or {}
-            if state_required:
-                if not isinstance(recorded, dict) or set(recorded) != set(jids):
-                    raise ValueError("Complete recorded owner state declarations are unavailable")
-                if any(not isinstance(model.get("state_variables"), dict) for model in recorded.values()):
-                    raise ValueError("Recorded owner state declarations are unavailable")
-            # Pairwise scope selection also reads custody and motion declarations.
-            # They remain private inputs to the same binding code used by CCA.
-            declared_models = {rid: {"state_variables": deepcopy(recorded.get(rid, {}).get("state_variables", {})),
-                **({"configuration": deepcopy(models[rid]["configuration"])}
-                   if models.get(rid, {}).get("configuration") else {})} for rid in jids}
-            source["owner_state_models_fingerprint"] = recovery_validation_fingerprint(declared_models)
-            source["revision"] = recovery_validation_fingerprint({key: value for key, value in source.items()
-                                                                  if key != "revision"})
-            rules, _ = _rules(definitions, scopes, declared_models, geometry)
-        except (KeyError, TypeError, ValueError, IndexError):
-            result["missing_context"].append({"ref": "/safety_rules", "source_sha256": record.get("source_sha256"),
-                "reason": "NEEDS_CONTEXT: selected AP bindings require complete recorded resource, part, and region declarations"})
-            continue
-        for rule in rules:
-            aps = []
-            for ap in rule["aps"]:
-                if physical_ap_kind(ap) is None:
-                    declared = rule["ap_groundings"][ap["label"]]
-                    public = {"resource": declared["resource_id"], "process": declared["process"],
-                              "part": declared["product"]}
-                    aps.append({"label": ap["label"], "meaning": ap["meaning"], "binding": public})
-                    selected_resources.add(public["resource"])
-                    continue
-                binding = _ap_binding(rule, ap)
-                # This is deliberately a physical binding allowlist, never an
-                # arbitrary path to private evaluator/model fields.
-                public = {key: deepcopy(value) for key, value in binding.items()
-                          if key in {"resource", "receiving_resource", "region", "part", "process", "target", "result", "capacity"}}
-                aps.append({"label": ap["label"], "meaning": ap["meaning"], "binding": public})
-                if "region" in public:
-                    selected_regions.add(public["region"])
-                for field in ("resource", "receiving_resource"):
-                    if field in public:
-                        selected_resources.add(public[field])
-                if "part" in public:
-                    selected_parts.add(public["part"])
-                if physical_ap_kind(ap) == "capacity_exceeded":
-                    selected_parts.update(geometry.get("parts", {}))
-            result["instances"].append({"id": rule["id"], "rule_id": rule["rule_id"], "aps": aps,
-                "source_path": record.get("source_path"), "source_sha256": record.get("source_sha256")})
-    result["regions"] = sorted(selected_regions)
-    result["resource_bindings"] = [{"resource": rid, **({"resource_jid": jids[rid]} if rid in jids else {})}
-                                    for rid in sorted(selected_resources)]
-    for region in sorted(selected_regions):
-        result["current_occupancy"][region] = {"resources": {rid: None for rid in sorted(selected_resources)},
-                                              "parts": {name: None for name in sorted(selected_parts)}}
-    if not selected_regions:
-        return result
-    try:
-        if not snapshot or set(resources) != set(jids):
-            raise ValueError("Recorded resource identities are incomplete")
-        observed = _checkpoint(snapshot, geometry, models, index=len(accepted))
-        for region, target in result["current_occupancy"].items():
-            target["resources"] = {rid: deepcopy(observed["occupancy_possibilities"][region][rid])
-                                    for rid in target["resources"]}
-            target["parts"] = {name: deepcopy(observed["part_occupancy_possibilities"][region][name])
-                                for name in target["parts"]}
-    except (KeyError, TypeError, ValueError, IndexError):
-        result["missing_context"].append({"ref": "/regions", "reason":
-            "NEEDS_CONTEXT: current occupancy requires recorded configuration, robot/tool/carried-part geometry, custody, and matching coordinate frames"})
-    return result
-
-
-def public_safety_context_fact(prepared: dict, session: dict, ref: str) -> dict:
-    """Resolve only the listed safety/region references; no live interfaces."""
-    segments = ref.split("/")
-    if not ref.startswith("/") or any(not segment for segment in segments[1:]):
-        raise ValueError("Unsupported context reference")
-    supported = (ref in {"/safety_rules", "/regions"} or
-        len(segments) == 3 and segments[1] == "safety_rules" and bool(segments[2]) or
-        len(segments) == 4 and segments[1] == "safety_rules" and bool(segments[2]) and segments[3] == "instances" or
-        len(segments) == 4 and segments[1] == "regions" and bool(segments[2]) and segments[3] == "occupancy")
-    if not supported:
-        raise ValueError("Unsupported context reference")
-    context = public_outline_safety_context(prepared, session)
-    metadata = deepcopy(context["source"])
-    if ref == "/safety_rules":
-        value = context["specifications"]
-        metadata.update(source="declaration", coverage="selected specifications")
-    elif segments[1] == "safety_rules":
-        name = segments[2]
-        selected = [row for row in context["specifications"] if row["id"] == name]
-        if not selected:
-            raise ValueError("NEEDS_CONTEXT: unknown selected safety specification")
-        value = selected if len(segments) == 3 else [row for row in context["instances"] if row["id"] == name]
-        if not value:
-            raise ValueError("NEEDS_CONTEXT: selected safety AP bindings are unavailable")
-        metadata.update(source="declaration", coverage="selected specifications")
-    elif ref == "/regions":
-        value = context["regions"]
-    else:
-        region = segments[2]
-        if region not in context["current_occupancy"]:
-            raise ValueError("NEEDS_CONTEXT: unknown selected safety region")
-        value = context["current_occupancy"][region]
-    return {"value": deepcopy(value), **metadata,
-            **({"missing_context": deepcopy(context["missing_context"])} if context["missing_context"] else {})}
-
-
-def compact_public_safety_context(context: dict, *, resource_jids: set[str] | None = None,
-                                  part_names: set[str] | None = None) -> dict:
-    """Keep declarations and endpoint facts once; full instances stay retrievable."""
-    result = {key: deepcopy(context[key]) for key in (
-        "resource_bindings", "regions", "current_occupancy", "source", "missing_context") if key in context}
-    if resource_jids is not None:
-        selected = {row["resource"] for row in context.get("resource_bindings", [])
-                    if row.get("resource_jid") in resource_jids}
-        for region in result.get("current_occupancy", {}).values():
-            region["resources"] = {rid: value for rid, value in region.get("resources", {}).items()
-                                   if rid in selected}
-    if part_names is not None:
-        for region in result.get("current_occupancy", {}).values():
-            region["parts"] = {part: value for part, value in region.get("parts", {}).items()
-                               if part in part_names}
-    result["specifications"] = [{**{key: deepcopy(value) for key, value in row.items() if key != "aps"},
-        "aps": [{"label": ap["label"], "meaning": ap["meaning"]} for ap in row["aps"]]}
-        for row in context["specifications"]]
-    return result
-
-
-def safety_feedback_bindings(context: dict, findings: list) -> list:
-    """Expose exact rule instances named in the recorded public feedback."""
-    result = []
-    for row in findings:
-        for check in (row.get("evidence") or {}).get("safety_checks", []):
-            rule_id = check.get("counterexample", {}).get("rule_id")
-            matching = [instance for instance in context["instances"] if instance["rule_id"] == rule_id
-                        and ("source_path" not in check or instance["source_path"] == check["source_path"])]
-            if len(matching) == 1 and matching[0] not in result:
-                result.append(deepcopy(matching[0]))
-    return result
-
-
-def _public_safety_scope(scope: dict, aps: list) -> dict:
-    """Keep declared physical bindings without private structured evaluators."""
-    fields = {"specification", "resource", "receiving_resource", "region", "part", "process", "target", "result"}
-    public = {key: value for key, value in scope.items() if key in fields and isinstance(value, str)}
-    if type(scope.get("capacity")) is int:
-        public["capacity"] = scope["capacity"]
-    bindings = scope.get("physical_ap_bindings")
-    if isinstance(bindings, dict):
-        labels = {ap["label"] for ap in aps}
-        public["physical_ap_bindings"] = {
-            label: {key: value for key, value in binding.items() if key in fields and isinstance(value, str)}
-            for label, binding in bindings.items() if label in labels and isinstance(binding, dict)}
-        for label, binding in bindings.items():
-            if label in public["physical_ap_bindings"] and type(binding.get("capacity")) is int:
-                public["physical_ap_bindings"][label]["capacity"] = binding["capacity"]
-    return public

@@ -21,8 +21,7 @@ from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.mult
     _slim_primitive_catalog_for_prompt,
 )
 from cais_spade_llm.recovery_framework.evaluation_capture import sha256_file, write_record
-from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryProduct, SavedRecoveryResource
-from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
+from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryProduct
 from cais_spade_llm.recovery_framework.part_slippage_recovery import _prompt_safety_rules
 from cais_spade_llm.recovery_framework.recovery_observations import RECORDS
 from cais_spade_llm.resources.machine.machine_jobs import public_processing_observations
@@ -34,7 +33,6 @@ _HIDDEN = context._PRIVATE_CONTEXT_FIELDS | {
     "program_options", "supports_executable_recovery", "supports_manipulator_pick_place",
     "primitive_steps", "capability_decompositions", "allowed_execution_surface", "active_job",
 }
-_NOT_CHECKED = {name: "not_checked" for name in ("ra", "physical_evidence", "cca", "nominal_continuation")}
 DRAFTS = RECORDS / "outline_drafts"
 # A cost limit, not a progress judgment: a good draft takes about six LLM calls.
 DRAFT_MAX_TURNS = 20
@@ -173,10 +171,8 @@ class OutlineDraft:
     """Adapt saved-observation UI actions to execute_multi_turn_recovery."""
 
     def __init__(self, observations: dict, safety_files: list[str], *, root: Path = DRAFTS,
-                 model: str | None = None, reasoning_effort: str | None = None,
-                 check_ra_feasibility: bool = False, check_physical_evidence: bool = False,
-                 check_cca_safety: bool = False) -> None:
-        """Prepare a detached framework session with explicitly selected checks.
+                 model: str | None = None, reasoning_effort: str | None = None) -> None:
+        """Prepare a detached framework session; no validator checks the outline.
 
         Args:
             observations: Immutable saved failure input and its recorded provenance.
@@ -184,9 +180,6 @@ class OutlineDraft:
             root: Directory for the fresh attempt's records.
             model: Optional attempt-specific provider model.
             reasoning_effort: Optional attempt-specific provider reasoning setting.
-            check_ra_feasibility: Enable ResourceAgent feasibility validation.
-            check_physical_evidence: Enable physical evidence calculations.
-            check_cca_safety: Enable validation of the selected safety predicates.
         """
         from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 
@@ -199,48 +192,13 @@ class OutlineDraft:
         # A failure blocks every task that needs the failed resource, not only its own tasks.
         moved = multi_turn_diagnostic.resume_after_faults(
             self.prepared, multi_turn.build_multi_turn_session_seed(self.prepared))
-        choices = dict(zip(CHECK_FIELDS, (check_ra_feasibility, check_physical_evidence, check_cca_safety)))
-        if any(type(value) is not bool for value in choices.values()) or all(choices.values()):
-            raise ValueError("Use the validated Recovery workflow when all three checks are enabled")
-        self.prepared["recovery_session"].update(choices)
         self.rules = _prompt_safety_rules(safety_files)
         self.prepared["prompt_safety_rules"] = deepcopy(self.rules)
-        from .outline_validation import load_outline_specifications
-
-        self.prepared["diagnostic_safety_specifications"] = load_outline_specifications(safety_files, ROOT)
-        resources = []
-        if any(choices.values()):
-            for jid, entry in observations["prepared_recovery_request"]["recovery_resources"].items():
-                owner = SavedRecoveryResource(jid, entry, observations, _copy_observations=False)
-                resources.append(owner)
-                snapshot = owner.get_recovery_snapshot()
-                recorded_model = entry.get("recovery_des_model") or {}
-                evidence = owner.get_recovery_resource_evidence()
-                model_values = (owner.recovery_des_model(snapshot=snapshot)
-                                if recorded_model.get("descriptor_fingerprint") or
-                                (entry.get("resource_type") != "robot" and
-                                 evidence.get("environment_models", {}).get(evidence.get("resource_id")))
-                                else deepcopy(recorded_model))
-                self.prepared["recovery_resources"][jid] = {**deepcopy(entry), "recovery_snapshot": snapshot,
-                    "recovery_des_model": model_values,
-                    "resource_evidence": evidence}
-            self.prepared.update(primitive_support_semantics="successor_primitive_union",
-                physical_evidence=deepcopy(observations.get("physical_evidence") or {}),
-                outline_safety_specifications=load_outline_specifications(safety_files, ROOT),
-                monitor_history=deepcopy(observations.get("monitor_history") or {}))
-            if check_physical_evidence:
-                self.prepared["outline_evidence_policy_version"] = 2
-                self.prepared["physical_evidence"].update(endpoint_evidence_policy_version=2,
-                    outline_evidence_policy_version=2, physical_preview_contract_version=7, owner_projection_clock_version=1)
-                description = (observations.get("planning_scene_capture", {}).get("native_model_parameters", {})
-                               .get("robot_description", {}).get("value"))
-                if description:
-                    self.prepared["physical_evidence"]["endpoint_robot_description"] = description
         # A resource's conditions are the variables its model and its primitives declare (assumption A.2).
         multi_turn_diagnostic.declare_derived_conditions(self.prepared, {
             jid: entry.get("execution_primitive_catalog") or []
             for jid, entry in observations["prepared_recovery_request"]["recovery_resources"].items()})
-        self.provider = SavedRecoveryProduct(observations, resources, model=model, reasoning_effort=reasoning_effort)
+        self.provider = SavedRecoveryProduct(observations, [], model=model, reasoning_effort=reasoning_effort)
         self.planner = ProcessPlanner(self.provider, [])
         self.planner.nodes = deepcopy(observations.get("pending_nodes", []))
         self.provider.part_tracker = deepcopy(observations.get("part_tracker", {}))
@@ -257,8 +215,7 @@ class OutlineDraft:
             "source_path": observations["source_path"], "source_sha256": observations["source_sha256"],
             "source_run_id": observations.get("run_id"), "captured_at": observations.get("captured_at"),
             "selected_safety_files": list(safety_files), "safety_rules": deepcopy(self.rules),
-            "validation_checks": choices,
-            "llm_settings": deepcopy(self.provider.llm_settings), "checks": dict(_NOT_CHECKED),
+            "llm_settings": deepcopy(self.provider.llm_settings),
             "execution_authorized": False, "transition_trace": [], "provider_calls": 0,
             "llm_turns": [], "retrievals": [], "message": "Ready for an unvalidated multi_turn outline."}
         if grounded is not None:
@@ -289,9 +246,6 @@ class OutlineDraft:
             "execution_authorized": False, "artifact_directory": str(self.directory),
             "outline_artifact_directory": str(self.directory / "recovery_outline"),
             "observation_path": self.record["source_path"],
-            "validation_checks": deepcopy(self.record.get("validation_checks") or dict.fromkeys(CHECK_FIELDS, False)),
-            "validation_checks_locked": bool(self.record["status"] != "draft_ready"
-                                              or (self._task is not None and not self._task.done())),
             "can_generate_outline": self.record["status"] == "draft_ready",
             "draft_path": str(self.directory / "draft.json")}
 
@@ -359,15 +313,13 @@ class OutlineDraft:
                     session_state=self.prepared.get("multi_turn_session_state"))
                 self.session = self.prepared.get("multi_turn_session_state", {})
                 self.record["transition_trace"] = deepcopy(self.session.get("accepted_outline_prefix", []))
-                self.record["checks"].update(self.session.get("outline_check_results", {}))
                 self.record["nominal_handoff"] = deepcopy(self.session.get("diagnostic_nominal_handoff", {}))
-                self.record["handoff_safety_blocks"] = deepcopy(self.session.get("diagnostic_handoff_safety_blocks", []))
                 status = self.session.get("status")
                 if status == "ready_for_primitive_generation":
                     self.record.update(status="draft", message=self._finished_message())
                     break
                 if status not in {"paused_after_outline_turn", "running"}:
-                    self.record.update(status="NEEDS_CONTEXT" if status == "NEEDS_CONTEXT" and any(self.record["validation_checks"].values()) else "draft_incomplete",
+                    self.record.update(status="draft_incomplete",
                         message="; ".join(row.get("reason", "") for row in self.session.get("outline_validation_findings", []))
                         or f"multi_turn stopped at {status}.")
                     break
@@ -378,7 +330,7 @@ class OutlineDraft:
                 self._save()
             if self._stopped:
                 self.record.update(status="stopped", message="Draft generation stopped; captured responses retained.")
-        except (RuntimeError, OSError, TypeError, KeyError, ValueError) as exc:
+        except (RuntimeError, OSError, TypeError, LookupError, AttributeError, ValueError) as exc:
             logger.warning("Multi_turn outline draft failed: %s", exc)
             self.record.update(status="draft_incomplete", message=str(exc))
         finally:
@@ -411,14 +363,9 @@ def load_draft(path: Path, observations: dict, *, root: Path = DRAFTS) -> dict:
     if not path.is_relative_to(root.resolve()) or path.name != "draft.json":
         raise ValueError("Select a saved outline draft")
     record = json.loads(path.read_text(encoding="utf-8"))
-    choices = record.get("validation_checks") or dict.fromkeys(CHECK_FIELDS, False)
-    checks = record.get("checks") or {}
-    valid_checks = set(choices) == set(CHECK_FIELDS) and all(type(value) is bool for value in choices.values())
-    valid_checks = valid_checks and not all(choices.values()) and checks.get("nominal_continuation") == "not_checked"
-    for field, name in zip(CHECK_FIELDS, ("ra", "physical_evidence", "cca")):
-        valid_checks = valid_checks and checks.get(name) in ({"passed", "not_selected", "not_checked"} if choices.get(field) else {"not_checked"})
+    # Drafts saved before October 22 may record outline checks; those checks were removed.
     if (record.get("kind") != "outline_draft" or record.get("version") not in {1, 2} or record.get("status") != "draft"
-            or record.get("execution_authorized") is not False or not valid_checks):
+            or record.get("execution_authorized") is not False or any((record.get("validation_checks") or {}).values())):
         raise ValueError("Saved record is not an unvalidated outline draft")
     if (record.get("source_sha256") != observations["source_sha256"]
             or record.get("scenario") != observations["scenario"]

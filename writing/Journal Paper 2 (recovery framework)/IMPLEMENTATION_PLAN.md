@@ -1,5 +1,70 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Validation removed for a clean rebuild — October 22, 2026 — contract-2 removal done, legacy path pending
+
+**Why.** RA feasibility had grown rules the paper does not have (planner custody checks under any
+check, shared-area rules at the handoff outside CCA, "part conditions alone" refusals,
+availability refusals, KMR-only physical rules), and two feasibility implementations. The user
+chose to delete all validation and rebuild RA feasibility (Alg. 1, Eq. 12) and then CCA safety
+(Eq. 13) from scratch, with every constraint declared as model data, never as validator code.
+
+**Old code.** Tag `pre-validation-rebuild` = `d389368` (October 21, 22:40). Read a file with
+`git show pre-validation-rebuild:<path>`; restore one with `git checkout pre-validation-rebuild -- <path>`.
+
+**Removed (uncommitted until the checkpoint commit).** All contract-2 outline validation: RA
+feasibility (`validate_primitive_support`, `validate_recovery_transition`), physical evidence
+(outline projections, endpoint evidence, evidence policy, Gazebo outline previews, KMR
+calculations), CCA outline safety (`outline_evidence_safety`, `outline_macro_safety`, the CCA
+handler), the RA/CCA/ProductAgent validation transport, nominal-continuation proof, the
+validated offline workflow (`create_offline_recovery`, saved-result loading, Test in Gazebo), the
+validated live outline stage of `PartSlippageRecovery`, the evaluation batch runner and outline
+audit, `scenario_runner` and its diagnostic job runner, and the outline check options in the
+draft, controller, bridge and UI. Also removed from the draft path: `custody_findings` and
+`handoff_conflicts` (handoff records no longer carry `safety_conflicts`).
+
+**Kept.** Validation-off drafts (schema, prompt, LLM selection), failure capture and
+`prepared_recovery_request` preparation, DES models and manifests, the CCA runtime monitor,
+nominal runtime, and composition and execution code (unreachable until validation returns).
+The Recovery page now offers Gazebo Start failure (capture only) and Offline drafts.
+
+**Verified.** A replay harness feeds each draft's recorded LLM responses back through the
+pipeline. For the newest draft of each scenario (`draft_3a8544a4`, `draft_3e0bf483`,
+`draft_d84e7ef7`, `draft_8a8b775a`, 43 calls) every request and every event is identical to the
+pre-removal replay; the only difference is the handoff record (`safety_conflicts` gone, `basis`
+text). Every package module imports and `ui_main --help` runs. Tests: at the tag 190 failed and
+5,776 passed; after the removal and test cleanup 152 failed and 4,478 passed, with no failure
+outside the tag's list (the other 38 known failures were in deleted validation tests). About
+1,300 validation test cases were deleted; tests of kept code were updated to the new interfaces.
+Until the rebuilt CCA check has tests, nothing checks the meaning of the M1, M2, Conveyor and trim
+rules (their catalog and compile tests remain).
+
+**Form checks removed too (October 22, later).** The user chose no checks at all after the LLM
+replies. Removed from the draft path: the event form check (`_derive_candidate_outline_task` is no
+longer called there), the reply-envelope and selected-index checks, the repeated-state refusal and
+its `selection_unresolved` stop, and the `recovery_complete` format check. The draft applies the
+chosen event as the LLM states it: `multi_turn_diagnostic.event_record` copies its fields and adds
+only `expected_start_state` from the projected state. A reply code cannot read (for example several
+candidates and no `selected_candidate_index`) ends the draft as `draft_incomplete` with the error;
+`max_turns` still bounds a draft. The response schema is still sent, with `strict: False`, so it is
+a hint only. A variable the resource does not declare stays on the event and in `condition_changes`
+but is not projected, since the projection writes only declared variables. Replay: `draft_3a8544a4`,
+`draft_3e0bf483` and `draft_8a8b775a` are identical to the pre-change replay; `draft_d84e7ef7`
+diverges at call 5, where the old check refused `unload_to_conveyor` for undeclared Conveyor
+variables (`part_location`, `part_order`) in `neighbor_end_state`. Tests: 152 failed (the same
+list) and 4,476 passed. `_derive_candidate_outline_task` stays for the contract-1 code and goes with
+step 2 below.
+
+**Next.**
+1. Checkpoint commit of the contract-2 removal (user's choice).
+2. Remove the legacy contract-1 runtime recovery (`product_recovery_controller`,
+   `recovery_session`, `process_recovery_planner`, contract-1 branches of `multi_turn*`, the
+   legacy UI panel). `RecoverySessionMixin.prepare_recovery_request` and its helpers build every
+   capture's `prepared_recovery_request` and must stay; nominal ProductAgent code shares the
+   controller file, and `EXPORTED_METHODS` must be trimmed in step.
+3. Rebuild RA feasibility: backward derivation by value over the resource's DES transitions,
+   forward `∀ρ ∃θ_ρ: C_ρ` with θ from recorded evidence, the next state from the matched
+   transition, and refusals the LLM can act on. Then CCA safety.
+
 ## Turn 1 recovery outline, validation off — October 19, 2026 — Part slippage done (uncommitted)
 
 **Status.** Part slippage recovery outline generation with every check off is done (user,

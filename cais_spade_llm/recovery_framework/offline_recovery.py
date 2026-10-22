@@ -2,25 +2,16 @@ from __future__ import annotations
 
 """Recovery generation from saved facts with no equipment or agent transport."""
 
-import asyncio
-import json
 import logging
 import math
 import os
 from copy import deepcopy
 from types import SimpleNamespace
-from uuid import uuid4
 
-from cais_spade_llm.agents.intelligent_product.process_planner import ProcessPlanner
 from cais_spade_llm.agents.resource_agent.resource_agent import ResourceAgent
 from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
     recovery_validation_fingerprint,
 )
-from cais_spade_llm.recovery_framework.recovery_observations import (
-    RECORDS,
-    offline_preparation_missing,
-)
-from cais_spade_llm.resources.recovery_feasibility import derive_primitive_union
 
 logger = logging.getLogger(__name__)
 
@@ -55,52 +46,6 @@ class SavedRecoveryResource:
                     raise ValueError(f'Conflicting recorded resource capabilities: {self.jid}.{field}')
                 self.static_capabilities[field] = deepcopy(value)
 
-    def prepare_current_scene_capabilities(self) -> dict:
-        """Derive current cell capabilities for a new attempt, retaining captured declarations."""
-        if self._entry.get("resource_type") != "robot":
-            return {}
-        from .workflow_execution import _robot_configuration
-        from cais_spade_llm.recovery_framework import ROOT
-
-        scene = self._observations.get("inputs", {}).get("scene", {})
-        robots = [row for row in scene.get("robots", []) if row.get("resource_id") == self.agent_name]
-        if len(robots) != 1:
-            return {}
-        robot = robots[0]
-        template = json.loads((ROOT / "cais_spade_llm/initialization/resources/robot_ur5e.json").read_text())["ur5e"]["gazebo"]["static_capabilities"]
-        inherited = deepcopy(template["gripper_reach"])
-        inherited["origin_pose"] = dict(zip(("x", "y", "z"), robot["base_xyz"], strict=True))
-        _, _, configured = _robot_configuration(scene, robot)
-        before = deepcopy(self.static_capabilities)
-        for field, old in (("gripper_reach", inherited), ("staging_areas", template["staging_areas"])):
-            if field in before and before[field] != old:
-                continue
-            if field in configured:
-                self.static_capabilities[field] = deepcopy(configured[field])
-            else:
-                self.static_capabilities.pop(field, None)
-        self._scene_capability_calculation = {
-            "kind": "calculated", "source": "recorded scene and workflow_execution._robot_configuration",
-            "scene_fingerprint": recovery_validation_fingerprint(scene),
-            "recorded_static_capabilities": before, "static_capabilities": deepcopy(self.static_capabilities),
-            "resource_id": self.agent_name, "execution_authorized": False}
-        return deepcopy(self._scene_capability_calculation)
-
-    def install_recovery_resource_evidence(self, *, observations: dict, source_fingerprint: str) -> dict:
-        """Retain compatible supplementary facts separately from the source capture."""
-        from cais_spade_llm.recovery_framework.outline_gazebo_evidence import checkpoint_differences
-        from cais_spade_llm.recovery_framework.recovery_observations import observation_fingerprint
-
-        if observation_fingerprint(self._observations) != source_fingerprint:
-            raise ValueError("Supplementary resource evidence belongs to another source capture")
-        differences = checkpoint_differences(self._observations, observations)
-        if differences:
-            raise ValueError("Supplementary resource evidence changes the checkpoint: " + "; ".join(differences))
-        evidence = (observations.get("resource_evidence") or {}).get(self.jid)
-        if not isinstance(evidence, dict) or evidence.get("conflicts"):
-            raise ValueError("Supplementary resource evidence is unavailable or conflicting")
-        self._resource_evidence_supplement = deepcopy(evidence)
-        return self.get_recovery_resource_evidence()
 
     def get_recovery_resource_evidence(self) -> dict:
         """Restore supported owner facts from this capture without changing it."""
@@ -204,15 +149,6 @@ class SavedRecoveryResource:
         return ResourceAgent.prepare_recovery_primitive_parameters(self, task=task,
             recovery_des_model=recovery_des_model, recovery_snapshot=recovery_snapshot, physical_input=physical_input)
 
-    def project_recovery_outline_event(self, **kwargs) -> dict:
-        """Project recorded event evidence without attaching a controller."""
-        evidence = kwargs.get('physical_input', {}).get('resource_evidence') or self.get_recovery_resource_evidence()
-        if evidence.get('environment_models') and self._entry.get('resource_type') != 'robot':
-            from cais_spade_llm.resources.environment_recovery import project_environment_event
-
-            kwargs['physical_input'] = {**kwargs.get('physical_input', {}), 'resource_evidence': evidence}
-            return project_environment_event(**kwargs)
-        return ResourceAgent.project_recovery_outline_event(self, **kwargs)
 
     def get_recovery_snapshot(self) -> dict:
         """Restore declared owner facts without changing the original capture."""
@@ -295,53 +231,6 @@ class SavedRecoveryResource:
             raise ValueError(f"NEEDS_CONTEXT: {self.jid}: recovery_des_model, descriptor_fingerprint")
         return deepcopy(model)
 
-    def validate_recovery_primitive_support(
-        self, *, task: dict, recovery_des_model: dict, recovery_snapshot: dict, physical_input: dict,
-    ) -> dict:
-        """Use recorded capability witnesses without constructing a live resource."""
-        physical_input = dict(physical_input)
-        if physical_input.get("primitive_support_semantics") == "successor_primitive_union":
-            supplied = physical_input.get("resource_evidence")
-            known = self.get_recovery_resource_evidence()
-            if physical_input.get("physical_evidence", {}).get("endpoint_evidence_policy_version") in (1, 2):
-                from .outline_evidence_policy import sanitize_validation_input
-
-                checked = {**deepcopy(physical_input), "projected_snapshot": deepcopy(recovery_snapshot),
-                           "resource_evidence": known}
-                sanitize_validation_input(checked, self.jid)
-                known = checked["resource_evidence"]
-            if supplied is not None:
-                def matches(recorded, proposed):
-                    if isinstance(recorded, dict) and isinstance(proposed, dict):
-                        return all(key in recorded and matches(recorded[key], value) for key, value in proposed.items())
-                    return type(recorded) is type(proposed) and recorded == proposed
-
-                if not isinstance(supplied, dict) or not matches(known, supplied):
-                    return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
-                            "reason": "Resource evidence is not linked to this saved resource capture",
-                            "context_requests": [f"/resources/{self.jid}/resource_evidence"]}
-            # Supplementary legacy facts were verified against this immutable
-            # capture above. An empty prepared record must not hide them.
-            physical_input["resource_evidence"] = known
-            witnesses = physical_input.get("parameter_witnesses") or []
-            recorded = self._entry.get("parameter_witnesses") or []
-            if not isinstance(witnesses, list) or any(not isinstance(row, dict) or row not in recorded for row in witnesses):
-                return {"allowed": False, "feasibility_status": "NEEDS_CONTEXT",
-                        "reason": "Parameter witnesses are not linked to this saved resource capture",
-                        "context_requests": [f"/resources/{self.jid}/parameter_witnesses"]}
-            witnesses = deepcopy(witnesses)
-            for row in witnesses:
-                row.setdefault("source", f"/resources/{self.jid}/parameter_witnesses")
-                row["source_capture"] = {key: deepcopy(self._observations[key])
-                                         for key in ("run_id", "captured_at", "context_revision") if key in self._observations}
-                if "captured_at" in self._observations:
-                    row.setdefault("captured_at", self._observations["captured_at"])
-                if "context_revision" in self._observations:
-                    row.setdefault("revision", self._observations["context_revision"])
-            physical_input["parameter_witnesses"] = witnesses
-        return ResourceAgent.validate_recovery_primitive_support(
-            self, task=task, recovery_des_model=recovery_des_model,
-            recovery_snapshot=recovery_snapshot, physical_input=physical_input)
 
     def check_recovery_primitive_feasibility(
         self, *, primitive: str, params: dict, task: dict, recovery_snapshot: dict,
@@ -475,146 +364,6 @@ class SavedRecoveryResource:
             raise ValueError(f"NEEDS_CONTEXT: no saved observed_pose for {part_name or 'requested parts'}")
         return result
 
-    def check_recorded_recovery_feasibility(  # noqa: C901, PLR0912, PLR0915 - recorded facts only
-        self, *, task: dict, recovery_snapshot: dict, physical_input: dict,
-    ) -> dict:
-        """Check saved robot custody and reach bounds without claiming a motion plan."""
-        findings, checks = [], []
-        result = {"findings": findings, "checks": checks, "evidence_source": "saved_observations",
-                  "source_run_id": self._observations.get("run_id"),
-                  "captured_at": self._observations.get("captured_at")}
-        if self._entry.get("resource_type") != "robot":
-            return result
-        from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
-
-        part = task.get("part_name") or physical_input.get("part_name")
-        context = physical_input.get("part_context") or {}
-        action = physical_input.get("grounded_action") or {}
-        end = task.get("expected_end_state") or {}
-        held = recovery_snapshot.get("held_part")
-        holder = (context["part_holder_resource_jid"] if "part_holder_resource_jid" in context
-                  else context.get("current_holder_resource_jid"))
-        effects = (action.get("expected_effect") or {}).get("part") or {}
-        affects_part = bool(part and (effects or any(field in end for field in (
-            "part_state", "part_location", "part_holder_resource_jid")) or end.get("held_part") == part))
-        current_location = context.get("part_location", context.get("current_location", context.get("location")))
-        changes_custody = end.get("held_part") == part or end.get("part_holder_resource_jid") == self.jid
-        relocates = "part_location" in end and end["part_location"] != current_location
-        acquires = bool(part and (
-            ((action.get("preconditions") or {}).get("part") or {}).get("requires_acquisition")
-            or ((changes_custody or relocates) and held != part and holder != self.jid)))
-
-        def reject(code: str, reason: str, *, missing: bool = False, **evidence) -> None:
-            findings.append({"validation_category": "physical_feasibility", "constraint_owner": "resource",
-                             "constraint_code": code, "resource_jid": self.jid, "part_name": part,
-                             "feasibility_status": "NEEDS_CONTEXT" if missing else "INFEASIBLE",
-                             "reason": reason, "evidence": {
-                                 "evidence_source": "saved_observations", "source_run_id": result["source_run_id"],
-                                 "captured_at": result["captured_at"], **evidence}})
-
-        if acquires:
-            if "held_part" not in recovery_snapshot:
-                reject("resource_validation_unavailable", "NEEDS_CONTEXT: recorded held_part is missing", missing=True)
-            elif held is not None and held != part:
-                reject("holder_conflict", f"Resource holds '{held}' and cannot acquire '{part}'", held_part=held)
-            if holder and holder != self.jid:
-                reject("holder_conflict", f"Part '{part}' is held by '{holder}'", current_holder_resource_jid=holder)
-            if held is None and recovery_snapshot.get("gripper_state") == "closed":
-                reject("gripper_occupancy_conflict", "Gripper is closed without holding the requested part")
-
-        sources = [("static_capabilities", self._entry.get("static_capabilities") or {}),
-                   ("recovery_snapshot", self._entry.get("recovery_snapshot") or {}),
-                   ("recovery_adapter", self._entry.get("recovery_adapter") or {})]
-
-        def capability(field: str):
-            fields = ("reachability", "reachable_locations") if field == "reachability" else (field,)
-            declarations = [(f"{source}.{key}", values[key]) for source, values in sources
-                            for key in fields if key in values]
-            if not declarations:
-                reject("resource_validation_unavailable", f"NEEDS_CONTEXT: recorded {field} is missing", missing=True, field=field)
-                return None
-            if any(value != declarations[0][1] for _, value in declarations[1:]):
-                reject("resource_validation_unavailable", f"NEEDS_CONTEXT: recorded {field} declarations conflict",
-                       missing=True, field=field, declarations=deepcopy(declarations))
-                return None
-            return declarations[0][1]
-
-        def check_pose(pose: dict, *, role: str, frame: str | None, source: str, frame_source: str | None = None) -> None:
-            bounds = capability("gripper_reach")
-            if bounds is None:
-                return
-            if not isinstance(bounds, dict) or bounds.get("frame") != "world" or frame != "world":
-                reject("resource_validation_unavailable", f"NEEDS_CONTEXT: {role} and gripper_reach require a recorded world frame",
-                       missing=True, checked_pose=deepcopy(pose), pose_frame=frame, pose_source=source,
-                       gripper_reach=deepcopy(bounds), frame_source=frame_source)
-                return
-            error = RobotAgent._recovery_pose_gripper_reach_error(pose, bounds)
-            evidence = {"checked_pose": deepcopy(pose), "pose_frame": frame, "pose_source": source,
-                        "gripper_reach": deepcopy(bounds), "role": role, "frame_source": frame_source}
-            if error:
-                missing = not error.startswith("pose is outside gripper_reach:")
-                reject("resource_validation_unavailable" if missing else "workspace_unreachable",
-                       ("NEEDS_CONTEXT: " if missing else "") + error, missing=missing, **evidence)
-            else:
-                checks.append({"status": "passed", "check": "gripper_reach", **evidence,
-                               "scope": "Recorded bound only; trajectory and controller checks remain deferred."})
-
-        if acquires:
-            source_ref = (action.get("preconditions") or {}).get("source_ref") or {}
-            pose = context.get("observed_pose") or source_ref.get("pose")
-            if context.get("observed_pose_current") is False:
-                reject("source_reference_unavailable", "NEEDS_CONTEXT: no current part pose is recorded after projected movement",
-                       missing=True, observed_pose_current=False, projected_pose=deepcopy(context.get("projected_pose")))
-            elif not isinstance(pose, dict) or not all(axis in pose for axis in ("x", "y", "z")):
-                reject("source_reference_unavailable", "NEEDS_CONTEXT: acquisition requires a recorded part pose", missing=True)
-            else:
-                frame = (context.get("observed_pose_frame") or context.get("frame") or context.get("frame_id")
-                         or pose.get("frame") or pose.get("frame_id") or source_ref.get("frame"))
-                source = "part_context.observed_pose" if context.get("observed_pose") else "source_ref.pose"
-                frame_source = None
-                failure = self._observations.get("failure") or {}
-                # This producer queries GetEntityState(reference_frame="world");
-                # only its exact captured result establishes the legacy frame.
-                if (not frame and self._observations.get("evidence_source") == "Gazebo"
-                        and failure.get("part_name") == part and pose == failure.get("observed_drop_pose")):
-                    frame = "world"
-                    source = "failure.observed_drop_pose"
-                    frame_source = "failure_effects._observe_part reference_frame=world"
-                check_pose(pose, role="source", frame=frame, source=source, frame_source=frame_source)
-
-        target = action.get("target") or {}
-        destination = end.get("part_location") if affects_part else None
-        destination = destination or target.get("target_location") or target.get("destination_location")
-        if destination == self.jid or destination == holder:
-            destination = None
-        if affects_part and not destination and end.get("resource_location") != recovery_snapshot.get(
-                "resource_location", recovery_snapshot.get("current_location")):
-            destination = end.get("resource_location")
-            named_poses = recovery_snapshot.get("named_poses") or self.static_capabilities.get("named_poses") or []
-            if destination and isinstance(named_poses, (dict, list)) and destination in named_poses:
-                checks.append({"status": "passed", "check": "named_poses", "named_pose": destination,
-                               "named_poses": deepcopy(named_poses),
-                               "scope": "Declared resource pose only; controller and trajectory checks remain deferred."})
-                destination = None
-        if affects_part and destination:
-            reachability = capability("reachability")
-            if reachability is not None:
-                if not isinstance(reachability, list):
-                    reject("resource_validation_unavailable", "NEEDS_CONTEXT: recorded reachability must be a list", missing=True)
-                elif destination not in reachability:
-                    reject("workspace_unreachable", f"Destination '{destination}' is outside declared reachability",
-                           destination=destination, reachability=deepcopy(reachability))
-                else:
-                    checks.append({"status": "passed", "check": "reachability", "destination": destination,
-                                   "reachability": deepcopy(reachability),
-                                   "scope": "Declared destination only; placement geometry and trajectory remain deferred."})
-        pose = target.get("pose") or target.get("slot_pose") or target.get("destination_pose")
-        if isinstance(pose, dict):
-            frame = (target.get("frame") or target.get("frame_id") or target.get("pose_frame")
-                     or pose.get("frame") or pose.get("frame_id"))
-            check_pose(pose, role="target", frame=frame, source="grounded_action.target")
-        return result
-
 
 class SavedRecoveryProduct:
     """Use the existing LLM request writer and pure saved-state validation."""
@@ -674,37 +423,6 @@ class SavedRecoveryProduct:
         self.resources = {str(resource.jid): resource for resource in resources}
         self._last_structured_request = {}
 
-    def restore_recovery_resource_evidence(self, session: dict, *, source_fingerprint: str) -> None:
-        """Restore explicitly saved supplements after constructing detached owners."""
-        for resource in self.resources.values():
-            resource._resource_evidence_supplement = None
-        captures = session.get("validation_resource_evidence_captures") or []
-        if not isinstance(captures, list):
-            raise ValueError("Saved supplementary validation captures must be a list")
-        for record in captures:
-            if record.get("source_observation_fingerprint") != source_fingerprint:
-                raise ValueError("Saved supplementary validation evidence belongs to another source capture")
-            observations = record.get("observations")
-            if not isinstance(observations, dict):
-                raise ValueError("Saved supplementary validation capture is unavailable")
-            for jid in observations.get("resource_evidence", {}):
-                if jid not in self.resources:
-                    raise ValueError("Saved supplementary validation evidence identifies an unknown resource")
-                self.resources[jid].install_recovery_resource_evidence(
-                    observations=observations, source_fingerprint=source_fingerprint)
-        physical = session.get('projected_physical_evidence') or {}
-        if physical.get('additional_binding_records'):
-            from .kmr_calculation import validate_calculation_records
-
-            owner = self.resources.get(physical.get('jids', {}).get('KMR'))
-            if owner is None:
-                raise ValueError('Saved additional bindings have no recorded resource owner')
-            validate_calculation_records(physical, session_id=session.get('session_id', ''),
-                inputs=owner.get_recovery_resource_evidence().get('inputs', {}))
-            model = owner.recovery_des_model(snapshot=owner.get_recovery_snapshot())
-            if any(record.get('source_model_fingerprint') != recovery_validation_fingerprint(model)
-                   for record in physical['additional_binding_records']):
-                raise ValueError('Saved additional bindings use a changed resource model')
 
     async def ask_llm_structured(self, prompt: str, **kwargs) -> dict:
         """Capture actual provider requests through the existing implementation."""
@@ -712,130 +430,4 @@ class SavedRecoveryProduct:
 
         return await LlmAgent.ask_llm_structured(self, prompt, **kwargs)
 
-    async def request_recovery_outline_physical_validation(
-        self, *, resource_jid: str, payload: dict, timeout_s: float = 10.0,
-    ) -> dict:
-        """Check declared transitions; explicitly defer fresh physical evidence."""
-        from cais_spade_llm.recovery_framework.outline_validation import uses_outline_evidence, validate_resource_outline_payload
 
-        if uses_outline_evidence(payload):
-            resource = self.resources.get(resource_jid)
-            if resource is None:
-                raise ValueError(f"NEEDS_CONTEXT: unknown resource {resource_jid}")
-            return validate_resource_outline_payload(resource, payload, offline=True)
-        resource = self.resources.get(resource_jid)
-        if resource is None:
-            raise ValueError(f"NEEDS_CONTEXT: unknown resource {resource_jid}")
-        snapshot = resource.get_recovery_snapshot()
-        model = resource.recovery_des_model()
-        recorded_catalog = resource._entry.get("execution_primitive_catalog")
-        if not isinstance(recorded_catalog, list):
-            raise ValueError(f"NEEDS_CONTEXT: {resource_jid}: execution_primitive_catalog")
-        catalog = {row["name"] for row in recorded_catalog}
-        project_snapshot = ResourceAgent.recovery_physical_validation_snapshot
-        if resource._entry.get("resource_type") == "robot":
-            from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
-
-            project_snapshot = RobotAgent.recovery_physical_validation_snapshot
-        results = []
-        for candidate in payload.get("candidates", []):
-            task, physical = candidate["task"], candidate.get("physical_input", {})
-            projected = project_snapshot(
-                live_snapshot=snapshot, physical_input=physical, recovery_des_model=model)
-            transition = ResourceAgent.check_recovery_transition_feasibility(
-                resource, task=task, recovery_snapshot=projected,
-                part_context=physical.get("part_context", {}), recovery_des_model=model)
-            support = derive_primitive_union(task=task, recovery_des_model=model, recovery_snapshot=projected)
-            missing = [row["primitive"] for row in support["primitives"] if row["primitive"] not in catalog]
-            if support["missing_support"] or not support["primitives"] or missing:
-                transition = {"allowed": False, "constraint_code": "resource_validation_unavailable",
-                              "reason": "NEEDS_CONTEXT: saved descriptor or primitive catalog lacks transition support"}
-            findings = [] if transition.get("allowed") else [{
-                "constraint_code": transition.get("constraint_code", "transition_feasibility_rejected"),
-                "reason": transition.get("reason"), "validation_category": "transition_feasibility",
-                "resource_jid": resource_jid, "evidence": transition.get("evidence", {}),
-            }]
-            transition["findings"] = deepcopy(findings)
-            recorded = resource.check_recorded_recovery_feasibility(
-                task=task, recovery_snapshot=projected, physical_input=physical,
-            ) if transition.get("allowed") else {"findings": [], "checks": []}
-            physical_findings = recorded["findings"]
-            findings.extend(physical_findings)
-            physical_status = "rejected" if physical_findings else "deferred"
-            results.append({
-                "candidate_index": candidate.get("candidate_index", 0), "event_id": candidate.get("event_id", ""),
-                "allowed": False, "planning_only": True, "findings": findings,
-                "transition_feasibility": transition,
-                "physical_feasibility": {
-                    "allowed": False, "status": physical_status, "planning_only": True,
-                    "reason": (physical_findings[0]["reason"] if physical_findings else
-                               "Fresh controller and trajectory checks require Test in Gazebo"),
-                    "findings": physical_findings, "recorded_checks": recorded,
-                    "primitive_support": {**support, "status": "deferred"},
-                },
-            })
-        return {"validator_jid": resource_jid, "evidence_source": "saved_observations",
-                "snapshot": snapshot, "snapshot_fingerprint": recovery_validation_fingerprint(snapshot),
-                "recovery_des_model": model, "recovery_des_model_fingerprint": model["descriptor_fingerprint"],
-                "results": results}
-
-    async def request_recovery_outline_safety_validation(self, **kwargs) -> dict:
-        """Run detached CCA evaluation for new attempts, retaining legacy policy."""
-        from cais_spade_llm.recovery_framework.outline_validation import uses_outline_evidence, validate_safety_outline_payload
-
-        payload = kwargs.get("payload") or {}
-        if uses_outline_evidence(payload):
-            return validate_safety_outline_payload(payload, offline=True)
-        raise ValueError("Formal safety checks are skipped in this offline example")
-
-
-def create_offline_recovery(
-    observations: dict, *, outline_mode: str, primitive_mode: str,
-    model: str | None = None, reasoning_effort: str | None = None,
-    source_observation_path: str | None = None,
-):
-    """Create a Manual session with optional attempt-specific LLM settings.
-
-    Explicit model and reasoning effort override saved settings independently.
-    Omitted values retain saved, environment, then existing default precedence.
-    The mode arguments remain accepted for existing callers; Offline is Manual.
-    """
-    from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
-
-    from cais_spade_llm.ui.recovery_setup import FAILURE_SCENARIOS
-
-    if observations.get("scenario") not in FAILURE_SCENARIOS:
-        raise ValueError("Unknown saved failure scenario")
-    prepared = observations.get("prepared_recovery_request") or {}
-    missing = offline_preparation_missing(observations)
-    if missing:
-        raise ValueError("NEEDS_CONTEXT: " + ", ".join(missing))
-    # The complete capture includes mesh geometry and a full planning scene.
-    # Keep one factory-owned copy instead of duplicating it for every resource.
-    observations = deepcopy(observations)
-    prepared = observations["prepared_recovery_request"]
-    resources = [SavedRecoveryResource(jid, entry, observations, _copy_observations=False)
-                 for jid, entry in prepared["recovery_resources"].items()]
-    product = SavedRecoveryProduct(observations, resources, model=model, reasoning_effort=reasoning_effort)
-    product.process_planner = ProcessPlanner(product, resources)
-    product.process_planner.nodes = deepcopy(observations.get("pending_nodes", []))
-    product.part_tracker = deepcopy(observations.get("part_tracker", {}))
-    setup = deepcopy(observations.get("setup") or {})
-    setup.update(execution_mode="simulation", diagnostic_cca_bypass=True,
-                 runtime_recovery_validation_policy="no_validation", selected_safety_file="__NONE__",
-                 runtime_recovery_mode="manual", runtime_recovery_primitive_mode="manual")
-    setup["failure_scenario"] = {**setup.get("failure_scenario", {}), "scenario": observations["scenario"]}
-    setup["outline_only"] = False
-    runtime = SimpleNamespace(
-        diagnostic_cca_bypass=True, setup=setup, path=RECORDS.parent, agent=product,
-        context=SimpleNamespace(run_id=f"offline_{uuid4().hex}", revision=observations.get("context_revision", 0)),
-        nominal_idle=asyncio.Event(), queue_save=lambda: None,
-        source_observation_path=source_observation_path,
-    )
-    runtime.nominal_idle.set()
-    recovery = PartSlippageRecovery(runtime, observations=observations)
-    runtime.part_slippage_recovery = recovery
-    product.environment_runtime = runtime
-    recovery._publish(llm_model=product.model, llm_reasoning_effort=product.reasoning_effort,
-                      llm_settings=product.llm_settings)
-    return recovery

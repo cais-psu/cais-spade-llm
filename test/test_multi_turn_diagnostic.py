@@ -83,17 +83,10 @@ def sequence():
 
 
 def test_real_multi_turn_retrieval_and_six_events_bypass_all_admission(captured, tmp_path, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_nominal_evidence
-    from cais_spade_llm.recovery_framework import offline_recovery, outline_endpoint_evidence, primitive_composition
+    from cais_spade_llm.recovery_framework import primitive_composition
 
     forbidden = Mock(side_effect=AssertionError("Diagnostic must not invoke validators or execution"))
-    for module, name in ((multi_turn_validated_event, "validate_event"),
-                         (multi_turn_nominal_evidence, "validate_nominal_continuation"),
-                         (offline_recovery, "create_offline_recovery"),
-                         (outline_endpoint_evidence, "project_bounded_successor"),
-                         (primitive_composition, "start_composition_attempt"),
-                         (outline_draft.context, "public_outline_safety_context")):
-        monkeypatch.setattr(module, name, forbidden)
+    monkeypatch.setattr(primitive_composition, "start_composition_attempt", forbidden)
     replies = [{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},
         {"thought": "Request facts.", "decision": "need_context",
          "context_requests": ["/resources/machine/snapshot", "/safety_rules"]},
@@ -114,7 +107,7 @@ def test_real_multi_turn_retrieval_and_six_events_bypass_all_admission(captured,
     assert draft.record["nominal_handoff"]["assumptions"]
     assert captured == before
     assert "/resources/machine/snapshot" in draft.record["retrievals"]
-    assert set(draft.record["checks"].values()) == {"not_checked"}
+    assert "checks" not in draft.record
     assert draft.record["execution_authorized"] is False
     forbidden.assert_not_called()
     for call in provider.call_args_list:
@@ -141,30 +134,30 @@ def test_llm_choice_is_committed_and_candidates_stay_isolated(captured, reverse)
     assert session["accepted_outline_prefix"][0]["event_name"] == "pause"
     assert session["symbolic_resources"]["machine"]["job_state"] == "paused"
     assert prepared == before
-    assert all(row["validation_audit"]["transition_validation"]["status"] == "not_checked" for row in audit["candidate_evaluations"])
+    assert audit["candidate_events"] == candidates and audit["transition_validation"]["status"] == "not_checked"
 
 
-def test_llm_choice_must_be_named_and_only_an_exact_repeat_is_refused(captured):
+def test_nothing_checks_the_llm_reply_or_its_chosen_event(captured):
     prepared, _ = outline_draft._inputs(captured)
     session = multi_turn.build_multi_turn_session_seed(prepared)
-    planner = SimpleNamespace(product_agent=SimpleNamespace())
+
+    def propose(response):
+        return asyncio.run(multi_turn_validated_event.handle_validated_candidates(
+            session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
+            response=response))[0]
+
     candidates = [event("noop", "machine", None, resource_state="loaded"), sequence()[0]]
-    status, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-        session=session, prepared=prepared, planner=planner,
-        response={"thought": "Two candidates, no choice.", "candidate_events": candidates}))
-    assert status == "need_revision" and "selected_candidate_index" in audit["validation_findings"][0]["reason"]
-    status, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-        session=session, prepared=prepared, planner=planner,
-        response={"thought": "Choose the event.", "candidate_events": candidates, "selected_candidate_index": 0}))
-    # With validation off, the LLM's choice stands even when it changes no modeled fact.
-    assert status == "need_next_task" and [row["event_name"] for row in session["accepted_outline_prefix"]] == ["noop"]
-    status, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-        session=session, prepared=prepared, planner=planner,
-        response={"thought": "Choose it again.", "candidate_events": candidates, "selected_candidate_index": 0}))
-    assert status == "need_revision"
-    finding = audit["validation_findings"][-1]
-    assert finding["reason"] == "Selected candidate noop repeats an accepted event or returns to an earlier state."
-    assert (finding["event_name"], finding["resource_jid"]) == ("noop", "machine")
+    # A reply code cannot read raises; the draft records the error.
+    with pytest.raises(KeyError):
+        propose({"thought": "Two candidates, no choice.", "candidate_events": candidates})
+    # A repeat, a variable the resource does not declare and a stated params are applied as stated.
+    for row in (candidates[0], candidates[0], event("slot", "machine", None, zone_1_part="KET4_Square_4mm"),
+                {**sequence()[0], "params": {"x": 1.0}}):
+        assert propose({"thought": "Choose it.", "candidate_events": [row]}) == "need_next_task"
+    assert [row["event_name"] for row in session["accepted_outline_prefix"]] == ["noop", "noop", "slot", "pause"]
+    assert session["accepted_outline_prefix"][2]["expected_end_state"] == {"zone_1_part": "KET4_Square_4mm"}
+    # Recovery is complete when the LLM says so, whatever else the reply carries.
+    assert propose({"thought": "Done.", "decision": "recovery_complete", "candidate_events": candidates}) == "outline_ready"
 
 
 def test_handoff_requires_replaced_work_and_restored_part(captured):
@@ -172,14 +165,11 @@ def test_handoff_requires_replaced_work_and_restored_part(captured):
     session = multi_turn.build_multi_turn_session_seed(prepared)
     assert multi_turn_diagnostic.handoff(session, prepared)["complete"] is False
     for row in sequence()[:-1]:
-        task, findings = multi_turn._derive_candidate_outline_task(
-            candidate_task=row, session_state=session, prepared_recovery_request=prepared)
-        assert not findings
-        multi_turn_diagnostic.apply_tentative_effects(task, session, prepared)
+        multi_turn_diagnostic.apply_tentative_effects(multi_turn_diagnostic.event_record(row, session, prepared),
+                                                      session, prepared)
         assert multi_turn_diagnostic.handoff(session, prepared)["complete"] is False
-    task, _ = multi_turn._derive_candidate_outline_task(
-        candidate_task=sequence()[-1], session_state=session, prepared_recovery_request=prepared)
-    multi_turn_diagnostic.apply_tentative_effects(task, session, prepared)
+    multi_turn_diagnostic.apply_tentative_effects(multi_turn_diagnostic.event_record(sequence()[-1], session, prepared),
+                                                  session, prepared)
     assert multi_turn_diagnostic.handoff(session, prepared)["complete"] is True
     assert session["symbolic_parts"]["KET4_Square_4mm"]["processCompleted"] == [{"process": "trim", "result": "square"}]
 
@@ -190,23 +180,7 @@ def test_diagnostic_flag_defaults_off(captured):
     assert multi_turn.build_multi_turn_session_seed(prepared)["outline_diagnostic_bypass"] is False
 
 
-def test_repeated_candidates_stop_without_mutating_prefix(captured):
-    prepared, _ = outline_draft._inputs(captured)
-    session = multi_turn.build_multi_turn_session_seed(prepared)
-    def propose():
-        return asyncio.run(multi_turn_validated_event.handle_validated_candidates(
-            session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
-            response={"thought": "Unchanged state.", "candidate_events": [event("same", "machine", None, resource_state="loaded")]}))[0]
-
-    assert propose() != "need_revision"
-    prefix = deepcopy(session["accepted_outline_prefix"])
-    for _ in range(3):
-        assert propose() == "need_revision"
-    assert session["status"] == "selection_unresolved"
-    assert session["accepted_outline_prefix"] == prefix
-
-
-def test_a_position_is_a_pose_condition_and_params_are_refused(captured):
+def test_a_position_is_a_pose_condition(captured):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_prompts import (
         _accepted_transition_prefix_for_prompt,
     )
@@ -218,24 +192,19 @@ def test_a_position_is_a_pose_condition_and_params_are_refused(captured):
     multi_turn_diagnostic.declare_derived_conditions(prepared, {})
     session = multi_turn.build_multi_turn_session_seed(prepared)
     drive = event("drive", "arm", None, resource_state="idle", pose={"x": -1.2, "y": 1.15, "yaw": -1.5708})
-    # An event has no params on any path; a position is the pose condition.
-    for state in (session, {**session, "outline_diagnostic_bypass": False}):
-        _, findings = multi_turn._derive_candidate_outline_task(
-            candidate_task={**drive, "params": {"x": -1.2}}, session_state=state, prepared_recovery_request=prepared)
-        assert findings and "pose" in findings[0]["reason"]
 
     def propose(row):
         return asyncio.run(multi_turn_validated_event.handle_validated_candidates(
             session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
             response={"thought": "Explore a pose.", "candidate_events": [row]}))[0]
 
-    assert propose(drive) != "need_revision"
+    # A position is the pose condition; an event carries no params.
+    assert propose({**drive, "params": {"x": -1.2}}) == "need_next_task"
     assert session["symbolic_resources"]["arm"]["current_pose"] == {"x": -1.2, "y": 1.15, "yaw": -1.5708}
-    # Only the exact same event again is a repeat; another pose is a new event.
-    assert propose({**drive, "outline_id": "again"}) == "need_revision"
     elsewhere = {**drive, "outline_id": "elsewhere",
                  "expected_end_state": {**drive["expected_end_state"], "pose": {"x": -1.0, "y": 1.15, "yaw": -1.5708}}}
-    assert propose(elsewhere) != "need_revision"
+    assert propose(elsewhere) == "need_next_task"
+    assert session["symbolic_resources"]["arm"]["current_pose"] == {"x": -1.0, "y": 1.15, "yaw": -1.5708}
     assert all("params" not in row for row in _accepted_transition_prefix_for_prompt(session["accepted_outline_prefix"]))
 
 
@@ -304,9 +273,7 @@ def shared_cell(tmp_path):
 
 def _apply(rows, session, prepared):
     for row in rows:
-        task, findings = multi_turn._derive_candidate_outline_task(
-            candidate_task=row, session_state=session, prepared_recovery_request=prepared)
-        assert not findings and not multi_turn_diagnostic.custody_findings(task, session)
+        task = multi_turn_diagnostic.event_record(row, session, prepared)
         multi_turn_diagnostic.apply_tentative_effects(task, session, prepared)
         session.setdefault("accepted_outline_prefix", []).append(task)
 
@@ -359,27 +326,6 @@ def test_a_resumed_entry_no_declared_event_binds_is_stated_as_not_checked(shared
     assert state["complete"] is True and state["required_nominal_entry_ids"] == ["nominal_entry:resume_approach"]
     assert state["assumptions"] == [{"task_id": "resume_belt", "reason": "no declared event of belt binds the resumed "
                                      "advance_conveyor; whether nominal work continues there is not checked"}]
-
-
-def test_shared_area_rule_holds_handoff_until_measured_occupant_leaves(shared_cell, tmp_path):
-    prepared, session = _draft(shared_cell, tmp_path)
-    _apply(_cell_recovery()[1:], session, prepared)
-    state = multi_turn_diagnostic.handoff(session, prepared)
-    assert state["conditions_met"] is True and state["complete"] is False
-    assert state["safety_conflicts"][0]["resource_jids"] == ["arm_a", "arm_b"]
-    _apply(_cell_recovery()[:1], session, prepared)
-    assert multi_turn_diagnostic.handoff(session, prepared)["complete"] is True
-
-
-def test_custody_rejects_a_second_part_and_a_part_held_elsewhere(shared_cell, tmp_path):
-    prepared, session = _draft(shared_cell, tmp_path)
-    for row, rejected in ((event("grab", "arm_a", "gear", held_part="gear", resource_state="picked"), True),
-                          (event("grab", "arm_b", "peg", held_part="peg", resource_state="picked"), True),
-                          (event("move", "arm_b", "gear", part_state="assembled", part_location="cell",
-                                 resource_state="placed"), False)):
-        task, _ = multi_turn._derive_candidate_outline_task(
-            candidate_task=row, session_state=session, prepared_recovery_request=prepared)
-        assert bool(multi_turn_diagnostic.custody_findings(task, session)) is rejected, row
 
 
 def test_prompt_states_recorded_facts_for_every_robot_without_tuned_targets(shared_cell, tmp_path, monkeypatch):
@@ -463,7 +409,8 @@ def test_a_changed_resource_snapshot_leaves_out_its_failure_time_values(shared_c
 
 def test_handoff_status_is_recorded_for_review_and_never_told_to_the_llm(shared_cell, tmp_path):
     prepared, session = _draft(shared_cell, tmp_path)
-    _apply(_cell_recovery()[1:], session, prepared)
+    # The gear is assembled, but arm_a never retakes the peg its resumed step needs.
+    _apply(_cell_recovery()[1:4], session, prepared)
     session["current_phase"] = "outline"
     prompt = multi_turn._build_phase_prompt(prepared, session)[1]
     assert "cannot take over" not in prompt and "Goal reached" not in prompt
@@ -474,8 +421,7 @@ def test_handoff_status_is_recorded_for_review_and_never_told_to_the_llm(shared_
     assert decision == "outline_ready" and session["status"] == "ready_for_primitive_generation"
     handoff = audit["diagnostic_nominal_handoff"]
     assert handoff["complete"] is False and handoff["declared_complete_by_llm"] is True
-    assert handoff["not_connected_reasons"] == [
-        "SAFE_cell_mutex: arm_a, arm_b would occupy cell when nominal work resumes"]
+    assert handoff["not_connected_reasons"] == ["no sequence of up to 6 declared nominal events reaches its next task"]
 
 
 def test_pose_relations_treat_every_resource_by_its_declarations():
@@ -560,28 +506,28 @@ def _candidate_limit(value):
     return None
 
 
-@pytest.mark.parametrize("check_cca_safety", [False, True])
-def test_llm_chooses_a_candidate_only_when_no_validator_is_enabled(shared_cell, tmp_path, monkeypatch, check_cca_safety):
+def test_llm_always_chooses_a_candidate_in_a_draft(shared_cell, tmp_path, monkeypatch):
     record, specs = shared_cell
     provider = AsyncMock(side_effect=[{"thought": "Use recorded facts.", "decision": "grounded", "observations": []},
                                       RuntimeError("stop after the first outline prompt")])
     monkeypatch.setattr(outline_draft.SavedRecoveryProduct, "ask_llm_structured", provider)
-    draft = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts", check_cca_safety=check_cca_safety)
-    if check_cca_safety:
-        monkeypatch.setattr(outline_draft.SavedRecoveryProduct, "ask_llm_structured", provider)
+    draft = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts")
     asyncio.run(draft.generate())
     call = provider.call_args_list[1]
     prompt = call.kwargs.get("prompt") or call.args[0]
     assert _candidate_limit(call.kwargs) == 5
-    assert ("selected_candidate_index" in json.dumps(call.kwargs["response_format"])) is not check_cca_safety
+    assert "selected_candidate_index" in json.dumps(call.kwargs["response_format"])
     assert "recovery_complete" in json.dumps(call.kwargs["response_format"])
     # Chat completions reject function tools with reasoning effort, so facts are requested by JSON.
     assert "tools" not in call.kwargs
-    assert ("then choose one with `selected_candidate_index`" in prompt) is not check_cca_safety
-    assert ("Do not select or rank candidates" in prompt) is check_cca_safety
-    # Code applies neighbor_end_state unchecked, so only drafts without checks offer it.
-    assert ("neighbor_end_state" in json.dumps(call.kwargs["response_format"])) is not check_cca_safety
-    assert ("- `neighbor_end_state`: when moving the part changes another resource" in prompt) is not check_cca_safety
+    assert "then choose one with `selected_candidate_index`" in prompt
+    assert "Do not select or rank candidates" not in prompt
+    # Code applies neighbor_end_state unchecked, so every draft offers it.
+    assert "neighbor_end_state" in json.dumps(call.kwargs["response_format"])
+    assert "- `neighbor_end_state`: when moving the part changes another resource" in prompt
+    # No validator checks a draft, so a recorded check flag never takes the choice from the LLM.
+    session = multi_turn.build_multi_turn_session_seed(draft.prepared)
+    assert multi_turn_diagnostic.llm_selects_next_event({**session, "check_cca_safety": True}) is True
 
 
 def _resume_only_cell(shared_cell):
@@ -648,7 +594,7 @@ def facts_goal(prepared, session):
 def test_resume_only_conditions_still_require_the_replaced_final_outcome(shared_cell, tmp_path):
     prepared, session = _draft(_resume_only_cell(shared_cell), tmp_path)
     recovery = _cell_recovery()
-    # Clearing the cell satisfies the recorded entry and the shared area, but gear is not assembled.
+    # Clearing the cell satisfies the recorded entry, but gear is not assembled.
     _apply(recovery[:1], session, prepared)
     state = multi_turn_diagnostic.handoff(session, prepared)
     assert state["complete"] is False and state["open_replaced_task_ids"] == ["replaced_insert"]
@@ -1074,7 +1020,7 @@ def test_recovery_complete_ends_the_recovery_and_records_whether_nominal_work_ca
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=planner, response=declare))
     # A wrong declaration still ends the recovery; the reasons are recorded for review, not fed back.
-    assert decision == "outline_ready" and not session["outline_validation_findings"]
+    assert decision == "outline_ready"
     handoff = audit["diagnostic_nominal_handoff"]
     assert handoff["complete"] is False and handoff["not_connected_reasons"] == [
         "the outcome stated in Recovery Goal does not hold, and no sequence of up to 6 declared nominal events produces it",
@@ -1166,15 +1112,16 @@ def test_a_new_state_name_does_not_clear_a_reported_fault(shared_cell, tmp_path)
         assert ("arm_b" in multi_turn_diagnostic.faulted_resources(session, prepared)) is faulted, state
 
 
-def test_with_every_check_off_custody_is_recorded_not_enforced(shared_cell, tmp_path):
+def test_custody_is_never_enforced_and_a_part_placed_elsewhere_is_released(shared_cell, tmp_path):
     planner = SimpleNamespace(product_agent=SimpleNamespace())
     prepared, session = _draft(shared_cell, tmp_path / "second_part")
     take = event("take", "arm_a", "gear", resource_state="picked", held_part="gear", part_state="in_gripper",
                  part_location="arm_a")
     decision, audit = asyncio.run(multi_turn_validated_event.handle_validated_candidates(
         session=session, prepared=prepared, planner=planner, response={"thought": "t", "candidate_events": [take]}))
+    # Nothing judges the LLM's event: arm_a takes the gear while it still holds the peg, and no note is kept.
     assert decision == "need_next_task" and [row["event_name"] for row in session["accepted_outline_prefix"]] == ["take"]
-    assert "arm_a already holds peg" in json.dumps(audit)
+    assert "custody_notes" not in json.dumps(audit)
     # Placing a held part elsewhere releases it, even when the end state omits held_part.
     prepared, session = _draft(shared_cell, tmp_path / "released")
     set_down = event("set_down", "arm_a", "peg", resource_state="idle", part_state="ready", part_location="buffer")
@@ -1359,13 +1306,6 @@ def test_a_choice_by_index_accepts_candidates_that_share_a_label(captured):
         session=session, prepared=prepared, planner=SimpleNamespace(product_agent=SimpleNamespace()),
         response={"thought": "Two options under one label.", "candidate_events": [first, second], "selected_candidate_index": 1}))
     assert status == "need_next_task" and session["accepted_outline_prefix"][0]["event_name"] == second["event_name"]
-    # An unreadable reply is told its real reason.
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_prompts as prompts
-
-    finding = {"constraint_code": "invalid_candidate_response", "reason": "Set selected_candidate_index to the index."}
-    assert prompts._outline_feedback_for_prompt(finding, set())["reason"] == finding["reason"]
-
-
 
 
 def test_conditions_come_from_each_resources_model_and_primitives():
@@ -1412,7 +1352,7 @@ def test_only_an_event_that_adds_to_a_process_record_makes_it_a_resource_conditi
     assert offered == {"machine"}
 
 
-def test_a_process_record_is_a_part_condition_and_undeclared_variables_are_named(captured):
+def test_a_process_record_is_a_part_condition(captured):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
 
     prepared, _ = outline_draft._inputs(captured)
@@ -1427,12 +1367,6 @@ def test_a_process_record_is_a_part_condition_and_undeclared_variables_are_named
                   processCompleted=[{"process": "trim", "result": "square"}])], session, prepared)
     names = facts.resource_names(prepared)
     assert facts._part_text("KET4_Square_4mm", prepared, session, names).endswith("; processCompleted: trim square")
-    # A variable the resource does not declare is refused with the variables it does declare.
-    _, findings = multi_turn._derive_candidate_outline_task(
-        candidate_task=event("slot", "machine", None, zone_1_part="KET4_Square_4mm"), session_state=session,
-        prepared_recovery_request=prepared)
-    assert findings[0]["reason"].startswith("expected_end_state may only use the variables declared for machine: ")
-    assert "resource_state" in findings[0]["reason"] and "not zone_1_part" in findings[0]["reason"]
 
 
 def test_a_stated_pose_moves_a_resource_out_of_a_shared_area(shared_cell, tmp_path):
@@ -1441,11 +1375,16 @@ def test_a_stated_pose_moves_a_resource_out_of_a_shared_area(shared_cell, tmp_pa
     multi_turn_diagnostic.declare_derived_conditions(prepared, {"arm_a": [cartesian], "arm_b": [cartesian]})
     session = multi_turn.build_multi_turn_session_seed(prepared)
     _apply(_cell_recovery()[1:], session, prepared)
-    assert multi_turn_diagnostic.handoff(session, prepared)["safety_conflicts"]
+
+    def regions():
+        return multi_turn_context.resolve_outline_context(prepared, session, "/resources/arm_b/pose_relations")["value"][
+            "containing_regions"]
+
+    assert regions() == ["cell"]
     # arm_b never changed its location, but its stated pose now lies outside the cell.
     _apply([event("clear_by_pose", "arm_b", None, resource_state="idle", pose={"x": 3.0, "y": 3.0, "z": 1.2})],
            session, prepared)
-    assert multi_turn_diagnostic.handoff(session, prepared)["safety_conflicts"] == []
+    assert regions() == []
     # Code keeps the location consistent with the stated pose and says why.
     assert [(row["variable"], row["value"], row["by"], row.get("reason"))
             for row in session["accepted_outline_prefix"][-1]["condition_changes"]] == [
@@ -1473,13 +1412,11 @@ def test_a_first_stated_pose_starts_from_the_recorded_pose(shared_cell, tmp_path
     task = session["accepted_outline_prefix"][-1]
     assert task["expected_start_state"]["pose"] == {"x": 0.0, "y": 0.0, "z": 1.2}
     assert "diagnostic_assumptions" not in task
-    # A resource that records no pose still starts from an unknown one, and the event says so.
+    # A resource that records no pose has no start value for it.
     session["symbolic_resources"]["arm_a"].pop("current_pose")
-    task, findings = multi_turn._derive_candidate_outline_task(
-        candidate_task=event("lift", "arm_a", None, resource_state="picked", pose={"x": 1.0, "y": 0.0, "z": 1.35}),
-        session_state=session, prepared_recovery_request=prepared)
-    assert not findings and task["diagnostic_assumptions"] == [
-        {"field": "pose", "reason": "start condition unknown; validation bypassed"}]
+    task = multi_turn_diagnostic.event_record(
+        event("lift", "arm_a", None, resource_state="picked", pose={"x": 1.0, "y": 0.0, "z": 1.35}), session, prepared)
+    assert "pose" not in task["expected_start_state"] and "diagnostic_assumptions" not in task
 
 
 def test_a_pose_an_earlier_event_stated_is_never_shown_as_measured(shared_cell, tmp_path):
@@ -1541,8 +1478,6 @@ def test_a_planar_pose_is_not_placed_in_an_area_bounded_in_height(shared_cell, t
             if change["variable"] == "resource_location"] == [None]
     relations = multi_turn_context.resolve_outline_context(prepared, session, "/resources/mobile/pose_relations")["value"]
     assert relations["containing_regions"] == [] and "mobile" in relations["not_evaluated"]
-    conflict, = multi_turn_diagnostic.handoff_conflicts(session, prepared)
-    assert conflict["resource_jids"] == ["arm_a", "arm_b"]
 
 
 def test_a_place_a_part_enters_has_only_its_slots_for_that_part_and_its_state_unknown(tmp_path):
@@ -1721,32 +1656,6 @@ def test_a_resumed_entry_needs_what_its_place_declares_for_it(tmp_path):
     assert multi_turn_diagnostic.handoff(right_zone, prepared)["complete"] is True
 
 
-def test_neighbor_end_state_is_checked_for_format_only(tmp_path):
-    record, specs = _belt_cell(tmp_path)
-    prepared = outline_draft.OutlineDraft(record, specs, root=tmp_path / "drafts").prepared
-    session = multi_turn.build_multi_turn_session_seed(prepared)
-    set_down = event("peg_to_buffer", "arm_a", "peg", resource_state="placed", held_part=None, part_state="ready",
-                     part_location="buffer")
-
-    def refusal(places, row=set_down, state=session):
-        _, findings = multi_turn._derive_candidate_outline_task(candidate_task={**row, "neighbor_end_state": places},
-                                                                session_state=state, prepared_recovery_request=prepared)
-        return findings[0]["reason"] if findings else None
-
-    assert refusal({"buffer": {"zone_1_part": "peg"}}) is None
-    assert "the event's own resource" in refusal({"arm_a": {"resource_state": "idle"}})
-    assert "keys are resource names; tray is not one" in refusal({"tray": {"zone_1_part": "peg"}})
-    # Only that resource's own declared variables, never the part's.
-    assert refusal({"buffer": {"part_location": "buffer"}}).endswith(
-        "may only use its declared variables: resource_state, zone_1_part; not part_location")
-    assert "maps each resource name" in refusal({"buffer": "peg"})
-    assert "needs part_name" in refusal({"buffer": {"zone_1_part": "peg"}}, row=event("rest", "arm_a", None,
-                                                                                     resource_state="idle"))
-    # No check reads the field, so drafts with a check, and the validated path, still refuse it.
-    for checked in ({**session, "check_cca_safety": True}, {**session, "outline_diagnostic_bypass": False}):
-        assert "unknown top-level field(s): neighbor_end_state" in refusal({"buffer": {"zone_1_part": "peg"}}, state=checked)
-
-
 def test_a_stated_holding_change_on_another_resource_is_also_the_parts(shared_cell, tmp_path):
     prepared, session = _draft(shared_cell, tmp_path)
     give = {**event("give", "arm_a", "peg", resource_state="idle", held_part=None, part_state="in_gripper",
@@ -1756,12 +1665,14 @@ def test_a_stated_holding_change_on_another_resource_is_also_the_parts(shared_ce
     part = session["symbolic_parts"]["peg"]
     assert session["symbolic_resources"]["arm_b"]["held_part"] == "peg"
     assert part["part_holder_resource_jid"] == part["current_holder_resource_jid"] == "arm_b"
-    # A take-over that states the former holder's release is not noted as held by it.
+    # A take-over that states the former holder's release moves the holding back on both sides.
     take = {**event("take", "arm_a", "peg", resource_state="picked", held_part="peg", part_state="in_gripper",
                     part_location="arm_a"), "neighbor_end_state": {"arm_b": {"held_part": None}}}
-    task, findings = multi_turn._derive_candidate_outline_task(candidate_task=take, session_state=session,
-                                                               prepared_recovery_request=prepared)
-    assert not findings and multi_turn_diagnostic.custody_findings(task, session) == []
+    _apply([take], session, prepared)
+    part = session["symbolic_parts"]["peg"]
+    assert (session["symbolic_resources"]["arm_a"]["held_part"], session["symbolic_resources"]["arm_b"]["held_part"]) == (
+        "peg", None)
+    assert part["part_holder_resource_jid"] == part["current_holder_resource_jid"] == "arm_a"
     # A stated taker stays the holder even when the part is given no location; only the giver is released.
     prepared, session = _draft(shared_cell, tmp_path / "no_location")
     give = {**event("give", "arm_a", "peg", resource_state="idle", part_location=None),

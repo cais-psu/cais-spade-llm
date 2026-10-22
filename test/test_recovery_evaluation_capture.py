@@ -691,7 +691,7 @@ def test_capture_guards_reject_llm_and_recovery_dispatch(monkeypatch):
     from cais_spade_llm.recovery_framework.part_slippage_recovery import PartSlippageRecovery
 
     methods = [(LlmAgent, name) for name in ('ask_llm', 'ask_llm_structured')]
-    methods += [(PartSlippageRecovery, name) for name in ('_run_stage', '_generate_outline', '_generate_primitives', '_execute')]
+    methods += [(PartSlippageRecovery, name) for name in ('_run_stage', '_generate_primitives', '_execute')]
     methods += [(slippage_execution, 'execute_generated_recovery')]
     for owner, name in methods:
         monkeypatch.setattr(owner, name, getattr(owner, name))
@@ -699,7 +699,7 @@ def test_capture_guards_reject_llm_and_recovery_dispatch(monkeypatch):
     for owner, name in methods:
         with pytest.raises(RuntimeError, match='Capture-only guard rejected'):
             asyncio.run(getattr(owner, name)())
-    assert len(calls) == 7
+    assert len(calls) == 6
 
 
 def test_private_workspace_leaves_shared_monitor_and_sources_unchanged(tmp_path, monkeypatch):

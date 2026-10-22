@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
 from nicegui import ui
 
-from cais_spade_llm.recovery_framework.diagnostics import MODES, ROOT, inspect_inputs, jobs, read_object
+from cais_spade_llm.recovery_framework.diagnostics import ROOT
 from cais_spade_llm.ui.evidence import (
     BackgroundSection,
     TablePager,
@@ -24,7 +23,6 @@ from cais_spade_llm.ui.recovery_evidence import (
     read_stage_record,
     stage_records,
 )
-from cais_spade_llm.ui.refresh import PageRefresh
 
 
 def _cell(value: Any) -> str:
@@ -188,181 +186,6 @@ def _validation(data: dict, path: Path) -> None:
                 ui.label("Associated DFA file is not recorded in this example.")
 
 
-def _test_controls(refresh, *, root: Path, debug_root: Path, is_active) -> None:
-    with ui.expansion("Test a failure scenario", icon="science").classes("w-full"):
-        ui.label(
-            "Generate and validate using saved context. Resource observations come from that context."
-        ).classes("text-sm text-slate-600")
-        options = BackgroundSection()
-        form = ui.column().classes("w-full")
-
-        def read_options() -> dict:
-            scenarios = sorted(
-                (root / "cais_spade_llm/initialization/failure_scenarios").glob("*.json")
-            )
-            contexts = sorted((root / "test/fixtures").rglob("runtime_context*.json"))
-            contexts += sorted((debug_root / "test_runs").glob("*/inputs/runtime_context.json"))
-            checkpoints = sorted(
-                (debug_root / "test_runs").glob("*/outline_checkpoint.json"), reverse=True
-            )
-            return {"scenarios": scenarios, "contexts": contexts, "checkpoints": checkpoints}
-
-        def show(values: dict) -> None:
-            form.clear()
-            with form:
-                scenario = ui.select(
-                    {str(p): p.name for p in values["scenarios"]},
-                    label="Scenario JSON",
-                    with_input=True,
-                ).classes("w-full")
-                context_options = {str(p): str(p.relative_to(root)) for p in values["contexts"]}
-                runtime_context = ui.select(
-                    context_options, label="runtime_context JSON", with_input=True
-                ).classes("w-full")
-                custom = ui.input("Additional saved runtime_context JSON path").classes("w-full")
-                mode = ui.select(list(MODES), value="outline", label="Test mode").classes("w-full")
-                response_source = ui.select(
-                    ["live", "fixture_response_replay"], value="live", label="Model response source",
-                ).classes("w-full")
-                replay = ui.input("Response replay JSON path (used only for explicit replay)").classes("w-full")
-                checkpoint = ui.select(
-                    {
-                        "": "Generate a new outline",
-                        **{str(p): p.parent.name for p in values["checkpoints"]},
-                    },
-                    value="",
-                    label="Accepted outline",
-                    with_input=True,
-                ).classes("w-full")
-                ui.label(
-                    "Reusing an outline requires matching saved inputs, settings, and validator code."
-                ).classes("text-xs text-slate-500")
-                with ui.expansion("Inspect selected inputs (prepared preview: not sent)", icon="preview").classes("w-full") as preview:
-                    inputs_view = BackgroundSection()
-
-                def inspect_selected() -> None:
-                    if not preview.value:
-                        return
-                    source = custom.value or runtime_context.value
-                    if not source or not scenario.value:
-                        return
-
-                    def read() -> dict:
-                        return inspect_inputs(contained_path(root, source), Path(scenario.value), root=root)
-
-                    def display(inputs: dict) -> None:
-                        saved = inputs["runtime_context"]
-                        ui.label(f"Input fingerprint: {inputs['fingerprint']}").classes("text-xs break-all")
-                        ui.label(f"Evidence source: {saved.get('evidence_source', 'synthetic / not declared')}")
-                        ui.label(f"Goal: {_cell(saved.get('goal_state'))}")
-                        ui.label(f"Remaining obligations: {_cell(saved.get('obligation_targets'))}")
-                        ui.label(f"Model settings: {_cell(inputs['generation_settings'])}")
-                        _table("Resource observations", saved.get("resource_snapshots") or [],
-                               ("resource_jid", "resource_state", "held_part", "current_pose", "evidence_source"))
-                        lazy_file("Starting state, observations, goals and operator guidance", Path(inputs["context_source"]))
-                        lazy_file("Failure scenario and trigger", Path(inputs["scenario_source"]))
-                        dependencies = ui.select(list(inputs["files"]), label="Referenced input file", with_input=True).classes("w-full")
-                        dependency_view = ui.column().classes("w-full")
-
-                        def selected_dependency() -> None:
-                            dependency_view.clear()
-                            if dependencies.value and dependencies.value != "runtime_context":
-                                with dependency_view:
-                                    render_file(root / dependencies.value)
-
-                        dependencies.on_value_change(selected_dependency)
-
-                    inputs_view.load(read, display)
-
-                preview.on_value_change(lambda _: inspect_selected())
-                for control in (scenario, runtime_context, custom):
-                    control.on_value_change(lambda _: inspect_selected())
-                message = ui.label().classes("text-sm")
-                progress = ui.column().classes("w-full")
-                last_status = None
-
-                async def start() -> None:
-                    start_button.disable()
-                    message.text = "Checking saved inputs…"
-                    try:
-                        source = custom.value or runtime_context.value
-                        if not source or not scenario.value:
-                            raise ValueError(
-                                "Select a scenario and its matching runtime_context JSON"
-                            )
-                        context_path = contained_path(root, source)
-                        checkpoint_path = (
-                            contained_path(debug_root / "test_runs", checkpoint.value)
-                            if checkpoint.value
-                            else None
-                        )
-                        if response_source.value == "fixture_response_replay" and not replay.value:
-                            raise ValueError("Explicit replay requires a response replay JSON file")
-                        directory = await jobs.start(
-                            mode.value, context_path, Path(scenario.value), checkpoint_path,
-                            replay_responses=(
-                                contained_path(root, replay.value)
-                                if response_source.value == "fixture_response_replay" and replay.value else None
-                            ),
-                        )
-                        message.text = (
-                            "Test started. Prompts and validation are saved as stages complete."
-                        )
-                        refresh(str(directory.relative_to(debug_root)))
-                    except (OSError, ValueError, KeyError, TypeError) as exc:
-                        message.text = f"Test was not started: {exc}"
-                    finally:
-                        if not start_button.is_deleted:
-                            start_button.set_enabled(jobs.task is None or jobs.task.done())
-
-                async def cancel() -> None:
-                    await jobs.cancel()
-                    refresh()
-                    await poll()
-
-                with ui.row().classes("gap-2"):
-                    start_button = ui.button("Run test", icon="play_arrow", on_click=start)
-                    cancel_button = ui.button("Cancel test", icon="stop", on_click=cancel).props(
-                        "outline"
-                    )
-                    cancel_button.disable()
-                    ui.button(
-                        "Refresh saved inputs",
-                        icon="refresh",
-                        on_click=lambda: options.load(read_options, show),
-                    ).props("flat")
-
-                async def poll() -> None:
-                    nonlocal last_status
-                    active = jobs.task is not None and not jobs.task.done()
-                    start_button.set_enabled(not active)
-                    cancel_button.set_enabled(active)
-                    if jobs.current is None:
-                        return
-                    try:
-                        record = await asyncio.to_thread(read_object, jobs.current / "run.json")
-                    except (OSError, ValueError):
-                        return
-                    if progress.is_deleted:
-                        return
-                    status = (record["id"], record["status"])
-                    if status == last_status:
-                        return
-                    last_status = status
-                    progress.clear()
-                    with progress:
-                        ui.label(f"{record['id']} · {record['mode']} · {record['status']}").classes(
-                            "font-semibold"
-                        )
-                        lazy_file("Test progress log", jobs.current / "runner.log")
-                    if not active:
-                        refresh()
-
-                PageRefresh(is_active=lambda: not form.is_deleted and is_active()).timer(1, poll)
-
-        options.load(read_options, show)
-
-
 def _all_files(example: dict) -> None:
     with ui.expansion("All recorded files", icon="folder_open").classes("w-full") as all_files:
         files_view = BackgroundSection()
@@ -509,5 +332,4 @@ def _saved_evidence(*, root: Path, debug_root: Path, is_active, bridge) -> None:
 
     selector.on_value_change(select)
     refresh_button.on_click(lambda: refresh())
-    _test_controls(refresh, root=root, debug_root=debug_root, is_active=is_active)
     refresh()

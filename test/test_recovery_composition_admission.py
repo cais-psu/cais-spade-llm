@@ -453,41 +453,6 @@ def test_physical_admission_missing_live_owner_cannot_authorize_selected_safety(
     asyncio.run(scenario())
 
 
-def test_outline_physical_safety_deferral_allows_planning_without_permission(monkeypatch):
-    async def scenario():
-        cca = _cca()
-        cca.predefined_safety_required = True
-        cca._wait_for_safety_monitor_ready = AsyncMock(return_value=True)
-        before = deepcopy(cca.safety_monitor.current_states)
-        sent = AsyncMock()
-        validator = Mock(side_effect=AssertionError("An outline cannot supply physical AP evidence"))
-        module = "cais_spade_llm.agents.central_controller.central_controller_agent"
-        monkeypatch.setattr(module + ".send_agent_message", sent)
-        monkeypatch.setattr(module + ".validate_outline_macro_recovery_safety", validator)
-        inbox = cca._RecoveryOutlineSafetyValidation()
-        cca.add_behaviour(inbox)
-        inbox.receive = AsyncMock(return_value=_packet("product@localhost",
-            "recovery_outline_safety_validate", {
-                "product_jid": "product@localhost", "candidates": [
-                    {"candidate_index": 0, "event_id": "generated-recovery", "safety_input": {}}
-                ],
-            }))
-        await inbox.run()
-        response = json.loads(sent.call_args.args[1].body)
-        result = response["results"][0]
-        assert result["is_safe"] is False
-        assert result["validation_status"] == "deferred_physical"
-        assert result["planning_only"] is True
-        assert result["execution_authorized"] is False
-        assert result["safety_dfa_states_before"] == result["safety_dfa_states_after"] == before
-        assert response["admissible_recovery_event_ids"] == []
-        assert response["planning_expandable_event_ids"] == ["generated-recovery"]
-        validator.assert_not_called()
-        assert cca.safety_monitor.current_states == before
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize("changed", ["planning_only", "execution_authorized", "is_safe", "findings"])
 def test_outline_deferral_cannot_be_confused_with_safety_pass_or_unavailable(changed):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn_outline_generation import (

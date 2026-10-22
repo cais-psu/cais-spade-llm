@@ -39165,29 +39165,24 @@ class SystemBridge:
 
     def set_failure_example_options(self, *, source: str, scenario: str,
                                     safety_files: list[str], observation_path: str = "",
-                                    check_ra_feasibility: bool = True, check_physical_evidence: bool = True,
-                                    check_cca_safety: bool = True, defer_preparation: bool = False) -> dict[str, Any]:
-        """Select saved inputs and the checks for the next outline attempt.
+                                    defer_preparation: bool = False) -> dict[str, Any]:
+        """Select saved inputs for the next unvalidated outline attempt.
 
         Args:
             source: Existing Gazebo or Offline source selection.
             scenario: Exact failure scenario.
             safety_files: Selected specification paths.
             observation_path: Original saved failure input.
-            check_ra_feasibility: Run ResourceAgent feasibility validation.
-            check_physical_evidence: Run physical evidence calculations.
-            check_cca_safety: Run the selected CCA safety checks.
             defer_preparation: Store preferences without loading or preparing the capture.
 
         Returns:
-            The bridge-owned workflow state. Legacy callers retain full validation.
+            The bridge-owned workflow state.
         """
         from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
 
         return example_for_bridge(self).set_options(source=source, scenario=scenario,
             safety_files=safety_files, observation_path=observation_path,
-            check_ra_feasibility=check_ra_feasibility, check_physical_evidence=check_physical_evidence,
-            check_cca_safety=check_cca_safety, defer_preparation=defer_preparation)
+            defer_preparation=defer_preparation)
 
     def get_default_recovery_observations(self) -> dict[str, str]:
         """Return the four retained failure inputs available for fresh attempts."""
@@ -39205,23 +39200,11 @@ class SystemBridge:
 
         return example_for_bridge(self).saved_observations()
 
-    async def start_offline_recovery(self) -> dict[str, Any]:
-        """Generate recovery from the selected saved observations."""
-        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
-
-        return example_for_bridge(self).start_offline()
-
     def prepare_offline_recovery(self) -> dict[str, Any]:
         """Prepare the selected saved input without starting LLM generation."""
         from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
 
         return example_for_bridge(self).prepare_offline()
-
-    def load_offline_recovery(self) -> dict[str, Any]:
-        """Load a completed saved composition for review without generating again."""
-        from cais_spade_llm.recovery_framework.part_slippage_example import example_for_bridge
-
-        return example_for_bridge(self).load_offline_result()
 
     async def part_slippage_action(self, action: str, *, feedback: str = "") -> dict[str, Any]:
         """Continue, regenerate, execute, stop or reset the current example."""

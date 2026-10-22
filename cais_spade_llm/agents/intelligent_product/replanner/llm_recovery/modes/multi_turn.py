@@ -297,8 +297,6 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         "outline_monitor_context": deepcopy(prepared_recovery_request.get("outline_monitor_context") or {}),
         "outline_context_retrieval": bool(recovery_session.get("outline_context_retrieval")),
         "outline_diagnostic_bypass": recovery_session.get("outline_diagnostic_bypass") is True,
-        **{field: recovery_session[field] for field in
-           ("check_ra_feasibility", "check_physical_evidence", "check_cca_safety") if field in recovery_session},
         "turn_index": 0,
         "max_turns": max_turns,
         "max_observations": max_observations,
@@ -335,9 +333,6 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         "selection_revision_count": 0,
         "selection_revision_fingerprint": "",
         "selection_revision_limit": 6,
-        "selection_repeated_failure_count": 0,
-        "selection_repeated_failure_fingerprint": "",
-        "selection_repeated_failure_limit": 3,
         "selection_revision_safety_rule_fingerprints": [],
         "selection_revision_live_dfa_fingerprints": [],
         "candidate_revision_targets": [],

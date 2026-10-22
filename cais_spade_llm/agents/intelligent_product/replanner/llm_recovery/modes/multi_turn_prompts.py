@@ -4726,11 +4726,10 @@ def render_multi_turn_phase_prompt(prompt_input: dict[str, Any]) -> str:
 
 
 def _diagnostic_goals_text(diagnostic: dict[str, Any]) -> str:
-    """State the recorded handoff obligations, their blockers and the pending nominal tasks."""
+    """State the recorded handoff obligations and the pending nominal tasks."""
     lines = ["Recovery ends when these recorded handoff conditions hold in the projected state; subsequent nominal "
              "processing and delivery belong to the nominal flow. Owner bookkeeping is not a separate recovery task.",
-             _fact_rows(diagnostic["conditions"]),
-             *("Nominal handoff is blocked in the projected state: " + reason for reason in diagnostic["blocked"])]
+             _fact_rows(diagnostic["conditions"])]
     if diagnostic["pending_tasks"]:
         lines += ["Pending nominal tasks (recovery_replaced: covered by the recovery; resume_suffix: resumes after the handoff):",
                   _fact_rows(diagnostic["pending_tasks"])]
@@ -4739,11 +4738,8 @@ def _diagnostic_goals_text(diagnostic: dict[str, Any]) -> str:
 
 def _diagnostic_notes_text(diagnostic: dict[str, Any], *, include_goals: bool) -> str:
     """State what diagnostic mode bypasses and how unvalidated events use recorded facts."""
-    checks = diagnostic["checks"]
-    note = ("RA feasibility, CCA safety and physical validation are bypassed." if not any(checks.values()) else
-            "Requested outline checks: " + json.dumps(checks) + ". Enabled checks must pass before an event advances.")
-    lines = ["Diagnostic mode: " + note + " Selected events and propagated states are tentative. "
-             "Unchanged fields need not be repeated."]
+    lines = ["Diagnostic mode: RA feasibility, CCA safety and physical validation are bypassed. Selected events "
+             "and propagated states are tentative. Unchanged fields need not be repeated."]
     if include_goals:
         lines.append(_diagnostic_goals_text(diagnostic))
     interrupted = diagnostic["interrupted"]

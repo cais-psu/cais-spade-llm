@@ -2178,35 +2178,6 @@ class RobotAgent(ResourceAgent):
 
         return get_resource_recovery_snapshot(self)
 
-    @staticmethod
-    def recovery_physical_validation_snapshot(
-        *,
-        live_snapshot: dict[str, Any],
-        physical_input: dict[str, Any],
-        recovery_des_model: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build RobotAgent-owned evidence for projected outline validation.
-
-        The first outline transition retains the fresh live gripper evidence.
-        For later unexecuted transitions, ``held_part`` is the authoritative
-        projected custody fact and RobotAgent derives its private gripper
-        evidence without requiring PA or the LLM to author that mechanism.
-        """
-        validation_snapshot = ResourceAgent.recovery_physical_validation_snapshot(
-            live_snapshot=live_snapshot,
-            physical_input=physical_input,
-            recovery_des_model=recovery_des_model,
-        )
-        projected_snapshot = physical_input.get("projected_recovery_snapshot")
-        if (
-            physical_input.get("use_projected_recovery_snapshot") is True
-            and isinstance(projected_snapshot, dict)
-            and "held_part" in projected_snapshot
-        ):
-            validation_snapshot["gripper_state"] = (
-                "closed" if projected_snapshot.get("held_part") else "open"
-            )
-        return validation_snapshot
 
     # ------------------------------------------------------------------ #
     # Recovery physical feasibility check
@@ -2738,66 +2709,6 @@ class RobotAgent(ResourceAgent):
         )
         return None
 
-    def validate_recovery_primitive_support(
-        self, *, task: dict[str, Any], recovery_des_model: dict[str, Any],
-        recovery_snapshot: dict[str, Any], physical_input: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Supply observed capability witnesses without authoring execution parameters."""
-        from cais_spade_llm.resources.recovery_feasibility import validate_primitive_support
-
-        if physical_input.get("primitive_support_semantics") == "successor_primitive_union":
-            return ResourceAgent.validate_recovery_primitive_support(
-                self, task=task, recovery_des_model=recovery_des_model,
-                recovery_snapshot=recovery_snapshot, physical_input=physical_input)
-
-        parameter_evidence = {}
-        pose = recovery_snapshot.get("current_pose")
-        if isinstance(pose, dict):
-            parameter_evidence.update({axis: pose[axis] for axis in ("x", "y", "z") if axis in pose})
-            travel_z = (getattr(self, "_task_ctx", None) or {}).get("travel_z")
-            if isinstance(travel_z, (int, float)) and isinstance(pose.get("z"), (int, float)):
-                parameter_evidence["dz"] = travel_z - pose["z"]
-        runtime = getattr(self, "environment_runtime", None)
-        geometry = getattr(getattr(runtime, "context", None), "geometry", {})
-        part = task.get("part_name")
-        if part in geometry and geometry[part].get("model_name"):
-            parameter_evidence["model_name"] = geometry[part]["model_name"]
-        pick_evidence = None
-        controller = getattr(self, "_controller", None)
-        observed_pose = (physical_input.get("part_context") or {}).get("observed_pose")
-        if ("dz" not in parameter_evidence and part in geometry
-                and isinstance(pose, dict) and isinstance(pose.get("z"), (int, float))
-                and isinstance(observed_pose, dict)
-                and getattr(runtime, "diagnostic_cca_bypass", False)
-                and getattr(self, "execution_mode", None) == "simulation"
-                and getattr(controller, "execution_mode", None) == "simulation"):
-            from cais_spade_llm.recovery_framework.part_slippage_recovery import diagnostic_setup
-            from cais_spade_llm.recovery_framework.workflow_execution import _part_geometry
-
-            if diagnostic_setup(runtime.setup):
-                pick_evidence = controller.compute_pick_targets(
-                    part_name=part, product_geometry=_part_geometry(runtime.context, part),
-                    target_pose=deepcopy(observed_pose), target_pose_source="observed_pose",
-                    use_global_min_pick_tcp_z=False,
-                )
-                travel_z = pick_evidence.get("travel_z")
-                if pick_evidence.get("success") is True and isinstance(travel_z, (int, float)):
-                    parameter_evidence["dz"] = travel_z - pose["z"]
-
-        def validate_primitive(*, primitive: str, params: dict[str, Any]) -> dict[str, Any]:
-            return self.check_recovery_primitive_feasibility(
-                primitive=primitive, params=params, task=task, recovery_snapshot=recovery_snapshot,
-                part_context=deepcopy(physical_input.get("part_context") or {}),
-                grounded_action=deepcopy(physical_input.get("grounded_action") or {}),
-            )
-
-        result = validate_primitive_support(
-            task=task, recovery_des_model=recovery_des_model, recovery_snapshot=recovery_snapshot,
-            validate_primitive=validate_primitive, parameter_evidence=parameter_evidence,
-        )
-        if pick_evidence is not None:
-            result["primitive_support"]["pick_target_evidence"] = deepcopy(pick_evidence)
-        return result
 
     def prepare_recovery_primitive_parameters(
         self, *, task: dict[str, Any], recovery_des_model: dict[str, Any],

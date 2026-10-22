@@ -370,11 +370,6 @@ class KMRResourceAgent(ResourceAgent):
             kwargs['resource_evidence'] = self.get_recovery_resource_evidence()
         return check_environment_primitive_capability(**kwargs)
 
-    def project_recovery_outline_event(self, **kwargs) -> dict:
-        """Keep declared symbolic effects separate from physical interval evidence."""
-        from cais_spade_llm.resources.environment_recovery import project_environment_event
-
-        return project_environment_event(**kwargs)
 
     def get_recovery_physical_snapshot(self) -> dict:
         """Export retained KMR observations without filling missing poses or custody.

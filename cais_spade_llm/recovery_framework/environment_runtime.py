@@ -679,15 +679,6 @@ class EnvironmentRuntime:
             | Template(metadata={"type": "replan_request"})
         )
         agent.add_behaviour(EnvironmentProductLoop(), execution)
-        if self.part_slippage_recovery is not None:
-            from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
-                RECOVERY_OUTLINE_PHYSICAL_VALIDATED,
-            )
-
-            agent.add_behaviour(
-                agent._RecoveryOutlinePhysicalValidatedInbox(),
-                Template(metadata={"type": RECOVERY_OUTLINE_PHYSICAL_VALIDATED}),
-            )
 
     def set_plan(self, task: dict) -> None:
         """Build the existing DAG/FSA interface for one rechecked next task."""

@@ -603,7 +603,7 @@ def install_capture_guards() -> list[str]:
 
     for method in ('ask_llm', 'ask_llm_structured'):
         setattr(LlmAgent, method, blocked('LlmAgent.' + method))
-    for method in ('_run_stage', '_generate_outline', '_generate_primitives', '_execute'):
+    for method in ('_run_stage', '_generate_primitives', '_execute'):
         setattr(PartSlippageRecovery, method, blocked('PartSlippageRecovery.' + method))
     slippage_execution.execute_generated_recovery = blocked('execute_generated_recovery')
     return calls

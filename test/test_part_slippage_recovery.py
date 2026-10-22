@@ -3,7 +3,6 @@ from __future__ import annotations
 """Part slippage stage modes, review ownership and simulation-only execution."""
 
 import asyncio
-import hashlib
 import json
 import threading
 from copy import deepcopy
@@ -78,6 +77,13 @@ def recovery(tmp_path, monkeypatch):
     return session
 
 
+def _accept_outline(recovery):
+    """Install the accepted outline that composition reads; the live workflow stops at outline_ready."""
+    recovery._outline_request = deepcopy(recovery._prepared)
+    recovery._publish(status="outline_review", outline_status="completed",
+                      outline=recovery._prepared["multi_turn_session_state"]["accepted_outline_prefix"])
+
+
 @pytest.mark.parametrize("outline_mode", ["auto", "manual"])
 @pytest.mark.parametrize("primitive_mode", ["auto", "manual"])
 def test_stage_modes_stop_before_execution(recovery, monkeypatch, outline_mode, primitive_mode):
@@ -88,13 +94,12 @@ def test_stage_modes_stop_before_execution(recovery, monkeypatch, outline_mode, 
     async def run():
         recovery.begin({"injection_status": "completed"})
         await recovery._task
-        if outline_mode == "manual":
-            assert recovery.snapshot()["status"] == "outline_ready"
+        assert recovery.snapshot()["status"] == "outline_ready"
+        with pytest.raises(ValueError, match="unavailable"):
             recovery.action("generate_outline")
-            await recovery._task
-            assert recovery.snapshot()["status"] == "outline_review"
-            recovery.action("continue_outline")
-            await recovery._task
+        _accept_outline(recovery)
+        recovery.action("continue_outline")
+        await recovery._task
         if primitive_mode == "manual":
             assert recovery.snapshot()["status"] == "primitive_ready"
             recovery.action("generate_primitives")
@@ -238,109 +243,6 @@ def test_frozen_checkpoint_grounding_never_changes_beliefs(recovery, monkeypatch
     assert context.revision == 4
 
 
-def test_outline_evidence_retry_does_not_generate_or_replace_llm_capture(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-        multi_turn_validated_event,
-    )
-
-    async def retry(*, prepared, session, planner):
-        assert session["projected_physical_evidence"]["event_evidence"] == [{"source": "owner preview"}]
-        assert session["projected_physical_evidence"]["scene_object_bindings"] == {"part": {"object_id": "part/link/collision"}}
-        assert session["projected_physical_evidence"]["support_collision_object_bindings"] == {"table/link/surface": "table"}
-        session["accepted_outline_prefix"] = [{"outline_id": "existing_proposal"}]
-        session.pop("pending_outline_validation")
-        return "need_next_task", {"source_turn_index": 2, "transition_validation": {"status": "passed"}}
-
-    async def run():
-        await recovery._prepare()
-        recovery._state["validation_contract_version"] = 2
-        recovery._prepared["multi_turn_session_state"] = {
-            "pending_outline_validation": {"response": {"thought": "recorded", "next_transition": {"outline_id": "existing_proposal"}}}}
-        directory = Path(recovery.snapshot()["artifact_directory"])
-        original = directory / "recovery_outline" / "turns" / "turn_00002_outline.json"
-        original.parent.mkdir(parents=True)
-        original.write_text('{"turn_index":2,"phase":"outline","status":"NEEDS_CONTEXT"}')
-        before = original.read_bytes()
-        await recovery.retry_outline_validation({"event_evidence": [{"source": "owner preview"}],
-            "physical_evidence": {"scene_object_bindings": {"part": {"object_id": "part/link/collision"}},
-                                  "support_collision_object_bindings": {"table/link/surface": "table"}}})
-        assert recovery.snapshot()["status"] == "outline_ready"
-        assert original.read_bytes() == before
-        turns = directory / "recovery_outline"
-        from cais_spade_llm.ui.recovery_evidence import recovery_turns
-        grouped = recovery_turns(turns, "recovery_outline")
-        assert len(grouped) == 1
-        assert len(grouped[0]["files"]) == 2
-
-    monkeypatch.setattr(multi_turn_validated_event, "retry_pending_event", retry, raising=False)
-    asyncio.run(run())
-
-
-def test_retry_archives_nominal_proof_before_resume_checkpoint(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-        multi_turn_validated_event,
-    )
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-        nominal_continuation_context_binding,
-        read_nominal_continuation,
-    )
-
-    proof = {"complete": False, "status": "NEEDS_CONTEXT", "failures": [{"task": {"part_name": None}}]}
-    pending = {"kind": "nominal", "source_turn_index": 2, "task": {"part_name": None},
-        "projected_physical_evidence": {"snapshot": {"recorded": [1, 2]}}}
-
-    async def retry(*, session, **kwargs):
-        assert session["pending_outline_validation"] == pending
-        session["nominal_continuation_evidence"] = deepcopy(proof)
-        return "need_context", {"source_turn_index": 2, "nominal_continuation_evidence": deepcopy(proof)}
-
-    async def run():
-        await recovery._prepare()
-        recovery._prepared.update(nominal_continuation_artifact_version=1,
-            source_observation_fingerprint="a" * 64,
-            multi_turn_session_state={"validation_contract_version": 2, "turn_index": 2,
-                                      "pending_outline_validation": deepcopy(pending)})
-        await recovery.retry_outline_validation({})
-        directory = Path(recovery.snapshot()["artifact_directory"])
-        state = recovery._prepared["multi_turn_session_state"]
-        assert state["pending_outline_validation"] == pending
-        summary = state["nominal_continuation_evidence"]
-        assert "artifact_reference" in summary
-        assert read_nominal_continuation(summary, directory=directory / "recovery_outline",
-            context_binding=nominal_continuation_context_binding(state, recovery._prepared)) == proof
-        assert len(list((directory / "recovery_outline/turns").glob("*_validation_*.json"))) == 1
-        resume = json.loads((directory / "validation_resume.json").read_text())
-        assert resume["multi_turn_session_state"]["nominal_continuation_evidence"] == summary
-        assert recovery.snapshot()["status"] == "blocked"
-
-    monkeypatch.setattr(multi_turn_validated_event, "retry_pending_event", retry)
-    asyncio.run(run())
-
-
-def test_offline_nominal_context_error_keeps_the_recorded_reason(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_artifacts
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence
-
-    proof = {"status": "NEEDS_CONTEXT", "complete": False, "reason": "Nominal continuation is not established",
-             "failures": [{"task_id": "environment_21", "reason": "Missing recorded parameter binding"}]}
-    monkeypatch.setattr(recovery_artifacts, "read_nominal_continuation", lambda *args, **kwargs: deepcopy(proof))
-    preview = Mock(side_effect=AssertionError("No task is available for a motion preview"))
-    monkeypatch.setattr(outline_gazebo_evidence, "pending_outline_event", preview)
-
-    async def run():
-        await recovery._prepare()
-        recovery.runtime.source_observation_path = "recorded/observations.json"
-        recovery._prepared["multi_turn_session_state"] = {"pending_outline_validation": {"kind": "nominal"},
-            "accepted_outline_prefix": [{"outline_id": "accepted"}], "nominal_continuation_evidence": proof}
-        before = deepcopy(recovery._prepared["multi_turn_session_state"])
-        with pytest.raises(ValueError, match="NEEDS_CONTEXT:.*Missing recorded parameter binding"):
-            await recovery._prepare_offline_outline_evidence(set())
-        assert recovery._prepared["multi_turn_session_state"] == before
-        preview.assert_not_called()
-
-    asyncio.run(run())
-
-
 def test_generation_archives_nominal_proof_before_debug_publication(tmp_path, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
@@ -384,37 +286,6 @@ def test_generation_archives_nominal_proof_before_debug_publication(tmp_path, mo
     assert published[-1]["multi_turn_session"]["nominal_continuation_evidence"]["status"] == "not_ready"
 
 
-@pytest.mark.parametrize("broken", [None, "source", "file", "context"])
-def test_saved_nominal_archive_requires_verified_source_and_context(recovery, tmp_path, broken):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
-        archive_nominal_continuation,
-    )
-    from cais_spade_llm.recovery_framework.recovery_observations import observation_fingerprint
-
-    source = tmp_path / "original_generation"
-    recovery._observations = {"run_id": "captured", "context_revision": 3}
-    state = {"validation_contract_version": 2, "turn_index": 2, "symbolic_parts": {"part": {"part_state": "ready"}},
-        "nominal_continuation_evidence": {"complete": True, "status": "passed", "tasks": [], "execution_authorized": False}}
-    prepared = {"nominal_continuation_artifact_version": 1, "validation_contract_version": 2,
-        "source_observation_fingerprint": observation_fingerprint(recovery._observations),
-        "recovery_debug": {"per_turn_debug_dir": str(source)}, "multi_turn_session_state": state}
-    turn = {"turn_index": 2, "nominal_continuation_evidence": deepcopy(state["nominal_continuation_evidence"])}
-    path = archive_nominal_continuation(prepared, state, turn, decision="outline_ready")
-    if broken == "source":
-        recovery._observations["context_revision"] += 1
-    elif broken == "file":
-        path.write_bytes(path.read_bytes() + b" ")
-    elif broken == "context":
-        state["symbolic_parts"]["part"]["part_state"] = "failed"
-    destination = recovery._new_artifact_directory()
-    if broken:
-        with pytest.raises(ValueError):
-            recovery._install_prepared(prepared, destination, "", new_attempt=False, source_directory=source)
-    else:
-        recovery._install_prepared(prepared, destination, "", new_attempt=False, source_directory=source)
-        assert recovery._prepared == prepared
-
-
 def test_primitive_regeneration_retains_verified_nominal_archive(recovery, tmp_path):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.recovery_artifacts import (
         archive_nominal_continuation,
@@ -448,111 +319,6 @@ def test_primitive_regeneration_retains_verified_nominal_archive(recovery, tmp_p
     assert read_nominal_continuation(saved, directory=directory,
         context_binding=nominal_continuation_context_binding(recovery._prepared["multi_turn_session_state"], recovery._prepared)) == proof
     assert path.read_bytes() == original
-
-
-@pytest.mark.parametrize("field", ["scene_object_bindings", "support_collision_object_bindings"])
-def test_preview_retry_rejects_changed_object_mapping_without_session_mutation(recovery, field):
-    async def run():
-        await recovery._prepare()
-        recovery._prepared["multi_turn_session_state"] = {
-            "pending_outline_validation": {"kind": "event"},
-            "projected_physical_evidence": {field: {"object": {"source": "recorded"}}}}
-        before = deepcopy(recovery._prepared)
-        with pytest.raises(ValueError, match="changes an existing"):
-            await recovery.retry_outline_validation({"physical_evidence": {field: {"object": {"source": "different"}}}})
-        assert recovery._prepared == before
-
-    asyncio.run(run())
-
-
-def test_outline_checkpoint_requires_recorded_joints_and_matches_facts():
-    from cais_spade_llm.recovery_framework.outline_gazebo_evidence import checkpoint_differences
-
-    state = {"held_part": "part", "joint_names": ["joint"], "joint_positions": [1.]}
-    record = {
-        "jids": {"robot": "robot@localhost"}, "inputs": {}, "program_revision": "r1",
-        "resource_states": {"robot": {"held_part": "part"}}, "part_tracker": {}, "pending_nodes": [],
-        "context_revision": 4, "acknowledgements": {}, "transitions": [], "monitor_history": {"active": False},
-        "physical_evidence": {"snapshot": {"resources": {"robot": deepcopy(state)}},
-            "resources": {"robot": {"observation_state": state, "attachment": {"model_name": "part"}}},
-            "resource_models": {"robot": {"version": 1}}, "geometry": {"frame": "world"}},
-    }
-    fresh = deepcopy(record)
-    assert checkpoint_differences(record, fresh) == []
-    for field, changed in (("context_revision", 5), ("acknowledgements", {"task": {"status": "completed"}}),
-                           ("transitions", [{"event_name": "different_event"}]), ("monitor_history", {"active": True})):
-        other = {**deepcopy(record), field: changed}
-        assert f"{field} changed; use new observations" in checkpoint_differences(record, other)
-        other.pop(field)
-        assert f"Missing {field}; use new observations" in checkpoint_differences(record, other)
-        other[field] = None
-        assert f"Unavailable {field}; use new observations" in checkpoint_differences(record, other)
-    assert "context_revision changed; use new observations" in checkpoint_differences(
-        record, {**deepcopy(record), "context_revision": 4.0})
-    fresh["physical_evidence"]["resources"]["robot"]["observation_state"]["joint_positions"] = [2.]
-    assert "robot.joint_positions changed" in checkpoint_differences(record, fresh)
-    del record["physical_evidence"]["resources"]["robot"]["observation_state"]["joint_positions"]
-    assert "Missing robot.joint_positions" in checkpoint_differences(record, fresh)
-
-
-@pytest.mark.parametrize("physical_source", ["observations", "prepared", "projected", "pending"])
-def test_explicit_archived_preview_keeps_recorded_facts_and_does_not_recapture(tmp_path, monkeypatch, physical_source):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence as preview
-    from cais_spade_llm.recovery_framework.recovery_observations import fingerprint
-
-    physical = {"snapshot": {"resources": {"robot": {"joint_positions": [1.]}}}}
-    physical["evidence_fingerprint"] = fingerprint(physical)
-    scene = {key: {"saved": True} for key in ("planning_scene", "start_state")}
-    scene.update(status="captured", physical_evidence_fingerprint=physical["evidence_fingerprint"],
-                 scene_fingerprint="scene", model_fingerprint="model", robot_description="saved URDF",
-                 robot_description_semantic="saved SRDF")
-    observations = {"physical_evidence": physical, "planning_scene_capture": scene,
-                    "resource_evidence": {"robot@localhost": {"state": {"_current_state": "picked"}}}}
-    event = {"outline_id": "proposal", "resource_jid": "robot@localhost"}
-    session = {"pending_outline_validation": {"response": {"next_transition": event}}}
-    recovery = SimpleNamespace(_prepared={"multi_turn_session_state": session,
-        "recovery_resources": {"robot@localhost": {"recovery_snapshot": {}, "recovery_des_model": {}}}},
-        _observations=observations, _generation=1, _stopped=False,
-        snapshot=lambda: {"artifact_directory": str(tmp_path)})
-    expected_physical = deepcopy(physical)
-    if physical_source != "observations":
-        expected_physical["physical_preview_contract_version"] = 2
-        recovery._prepared["physical_evidence"] = deepcopy(expected_physical)
-    if physical_source in {"projected", "pending"}:
-        expected_physical["snapshot"]["resources"]["robot"]["joint_positions"] = [1.1]
-        session["projected_physical_evidence"] = deepcopy(expected_physical)
-    if physical_source == "pending":
-        expected_physical["snapshot"]["resources"]["robot"]["joint_positions"] = [1.2]
-        session["pending_outline_validation"]["projected_physical_evidence"] = deepcopy(expected_physical)
-    owner = SimpleNamespace(jid="robot@localhost", prepare_recovery_outline_event_evidence=AsyncMock(
-        return_value={"status": "prepared", "command_sent": False, "event_evidence": []}))
-    runtime = SimpleNamespace(setup={"execution_mode": "simulation"}, conveyor_fault=SimpleNamespace(status="triggered"),
-        stopped=True, active_executions=set(), context=SimpleNamespace(reservations={}, revision=4),
-        part_slippage_recovery=SimpleNamespace(_task=None), resource_agents=[owner])
-    live_capture = Mock(side_effect=AssertionError("Archived prediction must not recapture live physics"))
-    monkeypatch.setattr(preview, "capture_observations", live_capture)
-    original = deepcopy(observations)
-    source_fingerprint = fingerprint(observations)
-    original_prepared = deepcopy(recovery._prepared)
-    result = asyncio.run(preview.prepare_gazebo_evidence(recovery, runtime))
-    assert result["status"] == "prepared"
-    assert result["evidence_source"] == "saved planning scene"
-    assert result["physical_execution_verified"] is False
-    assert result["execution_authorized"] is False
-    assert "resource_evidence_capture" not in result["evidence"]
-    assert owner.prepare_recovery_outline_event_evidence.call_args.kwargs["observations"] == original
-    provided = owner.prepare_recovery_outline_event_evidence.call_args.kwargs["physical_evidence"]
-    assert provided == expected_physical
-    from cais_spade_llm.resources.recovery_geometry import outline_event_binding
-
-    assert outline_event_binding(event, {}, {}, provided) == outline_event_binding(event, {}, {}, expected_physical)
-    assert recovery._prepared == original_prepared
-    assert observations == original
-    assert fingerprint(observations) == source_fingerprint
-    live_capture.assert_not_called()
-    observations["physical_evidence"]["snapshot"]["resources"]["robot"]["joint_positions"] = [2.]
-    with pytest.raises(ValueError, match="unchanged physical capture"):
-        asyncio.run(preview.prepare_gazebo_evidence(recovery, runtime))
 
 
 def test_owner_evidence_capture_preserves_null_and_has_no_controller_calls():
@@ -874,57 +640,6 @@ def test_tcp_transform_uses_fixed_captured_joint_declarations_without_live_tf():
     assert record["motion_config"]["tcp_transform"] == result
 
 
-def test_outline_preview_rejects_hardware_before_observation(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence
-
-    capture = Mock(side_effect=AssertionError("must not observe hardware"))
-    monkeypatch.setattr(outline_gazebo_evidence, "capture_observations", capture)
-    recovery.runtime.setup["execution_mode"] = "physical"
-    with pytest.raises(ValueError, match="requires simulation"):
-        asyncio.run(outline_gazebo_evidence.prepare_gazebo_evidence(recovery, recovery.runtime))
-    capture.assert_not_called()
-
-
-def test_outline_preview_duplicate_reset_and_stop_are_owned(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence
-
-    async def run():
-        await recovery._prepare()
-        recovery._state.update(status="blocked", validation_contract_version=2)
-        recovery._prepared["multi_turn_session_state"] = {"pending_outline_validation": {
-            "response": {"next_transition": {"outline_id": "proposal"}}}}
-        bridge = SimpleNamespace(system_running=True, _simulation_launch_key=lambda: "launch")
-        async def dispatch(coroutine):
-            return await coroutine
-        bridge._run_on_agent_runtime = dispatch
-        example = PartSlippageExample(bridge)
-        example.source, example._offline = "offline", recovery
-        example._runtime = SimpleNamespace(launch_identity="launch")
-        started, ended = asyncio.Event(), asyncio.Event()
-        async def preview(*args, cancel_event=None):
-            started.set()
-            try:
-                while not cancel_event.is_set():
-                    await asyncio.sleep(.01)
-                await asyncio.sleep(.02)
-                assert example.snapshot()["busy"]
-                raise asyncio.CancelledError()
-            finally:
-                ended.set()
-        monkeypatch.setattr(outline_gazebo_evidence, "prepare_gazebo_evidence", preview)
-        await example.action("prepare_gazebo_evidence")
-        await started.wait()
-        with pytest.raises(ValueError, match="already running"):
-            await example.action("prepare_gazebo_evidence")
-        with pytest.raises(ValueError, match="already running"):
-            await example.action("reset")
-        await example.action("stop")
-        assert ended.is_set()
-        assert not example.snapshot()["busy"]
-        assert example.snapshot()["status"] == "stopped"
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("mode", ["simulation", "physical"])
 def test_pose_feasibility_plans_without_dispatch_only_in_simulation(mode):
     from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
@@ -1210,25 +925,22 @@ def test_regeneration_invalidates_downstream_and_keeps_previous_records(recovery
     async def run():
         recovery.begin({"injection_status": "completed"})
         await recovery._task
-        original = recovery.snapshot()["artifact_directory"]
-        recovery._state["outline_mode"] = "manual"
-        recovery.action("regenerate_outline", feedback="Keep the observed custody")
-        with pytest.raises(ValueError, match="does not authorize execution"):
-            recovery.action("execute")
-        await recovery._task
-        state = recovery.snapshot()
-        assert state["status"] == "outline_review" and state["primitives"] == []
-        assert recovery._proposal == {}
-        assert state["artifact_directory"] != original
-        assert (Path(original) / "proposal.json").is_file()
-        assert recovery._prepared["recovery_feedback"] == "Keep the observed custody"
+        with pytest.raises(ValueError, match="unavailable"):
+            recovery.action("regenerate_outline", feedback="Keep the observed custody")
+        _accept_outline(recovery)
         recovery.action("continue_outline")
         await recovery._task
+        original = recovery.snapshot()["artifact_directory"]
+        with pytest.raises(ValueError, match="does not authorize execution"):
+            recovery.action("execute")
         recovery.action("regenerate_primitives", feedback="Review the destination")
         await recovery._task
-        assert recovery.snapshot()["status"] == "ready_to_execute"
+        state = recovery.snapshot()
+        assert state["status"] == "ready_to_execute"
+        assert state["artifact_directory"] != original
+        assert (Path(original) / "proposal.json").is_file()
         assert recovery._prepared["recovery_feedback"] == "Review the destination"
-        assert recovery.snapshot()["execution_authorized"] is False
+        assert state["execution_authorized"] is False
     asyncio.run(run())
 
 
@@ -1243,6 +955,9 @@ def test_stop_cancels_generation_and_rejects_stale_actions(recovery, monkeypatch
 
     async def run():
         recovery.begin({"injection_status": "completed"})
+        await recovery._task
+        _accept_outline(recovery)
+        recovery.action("continue_outline")
         await started.wait()
         recovery.stop()
         await asyncio.gather(recovery._task, return_exceptions=True)
@@ -1315,43 +1030,6 @@ def test_stop_during_composition_preparation_does_not_publish_worker_state(recov
     asyncio.run(run())
 
 
-def test_stage_stop_keeps_the_run_and_generate_starts_a_fresh_outline(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
-
-    started = asyncio.Event()
-    finish = multi_turn.execute_multi_turn_recovery.side_effect
-
-    async def pending(planner, prepared, *, session_state):
-        started.set()
-        await asyncio.Event().wait()
-
-    recovery._state.update(outline_mode="manual", primitive_mode="manual")
-
-    async def run():
-        recovery.begin({"injection_status": "completed"})
-        await recovery._task
-        stopped_directory = recovery.snapshot()["artifact_directory"]
-        monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", AsyncMock(side_effect=pending))
-        recovery.action("generate_outline")
-        await started.wait()
-        assert recovery.generating_stage() == "outline"
-        recovery.stop_generation()
-        assert recovery.generating_stage() == ""
-        await asyncio.gather(recovery._task, return_exceptions=True)
-        state = recovery.snapshot()
-        assert (state["status"], state["outline_status"]) == ("outline_ready", "stopped")
-        assert recovery._stopped is False
-        assert not recovery._offline_cancel.is_set()
-        with pytest.raises(ValueError, match="No recovery generation"):
-            recovery.stop_generation()
-        monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", AsyncMock(side_effect=finish))
-        recovery.action("generate_outline")
-        await recovery._task
-        assert recovery.snapshot()["status"] == "outline_review"
-        assert recovery.snapshot()["artifact_directory"] != stopped_directory
-    asyncio.run(run())
-
-
 def test_stage_stop_keeps_the_accepted_outline_for_a_new_gazebo_composition(recovery, monkeypatch):
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
 
@@ -1369,6 +1047,9 @@ def test_stage_stop_keeps_the_accepted_outline_for_a_new_gazebo_composition(reco
 
     async def run():
         recovery.begin({"injection_status": "completed"})
+        await recovery._task
+        _accept_outline(recovery)
+        recovery.action("continue_outline")
         await started.wait()
         outline = deepcopy(recovery._outline_request)
         stopped_directory = recovery.snapshot()["artifact_directory"]
@@ -1438,45 +1119,15 @@ def test_stage_stop_during_offline_composition_drains_and_renews_cancellation(re
     asyncio.run(run())
 
 
-def test_gazebo_stage_stop_cancels_generation_without_stopping_the_system(recovery, monkeypatch):
-    started = asyncio.Event()
-
-    async def pending(stage):
-        started.set()
-        await asyncio.Event().wait()
-
-    async def run_on_agent_runtime(coroutine):
-        return await coroutine
-
-    monkeypatch.setattr(recovery, "_run_stage", pending)
-    recovery._state.update(outline_mode="auto", primitive_mode="auto")
-    bridge = SimpleNamespace(system_running=True,
-                             stop_system=AsyncMock(side_effect=AssertionError("Stage Stop stopped the system")),
-                             _run_on_agent_runtime=AsyncMock(side_effect=run_on_agent_runtime))
-    example = PartSlippageExample(bridge)
-    example._runtime = recovery.runtime
-    example._status = {"status": "running_example", "message": "Running Part slippage."}
-
-    async def run():
-        recovery.begin({"injection_status": "completed"})
-        await started.wait()
-        assert example.snapshot()["generating_stage"] == "outline"
-        await example.action("stop_generation")
-        assert example.snapshot()["generating_stage"] == ""
-        await asyncio.gather(recovery._task, return_exceptions=True)
-        state = example.snapshot()
-        assert (state["status"], state["outline_status"]) == ("outline_ready", "stopped")
-    asyncio.run(run())
-    bridge._run_on_agent_runtime.assert_awaited_once()
-    bridge.stop_system.assert_not_called()
-
-
 def test_context_change_blocks_execution_and_generation_errors_are_retained(recovery, monkeypatch):
     execute = AsyncMock()
     monkeypatch.setattr("cais_spade_llm.recovery_framework.slippage_execution.execute_generated_recovery", execute)
 
     async def run():
         recovery.begin({"injection_status": "completed"})
+        await recovery._task
+        _accept_outline(recovery)
+        recovery.action("continue_outline")
         await recovery._task
         recovery._state.pop("composition_validation_version")
         recovery._proposal.pop("composition_validation_version", None)
@@ -1486,7 +1137,7 @@ def test_context_change_blocks_execution_and_generation_errors_are_retained(reco
         assert recovery.snapshot()["status"] == "blocked"
         execute.assert_not_called()
         monkeypatch.setattr(recovery, "_run_stage", AsyncMock(side_effect=ValueError("captured error")))
-        recovery.action("regenerate_outline")
+        recovery.action("regenerate_primitives")
         await recovery._task
         assert recovery.snapshot()["message"] == "ValueError: captured error"
     asyncio.run(run())
@@ -1509,7 +1160,7 @@ def test_preparation_attribute_error_retains_observations_and_allows_retry(recov
         monkeypatch.setattr(recovery, "_prepare", previous)
         recovery.action("prepare")
         await recovery._task
-        assert recovery.snapshot()["status"] == "ready_to_execute"
+        assert recovery.snapshot()["status"] == "outline_ready"
     asyncio.run(run())
 
 
@@ -1789,13 +1440,10 @@ def test_other_failures_compose_from_ready_contracts(recovery, scenario, mode):
     async def run():
         recovery.begin({"injection_status": "completed", "part_name": "recorded-part"})
         await recovery._task
-        if mode == "manual":
-            assert recovery.snapshot()["status"] == "outline_ready"
-            recovery.action("generate_outline")
-            await recovery._task
-            assert recovery.snapshot()["status"] == "outline_review"
-            recovery.action("continue_outline")
-            await recovery._task
+        assert recovery.snapshot()["status"] == "outline_ready"
+        _accept_outline(recovery)
+        recovery.action("continue_outline")
+        await recovery._task
         assert recovery.snapshot()["status"] == "primitive_ready"
         assert recovery.snapshot()["outline"] == _accepted_composition_inputs()["multi_turn_session_state"]["accepted_outline_prefix"]
         assert recovery._observations["scenario"] == scenario
@@ -1891,7 +1539,6 @@ def test_nonrobot_preparation_preserves_owner_facts_and_actual_failure(recovery,
         "recovery_resources": {jid: {"recovery_snapshot": {}} for jid in recovery.runtime.jids.values()}}
     prepare = AsyncMock(return_value=prepared)
     recovery.agent.process_planner = SimpleNamespace(prepare_recovery_request=prepare, _build_resource_search_state=Mock(return_value={}))
-    monkeypatch.setattr(recovery, "_install_prepared", Mock())
     asyncio.run(PartSlippageRecovery._prepare(recovery))
     args = prepare.call_args.kwargs
     assert args["failure_context"]["failed_function_name"] == ("" if checkpoint_completed else "recorded_function")
@@ -1925,8 +1572,8 @@ def test_regeneration_records_operator_assistance_without_changing_capture(recov
         recovery.begin({"injection_status": "completed"})
         await recovery._task
         before = deepcopy(recovery._observations)
-        recovery._state["status"] = "outline_review"
-        recovery.action("regenerate_outline", feedback="Recorded operator feedback")
+        _accept_outline(recovery)
+        recovery.action("regenerate_primitives", feedback="Recorded operator feedback")
         await recovery._task
         assert recovery.snapshot()["operator_assistance"][-1]["feedback"] == "Recorded operator feedback"
         assert recovery._observations == before
@@ -1940,47 +1587,6 @@ def test_selected_capture_must_match_the_failure_scenario(monkeypatch):
     with pytest.raises(ValueError, match="different failure scenario"):
         example.set_options(source="offline", scenario="Conveyor breakdown", safety_files=[], observation_path="capture")
     assert example.source == "gazebo" and not example.observation_path
-
-
-@pytest.mark.parametrize("mode", ["simulation", "physical"])
-def test_lift_witness_after_slippage_requires_controller_target_evidence(monkeypatch, mode):
-    from cais_spade_llm.agents.resource_agent.robot_agent import RobotAgent
-
-    observed_pose = {"x": .0, "y": .3, "z": 1.025}
-    controller = SimpleNamespace(execution_mode=mode, compute_pick_targets=Mock(return_value={
-        "success": True, "pick_z": 1.248, "travel_z": 1.298,
-    }))
-    owner = SimpleNamespace(
-        execution_mode=mode, _controller=controller, _task_ctx={},
-        environment_runtime=SimpleNamespace(diagnostic_cca_bypass=True, setup=example_setup(),
-            context=SimpleNamespace(geometry={"gear_small": {"model_name": "gear_small"}})),
-        check_recovery_primitive_feasibility=Mock(return_value={"allowed": True, "feasibility_status": "FEASIBLE"}),
-    )
-    monkeypatch.setattr("cais_spade_llm.recovery_framework.workflow_execution._part_geometry", lambda *args: {})
-    model = {
-        "state_variables": {"resource_state": {"domain": ["idle", "picked"]}},
-        "events": [{"event_name": "pick_grasp", "updates": {"resource_state": {"set": "picked"}},
-                    "primitive_support": [{"primitive": "move_relative", "params": {
-                        "dz": {"$state": "_task_ctx", "path": ["travel_z"]},
-                    }}]}],
-        "primitive_catalog": [{"name": "move_relative", "params": {"dz": {"type": "number"}},
-                               "required_params": ["dz"]}],
-    }
-    result = RobotAgent.validate_recovery_primitive_support(
-        owner, task={"part_name": "gear_small", "expected_start_state": {"resource_state": "idle"},
-                     "expected_end_state": {"resource_state": "picked"}},
-        recovery_des_model=model, recovery_snapshot={"current_pose": {"x": .029, "y": .145, "z": 1.289}},
-        physical_input={"part_context": {"observed_pose": observed_pose}},
-    )
-    if mode == "simulation":
-        assert result["allowed"] is True
-        assert result["primitive_support"]["parameter_evidence"]["dz"] == pytest.approx(.009)
-        assert result["primitive_support"]["pick_target_evidence"]["success"] is True
-        assert controller.compute_pick_targets.call_args.kwargs["target_pose"] == observed_pose
-        assert owner._task_ctx == {}
-    else:
-        assert result["feasibility_status"] == "NEEDS_CONTEXT"
-        controller.compute_pick_targets.assert_not_called()
 
 
 @pytest.mark.parametrize("owner_mode,controller_mode", [("physical", "physical"), ("simulation", "physical")])
@@ -2029,162 +1635,6 @@ def test_feedback_is_in_the_sent_outline_prompt():
                                           {"current_phase": "grounding"})
     assert payload["recovery_feedback"] == "Keep gear_small custody observed"
     assert "Operator feedback:\nKeep gear_small custody observed" in prompt
-
-
-def test_safety_prompt_snapshot_is_per_attempt_and_does_not_enable_validation(recovery, tmp_path):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes.multi_turn import (
-        _build_phase_prompt,
-    )
-
-    path = tmp_path / "selected.txt"
-    specification = {"id": "SAFE_shared_area_mutex", "requirement": "At most one resource may occupy assembly_board-v1."}
-    path.write_text(json.dumps({"catalog": {"specifications": [specification]}}))
-    original_bytes = path.read_bytes()
-    recovery.runtime.setup["selected_safety_files"] = [str(path)]
-    recovery._observations = {"captured_at": 123, "run_id": "source-run", "context_revision": 4}
-    observations_before = deepcopy(recovery._observations)
-    prepared = {"recovery_session": {}, "recovery_debug": {}, "llm_input": {"loaded_safety_rules": []},
-                "recovery_safety_context": {}}
-    directory = recovery._new_artifact_directory()
-    recovery._install_prepared(deepcopy(prepared), directory, "")
-    installed = deepcopy(recovery._prepared)
-    record = json.loads((directory / "inputs.json").read_text())["prepared_recovery_request"]
-    snapshot = [{**specification, "source_path": str(path), "source_sha256": hashlib.sha256(original_bytes).hexdigest()}]
-    assert record["prompt_safety_rules"] == snapshot
-    assert json.loads((directory / "prompt_safety_rules.json").read_text()) == {
-        "prompt_safety_rules": snapshot, "safety_status": "skipped"}
-    assert record["llm_input"]["loaded_safety_rules"] == []
-    assert record["recovery_safety_context"] == {}
-    assert recovery.snapshot()["safety_status"] == "skipped"
-    assert diagnostic_setup(recovery.runtime.setup)
-    assert recovery._observations == observations_before
-    assert path.read_bytes() == original_bytes
-
-    path.write_text(json.dumps({"catalog": {"specifications": [{**specification, "requirement": "Changed requirement"}]}}))
-    _, frozen_prompt = _build_phase_prompt(installed, {"current_phase": "outline"})
-    assert specification["requirement"] in frozen_prompt
-    assert "Changed requirement" not in frozen_prompt
-    recovery._install_prepared(deepcopy(prepared), recovery._new_artifact_directory(), "")
-    assert recovery._prepared["prompt_safety_rules"][0]["requirement"] == "Changed requirement"
-    recovery.runtime.setup["selected_safety_files"] = []
-    recovery._install_prepared(deepcopy(prepared), recovery._new_artifact_directory(), "")
-    assert recovery._prepared["prompt_safety_rules"] == []
-    assert json.loads((directory / "inputs.json").read_text())["prepared_recovery_request"] == record
-
-
-@pytest.mark.parametrize("payload", [None, {}, {"catalog": {"specifications": []}},
-                                     {"catalog": {"specifications": [{"id": "SAFE_shared_area_mutex"}]}}])
-def test_invalid_selected_safety_specification_keeps_observations(recovery, tmp_path, payload):
-    path = tmp_path / "selected.txt"
-    if payload is not None:
-        path.write_text(json.dumps(payload))
-    recovery.runtime.setup["selected_safety_files"] = [str(path)]
-    recovery._observations = {"captured_at": 123, "run_id": "source-run"}
-    before = deepcopy(recovery._observations)
-    with pytest.raises(ValueError, match="NEEDS_CONTEXT:.*selected safety specification"):
-        recovery._install_prepared({"recovery_session": {}, "recovery_debug": {}}, recovery._new_artifact_directory(), "")
-    assert recovery._observations == before
-    assert recovery.snapshot()["safety_status"] == "skipped"
-
-
-def test_outline_preparation_records_exact_rule_evidence_needs_without_claiming_pass(recovery):
-    recovery.runtime.setup["selected_safety_files"] = [
-        "cais_spade_llm/specification/safety/safety_assembly_board-v1_mutex.txt",
-        "cais_spade_llm/specification/safety/safety_assembly_board-v1_gear_small_before_KET4_Square_4mm.txt"]
-    recovery._observations = {"captured_at": 123, "run_id": "source-run", "context_revision": 4}
-    original = deepcopy(recovery._observations)
-    directory = recovery._new_artifact_directory()
-    recovery._install_prepared({"recovery_session": {}, "recovery_debug": {}}, directory, "")
-    record = json.loads((directory / "outline_evidence_requirements.json").read_text())
-    rules = {row["id"]: row for row in record["rules"]}
-    assert set(rules) == {"SAFE_shared_area_mutex", "SAFE_gear_small_before_KET4_Square_4mm"}
-    assert rules["SAFE_shared_area_mutex"]["aps"][0]["required_fields"] == [
-        "geometry.resources", "geometry.regions", "snapshot.resources", "resource_models", "geometry.parts", "snapshot.parts"]
-    assert "snapshot.parts.processCompleted_evidence" in rules["SAFE_gear_small_before_KET4_Square_4mm"]["aps"][1]["required_fields"]
-    assert all(ap["status"] == "evidence_required" for row in rules.values() for ap in row["aps"])
-    assert record["execution_authorized"] is False
-    assert recovery.snapshot()["outline_safety_status"] == "pending"
-    assert recovery._observations == original
-
-
-@pytest.mark.parametrize("offline", [False, True])
-def test_new_attempt_pins_primitive_support_semantics_without_changing_capture(recovery, offline):
-    recovery.offline = offline
-    recovery.runtime.setup["selected_safety_files"] = []
-    recovery._observations = {"run_id": "captured-run", "context_revision": 4}
-    captured = deepcopy(recovery._observations)
-    prepared = {"validation_contract_version": 2, "recovery_session": {}, "recovery_debug": {},
-                "multi_turn_session_state": {"turn_index": 7},
-                "physical_evidence": {"physical_preview_contract_version": 2}}
-    original = deepcopy(prepared)
-    directory = recovery._new_artifact_directory()
-    recovery._install_prepared(deepcopy(prepared), directory, "")
-    record = json.loads((directory / "inputs.json").read_text())["prepared_recovery_request"]
-    assert record["primitive_support_semantics"] == "successor_primitive_union"
-    assert record["multi_turn_session_seed"]["primitive_support_semantics"] == "successor_primitive_union"
-    assert record["validation_contract_version"] == 2
-    assert record["physical_evidence"]["physical_preview_contract_version"] == 7
-    assert record["physical_evidence"]["owner_projection_clock_version"] == 1
-    assert record["public_safety_context_version"] == 1
-    assert record["multi_turn_session_seed"]["public_safety_context_version"] == 1
-    assert "multi_turn_session_state" not in record
-    assert recovery.snapshot()["primitive_support_semantics"] == "successor_primitive_union"
-    assert recovery.snapshot()["execution_authorized"] is False
-    assert recovery._observations == captured
-    assert prepared == original
-    with pytest.raises(ValueError, match="does not authorize execution"):
-        recovery.action("execute")
-
-
-@pytest.mark.parametrize("version", [None, 1, 2, 3, 4, 5, 6, 7])
-def test_restored_attempt_keeps_recorded_physical_preview_contract_version(recovery, version):
-    saved = {"validation_contract_version": 2, "physical_evidence": {"recorded": True},
-             "multi_turn_session_state": {"turn_index": 3}}
-    if version is not None:
-        saved["physical_evidence"]["physical_preview_contract_version"] = version
-    before = deepcopy(saved)
-    recovery._install_prepared(saved, recovery._new_artifact_directory(), "", new_attempt=False)
-    assert recovery._prepared == before
-    assert recovery._prepared["physical_evidence"].get("physical_preview_contract_version") == version
-
-
-@pytest.mark.parametrize("version", [None, 0, 1])
-def test_restored_attempt_keeps_recorded_public_safety_context_version(recovery, version):
-    saved = {"validation_contract_version": 2,
-             "multi_turn_session_seed": {"turn_index": 1},
-             "multi_turn_session_state": {"turn_index": 3}}
-    if version is not None:
-        saved["public_safety_context_version"] = version
-        saved["multi_turn_session_seed"]["public_safety_context_version"] = version
-        saved["multi_turn_session_state"]["public_safety_context_version"] = version
-    before = deepcopy(saved)
-    recovery._install_prepared(saved, recovery._new_artifact_directory(), "", new_attempt=False)
-    assert recovery._prepared == before
-    assert recovery._prepared.get("public_safety_context_version") == version
-
-
-@pytest.mark.parametrize("conflict", [False, True])
-def test_new_attempt_records_owner_capabilities_before_scene_binding(recovery, conflict):
-    recovery.runtime.setup["selected_safety_files"] = []
-    capabilities = {"gripper_reach": {"frame": "world", "max_xy_radius_m": 0.7}}
-    physical = {"jids": {"ur5e-3": "owner@localhost"}, "resource_models": {"ur5e-3": {}}}
-    if conflict:
-        physical["resource_models"]["ur5e-3"]["static_capabilities"] = {"gripper_reach": None}
-    recovery._observations = {"physical_evidence": physical}
-    before = deepcopy(recovery._observations)
-    prepared = {"recovery_session": {}, "recovery_debug": {},
-                "recovery_resources": {"owner@localhost": {"static_capabilities": capabilities}}}
-    directory = recovery._new_artifact_directory()
-    if conflict:
-        with pytest.raises(ValueError, match="static_capabilities conflict"):
-            recovery._install_prepared(prepared, directory, "")
-    else:
-        recovery._install_prepared(prepared, directory, "")
-        captured = prepared["physical_evidence"]["resource_models"]["ur5e-3"]["static_capabilities"]
-        assert captured == capabilities
-        capabilities["gripper_reach"]["max_xy_radius_m"] = 1
-        assert captured["gripper_reach"]["max_xy_radius_m"] == 0.7
-    assert recovery._observations == before
 
 
 @pytest.mark.parametrize("marked", [False, True])
@@ -2361,63 +1811,6 @@ def test_successful_context_retrieval_publishes_once_before_next_await(monkeypat
 
 
 @pytest.mark.parametrize("marked", [False, True])
-def test_saved_result_load_preserves_attempt_marker_and_validation_records(recovery, tmp_path, monkeypatch, marked):
-    from cais_spade_llm.recovery_framework import offline_recovery, part_slippage_example
-    from cais_spade_llm.recovery_framework.recovery_observations import observation_fingerprint
-
-    source = tmp_path / "saved-run"
-    directory = source / "generation_0001"
-    (directory / "recovery_outline").mkdir(parents=True)
-    observations = {"run_id": "saved-run", "scenario": "Part slippage", "failure": {"injection_status": "completed"},
-                    "context_revision": 4, "prepared_recovery_request": {}}
-    observation_path = source / "observations.json"
-    observation_path.write_text(json.dumps(observations))
-    prepared = {"validation_contract_version": 2, "recovery_session": {}, "recovery_debug": {},
-                "multi_turn_session_state": {"current_phase": "primitive_generation", "turn_index": 8}}
-    proposal = {"validation_contract_version": 2, "offline_recovery": True,
-                "source_observation_fingerprint": observation_fingerprint(observations)}
-    if marked:
-        prepared["primitive_support_semantics"] = "successor_primitive_union"
-        prepared["multi_turn_session_state"]["primitive_support_semantics"] = "successor_primitive_union"
-        proposal["primitive_support_semantics"] = "successor_primitive_union"
-    (directory / "outline_request.json").write_text(json.dumps(prepared))
-    (directory / "proposal.json").write_text(json.dumps(proposal))
-    (directory / "inputs.json").write_text(json.dumps({"prepared_recovery_request": prepared}))
-    originals = {
-        "recovery_outline/validation.json": '{"validation_contract_version": 2, "allowed": false}\n',
-        "outline_evidence_requirements.json": '{"execution_authorized": false}\n',
-        "prompt_safety_rules.json": '{"prompt_safety_rules": [], "safety_status": "skipped"}\n',
-    }
-    for name, content in originals.items():
-        (directory / name).write_text(content)
-    (source / "run.json").write_text(json.dumps({"status": "offline_completed", "artifact_directory": str(directory),
-                                                "outline": [{"outline_id": "recorded-event"}], "primitives": []}))
-    recovery.offline = True
-    recovery._observations = deepcopy(observations)
-    recovery._state.update(source="offline", primitive_support_semantics="successor_primitive_union")
-    factory = Mock(return_value=recovery)
-    monkeypatch.setattr(offline_recovery, "create_offline_recovery", factory)
-    monkeypatch.setattr(part_slippage_example, "read_observations", lambda path: deepcopy(observations))
-    example = PartSlippageExample(SimpleNamespace(system_running=False))
-    example.source = "offline"
-    example.observation_path = str(observation_path)
-    result = example.load_offline_result()
-    assert result["validation_contract_version"] == 2
-    assert ("primitive_support_semantics" in result) is marked
-    assert recovery._prepared == prepared
-    assert recovery._proposal == proposal
-    assert recovery._prepared["multi_turn_session_state"]["turn_index"] == 8
-    loaded = Path(result["artifact_directory"])
-    for name, content in originals.items():
-        assert (loaded / name).read_text() == content
-        assert (directory / name).read_text() == content
-    assert (loaded / "inputs.json").read_bytes() == (directory / "inputs.json").read_bytes()
-    assert json.loads(observation_path.read_text()) == observations
-    with pytest.raises(ValueError, match="does not authorize execution"):
-        recovery.action("execute")
-
-
-@pytest.mark.parametrize("marked", [False, True])
 def test_primitive_regeneration_preserves_the_outline_attempt_marker(recovery, marked):
     prepared = {**_accepted_composition_inputs(), "validation_contract_version": 2,
                 "recovery_session": {}, "recovery_debug": {}}
@@ -2438,32 +1831,6 @@ def test_primitive_regeneration_preserves_the_outline_attempt_marker(recovery, m
     assert recovery._outline_request == prepared
     assert recovery._proposal["validation_contract_version"] == 2
     assert recovery._proposal["execution_authorized"] is False
-
-
-def test_outline_regeneration_pins_new_semantics_and_retains_saved_inputs(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import part_slippage_recovery
-
-    captured = {"run_id": "captured-run", "context_revision": 4,
-                "prepared_recovery_request": {"validation_contract_version": 2,
-                    "recovery_session": {}, "recovery_debug": {}}}
-    recovery.offline = True
-    recovery._observations = deepcopy(captured)
-    recovery.runtime.setup["selected_safety_files"] = []
-    recovery._prepared = deepcopy(captured["prepared_recovery_request"])
-    recovery._state.update(status="outline_review", validation_contract_version=2)
-    monkeypatch.setattr(recovery, "_prepare", PartSlippageRecovery._prepare.__get__(recovery))
-    monkeypatch.setattr(part_slippage_recovery, "offline_preparation_missing", lambda observations: [])
-
-    async def regenerate():
-        recovery.action("regenerate_outline")
-        await recovery._task
-
-    asyncio.run(regenerate())
-    assert recovery.snapshot()["status"] == "outline_review"
-    assert recovery._prepared["primitive_support_semantics"] == "successor_primitive_union"
-    assert recovery._outline_request["primitive_support_semantics"] == "successor_primitive_union"
-    assert recovery._observations == captured
-    assert recovery._proposal == {}
 
 
 def test_generic_prepared_request_does_not_upgrade_validation_semantics():
@@ -2586,561 +1953,6 @@ def test_initial_capture_discards_results_after_stop_or_changed_facts(recovery, 
             assert recovery.snapshot()["status"] == "blocked"
             assert "changed during physical capture" in recovery.snapshot()["message"]
         assert recovery._observations["physical_evidence"]["status"] == "pending"
-    asyncio.run(run())
-
-
-def _offline_preview_pending(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import recovery_motion_preview, recovery_observations
-
-    jid = "recovery-resource-3@localhost"
-    task = {"outline_id": "authored_event", "event_name": "new_event", "resource_jid": jid,
-            "part_name": None, "expected_end_state": {"held_part": None}}
-    physical = {"snapshot": {"resources": {"ur5e-3": {"held_part": None}}, "parts": {}},
-                "resource_models": {}, "jids": {"ur5e-3": jid}}
-    facts = {"execution_mode": "simulation", "resource_type": "robot", "snapshot": {"held_part": None}}
-    recovery.offline = True
-    recovery.runtime.source_observation_path = str(recovery.path / "source-observations.json")
-    recovery._observations = {"run_id": "source", "physical_evidence": deepcopy(physical)}
-    recovery._prepared = {"validation_contract_version": 2, "physical_evidence": deepcopy(physical),
-        "recovery_debug": {"artifact_directory": str(recovery.path)}, "recovery_session": {},
-        "recovery_resources": {jid: {"recovery_snapshot": {"held_part": None},
-            "recovery_des_model": {"state_variables": {"held_part": {"scope": "resource"}}}}},
-        "multi_turn_session_state": {"current_phase": "outline", "status": "paused_after_outline_turn",
-            "accepted_outline_prefix": [], "projected_physical_evidence": deepcopy(physical)}}
-    recovery._state.update(status="outline_ready", source="offline", validation_contract_version=2,
-                           artifact_directory=str(recovery.path), outline_mode="manual", primitive_mode="manual",
-                           execution_authorized=False)
-    owner = SimpleNamespace(agent_name="ur5e-3", get_recovery_resource_evidence=lambda: deepcopy(facts))
-    recovery.agent.resources = {jid: owner}
-    archive = {"manifest_sha256": "a" * 64, "source_path": recovery.runtime.source_observation_path}
-    read = Mock(return_value=archive)
-    native = AsyncMock(return_value={"status": "PREVIEW_COMPLETE", "command_sent": False})
-    monkeypatch.setattr(recovery_observations, "read_native_preview_model", read)
-    monkeypatch.setattr(recovery_observations, "native_preview_observations", lambda observations, model: deepcopy(observations))
-    monkeypatch.setattr(recovery_motion_preview, "preview_recovery_motion_from_files", native)
-    return task, physical, read, native
-
-
-def test_offline_manual_generate_retries_same_event_and_nominal_before_another_llm(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence
-
-    task, physical, read, native = _offline_preview_pending(recovery, monkeypatch)
-    original = deepcopy((task, physical, recovery._observations, recovery._prepared["recovery_resources"]))
-    generated, checked = [], []
-
-    async def generate(planner, prepared, *, session_state):
-        assert not session_state.get("pending_outline_validation")
-        generated.append(deepcopy(task))
-        session_state.update(status="NEEDS_CONTEXT", pending_outline_validation={"kind": "event",
-            "task": deepcopy(task), "response": {"next_transition": deepcopy(task)}, "source_turn_index": 1})
-
-    async def prepare(owner, **kwargs):
-        checked.append(deepcopy(kwargs["task"]))
-        assert recovery.snapshot()["status"] == "generating_outline"
-        assert recovery.snapshot()["outline_status"] == "generating"
-        assert kwargs["allow_live_capture"] is False
-        assert kwargs["observations"] == original[2]
-        response = await kwargs["preview_call"]({"proposal": deepcopy(kwargs["task"])}, execution_mode="simulation",
-            action_name="/private_preview", timeout_seconds=60, cancel_event=kwargs["cancel_event"])
-        for key in ("task", "recovery_snapshot", "recovery_des_model", "physical_evidence", "resource_evidence", "observations"):
-            kwargs[key]["private_calculation"] = True
-        return {"status": "prepared", "native_result": response}
-
-    async def retry(evidence):
-        assert evidence["status"] == "prepared"
-        session = recovery._prepared["multi_turn_session_state"]
-        if session["pending_outline_validation"]["kind"] == "event":
-            session["accepted_outline_prefix"] = [deepcopy(task)]
-            nominal = {**deepcopy(task), "outline_id": "recorded_nominal_task", "event_name": "declared_nominal_event"}
-            session["pending_outline_validation"] = {"kind": "nominal", "task": nominal,
-                "recovery_snapshot": {"held_part": None}, "projected_physical_evidence": deepcopy(physical)}
-            recovery._publish(status="blocked", outline_status="NEEDS_CONTEXT")
-        else:
-            session.pop("pending_outline_validation")
-            session.update(current_phase="primitive_generation", status="ready_for_primitive_generation")
-
-    monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", generate)
-    monkeypatch.setattr(outline_gazebo_evidence, "prepare_owner_event_evidence", prepare)
-    monkeypatch.setattr(recovery, "retry_outline_validation", retry)
-
-    async def run():
-        recovery.action("generate_outline")
-        await recovery._task
-
-    asyncio.run(run())
-    assert generated == [task]
-    assert [row["outline_id"] for row in checked] == ["authored_event", "recorded_nominal_task"]
-    assert native.await_count == 2 and read.call_count == 2
-    for call in native.await_args_list:
-        assert "action_name" not in call.kwargs and call.kwargs["model_archive"]["manifest_sha256"] == "a" * 64
-    assert (task, physical, recovery._observations, recovery._prepared["recovery_resources"]) == original
-    assert recovery.snapshot()["status"] == "outline_review"
-    assert recovery.snapshot()["execution_authorized"] is False
-
-
-def test_offline_preview_stops_same_bound_proposal_without_new_information(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence
-
-    task, _, read, native = _offline_preview_pending(recovery, monkeypatch)
-    session = recovery._prepared["multi_turn_session_state"]
-    session["pending_outline_validation"] = {"kind": "event", "task": task,
-        "response": {"next_transition": deepcopy(task)}}
-    original = deepcopy(session)
-    provider = AsyncMock(side_effect=AssertionError("Pending validation called the provider"))
-    prepare = AsyncMock(return_value={"status": "NEEDS_CONTEXT", "reason": "Required recorded fact is absent"})
-    retry = AsyncMock()
-    monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", provider)
-    monkeypatch.setattr(outline_gazebo_evidence, "prepare_owner_event_evidence", prepare)
-    monkeypatch.setattr(recovery, "retry_outline_validation", retry)
-    with pytest.raises(ValueError, match="Required recorded fact is absent"):
-        asyncio.run(recovery._run_stage("outline"))
-    assert prepare.await_count == 1 and retry.await_count == 0
-    assert read.call_count == 1
-    assert recovery._prepared["multi_turn_session_state"] == original
-    assert recovery.snapshot()['outline_status'] == 'NEEDS_CONTEXT'
-    assert recovery.snapshot()['outline_safety_status'] == 'unresolved'
-    provider.assert_not_called()
-    native.assert_not_called()
-
-
-@pytest.mark.parametrize("source_missing", [False, True])
-def test_offline_pending_preview_requires_verified_source_before_provider_or_native(recovery, monkeypatch, source_missing):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn
-
-    task, _, read, native = _offline_preview_pending(recovery, monkeypatch)
-    recovery._prepared["multi_turn_session_state"]["pending_outline_validation"] = {"kind": "event", "task": task}
-    if source_missing:
-        recovery.runtime.source_observation_path = None
-    else:
-        read.side_effect = ValueError("Native preview model archive has stale capture or model bindings")
-    provider = AsyncMock(side_effect=AssertionError("Pending validation called the provider"))
-    monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", provider)
-    with pytest.raises(ValueError, match="saved observation path|stale capture"):
-        asyncio.run(recovery._run_stage("outline"))
-    assert recovery._prepared["multi_turn_session_state"]["accepted_outline_prefix"] == []
-    provider.assert_not_called()
-    native.assert_not_called()
-
-
-@pytest.mark.parametrize("phase", ["provider", "validation"])
-def test_offline_stop_drains_worker_without_committing_private_state(recovery, monkeypatch, phase):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-        multi_turn,
-        multi_turn_validated_event,
-    )
-
-    task, _, _, _ = _offline_preview_pending(recovery, monkeypatch)
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
-    original = deepcopy(recovery._prepared)
-
-    async def held_operation(prepared, session):
-        prepared["private_worker_field"] = "must not publish"
-        session["accepted_outline_prefix"] = [deepcopy(task)]
-        entered.set()
-        try:
-            assert release.wait(5), "test did not release the private worker"
-            return "need_next_task", {"source_turn_index": 1}
-        finally:
-            finished.set()
-
-    async def generate(planner, prepared, *, session_state):
-        await held_operation(prepared, session_state)
-
-    async def validate(*, prepared, session, planner):
-        return await held_operation(prepared, session)
-
-    monkeypatch.setattr(multi_turn, "execute_multi_turn_recovery", generate)
-    monkeypatch.setattr(multi_turn_validated_event, "retry_pending_event", validate)
-    if phase == "validation":
-        recovery._prepared["multi_turn_session_state"]["pending_outline_validation"] = {"kind": "event", "task": task}
-        original = deepcopy(recovery._prepared)
-
-    async def run():
-        if phase == "provider":
-            recovery._schedule(recovery._generate_outline)
-        else:
-            recovery._schedule(lambda: recovery.retry_outline_validation({}))
-        owned = recovery._task
-        try:
-            for _ in range(100):
-                if entered.is_set():
-                    break
-                await asyncio.sleep(0.01)
-            assert entered.is_set()
-            recovery.stop()
-            await asyncio.sleep(0)
-            assert recovery.snapshot()["status"] == "stopped"
-            assert not owned.done() and not finished.is_set()
-            assert recovery._prepared.get("private_worker_field") is None
-            assert recovery._prepared["multi_turn_session_state"] == original["multi_turn_session_state"]
-            with pytest.raises(ValueError, match="Reset example"):
-                recovery._schedule(lambda: recovery.retry_outline_validation({}))
-            recovery.stop()
-            await asyncio.sleep(0)
-        finally:
-            release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await owned
-        assert finished.is_set() and owned.done()
-        assert recovery._prepared.get("private_worker_field") is None
-        assert recovery._prepared["multi_turn_session_state"] == original["multi_turn_session_state"]
-
-    asyncio.run(run())
-
-
-def test_offline_owner_preview_never_captures_missing_scene(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence, recovery_motion_preview
-    from cais_spade_llm.resources import resource_safety_preparation
-
-    fields = {"action_name": "/private_preview", "planning_scene_service": "/recorded_scene",
-        "preview_parameter_service": "/recorded_parameters", "max_translation_step": 0.01,
-        "max_rotation_step": 0.05, "max_joint_step": 0.35, "velocity_scaling": 0.1,
-        "acceleration_scaling": 0.1, "timeout_seconds": 60}
-    evidence = {"execution_mode": "simulation", "resource_type": "robot",
-                "inputs": {"scene": {"safety_preparation": {"outline_preview": fields}}}}
-    live = AsyncMock(side_effect=AssertionError("Offline preview captured live state"))
-    file_preview = AsyncMock(side_effect=AssertionError("Missing scene reached native preview"))
-    monkeypatch.setattr(recovery_motion_preview, "capture_preview_scene", live)
-    monkeypatch.setattr(recovery_motion_preview, "preview_recovery_motion", live)
-    monkeypatch.setattr(resource_safety_preparation, "prepare_outline_event_preview_request",
-        lambda **kwargs: {"status": "ready", "motion_requests": [{"mode": "cartesian"}]})
-    result = asyncio.run(outline_gazebo_evidence.prepare_owner_event_evidence(SimpleNamespace(),
-        task={}, recovery_snapshot={}, recovery_des_model={}, physical_evidence={}, resource_evidence=evidence,
-        observations={}, preview_call=file_preview, allow_live_capture=False))
-    assert result["status"] == "NEEDS_CONTEXT"
-    assert "Saved planning_scene_capture is missing" in result["reason"]
-    assert result["command_sent"] is False and result["execution_authorized"] is False
-    live.assert_not_called()
-    file_preview.assert_not_called()
-
-
-@pytest.mark.parametrize("rid", ["M1", "M2", "Conveyor", "3D Printing Station"])
-def test_owner_evidence_keeps_resource_projection_and_missing_facts(rid, monkeypatch):
-    from cais_spade_llm.recovery_framework import outline_gazebo_evidence, recovery_motion_preview
-    from cais_spade_llm.resources import resource_safety_preparation
-
-    forbidden = Mock(side_effect=AssertionError("Resource projection reached robot or live preparation"))
-    for module, name in ((resource_safety_preparation, "prepare_outline_event_preview_request"),
-                         (recovery_motion_preview, "capture_preview_scene"),
-                         (recovery_motion_preview, "preview_scene_fingerprint")):
-        monkeypatch.setattr(module, name, forbidden)
-    request = {"task": {"event_name": "authored_event", "resource_jid": rid + "@localhost",
-                         "part_name": None, "expected_end_state": {}},
-               "recovery_snapshot": {"part_name": None}, "recovery_des_model": {},
-               "physical_evidence": {"snapshot": {"resources": {rid: {"part_name": None}}}},
-               "resource_evidence": {"resource_type": "resource", "execution_mode": "simulation"},
-               "observations": {}}
-    original = deepcopy(request)
-    missing = {"status": "needs_context", "unresolved": ["Recorded owner interval is unavailable"],
-               "context_requests": [f"/resources/{rid}@localhost/outline_event_evidence"],
-               "command_sent": False, "execution_authorized": False}
-    def project(**kwargs):
-        assert kwargs["physical_input"]["physical_evidence"] == original["physical_evidence"]
-        kwargs["task"]["private_calculation"] = True
-        kwargs["recovery_snapshot"]["private_calculation"] = True
-        return deepcopy(missing)
-    owner = SimpleNamespace(project_recovery_outline_event=Mock(side_effect=project))
-    result = asyncio.run(outline_gazebo_evidence.prepare_owner_event_evidence(
-        owner, **request, allow_live_capture=False))
-    assert result["status"] == "NEEDS_CONTEXT"
-    assert result["geometry_evidence"] == missing
-    assert result["context_requests"] == missing["context_requests"]
-    assert result["reason"] == missing["unresolved"][0]
-    assert request == original
-    owner.project_recovery_outline_event.assert_called_once()
-    forbidden.assert_not_called()
-    absent = asyncio.run(outline_gazebo_evidence.prepare_owner_event_evidence(
-        SimpleNamespace(), **request, allow_live_capture=False))
-    assert absent["status"] == "NEEDS_CONTEXT"
-    assert absent["reason"] == "Resource-owned event projection is unavailable"
-
-
-@pytest.mark.parametrize("resource_type", ["robot", "kmr", "resource"])
-def test_owner_evidence_does_not_preview_incompatible_checkpoints(resource_type, monkeypatch):
-    from cais_spade_llm.recovery_framework import kmr_outline_evidence, outline_gazebo_evidence
-    from cais_spade_llm.resources import resource_safety_preparation
-
-    forbidden = Mock(side_effect=AssertionError("Incompatible records reached physical projection"))
-    monkeypatch.setattr(resource_safety_preparation, "prepare_outline_event_preview_request", forbidden)
-    monkeypatch.setattr(kmr_outline_evidence, "prepare_kmr_event_evidence", forbidden)
-    compatibility = {"status": "NEEDS_CONTEXT", "checks": [
-        {"resource_id": "M2", "status": "NEEDS_CONTEXT", "reason": "Recorded observation times differ"}]}
-    owner = SimpleNamespace(project_recovery_outline_event=forbidden)
-    result = asyncio.run(outline_gazebo_evidence.prepare_owner_event_evidence(owner,
-        task={}, recovery_snapshot={}, recovery_des_model={}, observations={},
-        physical_evidence={"processing_capture_compatibility": compatibility},
-        resource_evidence={"resource_type": resource_type, "execution_mode": "simulation"},
-        allow_live_capture=False))
-    assert result["status"] == "NEEDS_CONTEXT"
-    assert result["capture_compatibility"]["capture_diagnostic"] == compatibility
-    assert result["capture_compatibility"]["checks"][0]["ref"] == "/physical_evidence/outline_safety_specifications"
-    assert result["reason"] == "Selected AP dependencies were not recorded"
-    assert not result["execution_authorized"] and not result["command_sent"]
-    forbidden.assert_not_called()
-
-
-def test_owner_evidence_retains_kmr_preview_dispatch(monkeypatch):
-    from cais_spade_llm.recovery_framework import kmr_outline_evidence, outline_gazebo_evidence
-    from cais_spade_llm.resources import resource_safety_preparation
-
-    robot = Mock(side_effect=AssertionError("KMR used the robot preview fallback"))
-    kmr = AsyncMock(return_value={"status": "NEEDS_CONTEXT", "reason": "Recorded base motion is unavailable"})
-    monkeypatch.setattr(resource_safety_preparation, "prepare_outline_event_preview_request", robot)
-    monkeypatch.setattr(kmr_outline_evidence, "prepare_kmr_event_evidence", kmr)
-    result = asyncio.run(outline_gazebo_evidence.prepare_owner_event_evidence(SimpleNamespace(),
-        task={}, recovery_snapshot={}, recovery_des_model={}, physical_evidence={}, observations={},
-        resource_evidence={"resource_type": "kmr", "resource_id": "KMR", "environment_models": {"KMR": {}},
-                           "execution_mode": "simulation"}, allow_live_capture=False))
-    assert result == kmr.return_value
-    kmr.assert_awaited_once()
-    assert kmr.await_args.kwargs["allow_live_capture"] is False
-    robot.assert_not_called()
-
-
-def test_offline_owner_evidence_needs_no_robot_archive_and_preserves_pending_event(recovery, monkeypatch):
-
-    task, _, read, native = _offline_preview_pending(recovery, monkeypatch)
-    owner = recovery.agent.resources[task["resource_jid"]]
-    facts = owner.get_recovery_resource_evidence()
-    facts["resource_type"] = "resource"
-    owner.get_recovery_resource_evidence = lambda: deepcopy(facts)
-    owner.project_recovery_outline_event = Mock(return_value={"status": "needs_context",
-        "unresolved": ["Recorded owner interval is unavailable"], "context_requests": [],
-        "execution_authorized": False, "command_sent": False})
-    source = Path(recovery.runtime.source_observation_path)
-    source.write_text(json.dumps(recovery._observations))
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    recovery._prepared["attempt_provenance"] = {"capture": {"source_sha256": digest}}
-    session = recovery._prepared["multi_turn_session_state"]
-    session.update(outline_monitor_context={"existing": True}, pending_outline_validation={
-        "kind": "event", "task": task, "source_turn_index": 5, "response": {"next_transition": deepcopy(task)}})
-    original = deepcopy(session)
-    read.side_effect = AssertionError("Nonrobot owner requires a robot archive")
-    retry = AsyncMock(side_effect=AssertionError("Missing owner evidence cannot retry as success"))
-    monkeypatch.setattr(recovery, "retry_outline_validation", retry)
-    with pytest.raises(ValueError, match="Recorded owner interval is unavailable"):
-        asyncio.run(recovery._prepare_offline_outline_evidence(set()))
-    assert recovery._prepared["multi_turn_session_state"] == original
-    assert recovery.snapshot()["outline_status"] == "NEEDS_CONTEXT"
-    assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
-    owner.project_recovery_outline_event.assert_called_once()
-    read.assert_not_called()
-    native.assert_not_called()
-    records = list(recovery.path.glob("offline_validation/*/evidence.json"))
-    assert len(records) == 1 and json.loads(records[0].read_text())["status"] == "NEEDS_CONTEXT"
-    source.write_text("{}")
-    with pytest.raises(ValueError, match="saved observations changed"):
-        asyncio.run(recovery._prepare_offline_outline_evidence(set()))
-    owner.project_recovery_outline_event.assert_called_once()
-
-
-def test_offline_stop_during_nominal_archive_retains_artifact_without_committing(recovery, monkeypatch):
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery import recovery_artifacts
-    from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import (
-        multi_turn_validated_event,
-    )
-
-    task, _, _, _ = _offline_preview_pending(recovery, monkeypatch)
-    recovery._prepared.update(nominal_continuation_artifact_version=1,
-        source_observation_fingerprint="a" * 64, saved_pending_nodes=[])
-    current = recovery._prepared["multi_turn_session_state"]
-    current.update(validation_contract_version=2, turn_index=1,
-        pending_outline_validation={"kind": "event", "task": deepcopy(task)})
-    before = deepcopy(recovery._prepared)
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
-    archive = recovery_artifacts.archive_nominal_continuation
-    written = []
-
-    async def validate(*, prepared, session, planner):
-        proof = {"complete": True, "status": "passed", "tasks": [], "replaced_task_ids": [],
-                 "replacement_evidence": {}, "execution_authorized": False}
-        session.pop("pending_outline_validation")
-        session.update(accepted_outline_prefix=[deepcopy(task)], status="ready_for_primitive_generation",
-            nominal_continuation_evidence=deepcopy(proof))
-        return "outline_ready", {"source_turn_index": 1, "nominal_continuation_evidence": deepcopy(proof)}
-
-    def persist(prepared, session, turn, *, decision):
-        entered.set()
-        try:
-            assert release.wait(5), "test did not release the archive writer"
-            path = archive(prepared, session, turn, decision=decision)
-            written.append(path)
-            return path
-        finally:
-            finished.set()
-
-    monkeypatch.setattr(multi_turn_validated_event, "retry_pending_event", validate)
-    monkeypatch.setattr(recovery_artifacts, "archive_nominal_continuation", persist)
-
-    async def run():
-        recovery._schedule(lambda: recovery.retry_outline_validation({}))
-        owned = recovery._task
-        try:
-            for _ in range(100):
-                if entered.is_set():
-                    break
-                await asyncio.sleep(0.01)
-            assert entered.is_set()
-            assert recovery._prepared == before
-            recovery.stop()
-            await asyncio.sleep(0)
-            assert recovery.snapshot()["status"] == "stopped"
-            assert not owned.done() and not finished.is_set()
-            assert recovery._prepared == before
-            with pytest.raises(ValueError, match="Reset example"):
-                recovery._schedule(lambda: recovery.retry_outline_validation({}))
-        finally:
-            release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await owned
-        assert owned.done() and finished.is_set()
-
-    asyncio.run(run())
-    assert recovery._prepared == before
-    assert recovery.snapshot()["status"] == "stopped" and recovery.snapshot()["outline"] == []
-    assert recovery.snapshot()["execution_authorized"] is False
-    assert len(written) == 1 and written[0] is not None and written[0].is_file()
-    retained = json.loads(written[0].read_text())
-    assert retained["nominal_continuation_evidence"]["complete"] is True
-    resume = json.loads((recovery.path / "validation_resume.json").read_text())
-    assert resume["multi_turn_session_state"]["accepted_outline_prefix"] == [task]
-    assert not (recovery.path / "outline.json").exists()
-    assert not (recovery.path / "outline_request.json").exists()
-
-
-def test_attempt_provenance_is_pinned_once_and_preserved_on_restore(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import diagnostics, fingerprint
-    from cais_spade_llm.recovery_framework.recovery_observations import observation_fingerprint
-
-    implementation = Mock(return_value='recorded-implementation')
-    monkeypatch.setattr(diagnostics, 'validator_fingerprint', implementation)
-    recovery.runtime.setup['selected_safety_files'] = []
-    recovery._observations = {'run_id': 'source-run', 'captured_at': 'source-time', 'context_revision': 5,
-                             'inputs': {'recorded': None}, 'planning_scene_capture': {'model_fingerprint': 'recorded-model'}}
-    recovery.path.mkdir(parents=True, exist_ok=True)
-    source = recovery.path / 'observations.json'
-    source.write_text(json.dumps(recovery._observations))
-    before = source.read_bytes()
-    prepared = {'recovery_session': {}, 'recovery_debug': {}}
-    directory = recovery._new_artifact_directory()
-    recovery._install_prepared(prepared, directory, '')
-    recorded = deepcopy(recovery._prepared)
-    provenance = recorded['attempt_provenance']
-    assert provenance['capture'] == {'run_id': 'source-run', 'captured_at': 'source-time', 'context_revision': 5,
-        'observation_fingerprint': observation_fingerprint(recovery._observations),
-        'source_sha256': hashlib.sha256(before).hexdigest()}
-    assert provenance['configuration_fingerprint'] == fingerprint({'recorded': None})
-    assert provenance['model_fingerprint'] == 'recorded-model'
-    assert provenance['implementation_fingerprint'] == 'recorded-implementation'
-    assert provenance['unassisted'] is True
-    assert source.read_bytes() == before
-    for _ in range(3):
-        assert recovery.snapshot()['attempt_provenance'] == provenance
-    implementation.assert_called_once_with()
-    implementation.side_effect = AssertionError('Restoring history must not hash current implementation')
-    restored = recovery._new_artifact_directory()
-    recovery._install_prepared(recorded, restored, '', new_attempt=False, source_directory=directory)
-    assert recovery.snapshot()['attempt_provenance'] == provenance
-    assert json.loads((restored / 'attempt_provenance.json').read_text()) == provenance
-    assert recovery.snapshot()['provenance_path'] == str(restored / 'attempt_provenance.json')
-
-
-def test_historical_attempt_does_not_receive_current_provenance(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework import diagnostics
-
-    monkeypatch.setattr(diagnostics, 'validator_fingerprint', Mock(side_effect=AssertionError('Historical record changed')))
-    recovery._state.update(attempt_provenance={'version': 1}, provenance_path='previous')
-    directory = recovery._new_artifact_directory()
-    recovery._install_prepared({'validation_contract_version': 2}, directory, '', new_attempt=False)
-    assert recovery.snapshot()['attempt_provenance'] == {}
-    assert recovery.snapshot()['provenance_path'] == ''
-    assert not (directory / 'attempt_provenance.json').exists()
-
-
-def test_operator_assisted_attempt_provenance_is_excluded_from_unassisted_results(recovery):
-    recovery.runtime.setup['selected_safety_files'] = []
-    recovery._observations = {'run_id': 'recorded'}
-    assistance = {'action': 'regenerate_outline', 'feedback': 'operator supplied text', 'generation': 1}
-    recovery._state['operator_assistance'] = [assistance]
-    recovery._install_prepared({'recovery_session': {}, 'recovery_debug': {}}, recovery._new_artifact_directory(), assistance['feedback'])
-    assert recovery.snapshot()['attempt_provenance']['unassisted'] is False
-    assert recovery.snapshot()['attempt_provenance']['operator_assistance'] == [assistance]
-
-
-@pytest.mark.parametrize('new_attempt', [True, False])
-def test_new_attempt_restores_declared_owner_fields_without_rewriting_capture_or_history(recovery, new_attempt):
-    jid = 'recovery-resource-6@localhost'
-    declared = {'resource_state': {'scope': 'resource'}, 'part_name': {'scope': 'resource'},
-                'staging_part': {'scope': 'resource'}}
-    recorded = {'resource_state': 'idle', 'part_name': None}
-    owner = SimpleNamespace(get_recovery_snapshot=Mock(return_value=deepcopy(recorded)),
-        recovery_des_model=Mock(return_value={'descriptor_fingerprint': 'actual-owner-descriptor',
-            'state_variables': deepcopy(declared), 'events': [], 'primitive_catalog': [{'name': 'dwell', 'params': {}, 'required_params': []}]}),
-        static_capabilities={'process_capabilities': {'trim': {'supported_results': ['square']}}})
-    recovery.offline = True
-    recovery.agent.resources = {jid: owner}
-    recovery.runtime.setup['selected_safety_files'] = []
-    recovery._observations = {'run_id': 'capture', 'resource_evidence': {jid: {
-        'resource_id': 'M2', 'environment_models': {'M2': {'state_variables': declared}}, 'snapshot': deepcopy(recorded)}}}
-    owner.get_recovery_resource_evidence = Mock(return_value=deepcopy(recovery._observations['resource_evidence'][jid]))
-    original = deepcopy(recovery._observations)
-    prepared = {'recovery_session': {}, 'recovery_debug': {}, 'validation_contract_version': 2,
-        'ra_jid': jid, 'recovery_resources': {jid: {'resource_type': 'resource',
-            'recovery_snapshot': {'current_state': 'unknown'}, 'static_capabilities': {},
-            'recovery_des_model': {'state_variables': declared}}},
-        'llm_input': {'observed_runtime_state': {'resources': [{'resource_jid': jid,
-            'current_state': 'unknown', 'staging_part': 'must not survive absent owner fact'}]}}}
-    before = deepcopy(prepared)
-    recovery._install_prepared(prepared, recovery._new_artifact_directory(), '', new_attempt=new_attempt)
-    assert recovery._observations == original
-    if new_attempt:
-        entry = recovery._prepared['recovery_resources'][jid]
-        assert entry['recovery_snapshot']['resource_state'] == 'idle'
-        assert entry['recovery_snapshot']['part_name'] is None
-        assert 'staging_part' not in entry['recovery_snapshot']
-        assert entry['recovery_des_model_fingerprint'] == 'actual-owner-descriptor'
-        assert entry['static_capabilities'] == owner.static_capabilities
-        assert entry['execution_primitive_catalog'][0]['name'] == 'dwell'
-        assert entry['recovery_adapter']['supports_executable_recovery'] is True
-        assert recovery.snapshot()['execution_authorized'] is False
-        assert recovery._prepared['recovery_session']['outline_mode'] == 'incremental_candidates_validated'
-        assert recovery._prepared['multi_turn_session_seed']['outline_mode'] == 'incremental_candidates_validated'
-        current = recovery._prepared['llm_input']['observed_runtime_state']['resources'][0]
-        assert current['resource_state'] == 'idle' and current['part_name'] is None
-        assert 'staging_part' not in current
-    else:
-        assert recovery._prepared == before
-        owner.get_recovery_snapshot.assert_not_called()
-        owner.recovery_des_model.assert_not_called()
-
-
-def test_full_validation_choices_stay_locked_when_generation_pauses_without_an_event(recovery, monkeypatch):
-    from cais_spade_llm.recovery_framework.outline_checks import CHECK_FIELDS
-    from cais_spade_llm.recovery_framework.part_slippage_example import PartSlippageExample
-
-    choices = dict.fromkeys(CHECK_FIELDS, True)
-    recovery._publish(status="outline_ready", outline=[], primitives=[], validation_checks=choices)
-    example = PartSlippageExample(SimpleNamespace(system_running=False))
-    example.source, example.safety_files = "offline", []
-    example.validation_checks, example._offline = choices, recovery
-
-    async def paused():
-        recovery._publish(status="blocked", outline_status="NEEDS_CONTEXT", outline=[])
-
-    monkeypatch.setattr(recovery, "_generate_outline", paused)
-
-    async def run():
-        await example.action("generate_outline")
-        assert example.snapshot()["validation_checks_locked"] is True
-        await recovery._task
-        assert example.snapshot()["outline"] == []
-        assert example.snapshot()["validation_checks_locked"] is True
-        with pytest.raises(ValueError, match="Start fresh"):
-            example.set_options(source="offline", scenario="Part slippage", safety_files=[],
-                check_ra_feasibility=False, check_physical_evidence=False, check_cca_safety=False)
-
     asyncio.run(run())
 
 

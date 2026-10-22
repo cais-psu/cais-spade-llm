@@ -3,15 +3,17 @@ from __future__ import annotations
 """Tentative symbolic bookkeeping for the existing multi-turn diagnostic mode."""
 
 import math
-import re
 from copy import deepcopy
 from typing import Any
+
+from cais_spade_llm.agents.shared_information.recovery_validation_protocol import (
+    recovery_validation_fingerprint,
+)
 
 _CONDITION_FIELDS = {
     ("resource", "current_state"): "resource_state", ("resource", "location"): "resource_location",
     ("resource", "held_part"): "held_part", ("part", "state"): "part_state", ("part", "location"): "part_location",
 }
-_SHARED_AREA_FORMULA = re.compile(r"^G\s*!\s*\(\s*(\w+)\s*&\s*(\w+)\s*\)$")
 # How the prompt and the lookups show a value an accepted event changed without stating it.
 NOT_STATED = "not stated"
 
@@ -31,10 +33,8 @@ def replaced_tasks(prepared: dict) -> set[str]:
 
 
 def llm_selects_next_event(session: dict) -> bool:
-    """Return whether no outline validator is enabled, so the LLM chooses each event."""
-    from cais_spade_llm.recovery_framework.outline_checks import selected_checks
-
-    return session.get("outline_diagnostic_bypass") is True and not any(selected_checks(session).values())
+    """Return whether the LLM chooses each event: always in a draft, which no validator checks."""
+    return session.get("outline_diagnostic_bypass") is True
 
 
 def recorded_conditions(prepared: dict, key: str = "marked_reentry_conditions") -> list[dict]:
@@ -69,35 +69,6 @@ def condition_holds(row: dict, session: dict, prepared: dict) -> bool:
     return comparison._exact_state_field_value(state, name) == row.get("expected")
 
 
-def custody_findings(task: dict, session: dict) -> list[dict]:
-    """Reject handling a part held by another resource, or a second part.
-
-    A task-level event may combine pick and place. Only resources that declare
-    ``held_part`` are checked; geometry, reach and feasibility remain unchecked.
-    """
-    part_name, jid = task.get("part_name"), task["resource_jid"]
-    if not part_name or "held_part" not in session.get("recovery_des_models", {}).get(jid, {}).get("state_variables", {}):
-        return []
-    resources = session.get("symbolic_resources", {})
-    # A resource the event itself states as releasing the part no longer holds it.
-    released = {other for other, values in (task.get("neighbor_end_state") or {}).items()
-                if "held_part" in values and values["held_part"] != part_name}
-    holder = next((other for other, row in resources.items()
-                   if row.get("held_part") == part_name and other not in released), None)
-    held = resources.get(jid, {}).get("held_part")
-    before = session.get("symbolic_parts", {}).get(part_name, {}).get("part_location")
-    end = task.get("expected_end_state", {})
-    handles = end.get("held_part") == part_name or ("part_location" in end and end["part_location"] != before)
-    reasons = []
-    if handles and holder not in {None, jid}:
-        reasons.append(f"{part_name} is held by {holder}")
-    if handles and held not in {None, part_name}:
-        reasons.append(f"{jid} already holds {held}")
-    identity = {key: task[key] for key in ("outline_id", "event_name", "resource_jid", "part_name") if task.get(key)}
-    return [{"constraint_owner": "resource", "constraint_code": "custody_discontinuity", "reason": reason, **identity}
-            for reason in reasons]
-
-
 def _inside(pose: dict, bounds: list) -> bool:
     """Return whether a pose lies in region bounds on every axis the region bounds.
 
@@ -110,59 +81,6 @@ def _inside(pose: dict, bounds: list) -> bool:
                for axis, (low, high) in zip("xyz", bounds, strict=False))
 
 
-def handoff_conflicts(session: dict, prepared: dict) -> list[dict]:
-    """Check selected shared-area rules for the state in which nominal work resumes.
-
-    A resource whose accepted events never move it keeps its measured occupancy; one last
-    moved by a stated pose occupies what that pose lies in; one last moved by a location
-    change occupies a region only through its projected resource_location.
-    Other formulas are not evaluated here.
-    """
-    from cais_spade_llm.agents.central_controller.ppr_ap import physical_ap_kind
-
-    from . import multi_turn_outline_generation as comparison
-
-    resources, _ = comparison._projected_outline_validation_context(session_state=session, prepared_recovery_request=prepared)
-    # Only an event that changes a resource's location or pose moves it; a state change alone leaves
-    # its measured occupancy in place. The latest such event decides how the resource is placed.
-    placed_by: dict[str, str] = {}
-    for task in session.get("accepted_outline_prefix", []):
-        end = task.get("expected_end_state") or {}
-        if "pose" in end or "resource_location" in end:
-            placed_by[task.get("resource_jid")] = "pose" if "pose" in end else "location"
-    entering = {}
-    for row in nominal_rows(session, prepared):
-        params = row["task"]["params"]
-        for location in {params.get("destination_location"), params.get("origin_resource_location")} - {None}:
-            entering.setdefault(location, set()).add(row["task"]["resource_jid"])
-    conflicts = []
-    for record in prepared.get("diagnostic_safety_specifications", []):
-        document = record["document"]
-        for rule in document["catalog"]["specifications"]:
-            labels = _SHARED_AREA_FORMULA.match(rule.get("formula", "").strip())
-            aps = {ap["label"]: ap for ap in rule.get("aps", [])}
-            if not labels or any(label not in aps or physical_ap_kind(aps[label]) != "resource_region"
-                                 for label in labels.groups()):
-                continue
-            for scope in document.get("requirement_scopes", []):
-                region = scope.get("region")
-                if scope.get("specification") != rule["id"] or not region:
-                    continue
-                bounds = prepared.get("diagnostic_regions", {}).get(region, {}).get("bounds")
-                occupants = set(entering.get(region, set()))
-                for jid, row in resources.items():
-                    pose = (session.get("symbolic_resources", {}).get(jid, {}).get("current_pose")
-                            if placed_by.get(jid) == "pose" else
-                            prepared.get("recovery_resources", {}).get(jid, {}).get("recovery_snapshot", {}).get("current_pose"))
-                    if comparison._exact_state_field_value(row, "resource_location") == region or (
-                            placed_by.get(jid) != "location" and bounds and _inside(pose or {}, bounds)):
-                        occupants.add(jid)
-                if len(occupants) > 1:
-                    conflicts.append({"rule_id": rule["id"], "region": region, "resource_jids": sorted(occupants),
-                                      "reason": f"{rule['id']}: {', '.join(sorted(occupants))} would occupy {region} when nominal work resumes"})
-    return conflicts
-
-
 def prompt_context(session: dict, prepared: dict, fault: dict, *, outline: bool) -> dict:
     """Collect the recorded handoff facts that a diagnostic prompt states.
 
@@ -173,19 +91,15 @@ def prompt_context(session: dict, prepared: dict, fault: dict, *, outline: bool)
         outline: Whether condition values are compared with the projected state.
 
     Returns:
-        Selected checks, handoff conditions (with ``holds`` on outline turns), blocker reasons once
-        every condition holds, compact pending nominal tasks, the interrupted event, and the
+        Handoff conditions (with ``holds`` on outline turns), compact pending nominal tasks,
+        the interrupted event, and the
         diagnostic refs that have recorded data.
     """
-    from cais_spade_llm.recovery_framework.outline_checks import selected_checks
-
     from .multi_turn_context import diagnostic_refs
 
     conditions = [{**{key: row.get(key) for key in ("role", "entity_kind", "entity", "field", "expected")},
                    **({"holds": condition_holds(row, session, prepared)} if outline else {})}
                   for row in entry_conditions(prepared)]
-    blocked = (handoff_conflicts(session, prepared)
-               if outline and conditions and all(row["holds"] for row in conditions) else [])
     roles = {identifier: suffix["role"] for role in ("recovery_replaced", "resume_suffix")
              for suffix in _suffixes(prepared, role)
              for identifier in [*suffix.get("pending_task_ids", []), suffix.get("entry_task_id")] if identifier}
@@ -199,8 +113,8 @@ def prompt_context(session: dict, prepared: dict, fault: dict, *, outline: bool)
         tasks.append({key: value for key, value in row.items() if value is not None})
     interrupted = ({key: fault[key] for key in ("blocked_at_function", "focused_resource_jid")}
                    if fault.get("blocked_at_function") and fault.get("focused_resource_jid") else {})
-    return {"checks": selected_checks(session), "conditions": conditions,
-            "blocked": [row["reason"] for row in blocked], "pending_tasks": tasks,
+    return {"conditions": conditions,
+            "pending_tasks": tasks,
             "interrupted": interrupted, "refs": diagnostic_refs(prepared)}
 
 
@@ -1102,7 +1016,6 @@ def _connection_scope(session: dict, prepared: dict) -> tuple[set[str], set[str]
         if row["event_id"] not in entries:
             actors.add(row["task"]["resource_jid"])
             parts.add(row["task"].get("part_name"))
-    actors |= {jid for conflict in handoff_conflicts(session, prepared) for jid in conflict["resource_jids"]}
     if goal_reached(session, prepared) is not True:
         # Nominal work may still finish the interrupted outcome itself.
         for jid, node in _replaced_work(prepared):
@@ -1313,6 +1226,33 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
     return tasks
 
 
+def _comparison_state_fingerprint(session: dict) -> str:
+    """Compare modeled facts without counting generated record identities as progress."""
+    ignored = {"source", "provenance", "captured_at", "recorded_at", "revision", "source_fingerprint",
+               "snapshot_fingerprint", "fingerprint", "outline_id", "command_id", "candidate_source",
+               "current_pose_captured_at", "current_pose_source", "field_sources", "commands", "history"}
+
+    def facts(value):
+        if isinstance(value, dict):
+            return {key: facts(item) for key, item in value.items() if key not in ignored}
+        if isinstance(value, list):
+            return [facts(item) for item in value]
+        return value
+
+    physical = session.get("projected_physical_evidence") or {}
+    return recovery_validation_fingerprint(facts({
+        "resources": session.get("symbolic_resources"), "parts": session.get("symbolic_parts"),
+        "monitor": {key: {field: value for field, value in record.items()
+                          if field in {"rules_fingerprint", "states", "pending_rule_ids", "activation"}}
+                    for key, record in session.get("outline_monitor_context", {}).items()},
+        "snapshot": physical.get("snapshot"), "geometry": physical.get("geometry"),
+        "processing_observations": physical.get("processing_observations"),
+        "environment_valuation": physical.get("environment_valuation"),
+        "resource_models": physical.get("resource_models"),
+        "unresolved_processing": physical.get("unresolved_processing"),
+    }))
+
+
 def nominal_connection(session: dict, prepared: dict, *, max_steps: int = _CONNECTION_MAX_STEPS) -> list[dict] | None:
     """Search declared nominal events that bring the projected state to the next nominal task.
 
@@ -1329,8 +1269,6 @@ def nominal_connection(session: dict, prepared: dict, *, max_steps: int = _CONNE
     Returns:
         The connecting nominal tasks, an empty list when the handoff already holds, or None.
     """
-    from .multi_turn_validated_event import _comparison_state_fingerprint
-
     if handoff(dict(session), prepared)["complete"]:
         return []
     if _faulted_resumed_work(session, prepared):
@@ -1361,8 +1299,7 @@ def connection_blockers(session: dict, prepared: dict) -> list[str]:
     reasons = _faulted_resumed_work(session, prepared)
     if reasons:
         return reasons
-    conflicts = [row["reason"] for row in handoff(dict(session), prepared)["safety_conflicts"]]
-    return conflicts or [f"no sequence of up to {_CONNECTION_MAX_STEPS} declared nominal events reaches its next task"]
+    return [f"no sequence of up to {_CONNECTION_MAX_STEPS} declared nominal events reaches its next task"]
 
 
 def _connected_handoff(session: dict, prepared: dict, connection: list[dict]) -> dict:
@@ -1401,7 +1338,7 @@ def declare_recovery_complete(*, session: dict, prepared: dict, response: dict) 
 
     Whether the recovery is complete is the LLM's decision: code neither refuses nor answers it. It
     searches the declared nominal events for a connection and records the result, or why none exists,
-    for review. Only a reply that also carries other content is returned, since it cannot be read.
+    for review.
 
     Args:
         session: Tentative planning state, ended by the declaration.
@@ -1409,23 +1346,15 @@ def declare_recovery_complete(*, session: dict, prepared: dict, response: dict) 
         response: The LLM's ``recovery_complete`` reply.
 
     Returns:
-        ``outline_ready`` with the recorded handoff, or ``need_revision`` for an unreadable reply.
+        ``outline_ready`` with the recorded handoff.
     """
-    extra = sorted(key for key, value in response.items()
-                   if key not in {"thought", "decision", "selected_candidate_index"} and value not in (None, [], ""))
-    if extra:
-        findings = [{"constraint_owner": "planner", "constraint_code": "recovery_complete_format",
-                     "reason": "recovery_complete takes only thought and decision; remove " + ", ".join(extra) + "."}]
-        session.update(status="paused_after_outline_turn", outline_validation_findings=findings)
-        return "need_revision", {"validation_findings": findings, "schema_valid": False}
     connection = nominal_connection(session, prepared)
     proposed = (_connected_handoff(session, prepared, connection) if connection is not None
                 else handoff(dict(session), prepared))
     proposed.update(declared_complete_by_llm=True,
                     not_connected_reasons=[] if connection is not None else _unconnected_reasons(session, prepared))
-    session.update(diagnostic_nominal_handoff=proposed, status="ready_for_primitive_generation",
-                   outline_validation_findings=[])
-    return "outline_ready", {"schema_valid": True, "diagnostic_nominal_handoff": proposed,
+    session.update(diagnostic_nominal_handoff=proposed, status="ready_for_primitive_generation")
+    return "outline_ready", {"diagnostic_nominal_handoff": proposed,
                              "transition_validation": {"status": "not_checked"}, "execution_authorized": False}
 
 
@@ -1447,15 +1376,13 @@ def handoff(session: dict, prepared: dict) -> dict:
     # still required.
     conditions_met = not unmet and not open_work if recorded else bool(required or expected) and not remaining
     ready = conditions_met and bool(expected) and expected <= entries
-    conflicts = handoff_conflicts(session, prepared) if ready else []
-    return {"complete": ready and not conflicts, "conditions_met": ready,
-        "unmet_handoff_conditions": unmet, "safety_conflicts": conflicts,
+    return {"complete": ready, "conditions_met": ready, "unmet_handoff_conditions": unmet,
         "remaining_replaced_task_ids": sorted(remaining), "open_replaced_task_ids": sorted(open_work),
         "proposed_nominal_entry_ids": sorted(entries), "required_nominal_entry_ids": sorted(expected),
         "assumptions": [*deepcopy(session.get("diagnostic_handoff_assumptions", [])), *undeclared,
                         *unbound_resume_entries(session, prepared)],
-        "basis": ("recorded handoff conditions and shared-area rules on tentative symbolic state; "
-                  "complete nominal continuation not checked"), "execution_authorized": False}
+        "basis": "recorded handoff conditions on tentative symbolic state; complete nominal continuation not checked",
+        "execution_authorized": False}
 
 
 def unresolved_conditions(session: dict, prepared: dict) -> set[str]:
@@ -1473,94 +1400,65 @@ def unresolved_conditions(session: dict, prepared: dict) -> set[str]:
         "nominal_entry:" + name for name in set(state["required_nominal_entry_ids"]) - set(state["proposed_nominal_entry_ids"])}
 
 
-async def handle_event(*, session: dict, prepared: dict, response: dict, planner: Any) -> tuple[str, dict]:
-    """Handle one candidate with only the requested outline checks enabled."""
-    from cais_spade_llm.recovery_framework.outline_checks import selected_checks, validate_partial_event
+def event_record(event: dict, session: dict, prepared: dict) -> dict:
+    """Return the event as the LLM states it, with the projected values it starts from.
 
+    Nothing about the event is checked. Its start state holds the current projected value of each
+    variable its end state names, where the projected state has one.
+
+    Args:
+        event: One candidate event from the LLM's reply.
+        session: Projected planning state before the event.
+        prepared: Recorded failure context.
+
+    Returns:
+        The event record that is applied and kept in the outline.
+    """
     from . import multi_turn
 
-    task, findings = multi_turn._derive_candidate_outline_task(candidate_task=response["next_transition"],
+    jid, part = event.get("resource_jid"), event.get("part_name")
+    resources, parts = multi_turn._projected_outline_validation_context(
         session_state=session, prepared_recovery_request=prepared)
-    if findings or task is None:
-        return "need_revision", {"validation_findings": findings, "schema_valid": False}
-    task = multi_turn._commit_selected_candidate_task(task=task,
+    model = (session.get("recovery_des_models") or {}).get(jid) or (
+        (prepared.get("recovery_resources") or {}).get(jid) or {}).get("recovery_des_model") or {}
+    variables = model.get("state_variables") or {}
+    start = {}
+    for name in sorted(event.get("expected_end_state") or {}):
+        scope = variables.get(name, {}).get("scope") or ("part" if name in {"part_state", "part_location"} else "resource")
+        row = parts.get(part, {}) if scope == "part" else resources.get(jid, {})
+        known, value = multi_turn._projected_state_value(row=row, field_name=name, scope=scope)
+        if known:
+            start[name] = value
+    record = {"outline_id": event.get("outline_id"), "event_name": event.get("event_name"), "resource_jid": jid,
+              "expected_start_state": start, "expected_end_state": deepcopy(event.get("expected_end_state")),
+              "rationale": event.get("rationale")}
+    if "part_name" in event:
+        record["part_name"] = part
+    if event.get("neighbor_end_state"):
+        record["neighbor_end_state"] = deepcopy(event["neighbor_end_state"])
+    return record
+
+
+async def handle_event(*, session: dict, prepared: dict, response: dict, planner: Any) -> tuple[str, dict]:
+    """Apply the candidate event the LLM chose, as it states it; nothing checks it.
+
+    The LLM alone ends the recovery, by declaring it complete.
+    """
+    from . import multi_turn
+
+    task = multi_turn._commit_selected_candidate_task(task=event_record(response["next_transition"], session, prepared),
         sequence_index=multi_turn._next_recovery_sequence_index(session))
-    custody = custody_findings(task, session)
-    # With every outline check off nothing judges the LLM's event, so custody is recorded, not enforced.
-    if custody and not llm_selects_next_event(session):
-        return "need_revision", {"validation_findings": custody, "schema_valid": False}
-    audit = {"custody_notes": custody} if custody else {}
-    try:
-        checks, ra, cca = await validate_partial_event(task=task, session=session, prepared=prepared,
-                                                      planner=planner, turn=audit)
-    except (KeyError, TypeError, ValueError) as exc:
-        checks, ra, cca = {}, {}, {}
-        findings = [{"constraint_owner": "planner", "constraint_code": "outline_validation_unavailable", "reason": str(exc)}]
-    else:
-        findings = [{"constraint_owner": "cca" if name == "cca" else "resource",
-            "constraint_code": "outline_validation_unavailable" if status == "NEEDS_CONTEXT" else "outline_validation_rejected",
-            "reason": (cca.get("reason") if name == "cca" else
-                       ra.get("geometry_evidence", {}).get("reason") or "; ".join(ra.get("geometry_evidence", {}).get("unresolved", []))
-                       if name == "physical_evidence" else ra.get("reason")) or "Required outline check did not pass",
-            "validation_status": status}
-            for name, status in checks.items() if status not in {"passed", "not_checked", "not_selected"}]
-    if findings:
-        missing = any(row.get("validation_status") == "NEEDS_CONTEXT" for row in findings) or not checks
-        session.update(status="NEEDS_CONTEXT" if missing else "validation_rejected",
-                       outline_validation_findings=findings, outline_check_results=checks)
-        return "need_context" if missing else "need_revision", {**audit, "validation_findings": findings,
-            "schema_valid": True, "transition_validation": {"status": "unresolved" if missing else "rejected"},
-            "checks": checks, "execution_authorized": False}
     working = deepcopy(session)
     apply_tentative_effects(task, working, prepared)
-    if selected_checks(session)["check_physical_evidence"]:
-        from .multi_turn_validated_event import _project
-
-        try:
-            _project(task, ra, cca or {"monitor_context_after": session.get("outline_monitor_context", {})}, working)
-        except ValueError as exc:
-            finding = {"constraint_owner": "resource", "constraint_code": "outline_validation_unavailable", "reason": str(exc)}
-            session.update(status="NEEDS_CONTEXT", outline_validation_findings=[finding])
-            return "need_context", {**audit, "schema_valid": True, "validation_findings": [finding], "checks": checks}
-    else:
-        working["derived_resource_snapshots"] = deepcopy(working.get("symbolic_resources", {}))
-        if cca.get("is_safe") is True:
-            working["outline_monitor_context"] = deepcopy(cca.get("monitor_context_after") or {})
-            if cca.get("state_only_projection"):
-                working["projected_state_evidence"] = deepcopy(cca["state_only_projection"])
-    proposed = handoff(working, prepared)
-    if proposed["complete"]:
-        from cais_spade_llm.recovery_framework.outline_checks import validate_partial_handoff
-
-        handoff_checks, findings = await validate_partial_handoff(session=working, prepared=prepared, planner=planner)
-        if findings:
-            session.update(status="NEEDS_CONTEXT" if any(row.get("validation_status") == "NEEDS_CONTEXT" for row in findings)
-                           else "validation_rejected", outline_validation_findings=findings,
-                           outline_check_results=checks)
-            return "need_context" if session["status"] == "NEEDS_CONTEXT" else "need_revision", {
-                **audit, "schema_valid": True, "checks": checks, "validation_findings": findings,
-                "nominal_handoff_checks": handoff_checks, "transition_validation": {"status": "unresolved"}}
-        audit["nominal_handoff_checks"] = handoff_checks
+    working["derived_resource_snapshots"] = deepcopy(working.get("symbolic_resources", {}))
     working.setdefault("accepted_outline_prefix", []).append(deepcopy(task))
-    working["outline_check_results"] = checks
     session.update(working)
     multi_turn._sync_des_recovery_aliases(session)
     proposed = handoff(session, prepared)
-    # With every check off only the LLM ends the recovery, by declaring it complete.
-    llm_decides = llm_selects_next_event(session)
-    if not llm_decides and not proposed["complete"] and goal_reached(session, prepared):
-        connection = nominal_connection(session, prepared)
-        if connection:
-            proposed = _connected_handoff(session, prepared, connection)
     session["diagnostic_nominal_handoff"] = proposed
-    if proposed["conditions_met"] and proposed["safety_conflicts"]:
-        session.setdefault("diagnostic_handoff_safety_blocks", []).append(
-            {"outline_id": task["outline_id"], "conflicts": deepcopy(proposed["safety_conflicts"])})
-    ends = proposed["complete"] and not llm_decides
-    session["status"] = "ready_for_primitive_generation" if ends else "paused_after_outline_turn"
-    return ("outline_ready" if ends else "need_next_task"), {
-        **audit, "schema_valid": True, "next_transition": deepcopy(task), "checks": checks,
-        "transition_validation": {"status": "not_checked"},
+    session["status"] = "paused_after_outline_turn"
+    return "need_next_task", {
+        "next_transition": deepcopy(task), "transition_validation": {"status": "not_checked"},
         "diagnostic_nominal_handoff": proposed, "execution_authorized": False}
 
 

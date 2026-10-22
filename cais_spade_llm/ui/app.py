@@ -486,9 +486,6 @@ def create_app() -> None:
 
     app.on_startup(_on_startup)
     app.on_shutdown(_on_shutdown)
-    from cais_spade_llm.recovery_framework.diagnostics import jobs
-    app.on_startup(jobs.recover_interrupted)
-    app.on_shutdown(jobs.cancel)
 
     ui.run(
         title="Penn State CAIS Lab Multi-Agent Manufacturing System",

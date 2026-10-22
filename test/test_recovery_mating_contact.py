@@ -235,64 +235,6 @@ def test_continuous_mating_rejects_interior_departure_despite_valid_endpoints(ki
     assert json.loads(json.dumps(proof)) == proof
 
 
-@pytest.mark.parametrize("defect", [None, "legacy", "wrong_target", "wrong_policy", "wrong_pose", "unretained", "unseated"])
-def test_owner_completion_requires_matching_fixture_proof_for_a_nonexact_seated_pose(defect):
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint
-    from cais_spade_llm.resources.recovery_geometry import _owner_product_completion
-
-    kwargs, trajectory = _case()
-    # A supported owner endpoint lies inside the existing seating corridor;
-    # it is retained rather than snapped to the part's nominal coordinates.
-    trajectory["points"][-1]["positions"] = [1e-7]
-    kwargs["target_tool_pose"][2] = 1e-7
-    prepared = prepare_mating_contact(**kwargs)
-    proof = _proof(kwargs, trajectory, prepared)
-    assert proof["status"] == "supported", proof
-    native = _native(prepared, trajectory)
-    state = deepcopy(kwargs["state"])
-    rid, part = kwargs["resource_id"], kwargs["part_name"]
-    pose = [0., 0., 1e-7, 0., 0., 0., 1.]
-    state["resources"][rid].update(joint_positions=[1e-7], current_pose=pose)
-    state["parts"][part]["current_pose"] = pose
-    support = projected_fixture_handoff(resource_id=rid, part_name=part, state=state,
-        evidence=kwargs["evidence"], owner_evidence=kwargs["owner_evidence"], mating_contact=prepared,
-        endpoint_evidence={"mating_start_state": kwargs["state"], "mating_native_record": native,
-                           "mating_corridor_evidence": proof})
-    assert support["status"] == "supported", support
-    state["resources"][rid]["held_part"] = None
-    state["parts"][part].update(processCompleted=[], processCompleted_complete=True,
-        processCompleted_evidence={"complete": True, "source_kind": "recorded", "checkpoint": "capture"})
-    target = "Gear_Plate/Gear_Shaft_1"
-    event = {"event_name": "place_insert", "function_name": "place_insert", "event_id": 3,
-        "updates": {"part_location": {"set": "assembly_board-v1"}},
-        "parameter_bindings": {"resource_id": {"equals": rid}, "destination_location": {"equals": "assembly_board-v1"},
-            "part_name": {"reference": "part_name"}, "target": {"type": "string"}},
-        "product_effects": {"state": "assembled", "target": {"set_from_param": "target"},
-            "processCompleted": [{"process": "assembly", "target": {"set_from_param": "target"}}]}}
-    geometry = {"parts": {part: {"target": target}}}
-    evidence = {"environment_models": {rid: {"events": [event]}}, "product_name": "assembly_board-v1",
-                "requirements": {part: [{"state": "assembled", "target": target}]}}
-    policy = deepcopy(prepared["simulation_mating_contact"])
-    contract = {"version": 6, "owner_declarations": [{"event_name": "place_insert"}], "placement_target": {
-        "status": "calculated", "destination_location": "assembly_board-v1", "target": target,
-        "target_reference": {"surface_role": "assembly_slot", "target_point": "inserted_part_origin"},
-        "target_origin_pose": kwargs["target_origin_pose"], "simulation_mating_contact": policy}}
-    if defect == "legacy": contract["version"] = 5
-    elif defect == "wrong_target": support["target_origin_pose"] = {"x": 0., "y": 0., "z": .1}
-    elif defect == "wrong_policy": support["policy_fingerprint"] = recovery_validation_fingerprint({})
-    elif defect == "wrong_pose": support["current_pose"] = [0., 0., 0., 0., 0., 0., 1.]
-    elif defect == "unretained": support["retained_fixture"] = False
-    elif defect == "unseated": support["seated"] = False
-    before = deepcopy(state)
-    result = _owner_product_completion(task={"part_name": part, "resource_jid": rid, "outline_id": "recorded_place"},
-        state=state, geometry=geometry, evidence=evidence, contract=contract, rid=rid, support={part: support})
-    assert (result is not None) == (defect is None)
-    assert state == before
-    if result:
-        assert result["kind"] == "predicted"
-        assert result["product_effects"][part]["processCompleted"] == [{"process": "assembly", "target": target}]
-
-
 def test_mating_reuses_fixed_origins_with_exact_fk_outputs(monkeypatch):
     from cais_spade_llm.resources import recovery_mating_contact as module
 

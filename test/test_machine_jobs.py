@@ -299,8 +299,7 @@ def test_program_selection_without_clock_preserves_owner_constraints(machine, da
     assert owner.snapshot() == before
 
 
-def _machine_access_case(resource_id, *, projected=True):
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint as fingerprint
+def _machine_access_case(resource_id):
     from test_recovery_outline_evidence import _commanded_hold_case
 
     scene = deepcopy(json.loads(SCENE_PATH.read_text()))
@@ -327,16 +326,6 @@ def _machine_access_case(resource_id, *, projected=True):
         physical['snapshot']['resources'][peer] = state
         physical['resources'][peer] = resource
         physical['resource_models'][peer] = model
-    if projected:
-        state = physical['snapshot']['resources']['KMR']
-        resource = physical['resources']['KMR']
-        resource.pop('controller_hold_activity')
-        resource['projected_controller_hold'] = {'kind': 'projected',
-            'binding': deepcopy(physical['provenance']['binding']),
-            'joint_names': deepcopy(state['joint_names']), 'positions': deepcopy(state['joint_positions'])}
-        resource['projected_endpoint'] = {'binding': deepcopy(physical['provenance']['binding']),
-            'state_fingerprint': fingerprint(state),
-            'configuration_fingerprint': fingerprint(physical['resource_models']['KMR']['configuration'])}
     evidence = {'resource_id': resource_id, 'inputs': {'scene': scene}}
     task = {'outline_id': 'provider_proposal', 'event_name': 'machine_part', 'resource_jid': resource_id + '@localhost',
         'part_name': part, 'expected_end_state': {'resource_state': 'completed'}}
@@ -344,11 +333,10 @@ def _machine_access_case(resource_id, *, projected=True):
 
 
 @pytest.mark.parametrize('resource_id', ['M1', 'M2'])
-@pytest.mark.parametrize('projected', [False, True])
-def test_machine_access_uses_supported_geometry_without_changing_observations(resource_id, projected):
+def test_machine_access_uses_supported_geometry_without_changing_observations(resource_id):
     from cais_spade_llm.resources.environment_recovery import _machine_access_projection, _machine_command_projection
 
-    evidence, snapshot, task, physical, part = _machine_access_case(resource_id, projected=projected)
+    evidence, snapshot, task, physical, part = _machine_access_case(resource_id)
     machine = next(row for row in evidence['inputs']['scene']['machines'] if row['resource_id'] == resource_id)
     owner = MachineJobs(machine, 'run')
     owner.command('select_program', {'program': 'square'}, command_id='program', now=100., observations={})
@@ -370,9 +358,8 @@ def test_machine_access_uses_supported_geometry_without_changing_observations(re
 @pytest.mark.parametrize('resource_id', ['M1', 'M2'])
 @pytest.mark.parametrize('condition', ['part_missing_support', 'part_location', 'part_moved', 'held',
     'KMR_occupied', 'handling_robot_occupied', 'KMR_ambiguous', 'handling_robot_ambiguous',
-    'missing_link', 'stale_endpoint', 'missing_hold', 'invalidated_geometry'])
+    'missing_link', 'missing_hold'])
 def test_machine_access_keeps_constraints_and_missing_evidence_distinct(resource_id, condition):
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint as fingerprint
     from cais_spade_llm.resources.environment_recovery import _machine_access_projection
 
     evidence, snapshot, task, physical, part = _machine_access_case(resource_id)
@@ -392,16 +379,10 @@ def test_machine_access_keeps_constraints_and_missing_evidence_distinct(resource
         model = physical['resource_models'][peer]['configuration']
         margin = machine['KMR_process_clearance_m'] + .1 if peer == 'KMR' else .12
         model['root_xyz'][0] = machine['workholding_pose'][0] + (margin if condition.endswith('ambiguous') else .01)
-        if peer == 'KMR':
-            physical['resources'][peer]['projected_endpoint']['configuration_fingerprint'] = fingerprint(model)
     elif condition == 'missing_link':
         evidence['inputs']['scene']['KMR']['task_execution']['clearance_link_bounds']['missing'] = [{'center': [0., 0., 0.], 'radius': .1}]
-    elif condition == 'stale_endpoint':
-        physical['resources']['KMR']['projected_endpoint']['binding'] = {'id': 'old'}
     elif condition == 'missing_hold':
         physical['resources'][handling].pop('controller_hold_model')
-    else:
-        physical['invalidated_geometry'] = {'resources': {handling: {'reason': 'moved'}}}
     before = deepcopy((evidence, snapshot, task, physical))
     if condition.endswith('occupied'):
         assert _machine_access_projection(evidence, snapshot, task, physical, part)['robot_access_clear'] is False
@@ -488,35 +469,6 @@ def test_worker_commands_remain_responsive_during_machine_part(machine, tmp_path
     assert job['simulation_paused_sec'] >= 1.
 
 
-def test_new_machine_ra_derives_pause_without_order_or_completion(machine):
-    from cais_spade_llm.product.environment import EnvironmentProductContext
-    from cais_spade_llm.recovery_framework import ROOT, PRODUCT_PATH, read_json
-    from cais_spade_llm.resources.environment_recovery import environment_owner_evidence, environment_recovery_descriptor, check_environment_primitive_capability
-    from cais_spade_llm.resources.recovery_feasibility import validate_primitive_support
-    meta = next(iter(read_json(PRODUCT_PATH).values()))
-    context = EnvironmentProductContext(scene=read_json(SCENE_PATH), product_order=read_json(ROOT/meta['product_order_file']),
-                                        geometry=read_json(ROOT/meta['product_geometry_file'])['gazebo'])
-    jobs = MachineJobs(machine, context.run_id)
-    start(jobs)
-    jobs.observe(101, observed())
-    owner = SimpleNamespace(agent_name='M2', jid='M2@localhost', environment_context=context.resources['M2'],
-        workflow_worker=SimpleNamespace(read_machine_jobs=jobs.snapshot), environment_runtime=SimpleNamespace(context=context, setup={}))
-    context.resources['M2'].valuation.update(resource_state='loaded', part_name='RGOCG4-50_Round_4mm')
-    evidence = environment_owner_evidence(owner)
-    snapshot = evidence['snapshot']
-    descriptor = environment_recovery_descriptor(evidence, snapshot, resource_jid=str(owner.jid))
-    proposal = {'event_name':'new_pause_event', 'resource_jid':str(owner.jid), 'part_name':None,
-        'expected_start_state':{'job_state':'running'},
-        'expected_end_state':{'job_state':'paused', 'active_job':None}, 'params':{'job_id':'circle-job'}}
-    original = deepcopy(evidence)
-    result = validate_primitive_support(task=proposal, recovery_des_model=descriptor, recovery_snapshot=snapshot,
-        validate_primitive=lambda **kw:check_environment_primitive_capability(**kw, task=proposal,
-            recovery_snapshot=snapshot, resource_evidence=evidence))
-    assert result['feasibility_status'] == 'FEASIBLE', result
-    assert evidence == original and jobs.record['jobs']['circle-job']['process_completed'] is False
-    assert descriptor['primitive_support_semantics'] == 'successor_primitive_union'
-
-
 def test_active_processing_cannot_silently_freeze_during_another_event(machine):
     from cais_spade_llm.resources.machine.machine_jobs import missing_processing_projection
     owner = MachineJobs(machine, 'run')
@@ -547,245 +499,6 @@ def test_processing_prompt_keeps_facts_without_command_history(machine):
     assert 'LEAK_SENTINEL' not in text and 'commands' not in text
     assert result['checkpoint']['processing_observations']['M2']['jobs']['circle-job']['processing_active_sec'] == 1
     assert source == original
-
-
-@pytest.mark.parametrize('rid,part,result_name,job_id,next_program', [
-    ('M1', 'KET4_Square_4mm', 'square', 'square-job', 'circle'),
-    ('M2', 'RGOCG4-50_Round_4mm', 'circle', 'circle-job', 'square'),
-])
-@pytest.mark.parametrize('offline', [False, True])
-@pytest.mark.parametrize('missing_peer_geometry', [False, True])
-@pytest.mark.parametrize('endpoint_version', [None, 2])
-def test_pause_and_program_selection_have_separate_owner_projections(
-    monkeypatch, rid, part, result_name, job_id, next_program, offline, missing_peer_geometry, endpoint_version,
-):
-    import asyncio
-    from cais_spade_llm.agents.shared_information.recovery_validation_protocol import recovery_validation_fingerprint as fingerprint
-    from cais_spade_llm.product.environment import EnvironmentProductContext
-    from cais_spade_llm.recovery_framework import ROOT, PRODUCT_PATH, read_json
-    from cais_spade_llm.recovery_framework.offline_recovery import SavedRecoveryResource
-    from cais_spade_llm.recovery_framework.outline_gazebo_evidence import prepare_owner_event_evidence
-    from cais_spade_llm.recovery_framework.workflow_execution import WorkflowResourceAgent
-    from cais_spade_llm.resources import resource_safety_preparation
-    from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor, project_environment_event
-    from test_environment_recovery import static_machine_projection_input
-    from test_recovery_outline_evidence import _commanded_hold_case
-    robot_preview = Mock(side_effect=AssertionError('Machine job control requested a robot preview'))
-    monkeypatch.setattr(resource_safety_preparation, 'prepare_outline_event_preview_request', robot_preview)
-    meta = next(iter(read_json(PRODUCT_PATH).values()))
-    scene = read_json(SCENE_PATH)
-    context = EnvironmentProductContext(scene=scene, product_order=read_json(ROOT/meta['product_order_file']),
-                                        geometry=read_json(ROOT/meta['product_geometry_file'])['gazebo'])
-    owner, evidence, snapshot, _model, physical = static_machine_projection_input(context, rid, part)
-    _, _, peer_state, peer_model, _ = _commanded_hold_case()
-    for peer in ('KMR', 'ur5e-2'):
-        physical['resource_models'][peer] = deepcopy(peer_model)
-        physical['snapshot']['resources'][peer].update({
-            key: deepcopy(peer_state[key]) for key in ('joint_names', 'joint_positions')})
-    declaration = next(row for row in scene['machines'] if row['resource_id'] == rid)
-    jobs = MachineJobs(declaration, context.run_id)
-    start(jobs, identity=job_id, part=part, result=result_name)
-    jobs.observe(101, observed(part))
-    evidence['processing_observations'] = jobs.snapshot()
-    snapshot.update(job_public_state(jobs.snapshot()))
-    evidence['environment_valuation'][rid].update(job_public_state(jobs.snapshot()))
-    physical['environment_valuation'][rid].update(job_public_state(jobs.snapshot()))
-    physical['snapshot']['resources'][rid].update(job_public_state(jobs.snapshot()))
-    physical['processing_observations'] = {rid: jobs.snapshot()}
-    physical['geometry']['regions'] = deepcopy(scene['safety_preparation']['regions'])
-    for peer, values in physical['snapshot']['resources'].items():
-        if 'held_part' in values:
-            physical['geometry']['resources'][peer]['stationary_only'] = False
-    for values in physical['snapshot']['parts'].values():
-        values.update(processCompleted_complete=True, processCompleted_evidence={
-            'complete': True, 'source_kind': 'recorded', 'checkpoint': 'local fixture'})
-    if endpoint_version == 2:
-        physical['endpoint_evidence_policy_version'] = endpoint_version
-        physical['resources'][rid].pop('model_static')
-        physical['geometry']['resources'][rid].pop('component_bounds')
-    if missing_peer_geometry:
-        for collection in (physical['snapshot']['resources'], physical['geometry']['resources'], physical['resources']):
-            del collection['ur5e-4']
-    original = deepcopy(physical)
-    for params, end in [({'job_id':job_id}, {'job_state':'paused', 'active_job':None}),
-                         ({'program':next_program}, {'selected_program':next_program})]:
-        model = environment_recovery_descriptor(evidence, snapshot, resource_jid=owner.jid)
-        task = {'event_name':'provider_proposal', 'resource_jid':owner.jid, 'part_name':None,
-                'params':params, 'expected_start_state':{}, 'expected_end_state':end}
-        if 'selected_program' in end:
-            from cais_spade_llm.recovery_framework.outline_endpoint_evidence import _occupancy_binding, _readiness
-
-            for peer in ('KMR', 'ur5e-2'):
-                physical['resources'][peer]['projected_endpoint'] = {
-                    'binding': deepcopy(physical['provenance']['binding']),
-                    'state_fingerprint': fingerprint(physical['snapshot']['resources'][peer]),
-                    'configuration_fingerprint': fingerprint(physical['resource_models'][peer]['configuration']),
-                    'condition': 'successful_owner_action_completion', 'physical_execution_verified': False,
-                }
-            if endpoint_version == 2:
-                physical['endpoint_occupancy']['binding'] = _occupancy_binding(physical)
-                if not offline and not missing_peer_geometry:
-                    for stale_field in ('binding', 'state_fingerprint', 'configuration_fingerprint'):
-                        changed = deepcopy(physical)
-                        changed['resources']['KMR']['projected_endpoint'][stale_field] = 'stale'
-                        changed['endpoint_occupancy']['binding'] = _occupancy_binding(changed)
-                        stale = project_environment_event(task=task, recovery_snapshot=snapshot, recovery_des_model=model,
-                            physical_input={'resource_evidence': evidence, 'physical_evidence': changed})
-                        assert stale['status'] == 'projected'
-                        assert stale['successor_evidence']['resources']['KMR']['projected_endpoint'][stale_field] == 'stale'
-                        with pytest.raises(ValueError, match='Projected starting configuration is stale'):
-                            _readiness(stale['successor_evidence'], 'KMR')
-        if endpoint_version == 2 and 'selected_program' in end:
-            physical['processing_observations'][rid].pop('simulation_clock_sec')
-            changed = deepcopy(physical)
-            changed['snapshot']['parts'][part]['current_pose'][0] += .25
-            stale = project_environment_event(task=task, recovery_snapshot=snapshot, recovery_des_model=model,
-                physical_input={'resource_evidence': evidence, 'physical_evidence': changed})
-            assert stale['status'] == 'needs_context'
-            assert any('Retained endpoint occupancy is stale' in reason for reason in stale['unresolved'])
-        expected = project_environment_event(task=task, recovery_snapshot=snapshot, recovery_des_model=model,
-            physical_input={'resource_evidence':evidence, 'physical_evidence':physical})
-        if offline:
-            validating_owner = SavedRecoveryResource(owner.jid, {'resource_type': 'resource',
-                'recovery_snapshot': snapshot, 'recovery_des_model': model, 'resource_evidence': evidence},
-                {'jids': {rid: owner.jid}})
-        else:
-            validating_owner = owner
-            validating_owner.project_recovery_outline_event = (
-                WorkflowResourceAgent.project_recovery_outline_event.__get__(owner))
-        before = deepcopy((task, snapshot, model, physical, evidence))
-        prepared = asyncio.run(prepare_owner_event_evidence(validating_owner, task=task,
-            recovery_snapshot=snapshot, recovery_des_model=model, physical_evidence=physical,
-            resource_evidence=evidence, observations={}, allow_live_capture=False))
-        assert prepared['status'] == 'prepared', prepared
-        assert prepared['geometry_evidence'] == expected
-        assert (task, snapshot, model, physical, evidence) == before
-        result = prepared['geometry_evidence']
-        assert result['status'] == 'projected', result
-        assert 'owner_safety_evidence_unresolved' not in result, result.get('owner_safety_evidence_unresolved')
-        assert [row['owner_completion_applied'] for row in result['observations']] == [False, True]
-        assert result['observations'][0]['state_snapshot'][rid] != result['observations'][-1]['state_snapshot'][rid]
-        from cais_spade_llm.agents.central_controller.outline_evidence_safety import _owner_ledgers
-
-        tampered = deepcopy(result['observations'][0])
-        tampered['owner_completion_applied'] = True
-        with pytest.raises(ValueError, match='another physical checkpoint'):
-            _owner_ledgers(tampered, result['owner_safety_evidence']['resource_models'], result['geometry']['parts'])
-        assert result['command_sent'] is False and result['execution_authorized'] is False
-        assert result['observations'][-1]['time'] == 0
-        if 'selected_program' in end:
-            for peer in ('KMR', 'ur5e-2'):
-                endpoint = result['successor_evidence']['resources'][peer]['projected_endpoint']
-                assert endpoint['binding'] == result['successor_evidence']['provenance']['binding']
-                assert endpoint['preserved_endpoint']['fingerprint'] == fingerprint(physical['resources'][peer]['projected_endpoint'])
-                assert endpoint['physical_execution_verified'] is False
-                if endpoint_version == 2:
-                    readiness = _readiness(result['successor_evidence'], peer)
-                    assert readiness['kind'] == 'conditional_successor' and readiness['status'] == 'missing'
-        if endpoint_version == 2:
-            assert 'model_static' not in result['successor_evidence']['resources'][rid]
-            assert 'component_bounds' not in result['successor_evidence']['geometry']['resources'][rid]
-            assert result['observations'][0]['occupancy_possibilities'] == result['observations'][-1]['occupancy_possibilities']
-            if 'selected_program' in end:
-                assert 'simulation_clock_sec' not in result['successor_evidence']['processing_observations'][rid]
-        if missing_peer_geometry:
-            from cais_spade_llm.agents.central_controller.outline_evidence_safety import validate_outline_evidence_safety
-
-            specification = read_json(ROOT / 'cais_spade_llm/specification/safety/safety_M2_mutex.txt')
-            cca = validate_outline_evidence_safety(projection=result, catalog=specification['catalog'],
-                requirement_scopes=specification['requirement_scopes'], prospective_activation=True)
-            assert cca['validation_status'] == 'NEEDS_CONTEXT'
-            assert not cca['is_safe']
-            assert 'ur5e-4' in result['owner_safety_evidence']['resource_models']
-        else:
-            from cais_spade_llm.agents.central_controller.outline_evidence_safety import validate_outline_evidence_safety
-
-            for filename in ('safety_M2_mutex.txt',
-                             'safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt'):
-                specification = read_json(ROOT / 'cais_spade_llm/specification/safety' / filename)
-                cca = validate_outline_evidence_safety(projection=result, catalog=specification['catalog'],
-                    requirement_scopes=specification['requirement_scopes'], prospective_activation=True)
-                assert cca['is_safe'], cca['reason']
-        physical, snapshot = result['successor_evidence'], result['projected_resource_snapshot']
-    configuration = physical['processing_observations'][rid]['current_configuration']
-    assert configuration['tool'] == declaration['current_configuration']['tool']
-    assert configuration['workholding'] == declaration['current_configuration']['workholding']
-    assert physical['snapshot']['resources']['ur5e-2'] == original['snapshot']['resources']['ur5e-2']
-    assert evidence['processing_observations']['jobs'][job_id]['job_state'] == 'running'
-    assert physical['processing_observations'][rid]['jobs'][job_id]['job_state'] == 'paused'
-    assert physical['processing_observations'][rid]['jobs'][job_id]['process_completed'] is False
-    assert physical['snapshot']['parts'] == original['snapshot']['parts']
-    robot_preview.assert_not_called()
-
-
-@pytest.mark.parametrize('rid,part,result_name,job_id,processing_safe', [
-    ('M1', 'KET4_Square_4mm', 'square', 'square-job', True),
-    ('M2', 'RGOCG4-50_Round_4mm', 'circle', 'circle-job', False),
-])
-@pytest.mark.parametrize('partial', [False, True])
-def test_endpoint_nominal_machine_completion_uses_remaining_job_time(
-        rid, part, result_name, job_id, processing_safe, partial, monkeypatch):
-    from cais_spade_llm.agents.central_controller.outline_evidence_safety import validate_outline_evidence_safety
-    from cais_spade_llm.product.environment import EnvironmentProductContext
-    from cais_spade_llm.recovery_framework import ROOT, PRODUCT_PATH, read_json
-    from cais_spade_llm.recovery_framework.outline_validation import load_outline_specifications
-    from cais_spade_llm.resources.environment_recovery import environment_recovery_descriptor, project_environment_event
-    from test_environment_recovery import static_machine_projection_input
-
-    monkeypatch.setattr('cais_spade_llm.recovery_framework.recovery_motion_preview.preview_recovery_motion_from_files',
-                        Mock(side_effect=AssertionError('Machine completion requested a robot trajectory')))
-    meta = next(iter(read_json(PRODUCT_PATH).values()))
-    scene = read_json(SCENE_PATH)
-    context = EnvironmentProductContext(scene=scene, product_order=read_json(ROOT/meta['product_order_file']),
-        geometry=read_json(ROOT/meta['product_geometry_file'])['gazebo'])
-    owner, evidence, snapshot, _, physical = static_machine_projection_input(context, rid, part)
-    declaration = next(row for row in scene['machines'] if row['resource_id'] == rid)
-    jobs = MachineJobs(declaration, context.run_id)
-    start(jobs, identity=job_id, part=part, result=result_name)
-    jobs.observe(101, observed(part))
-    evidence['processing_observations'] = jobs.snapshot()
-    for values in (snapshot, evidence['environment_valuation'][rid],
-                   physical['environment_valuation'][rid], physical['snapshot']['resources'][rid]):
-        values.update(job_public_state(jobs.snapshot()))
-    specifications = load_outline_specifications([
-        'cais_spade_llm/specification/safety/safety_M2_mutex.txt',
-        'cais_spade_llm/specification/safety/safety_KET4_Square_4mm_before_RGOCG4-50_Round_4mm_processing.txt',
-    ], ROOT)
-    physical.update(processing_observations={rid: jobs.snapshot()}, endpoint_evidence_policy_version=2,
-                    outline_safety_specifications=specifications)
-    if partial:
-        physical['outline_evidence_policy_version'] = 2
-        physical['resources']['KMR'] = {'model_static': False, 'idle': False}
-        physical['geometry']['resources']['KMR']['stationary_only'] = False
-    physical['geometry']['regions'] = deepcopy(scene['safety_preparation']['regions'])
-    for peer, values in physical['snapshot']['resources'].items():
-        if 'held_part' in values:
-            physical['geometry']['resources'][peer]['stationary_only'] = False
-    for values in physical['snapshot']['parts'].values():
-        values.update(processCompleted_complete=True, processCompleted_evidence={
-            'complete': True, 'source_kind': 'recorded', 'checkpoint': 'local fixture'})
-    model = environment_recovery_descriptor(evidence, snapshot, resource_jid=owner.jid)
-    task = {'event_name': 'nominal_processing', 'resource_jid': owner.jid, 'part_name': part,
-        'required_task_contract': 'machine_part', 'params': {'process': 'trim', 'result': result_name},
-        'expected_end_state': {'resource_state': 'completed', 'part_state': 'completed'}}
-    original = deepcopy((physical, evidence, snapshot))
-    projection = project_environment_event(task=task, recovery_snapshot=snapshot, recovery_des_model=model,
-        physical_input={'resource_evidence': evidence, 'physical_evidence': physical})
-    assert projection['status'] == 'projected', projection
-    assert projection['observations'][-1]['time'] == declaration['simulation_process']['processing_time_sec'] - 1
-    completed = projection['successor_evidence']['processing_observations'][rid]['jobs'][job_id]
-    assert completed['process_completed'] is True and completed['job_state'] == 'completed'
-    if partial:
-        assert 'KMR' in projection['successor_evidence']['invalidated_geometry']['resources']
-        assert all(values['KMR'] == [False, True] for point in projection['observations'][1:]
-                   for values in point['occupancy_possibilities'].values())
-    assert (physical, evidence, snapshot) == original
-    assert projection['command_sent'] is False and projection['execution_authorized'] is False
-    for specification, expected in zip(specifications, (True, processing_safe), strict=True):
-        document = specification['document']
-        cca = validate_outline_evidence_safety(projection=projection, catalog=document['catalog'],
-            requirement_scopes=document['requirement_scopes'], prospective_activation=True)
-        assert cca['is_safe'] is expected, cca
 
 
 def test_random_worker_failure_preserves_both_jobs_before_shutdown(tmp_path):
@@ -1054,25 +767,6 @@ def test_checkpoint_readiness_rejects_legacy_equal_timestamps(machine):
     assert compatibility['status'] == 'NEEDS_CONTEXT'
     assert any('Equal simulation times' in row['reason'] for row in compatibility['checks'])
     assert 'prepared_recovery_request.recovery_resources' in offline_preparation_missing(captured)
-
-
-def test_missing_capture_compatibility_does_not_overwrite_ra_feasible():
-    from cais_spade_llm.recovery_framework.outline_validation import validate_resource_outline_payload
-
-    projection = Mock(return_value={'status': 'projected', 'observations': [], 'interval_complete': True})
-    owner = SimpleNamespace(jid='M2@localhost', get_recovery_snapshot=lambda: {},
-        recovery_des_model=lambda **_: {}, project_recovery_outline_event=projection,
-        validate_recovery_primitive_support=lambda **_: {'allowed': True, 'feasibility_status': 'FEASIBLE'})
-    result = validate_resource_outline_payload(owner, {'primitive_support_semantics': 'successor_primitive_union',
-        'candidates': [{'task': {'resource_jid': 'M2@localhost'}, 'physical_input': {'physical_evidence': {
-            'processing_capture_compatibility': {'status': 'NEEDS_CONTEXT', 'checks': [
-                {'status': 'NEEDS_CONTEXT', 'reason': 'Recorded observation times differ'}]}}}}]}, offline=True)['results'][0]
-    assert result['feasibility_status'] == 'FEASIBLE'
-    assert result['geometry_evidence']['status'] == 'needs_context'
-    assert result['geometry_evidence']['interval_complete'] is False
-    assert result['execution_authorized'] is False
-    projection.assert_called_once()
-    assert result['geometry_evidence']['capture_compatibility']['checks'][0]['ref'] == '/physical_evidence/outline_safety_specifications'
 
 
 def test_unrelated_processing_does_not_veto_owner_projection(machine):
