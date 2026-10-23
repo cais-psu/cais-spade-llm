@@ -244,25 +244,24 @@ class EnvironmentProductContext:
             geometry["assembly_board"].get("grasp_pose")
         )
         self.part_tracker = {
-            name: {"location": None, "state": "unknown", "last_task": None, "processCompleted": []}
+            name: {"location": None, "current_process": None, "last_task": None, "processCompleted": []}
             for name in names
         }
         for name in configured_scene["Storage"]["slots"]:
-            self.part_tracker[name].update(location="Storage", state="ready")
+            self.part_tracker[name].update(location="Storage")
         for name in configured_scene["3D Printing Station"]["initial_products"]:
             self.part_tracker[name].update(
                 location="3D Printing Station",
-                state="ready",
                 processCompleted=[{"process": "print_part"}],
             )
-        self.part_tracker[self.product_name].update(location=self.product_name, state="ready")
+        self.part_tracker[self.product_name].update(location=self.product_name)
         initial_owners = owners(self.models, self.snapshot(), self.part_tracker, self.product_name)
         for part, owner in initial_owners.items():
             if self.part_tracker[part]["location"] is None:
-                self.part_tracker[part].update(location=owner, state="ready")
+                self.part_tracker[part].update(location=owner)
         for entry in configured_scene.get("failure_initial_conditions", []):
             self.part_tracker[entry["part_name"]].update(
-                location=entry["resource_id"], state="ready",
+                location=entry["resource_id"],
                 processCompleted=deepcopy(entry["processCompleted"]))
         self.initial_product_states = deepcopy(self.part_tracker)
         self.run_id = uuid4().hex

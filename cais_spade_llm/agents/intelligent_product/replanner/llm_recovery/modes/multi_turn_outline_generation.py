@@ -1192,11 +1192,6 @@ def _recovery_event_instance_task(
         start_state["held_part"] = deepcopy(resource_row.get("held_part"))
         end_state["held_part"] = deepcopy(resource_row.get("held_part"))
     if part_name:
-        if "part_state" not in start_state:
-            start_state["part_state"] = _exact_state_field_value(
-                part_row, "part_state"
-            )
-            end_state["part_state"] = deepcopy(start_state["part_state"])
         if "part_location" not in start_state:
             start_state["part_location"] = _exact_state_field_value(
                 part_row, "part_location"

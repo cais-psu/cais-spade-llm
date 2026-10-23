@@ -87,7 +87,8 @@ def test_delivery_goal_has_five_tasks_and_preserves_assembly_semantics(inputs):
     assert values['Storage']['inventory.KET4_Square_4mm'] is False
     assert values['M2']['part_name'] is None
     state = context.part_tracker['KET4_Square_4mm']
-    assert state['location'] == 'M1' and state['state'] == 'loaded'
+    # The machine's state says it is loaded; the part only records where it is.
+    assert state['location'] == 'M1' and state['current_process'] is None
     assert state['processCompleted'] == []
 
 

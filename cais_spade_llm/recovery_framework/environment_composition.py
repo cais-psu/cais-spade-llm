@@ -43,8 +43,7 @@ def state_labels(checker: BaseSafetyChecker, values: dict, products: dict,
         params = {**(contexts or {}).get(rid, {}), **value}
         part = value.get("held_part") or value.get("part_name") or params.get("part_name")
         if part in products:
-            params.update(part_name=part, part_location=products[part].get("location"),
-                          part_state=products[part].get("state"))
+            params.update(part_name=part, part_location=products[part].get("location"))
         result.update(checker._map_state_to_aps(
             jids[rid], str(value.get("resource_state", "")), params))
     return frozenset(result)

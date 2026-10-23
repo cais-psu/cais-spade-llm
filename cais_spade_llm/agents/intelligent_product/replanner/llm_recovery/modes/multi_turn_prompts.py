@@ -4075,7 +4075,7 @@ def _render_outline_prompt(payload: dict[str, Any]) -> str:
     recovery_des_models = dict(session_state.get("recovery_des_models") or {})
     scope = payload.get("outline_context")
     if scope or session_state.get("validation_contract_version") == 2:
-        public_fields = {"resource_state", "part_state", "held_part", "resource_location", "part_location"}
+        public_fields = {"resource_state", "held_part", "resource_location", "part_location", "current_process"}
         resource_fields = {}
         for jid, model in recovery_des_models.items():
             fields = model.get("state_variables", {})
@@ -4680,8 +4680,9 @@ def _render_failure_outline_prompt(payload: dict[str, Any], session_state: dict[
         "condition is the variables its model declares; request `/resources/<name>/state_variables` for them and "
         "their allowed values. A value your events changed without stating it reads \"not stated\".",
         *template["resources"],
-        "", "Parts", "A part's condition is its variables: its state, where it is, who holds it, and its process "
-        "record; request `/parts/<name>/state_variables` for them.", *template["parts"],
+        "", "Parts", "A part's condition is its variables: where it is, who holds it, and its process record "
+        "(its unfinished process and the processes it completed); request `/parts/<name>/state_variables` "
+        "for them.", *template["parts"],
         "", "Safety Rules", "Your events, and normal production after them, must keep these rules.",
         _compact_safety_rules(dict(payload.get("llm_input") or {})),
         "", "Candidate Rules", *_failure_outline_candidate_rules(neighbor_end_state=llm_selects_next_event(session_state)),

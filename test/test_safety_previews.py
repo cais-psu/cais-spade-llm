@@ -131,7 +131,7 @@ def test_preview_routes_preserve_product_symbols_through_labeling(route: str) ->
 
 
 @pytest.mark.parametrize("product", ["KET4_Square_4mm", "gear_small"])
-@pytest.mark.parametrize("state", ["part_state=assembled", "resource_location=assembly_board-v1"])
+@pytest.mark.parametrize("state", ["part_location=assembly_board-v1", "resource_location=assembly_board-v1"])
 def test_ast_state_descriptor_preserves_rule_product_and_field_state(
     product: str, state: str
 ) -> None:
@@ -210,7 +210,12 @@ def test_reference_bindings_come_from_declared_board_capabilities() -> None:
                 assert any(event["function_name"] == symbol for event in models[actor]["events"])
             else:
                 field, value = symbol.split("=", 1)
-                assert value in models[actor]["state_variables"][field]["domain"]
+                if field == "part_location":
+                    # A part's location is the part's own field: the actor must declare placing parts there.
+                    assert any(event["parameter_bindings"].get("destination_location", {}).get("equals") == value
+                               for event in models[actor]["events"])
+                else:
+                    assert value in models[actor]["state_variables"][field]["domain"]
 
 
 @pytest.mark.parametrize("state", ["positioned", "placed", "failed"])
@@ -234,7 +239,7 @@ def test_precedence_uses_acknowledged_part_state_and_remembers_completion() -> N
     assert checker._map_task_to_aps("ur5e-4@localhost", "place_insert", params) == []
     done = state_labels(checker,
                         {"ur5e-4": {"resource_state": "placed", "held_part": None}},
-                        {"gear_small": {"state": "assembled", "location": "assembly_board-v1"}},
+                        {"gear_small": {"location": "assembly_board-v1"}},
                         {"ur5e-4": "ur5e-4@localhost"}, {"ur5e-4": params})
     assert done == frozenset({"ap004"})
     entry = frozenset(checker._map_task_to_aps("ur5e-3@localhost", "place_approach", {

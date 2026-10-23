@@ -33,7 +33,7 @@ async def _fresh_preparation(runtime, fresh: dict, template: dict) -> dict:
 
     planner = runtime.agent.process_planner
     tracker = deepcopy(fresh["part_tracker"])
-    states = {name: row.get("state") for name, row in tracker.items()}
+    states: dict = {}
     locations = {name: row.get("location") for name, row in tracker.items()}
     resources = {}
     for rid, values in fresh["resource_states"].items():
@@ -93,10 +93,11 @@ async def _fresh_preparation(runtime, fresh: dict, template: dict) -> dict:
             final_status="failed:" + fresh["scenario"], part_name=part,
             observations=deepcopy(failure),
             affected_entities=[{"entity_type": "part", "entity_id": part,
-                                "state": tracker[part]["state"], "location": tracker[part]["location"]}],
+                                "location": tracker[part]["location"],
+                                "current_process": deepcopy(tracker[part].get("current_process"))}],
             state_before=failure.get("resource_values_before", {}).get(rid),
             state_after={**deepcopy(fresh["resource_states"][rid]),
-                         "part_state": tracker[part]["state"], "part_location": tracker[part]["location"]})
+                         "part_location": tracker[part]["location"]})
     stuck = planner._build_resource_search_state(resource_jid=template["ra_jid"], resource_states=resources,
         default_resource_state="", part_states=states, part_locations=locations)
     prepared = await planner.prepare_recovery_request(

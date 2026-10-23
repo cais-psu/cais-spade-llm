@@ -1,5 +1,449 @@
 # Recovery framework roadmap, including UI dry runs and trustworthy prompt inspection
 
+## Aligned part model — October 23, 2026 — DONE offline and verified (full suite = baseline), uncommitted; Gazebo/recapture pending after activity model B
+
+**Decision (user, October 23).** Align the part model with the semiconductor framework
+(`/home/jongh/projects/SemiconductorSimulation_testing-master`). Do it before the RA rebuild, and batch it
+with the RA step 1 constraints (next section) into one recapture.
+
+**Semiconductor reference.**
+- `ProductState` (`Agents/sharedInformation/ProductState.java`) is `location` plus `processCompleted`.
+  There, `processCompleted` is one value: the current process marker. "startProgramX" means in progress
+  (`MachineAgent.java:107`), "X" means done (108), and "startMoving" means being carried
+  (`RobotAgent.java:111`).
+- The history is separate: `ProductHistory` (`Agents/intelligentProduct/ProductHistory.java`) is the
+  graph of the events that occurred and the states visited.
+- There is no handling-status field and no interruption.
+
+**The aligned part state.**
+
+| Field | Meaning | Semiconductor |
+| --- | --- | --- |
+| `part_location` | where the part is: a place, the resource holding it, or none (loose, with a measured pose) | `location` |
+| current process (name: D2) | `{process, result, status, machine}` while a process is started and not completed; none otherwise. Status: running, paused, stopped | `processCompleted`, the current marker |
+| `processCompleted` | the append-only ledger of completed processes, unchanged (`{process, result}` or `{process, target}`). The CCA's APs read it (`reviewed_primitive_program_safety` 436-476, `_complete_target_ledger` 420-433) | `ProductHistory` |
+
+- **Removed:** `part_state` (the DES variable and the product tracker's `state`), the part-scoped
+  `job_state`, and `assembled.<part>`. Each restated location or process.
+- **Kept:** the measured `pose` (evidence) and the machine worker's job record (`MachineJobs`, with its own
+  per-job `job_state` and `processing_fraction`), which the failure observations and rule A2 read.
+
+**Who writes what.**
+- `part_location` is derived from custody only (`held_part`, machine `part_name`/`staging_part`,
+  `zone_*_part`, Conveyor `part_location.<part>`, `inventory.*`, `output.*`, Exit `product_location`, and
+  the ledger's assembly entry for parts on the product). Robots stop writing part fields.
+- Machine `start_job` sets the current process `{trim, square, running, M2}`. `pause_job`, `resume_job`
+  and `stop_job` change its status. Observed `complete_job` clears it and appends `{trim, square}` to the
+  ledger.
+- `place_insert` appends `{assembly, target}`. Printer `complete_job` appends `{print_part}`.
+- Guards:
+  - `start_job`: the part has no paused or stopped current process.
+  - Reload `resume_job`: the part's current process is paused **on this machine**.
+  - `place_insert`: no assembly ledger entry for the part (replaces `assembled.<part> == False`).
+  - Exit pickup: every part has its assembly entry (replaces `assembled.<p> == True`, `nominal_des`
+    759-767).
+
+**Model bugs this fixes.**
+1. Cross-machine resume. M2 can resume KET4's job paused on M1, although the job record is per machine,
+   and KET4's fresh `start_job` on M2 is blocked.
+2. `job_state` is declared part-scoped but behaves as one machine variable. Unload events never clear or
+   move it (`nominal_des` 683), so after a paused part is unloaded, `start_job` for the next part is
+   blocked. The reload resume also never checks that it is the same part.
+3. `place_release` never resets the robot's `part_state` (`nominal_des` 603), so a stale value remains.
+4. The v1 plant writes `processCompleted` as strings (`nominal_des` 84-88, `product/state.py` 15, 55,
+   96-100), while v2/v3 write `{process, ...}` dicts.
+
+**Decisions for the user.**
+- **D1 — keep the ledger and add a current process (recommended).** This is the semiconductor split, and
+  the CCA stays untouched. The alternative (a status inside each ledger entry) breaks the CCA ledger checks
+  (`_complete_target_ledger` rejects extra keys; the monitor history checks the ledger only grows) and
+  touches about six safety modules and their fixtures.
+- **D2 — name of the current-process field.** Proposal: `current_process`.
+- **D3 — remove the product tracker's `state` too (recommended).** It is the runtime copy of the part
+  state, so "aligned everywhere" includes it. Readers: `product/state.py`, `product/environment.py`,
+  `environment_runtime` 391/1212, `order.py` 204-210 (v2 `{"state": "assembled"}` requirement),
+  `nominal_planner` 20-21, `failure_grounding` 302-311/341-366 (fault identity keys), `slippage_execution`,
+  capture preparation (`part_slippage_recovery` 441-457, `outline_gazebo_evidence` 96-107), the products
+  UI page.
+- **D4 — remove the legacy contract-1 recovery first (recommended; already step 2 of "Validation
+  removed").** Most remaining `part_state` readers are legacy: `product_recovery_controller`,
+  `process_recovery_planner`, `recovery_session`, contract-1 branches of `multi_turn*`,
+  `multi_turn_outline_state`, `recovery_validation_service`, and the validated prompts. Keep what capture
+  preparation still calls: `recovery_session.prepare_recovery_request`,
+  `_recovery_marked_reentry_context` and `process_recovery_planner._build_resource_search_state`.
+
+**Stages.**
+0. **Checkpoint commit: done** (`a33a0dd`, user, October 23 13:12). Baseline on `a33a0dd`: 152 failed,
+   4,471 passed (the known list).
+   - **D4 skipped (user, October 23, after the mapping below).** The old runtime-recovery engine is not
+     dead. Delivery runs (captures, Gazebo deliveries) dispatch through the product agent's
+     `_PlanExecutor` → `_next_dispatchable_task_node` → `_select_runtime_event`. That path contains a
+     symbolic repair engine (controllable repairs, acquire-entity repair events, runtime plan-validation
+     checks, recovery sequences run as macros), which escalates to the old LLM generation
+     (`_run_multi_turn_recovery_until` → contract-1 `multi_turn`).
+   - Removing it would change what nominal dispatch does on a violation, against the user's condition
+     ("legacy removal is ok as long as the main pipeline works").
+   - Truly dead, for a later optional cleanup:
+     - 29 controller methods (about 1,500 lines: proposal approvals, guidance, preprogrammed scenarios,
+       final bundles, DES retry);
+     - the Run tab's recovery panel (about 1,800 lines; the tab and its nominal controls stay);
+     - 13 panel bridge methods;
+     - the CCA `recovery_safety_generated` inbox.
+   - Whether nominal dispatch should stop instead of escalating to the old LLM is a behavior decision for
+     the user, not a cleanup.
+   - The kept engine gets the same mechanical part-field updates as every other reader.
+   - Mapping scripts are in the session scratchpad (`trace_drafts.py`, `closure.py`,
+     `classify_controller.py`).
+   - Offline check: replaying the four October 23 drafts with their recorded replies reproduces the live
+     drafts (scratchpad `trace_drafts.py` pattern). Use it after each stage; only the part display should
+     differ.
+1. **Plant and product model (offline):**
+   - `nominal_des`: remove `part_state` and `assembled.*`, convert the guards above, and move the
+     ledger strings to dicts.
+   - The robot task definitions (`part_in_state`/`part_transition` keep location only) and
+     `robot_task_recovery`.
+   - `environment_models`: the current process replaces `job_state`, with the new job guards;
+     `owners`/`_custody_part`; `product_state_from_custody` returns location only.
+   - `product/state.py`, `product/environment.py`, `product/nominal.py`, `nominal_planner`, `order.py`.
+   - `machine_jobs.machine_public_state` also maps the worker record onto the part's current process.
+2. **Recovery side:**
+   - `failure_grounding`: a discrepant part gets a location (the robot when an attachment is measured,
+     else none) plus its observed pose, and identity keys use location.
+   - `environment_recovery` placeholders; `recovery_observations`/`offline_recovery` copies;
+     `slippage_execution`; capture preparation.
+   - Draft path:
+     - `multi_turn_outline_facts`: Parts lines and the goal "KET4_Square_4mm: trim → square
+       completed".
+     - `multi_turn_diagnostic`: `_CONDITION_FIELDS`, `_project_machine_jobs`, claims, `goal_reached`,
+       `nominal_entry_ids`.
+     - `multi_turn_context`: part snapshot and `state_variables`.
+     - `multi_turn` symbolic parts, `multi_turn_outline_generation` instance tasks, and the prompt's
+       feedback fields.
+3. **Safety and UI:** remove `part_state` from `base_safety_checker._fixed_state_fields` and from
+   `environment_composition`'s AP params (the CCA ledger APs are unchanged). UI: `nominal_resource_des`
+   labels, `products.py` columns, `robot_status_card`.
+4. **RA step 1 constraints** (the next section's list).
+5. **Tests:**
+   - Update about 30 test files. The largest are `test_multi_turn_diagnostic`,
+     `test_recovery_context_retrieval`, `test_nominal_resource_des`, `test_environment_capabilities` and
+     `test_part_slippage_recovery`.
+   - Add regression tests for bugs 1–4.
+   - Migrate the checked-in fixtures that carry `part_state`/`assembled.*` (`storage_interruption`,
+     `conveyor_b66d_declared_fields.json`, the `part_slippage` turn responses and bundles,
+     `legacy_task_ap_preview.json`) in the existing `test/ppr_ap_migration.py` style.
+   - Old recorded captures keep loading (extra fields are ignored); the tests pinned to them
+     (`test_failure_grounding.OFFICIAL`) get updated expectations.
+6. **Verification and Gazebo:**
+   - `poetry check`, `compileall`, `ui_main --help`, and the full suite against the known failures.
+   - `make bootstrap-gazebo`, then one nominal Gazebo run.
+   - Recapture all four failures through the shared queue, with the runbook flags.
+   - Switch the UI defaults and archive the superseded captures first (the archive rule).
+   - Rerun the four LLM-only drafts.
+7. Then RA steps 2–5.
+
+**Progress (October 23, evening; uncommitted).**
+- **Done, stage 1a (machine jobs).** `environment_models._declare_machine_jobs` has no `job_state`
+  variable. The job events carry `product_effects.current_process`: `start_job` sets
+  `{process, result, status: running, machine}`, `pause`/`resume`/`stop` set the status (`_JOB_STATUS`),
+  and the observed `complete_job` clears it and appends the ledger entry. `product_guards.current_process`
+  is now checked in `project_transition` (`_check_product_guards`):
+  - `start_job` is allowed unless this machine holds the part's unfinished job (`not_matches` machine);
+  - the reload `resume_job` requires the part's job paused on this machine (`matches`).
+  - Helper `current_process_after`. Bugs 1 and 2 are fixed. Test:
+    `test_a_reloaded_part_resumes_only_where_its_job_paused_and_starts_fresh_elsewhere`.
+- **Done, stage 1b (tracker).** The product tracker is `{location, current_process, last_task,
+  processCompleted}` (`product/environment.py` init, `product/state.py` `ProductState`).
+  - `product_state_from_custody` returns location only.
+  - An assembled part is located on the product (`owners`, `project_transition`, `environment_runtime`
+    391).
+  - `matches_requirement` reads an order's `{"state": "assembled", "target"}` as the part's `target`.
+  - The v1 ledger holds `{"process": name}` dicts (bug 4).
+- **Done, stage 1c (robot part fields).** The v1 plant robots declare no `part_state`/`part_location`
+  and their events write none. `assembled.<part>` stays in the v1 plant only; the runtime models strip it
+  as before.
+  - The robot task contracts (`robot_task_definitions` `part_in_state`/`part_transition`) keep their
+    vocabulary. Only the old non-delivery bidding planner, the kept engine and the robot recovery
+    descriptor read it.
+  - The engine's part-state guard became a held-part check only (it was already skipped for unknown
+    values: `enforce_unknown=False`).
+  - The repair projections and `_recovery_part_entry_mismatch` compare location only.
+  - The non-delivery tracker update stores no handling label.
+- **Done, other readers:** `environment_composition` AP params, `base_safety_checker._fixed_state_fields`
+  (no spec used `part_state`), the `saved_recovery_execution` comparison.
+- **Done, grounding:** `failure_grounding` part facts = (location, current_process). A discrepant part is
+  at its holder, or at none with its observed pose. `fault_identity`/`belief_key` use location, and
+  `part_facts` drop `current_state`.
+  - The four current captures' stored groundings (`beliefs.json`) no longer match re-derivation until
+    they are recaptured or re-stored with `failure_grounding --store`. Do not rewrite capture files
+    without asking the user.
+- **Done, stage 2 (first pass, not yet fully tested):**
+  - Capture preparation (`recovery_session`):
+    - `_contract_part_state_holds` checks a task contract's `part_in_state` by custody
+      (`in_gripper`/`in_transit`: the acting resource holds the part; `ready`: it does not);
+    - no `resume_entry_part_state` rows (the carried-entity and location rows remain);
+    - `part_facts` carry `current_process` instead of `current_state`.
+  - `part_slippage_recovery`/`outline_gazebo_evidence` pass location and current process, and an empty
+    search-state `part_states`.
+  - The robot recovery descriptor declares and writes no `part_state` (it keeps `part_location`, the
+    location custody gives).
+  - `environment_recovery` placeholders: `part_location`, `current_process`. The machine `job_state`
+    description is removed.
+  - Draft path:
+    - `multi_turn` seeds no `part_state` and merges a stated `current_process`
+      (`_stated_current_process`: a bare status merges into the record);
+    - `multi_turn_diagnostic`:
+      - `condition_holds` translates an older capture's `(part, state)` row through the contract rule;
+      - outcomes include ledger effects (`_completed_effects`, `_meets` containment), as does
+        `declared_part_effects`;
+      - `_project_machine_jobs` follows `current_process`;
+      - nominal-connection steps get their model's product guards and effects
+        (`_with_product_effects`);
+    - context, instance tasks and prompt feedback fields have no `part_state`;
+    - the Parts header reads "where it is, who holds it, and its process record";
+    - `multi_turn_outline_facts` shows "at M1; processes: trim → square running on M1", and the goal
+      reads "trim → square completed".
+  - `slippage_execution`: a placement is a changed end `part_location` (assembled = on the product), and
+    the robot valuation gets no part fields.
+  - Offline prompt preview on the current (old) captures renders correctly. Their goal lines still show
+    "job_state completed"/"part_state assembled", which come from the old recorded models, until the
+    recapture.
+- **Tests updated so far** (fixtures moved to the aligned tracker; the legacy preview fixture migrates
+  `part_state=assembled` to `part_location=<destination>` in `test/ppr_ap_migration.py`):
+  `test_machine_jobs`, `test_nominal_agents`, `test_recovery_delivery`, `test_failure_grounding`,
+  `test_part_slippage_recovery`, `test_safety_previews`.
+- **Done, draft path and UI:**
+  - The draft-path suites were fixed. Nominal-connection steps carry their model's ledger and
+    `current_process` effects, and a stated ledger entry that completes the unfinished process clears it
+    (`_finish_completed_process`, a code-derived change).
+  - No `job_state` is shown to the LLM (user, October 23). Rule A2's `task_outcome` signal states
+    `process, result, status, processing_fraction`, and the jobs line reads
+    "KET4_Square_4mm trim → square interrupted". The machine worker's own `MachineJobs` record keeps its
+    `job_state` field (controller bookkeeping, not model state); renaming it is a later runtime change.
+  - UI: `products.py` shows `current_process` and the unfinished process; `nominal_resource_des` has no
+    `part_state`.
+- **Verified (October 23, night):** the full suite gives **152 failed / 4,472 passed**, the same 152 as the
+  `a33a0dd` baseline, none new (the extra pass is the new job regression test). `poetry check`,
+  `compileall` and `ui_main --help` pass. The draft diff has no removed imports (34 files).
+- **Remaining:** RA step 1 constraints, then stage 6 Gazebo (bootstrap, nominal run, recapture, draft
+  reruns). Both are now ordered after the "activity model B" stage below.
+
+**Activity model B (user, October 23: "b makes sense", "do not implement yet").**
+- Every activity is a commanded start (controllable) → a running state → an observed finish
+  (uncontrollable). A fault is an observed event from any state (Eqs. 2–3), and custody (so a part's
+  location) changes at the finish. This is the Ramadge–Wonham machine (start controllable, finish
+  uncontrollable, breakdown uncontrollable); the semiconductor robots and machines already have start →
+  in-progress → finish edges.
+- Machines (`start_job`/`complete_job`) and the printer already follow it.
+- To do:
+  - Robots: `pick_approach`, `pick_grasp`, `place_approach`, `place_release`/`place_insert`,
+    `move_home`, each with a running state (`approaching_pick`, `grasping`, `approaching_place`,
+    `releasing`, `moving_home`).
+  - KMR: `travelling`, `grasping`, `positioning`, `releasing`.
+  - Conveyor: `resource_state` idle/moving replaces `belt_stopped`, with the move's targets in
+    `task_ctx`.
+  - Buffer: idle/moving per zone advance.
+  - Storage gets `resource_state` (passive).
+- Shared events synchronize on the finish events (custody moves); start events carry the "may begin"
+  guards. Example: a robot cannot place on a moving belt.
+- During an activity a part keeps its last confirmed location, and the owner's running state says it is
+  in transit.
+- The runtime already has both halves: a dispatch applies the start, an acknowledgement applies the
+  finish, and a failure report applies the fault. Verify this when planning.
+- Open decisions:
+  - event naming;
+  - recovery outline events stay outcome-level (x → x′), with completion treated as uncontrollable by
+    RA/CCA (recommended);
+  - whether the Conveyor gets a controllable mid-move stop (not today).
+- Order: plan B as its own stage, then the RA step 1 constraints, then one recapture after both.
+
+**Paper.** Section 3 states the part state as (location, current process, process ledger), citing the
+semiconductor `ProductState`/`ProductHistory`. The interrupted-process status is the extension.
+
+## Activity model B — stage plan, October 23, 2026 — APPROVED (B-D1…B-D6 as recommended), not started
+
+**Decision (user, October 23).** "b makes sense"; "do not implement yet"; "come up with the detailed plan
+for B including the resources that are not aligned correctly right now". Ordered after the aligned part
+model (done offline) and before the RA step 1 constraints and the single recapture.
+
+**Formal rule.** Every activity is a controllable start (the resource enters a running state) followed by
+an uncontrollable, observed finish (custody, and so the part's location, changes). A fault is an
+uncontrollable observed event from any state (Eqs. 2–3). This is the Ramadge–Wonham machine (start
+controllable, finish uncontrollable, breakdown uncontrollable).
+- The semiconductor robots and machines already have start → in-progress → finish edges. There the
+  in-progress state lives in the product node and the edges are timed rather than labeled.
+- The CCA's local composition already treats every action as a start plus an uncontrollable "done"
+  (`local_composition.py` 129, 237-277).
+- Plant composition stays ∥ᵢ Gᵢ with shared events: participants synchronize on the finish, where custody
+  moves; the start carries the "may begin" guards.
+
+### Resources that are not aligned today
+
+| Resource | Today | Problem |
+| --- | --- | --- |
+| UR5e ×4 | `idle, at_pick, picked, positioned, placed`; 5 one-event activities | command and completion merged in one controllable event |
+| KMR | `idle, at_pick, carrying, positioned`; `move_to_resource` is `carrying`→`carrying` | travel has no state; activities are one event |
+| Conveyor | **no `resource_state`**; `belt_stopped` is always true (nothing sets it false); `loading_reserved_by` is never set to a robot (a binding only) | no state; dead variables; the advance is one event |
+| Buffer | **no `resource_state`**; `zone_1..4_part` | no state; `advance_part` is one event |
+| Storage | **no `resource_state`**; `inventory.<part>` | no state (passive) |
+| M1, M2 | already B (`start_job` → `complete_job`, `fault_states: [interrupted]`) | `controllable_event_alphabet` wrongly lists `complete_job` (`environment_models` 183-184 copies the local alphabet) |
+| Printer | already B (`print_part` → `complete_job`) | `local_event_alphabet` lacks `complete_job` (alphabets are computed before `_declare_printer_state`), so `bind_executor` (`product/environment.py` 78) would reject it |
+| Exit | `empty, occupied` (participant only) | aligned |
+
+### Target model
+
+| Resource | States | Activities (start → running state; observed finish → state) | At the finish |
+| --- | --- | --- | --- |
+| UR5e | `idle`, `approaching_pick`, `at_pick`, `grasping`, `picked`, `approaching_place`, `positioned`, `releasing`, `placed`, `moving_home` + fault `failed` | `pick_approach` idle/placed → approaching_pick → at_pick; `pick_grasp` → grasping → picked; `place_approach` → approaching_place → positioned; `place_release`/`place_insert` → releasing → placed; `move_home` → moving_home → idle | grasp: `held_part` = part, the source slot clears. Release: `held_part` = none, the destination gets the part (insert: on the product, ledger += assembly) |
+| KMR | `idle`, `approaching`, `at_pick`, `grasping`, `carrying`, `travelling`, `positioning`, `positioned`, `releasing` + `failed` | `pick_approach`, `pick_part`, `move_to_resource` (→ travelling → same state, new `resource_location`), `place_approach`, `place_release` | pick: Storage `inventory` = false. Release: machine `part_name`, machine → `loaded` |
+| Conveyor | `idle`, `moving` + `failed` (`resource_state` **replaces `belt_stopped`**) | `advance` idle → moving → idle (`task_ctx` holds the targets); variant with delivery | regions/`part_order` updated; with delivery the leading part goes to Buffer `zone_1_part` |
+| Buffer | `idle`, `moving` + `failed` | `advance_part` (zone n → n+1) | zones updated |
+| Storage | `idle` (new; passive) | — (a participant in KMR/robot picks) | — |
+| M1, M2, Printer | unchanged | unchanged | unchanged (alphabet bugs fixed) |
+| Exit | unchanged | — | — |
+
+- **The Conveyor's loading reservation becomes real.** A robot's `place_release` start onto the belt
+  sets `loading_reserved_by` = robot (the robot is `releasing`), and its finish clears it. The Conveyor's
+  `advance` start requires `idle` and no reservation, so a robot never places onto a moving belt and the
+  belt never moves under a releasing robot.
+- **A part keeps its last confirmed location during an activity.** The owner's running state says it is
+  in transit, so location stays custody-only.
+
+### Decisions (approved by the user on October 23, all as recommended)
+
+- **B-D1 Naming.**
+  - The start keeps the function name (`pick_approach`, `advance_conveyor`, …), so programs, executor
+    binding and CCA event APs keep working.
+  - The finish is `<function>_done` (`pick_approach_done`, …).
+  - The machines and printer keep `start_job`/`complete_job` and `print_part`/`complete_job` (fixed
+    symbols).
+- **B-D2 Runtime commit points (recommended: two commits per execution).** One resource-agent execution
+  produces two product commits:
+  - **start** when the RA sends `ack("running")` after the CCA grant (`environment_runtime.py` 1593);
+  - **finish** at `ack("completed")`;
+  - **fault** at `ack("blocked")` or an injected fault.
+
+  Rejected alternative: a separately dispatched finish task, as `complete_job` is today. The robot, KMR
+  and transport executors are synchronous (`workflow_execution.py` 497, 578, 616), the worker runs one
+  operation at a time, there is no in-flight handle to re-attach to, and each finish would cost a
+  negotiation, a CCA preview and reservations (the CCA could even "hold" an uncontrollable event).
+  Machines and the printer keep their existing two-task form, which is the same formal model.
+- **B-D3 Revisions.** A start commit bumps the participants' revisions, so the pending record is re-bound
+  to the post-start revisions before its finish is checked (`product/environment.py` 694-699 and RA checks
+  at `environment_runtime.py` 1531, 1583, 1636).
+- **B-D4 CCA stepping.**
+  - `synchronize` takes typed start/finish/fault records and steps the monitors at each one: start =
+    "executing X" event APs plus the running state's state labels; finish = the state labels after.
+  - `local_composition` must not add its own "done" to an explicit finish (no double completion).
+- **B-D5 Recovery outline events stay outcome-level (x → x′).** The LLM states one event and its end
+  state; RA/CCA treat its completion as uncontrollable. The draft's nominal-connection search counts
+  activities (start + finish together) so its 6-step budget still means six activities, and it never
+  offers fault events as nominal steps (`multi_turn_diagnostic._nominal_successors` iterates every event
+  today).
+- **B-D6 No mid-motion cancel or stop events now.** Add a controllable `cancel`/`stop` later only if a
+  recovery needs one.
+
+### Sub-stages
+
+1. **B1 Model.**
+   - `nominal_des._event` takes `controllable`/`observable`.
+   - Split builders: `_robot_task_event`, `_robot_pick_events`, `_robot_place_events` (`place_release`
+     602), `move_home`, the KMR events in `_machine_and_mobile_events`, `advance_conveyor` (both
+     variants) and `advance_part` in `_transport_and_print_events`. Custody updates and product effects
+     move to the finish; every participant gets the same `event_id` and `controllable` (the shared-field
+     check, `environment_models` 421-441).
+   - Running states enter the `resource_state` domains. Conveyor `resource_state` replaces
+     `belt_stopped`; Buffer and Storage get one.
+   - Alphabets are filtered by the flag and computed after `_declare_printer_state` (fixes both alphabet
+     bugs).
+   - Invariants: `owners()` (869-881) and `nominal_des._check_valuation` (1048-1059) classify the new
+     holding states (`grasping`, `approaching_place`, `releasing`, `travelling`, …) against `held_part`.
+   - Program contracts: start `success_state` = the running state (robot registry definitions,
+     `KMR_TASKS`, `workflow_task_programs`, `machine_job_functions`); `function_contracts` skips finishes.
+     Regenerate the scene `resource_programs` and bump its revision (`gazebo_programs._check_program`
+     compares exactly).
+2. **B2 Planning.**
+   - `event_bindings`/`candidates`/`feasibility`, plus the Conveyor-specific logic moved to the finish:
+     `project_transition` load/advance derivations (1090-1119), `_parameterized_event` collection
+     guards/effects (529-539), `candidates` (709-730), `project_nominal_event`, and `_task_reservations`
+     (`product/environment.py` 614-656).
+   - `environment_capabilities`; the path budget (`environment_runtime.py` `max_steps = 64`) roughly
+     doubles.
+   - `set_plans` `in_state`/`out_state` (718-740) per half.
+   - The v1 `nominal_planner` templates.
+3. **B3 Runtime (EnvironmentRuntime, and DeliveryRuntime's `_AckInbox` the same way).**
+   - The PA commits a start on `"running"` (today only logged at 1369-1370) and a finish on
+     `"completed"`.
+   - A failure commits the fault (`blocked`/injected), and the run then stops as today.
+   - Pending re-bind (B-D3); `environment_admission.synchronize` typed records (B-D4).
+   - Finishes are never dispatched as tasks (their executor binding is skipped, like the observed-event
+     checks at `environment_runtime.py` 1518-1528).
+   - Hard-coded states: `delivery.py` 242-248, `kmr_agent.py` 191-194, `environment_runtime.py` 1169 and
+     1263.
+4. **B4 Capture and grounding (the failure captures depend on these).**
+   - `failure_checkpoints.py` (`picked` 31, last acknowledgement `pick_grasp` 39, `place_approach` 76,
+     M1 `completed` 109/131/150, `at_pick` 133, `complete_job`/`pick_approach` 138, `start_job` 184,
+     `place_approach` 198) moves to the new states and finish records.
+   - `conveyor_fault.py`: `complete_job` 157; `place_approach` step `descend` 247-255, which becomes the
+     running state `approaching_place`; `failed` 448.
+   - `evaluation_capture.py` checks (183, 194, 244-259, 300).
+   - Rule A1: a robot goal cancelled mid-activity is the fault out of the running state, with its finish
+     pending (like A2's pending `complete_job`).
+5. **B5 Recovery and draft path.**
+   - `robot_task_recovery` emits start/finish pairs from the programs (`primitive_support` and
+     `composition_contract` on the start only; running states in the domain).
+   - `environment_recovery`: `public_evaluation_support` reads finish updates too (137-149); the KMR
+     operation names (146-147); `collection_binding` on the Conveyor finish only (316-325); `_owned_event`
+     support on the start only.
+   - `multi_turn_diagnostic`:
+     - activity-level steps and no faults in `_nominal_successors`;
+     - `_recorded_task`, `resume_entries` and `_declared_event` bind the start by function name and
+       complete with its finish;
+     - neighbor pairing (`_neighbor_rows`/`_owner_allows`) by the finish copy;
+     - `faulted_resources` with `failed` in the domain.
+   - `multi_turn_outline_facts`: state words for Conveyor/Buffer/Storage; `_placement_positions` and
+     `declared_record_places` read finish updates.
+6. **B6 UI and bridge.**
+   - `nominal_resource_des`: function diagrams draw start and finish edges (358-410); the field choice
+     prefers occupancy for Conveyor/Buffer/Storage (1068-1076, 716-745).
+   - `status_badge.py` colors the running states; `robot_status_card`; bridge robot state maps (28959-28976)
+     and `positioned`/`picked` checks (14729-14742, 15770, 19303, 20050, 26496, 27179, 32969).
+7. **B7 Tests.**
+   - Update the tests that pin activity events and states. Largest: `test_nominal_resource_des` (≈70
+     references), `test_multi_turn_diagnostic` (≈50), `test_environment_capabilities` (≈40),
+     `test_recovery_feasibility`, `test_part_slippage_recovery`, `test_conveyor_fault`,
+     `test_safety_previews`, `test_gazebo_resource_programs`, `test_recovery_case_safety`; plus JSON
+     fixtures with `belt_stopped` programs.
+   - New regression tests:
+     - each resource's start/finish pair and controllability;
+     - no place onto a moving belt;
+     - a fault from a running state;
+     - two commits per execution with re-bound revisions;
+     - the CCA steps once per record with no double "done";
+     - fixed alphabets for machines and the printer.
+8. **B8 Verification.**
+   - The full suite against the baseline; `make bootstrap-gazebo`.
+   - **One nominal Gazebo order run** (the main pipeline end to end).
+   - Then the RA step 1 constraints.
+   - Then **one recapture of all four failures** (shared queue, runbook flags), the UI defaults switch,
+     archiving first, and four draft reruns.
+
+### Risks
+
+- **The main pipeline runtime changes:** two commits per execution, CCA stepping, and capture checkpoints.
+  The B8 nominal run and the recapture are the end-to-end proof.
+- **Paths double in length:** planning budgets and the draft search are adjusted to count activities.
+- **Recorded artifacts go stale:** the scene program revision bump makes old captures non-executable in
+  Gazebo (they are recaptured anyway).
+- **Size:** larger than the part model change. It touches roughly the model, planning, runtime,
+  capture, CCA, recovery, UI and about 25 test files.
+
+### Paper
+
+- Section 3: one resource template (`resource_state` + variables; activities as start/finish with
+  controllability; faults from any state).
+- Section 5.3: the monitors step on start and finish records.
+- State the outcome-level recovery event convention (B-D5).
+
 ## RA feasibility validation — October 23, 2026 — plan approved by the user, not started
 
 **Goal.** Rebuild RA validation as the paper defines it, applied to each event the LLM proposes:
@@ -123,6 +567,22 @@ collapses. So the RA is a verifier, never a generator:
 
 Noticed, out of scope: `workflow_gazebo.py` 56-60 indexes `machines[0]`/`[1]` unsorted, while
 `nominal_des` sorts them by `conveyor_loading_pose` (the same order today).
+
+**Model bug found October 23: cross-machine resume.**
+- The job record and its percentage (`MachineJobs`, `processing_fraction` at `machine_jobs.py` 485-486)
+  are per machine: KET4's 7% lives only in M1's record.
+- The DES lets the part-scoped `job_state: paused` travel with the part. M2's `resume_job` guard checks
+  only "loaded and the part's job paused", not which machine paused it.
+- M2's `start_job` is blocked for KET4, because it needs `job_state` none or completed.
+- So the model allows a resume M2's worker cannot execute and forbids the fresh start it can. Today's
+  Machining draft `draft_b89cc88b…` used exactly that resume.
+- The scenario intends `resume_after_reload` for the same machine (M2 resumes RGOCG4-50) and a fresh
+  start for KET4 on M2.
+- Fix: guard the resume by the machine that holds the job. In the aligned part model, each record entry
+  names its machine. Fix it whichever part model is chosen.
+
+**Aligned part model (chosen by the user October 23).** See the section "Aligned part model" at the top:
+location, current process and the unchanged `processCompleted` ledger. It fixes this resume bug.
 
 **Design choices (user-approved October 23).**
 - Match each changed variable separately, not the whole end state against one transition, so

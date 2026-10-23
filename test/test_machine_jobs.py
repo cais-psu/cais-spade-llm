@@ -564,12 +564,13 @@ def test_random_worker_failure_preserves_both_jobs_before_shutdown(tmp_path):
     assert peer.record['active_job'] is None
 
 
-def test_job_control_is_the_machine_automaton_and_each_part_keeps_its_job_state():
+def test_job_control_is_the_machine_automaton_and_each_part_keeps_its_current_process():
     from cais_spade_llm.resources.environment_models import build_environment_models
 
     m1 = build_environment_models(json.loads(SCENE_PATH.read_text()))['M1']
     variables = m1['state_variables']
-    assert 'active_job' not in variables and variables['job_state']['scope'] == 'part'
+    # The unfinished job is the part's current_process (product state), not a machine variable.
+    assert 'active_job' not in variables and 'job_state' not in variables
     own = {(event['event_name'], event['guards']['resource_state']['equals'], event['updates']['resource_state']['set'])
            for event in m1['events'] if event['parameter_bindings']['resource_id'] == {'equals': 'M1'}
            and 'equals' in event['guards'].get('resource_state', {}) and 'resource_state' in event['updates']}
@@ -584,6 +585,44 @@ def test_job_control_is_the_machine_automaton_and_each_part_keeps_its_job_state(
     assert machine_public_state(record, {'part_name': 'KET4_Square_4mm', 'current_state': 'loaded'}) == {
         'selected_program': 'square', 'resource_state': 'interrupted', 'current_state': 'interrupted'}
     assert machine_public_state(record, {'part_name': None}) == {'selected_program': 'square'}
+
+
+def test_a_reloaded_part_resumes_only_where_its_job_paused_and_starts_fresh_elsewhere():
+    from cais_spade_llm.resources.environment_models import (
+        _check_product_guards,
+        build_environment_models,
+        current_process_after,
+    )
+
+    models = build_environment_models(json.loads(SCENE_PATH.read_text()))
+    part = 'KET4_Square_4mm'
+
+    def event(rid, name, before):
+        return next(e for e in models[rid]['events'] if e['event_name'] == name
+                    and e['parameter_bindings']['resource_id'] == {'equals': rid}
+                    and e['guards'].get('resource_state') == {'equals': before})
+
+    def params(rid, name, **extra):
+        values = {'resource_id': rid, 'part_name': part, **extra}
+        return {**values, 'process': 'trim', 'result': 'square'} if name in {'start_job', 'complete_job'} else values
+
+    started = current_process_after(event('M1', 'start_job', 'loaded'), None, params('M1', 'start_job'))
+    assert started == {'process': 'trim', 'result': 'square', 'status': 'running', 'machine': 'M1'}
+    paused = current_process_after(event('M1', 'pause_job', 'running'), started, params('M1', 'pause_job', job_id='j'))
+    assert paused == {**started, 'status': 'paused'}
+    reload_resume = {'M1': event('M1', 'resume_job', 'loaded'), 'M2': event('M2', 'resume_job', 'loaded')}
+    # The job record is per machine, so only M1 can resume the job it paused.
+    _check_product_guards(reload_resume['M1'], {'current_process': paused}, params('M1', 'resume_job', job_id='j'))
+    with pytest.raises(ValueError, match='current_process'):
+        _check_product_guards(reload_resume['M2'], {'current_process': paused}, params('M2', 'resume_job', job_id='j'))
+    # M2 may start the part fresh; M1 may not start over a job it holds.
+    _check_product_guards(event('M2', 'start_job', 'loaded'), {'current_process': paused}, params('M2', 'start_job'))
+    with pytest.raises(ValueError, match='current_process'):
+        _check_product_guards(event('M1', 'start_job', 'loaded'), {'current_process': paused}, params('M1', 'start_job'))
+    # The observed completion clears the unfinished process; the ledger keeps the result.
+    complete = event('M2', 'complete_job', 'running')
+    assert current_process_after(complete, {**started, 'machine': 'M2'}, params('M2', 'complete_job')) is None
+    assert complete['product_effects']['processCompleted'] == [{'process': 'trim', 'result': {'set_from_param': 'result'}}]
 
 def test_job_controlled_machining_plans_a_commanded_start_and_an_observed_completion():
     from cais_spade_llm.resources.environment_models import build_environment_models, candidates, feasibility

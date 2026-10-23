@@ -82,7 +82,7 @@ def _event(
                     "target": deepcopy(capability[1]),
                 },
                 "product_effects": {
-                    "processCompleted": [name]
+                    "processCompleted": [{"process": name}]
                     if name in {"machine_part", "print_part", "place_insert"}
                     else [],
                 },
@@ -188,29 +188,8 @@ def _declare_states(models: dict, scene: dict) -> None:
         _variable(model, "task_ctx.origin_resource_location", [None, *sources], None)
         _variable(model, "task_ctx.destination_location", [None, *destinations], None)
         _variable(model, "task_ctx.part_name", [None, *parts], None)
-        _variable(
-            model,
-            "part_state",
-            [
-                None,
-                "ready",
-                "in_gripper",
-                "in_transit",
-                *(["assembled"] if robot in {
-                    scene["Buffer For Machined parts"]["handling_robot"],
-                    scene["3D Printing Station"]["handling_robot"],
-                } else []),
-            ],
-            None,
-            scope="part",
-        )
-        _variable(
-            model,
-            "part_location",
-            [None, *dict.fromkeys([*sources, robot, *destinations])],
-            None,
-            scope="part",
-        )
+        # A part's location follows from custody (held_part and the place's own fields), so the robot
+        # declares no part variables.
         model["marked_state_conditions"] = [
             _equals(resource_state="idle", held_part=None, resource_location="home")
         ]
@@ -530,14 +509,11 @@ def _robot_pick_events(
             owner: source_guards,
         },
         {
-            robot: {
-                **_sets(part_state="in_gripper", part_location=robot),
-                "held_part": {"set_from_param": "part_name"},
-            },
+            robot: {"held_part": {"set_from_param": "part_name"}},
             owner: source_updates,
         },
         parameters=parameters,
-        capability=(source_state, {"part_location": robot, "part_state": "in_gripper"}),
+        capability=(source_state, {"part_location": robot}),
     )
 
 
@@ -557,12 +533,8 @@ def _robot_place_events(
     parameters = {
         "part_name": {"equals": fixed_part} if fixed_part is not None else _part_parameter(robot)
     }
-    in_gripper = {"part_location": robot, "part_state": "in_gripper"}
-    positioned = {
-        "part_location": robot,
-        "part_state": "in_transit",
-        "task_ctx.destination_location": destination,
-    }
+    in_gripper = {"part_location": robot}
+    positioned = {"part_location": robot, "task_ctx.destination_location": destination}
     downstream_guards = (
         {"Buffer For Machined parts": _equals(zone_1_part=None)}
         if destination == "Conveyor"
@@ -580,9 +552,7 @@ def _robot_place_events(
         },
         {
             robot: {
-                **_sets(
-                    resource_location=destination, part_state="in_transit", part_location=robot
-                ),
+                **_sets(resource_location=destination),
                 "task_ctx.destination_location": {"set": destination},
             }
         },
@@ -600,7 +570,7 @@ def _robot_place_events(
     }
     updates = {
         robot: {
-            **_sets(resource_state="placed", held_part=None, part_location=destination),
+            **_sets(resource_state="placed", held_part=None),
             **{
                 field: {"set": None}
                 for field in models[robot]["state_variables"]
@@ -612,7 +582,6 @@ def _robot_place_events(
     if assembly:
         guards.pop(owner)
         updates.pop(owner)
-        updates[robot]["part_state"] = {"set": "assembled"}
         guards[robot]["assembled.{part_name}"] = {"equals": False}
         updates[robot]["assembled.{part_name}"] = {"set": True}
         _robot_task_event(
@@ -627,7 +596,7 @@ def _robot_place_events(
             guards,
             updates,
             parameters=parameters,
-            capability=(positioned, {"part_location": destination, "part_state": "assembled"}),
+            capability=(positioned, {"part_location": destination}),
         )
     else:
         _event(
@@ -803,12 +772,12 @@ def _robot_events(models: dict, scene: dict) -> None:
         },
         completion_guards,
         {
-            exit_robot: _sets(held_part=product, part_state="in_gripper", part_location=exit_robot),
+            exit_robot: _sets(held_part=product),
             "Exit": _sets(product_location=exit_robot),
         },
         capability=(
             {"part_location": product},
-            {"part_location": exit_robot, "part_state": "in_gripper"},
+            {"part_location": exit_robot},
         ),
     )
     _robot_place_events(

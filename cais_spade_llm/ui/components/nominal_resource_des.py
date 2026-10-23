@@ -562,7 +562,7 @@ def _product_graph_label(state: dict, conditions: dict) -> str:
         lines = [f"{key} = {_text(value)}" for key, value in output.items()]
         if location is not None:
             lines.append(f"part_location = {_text(location)}")
-    for key in ("part_state", "zone"):
+    for key in ("zone",):
         if key in state:
             lines.append(f"{key} = {_text(state[key])}")
     for key in ("resource_location", "task_ctx.destination_location"):
@@ -659,7 +659,7 @@ def nominal_resource_product_diagram(model: dict, models: dict) -> dict:
         if key not in node_ids:
             state = {
                 field: deepcopy(value) for field, value in endpoint.items()
-                if field in {"part_location", "part_state", "zone", "processCompleted"}
+                if field in {"part_location", "zone", "processCompleted"}
                 or field.startswith("output.")
             }
             conditions = {field: deepcopy(value) for field, value in endpoint.items()

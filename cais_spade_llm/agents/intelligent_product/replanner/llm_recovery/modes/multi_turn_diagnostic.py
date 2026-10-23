@@ -12,7 +12,7 @@ from cais_spade_llm.agents.shared_information.recovery_validation_protocol impor
 
 _CONDITION_FIELDS = {
     ("resource", "current_state"): "resource_state", ("resource", "location"): "resource_location",
-    ("resource", "held_part"): "held_part", ("part", "state"): "part_state", ("part", "location"): "part_location",
+    ("resource", "held_part"): "held_part", ("part", "location"): "part_location",
 }
 # How the prompt and the lookups show a value an accepted event changed without stating it.
 NOT_STATED = "not stated"
@@ -63,6 +63,14 @@ def condition_holds(row: dict, session: dict, prepared: dict) -> bool:
         session_state=session, prepared_recovery_request=prepared)
     kind = row.get("entity_kind")
     state = (resources if kind == "resource" else parts).get(row.get("entity"), {})
+    if kind == "part" and row.get("field") == "state":
+        # Older captures record a task contract's part label; a part stores none, so it is checked by
+        # who holds the part, as capture preparation now does.
+        from ..recovery_session import _contract_part_state_holds
+
+        holder = next((jid for jid, values in resources.items() if values.get("held_part") == row.get("entity")), "")
+        held = row.get("entity") if holder else ""
+        return bool(state) and _contract_part_state_holds(str(row.get("expected") or ""), str(row.get("entity")), held)
     name = _CONDITION_FIELDS.get((kind, row.get("field")), row.get("field"))
     if not state or name in session.get("diagnostic_unknown_owner_fields", {}).get(row.get("entity"), []):
         return False
@@ -400,39 +408,55 @@ def machine_jobs(jid: str, session: dict, prepared: dict) -> list[dict]:
         prepared: Recorded failure context holding the recorded jobs.
 
     Returns:
-        Each job's part, state and, while no event changed it, its recorded processing fraction.
+        Each job's part, process, result, status and, while no event changed it, its recorded processing
+        fraction.
     """
     if jid in session.get("diagnostic_machine_jobs", {}):
         return session["diagnostic_machine_jobs"][jid]
     observations = (prepared.get("recovery_resources", {}).get(jid, {}).get("static_capabilities") or {}).get(
         "processing_observations") or {}
-    return [{"part_name": row["part_name"], "job_state": row.get("job_state"),
-             "processing_fraction": row.get("processing_fraction")}
+    return [{"part_name": row["part_name"], "process": row.get("process"), "result": row.get("result"),
+             "status": row.get("job_state"), "processing_fraction": row.get("processing_fraction")}
             for row in (observations.get("jobs") or {}).values() if row.get("part_name")]
 
 
-def _project_machine_jobs(task: dict, session: dict, prepared: dict) -> None:
-    """Apply a stated job_state to the job it belongs to.
+def _finish_completed_process(task: dict, session: dict) -> list[dict]:
+    """End the part's unfinished process when the event states the ledger entry that completes it.
 
-    A job's state is a condition of its part, so the stated value changes the job of the event's part
-    and leaves the others as they are. A model that declares job_state on the resource means the job of
-    the part it holds, or else its last retained job.
+    A process cannot be both unfinished and completed; the model's completion event clears it the same
+    way. An event that states the part's current process itself is applied as stated.
     """
-    stated = {task["resource_jid"]: task["expected_end_state"], **(task.get("neighbor_end_state") or {})}
-    for jid, values in stated.items():
-        # A null job_state means no job is active; it is no job's state, so retained jobs keep theirs.
-        if values.get("job_state") is None:
-            continue
-        jobs = session.setdefault("diagnostic_machine_jobs", {}).setdefault(jid, deepcopy(machine_jobs(jid, session, prepared)))
-        declared = session.get("recovery_des_models", {}).get(jid, {}).get("state_variables", {}).get("job_state", {})
-        part = (task.get("part_name") if declared.get("scope") == "part"
-                else session.get("symbolic_resources", {}).get(jid, {}).get("part_name"))
-        job = next((row for row in jobs if row["part_name"] == part), None) if part else (jobs[-1] if jobs else None)
-        if job is None and part:
-            job = {"part_name": part}
-            jobs.append(job)
-        if job is not None:
-            job.update(job_state=deepcopy(values["job_state"]), processing_fraction=None)
+    part_name = task.get("part_name")
+    part = session.get("symbolic_parts", {}).get(part_name, {})
+    current = part.get("current_process")
+    if not isinstance(current, dict) or "current_process" in task["expected_end_state"]:
+        return []
+    done = {key: current.get(key) for key in ("process", "result") if current.get(key) is not None}
+    if done not in (part.get("processCompleted") or []):
+        return []
+    part["current_process"] = None
+    return [_derived(part_name, "current_process", None, f"the stated processCompleted completes {done}")]
+
+
+def _project_machine_jobs(task: dict, session: dict, prepared: dict) -> None:
+    """Keep the machine's job record of the event's part in step with the part's stated current process.
+
+    The part carries its unfinished process with the machine that holds the job, so a stated status
+    changes that machine's job of the part and leaves its other jobs as they are. A stated completion
+    (``current_process`` none) leaves the records as they are.
+    """
+    part = task.get("part_name")
+    process = session.get("symbolic_parts", {}).get(part, {}).get("current_process")
+    if not part or "current_process" not in task["expected_end_state"] or not isinstance(process, dict):
+        return
+    jid = process.get("machine") or task["resource_jid"]
+    jobs = session.setdefault("diagnostic_machine_jobs", {}).setdefault(jid, deepcopy(machine_jobs(jid, session, prepared)))
+    job = next((row for row in jobs if row["part_name"] == part), None)
+    if job is None:
+        job = {"part_name": part}
+        jobs.append(job)
+    job.update({key: deepcopy(process[key]) for key in ("process", "result") if process.get(key) is not None})
+    job.update(status=deepcopy(process.get("status")), processing_fraction=None)
 
 
 def _place_records(location: Any, part_name: str, session: dict, prepared: dict) -> list[tuple[str, list[str], bool]]:
@@ -502,13 +526,29 @@ def _carry_owner_bookkeeping(task: dict, session: dict) -> None:
                 session["symbolic_resources"][task["resource_jid"]]["active_job"] = deepcopy(private["set"])
 
 
+def _completed_effects(event: dict, params: dict) -> list[dict]:
+    """Return the ledger entries an event appends to its part's processCompleted, resolved with params."""
+    return [{name: _fixed(value, params) for name, value in row.items()}
+            for row in (event.get("product_effects") or {}).get("processCompleted") or [] if isinstance(row, dict)]
+
+
+def _meets(end: dict, name: str, value: Any) -> bool:
+    """Compare one outcome value; a ledger outcome holds when the stated record contains its entries."""
+    if name == "processCompleted":
+        return isinstance(end.get(name), list) and all(row in end[name] for row in value)
+    return end.get(name) == value
+
+
 def _declared_outcome(event: dict, params: dict, variables: dict) -> dict:
     """Return the fixed outcome a declared event gives a recorded task: its part's, else its fixed effects."""
-    # The part's declared outcome decides, so a resource may reach it under a new state name.
-    # Work that declares no part outcome is compared on its fixed declared effects.
+    # The part's declared outcome decides, so a resource may reach it under a new state name: where the
+    # part ends up and the processes it completes. Work that declares no part outcome is compared on its
+    # fixed declared effects.
     outcome = {name: _fixed(value, params) for name, value in event.get("updates", {}).items()
                if variables.get(name, {}).get("scope") == "part" and not variables[name].get("private")
                and _fixed(value, params) is not None}
+    if completed := _completed_effects(event, params):
+        outcome["processCompleted"] = completed
     return outcome or {name: value["set"] for name, value in event.get("updates", {}).items()
                        if name != "active_job" and isinstance(value, dict) and "set" in value}
 
@@ -524,7 +564,7 @@ def _met_event(model: dict, node: dict, end: dict) -> dict | None:
                for name in ("part_name", "process", "result") if name in params):
             continue
         outcome = _declared_outcome(event, params, variables)
-        if outcome and all(end.get(name) == value for name, value in outcome.items()):
+        if outcome and all(_meets(end, name, value) for name, value in outcome.items()):
             return event
     return None
 
@@ -582,7 +622,9 @@ def apply_tentative_effects(task: dict, session: dict, prepared: dict) -> None:
       holds it, since that pose is the resource's own;
     - a place a part leaves or enters gets unknown values for its state and its variables that can
       hold the part, unless the event states how that place changed;
-    - a stated job_state changes the job of the part the resource holds, or else its last retained job;
+    - a stated ledger entry that completes the part's unfinished process ends that process, as the
+      model's own completion does, and a stated process status changes the job record of the machine
+      that holds the part's job;
     - interrupted work whose outcome now holds (its declared outcome, or its part resting at the
       task's destination) is claimed.
     Every changed variable is recorded on the event in ``condition_changes`` with ``by`` set to
@@ -595,6 +637,7 @@ def apply_tentative_effects(task: dict, session: dict, prepared: dict) -> None:
     multi_turn._apply_task_effects_to_symbolic_state(task, session)
     changes = [*_event_changes(task, session), *_apply_neighbor_end_state(task, session),
                *_locate_by_pose(task, session, prepared)]
+    changes += _finish_completed_process(task, session)
     _project_machine_jobs(task, session, prepared)
     unknown = session.get("diagnostic_unknown_owner_fields", {}).get(task["resource_jid"], [])
     session.setdefault("diagnostic_unknown_owner_fields", {})[task["resource_jid"]] = [
@@ -835,9 +878,12 @@ def declared_part_effects(jid: str | None, task: dict, prepared: dict, session: 
                 key in bindings and _fixed(bindings[key], params) != params[key]
                 for key in ("part_name", "process", "result") if key in params):
             continue
-        return {key: _fixed(value, params) for key, value in event.get("updates", {}).items()
-                if variables.get(key, {}).get("scope") == "part" and not variables[key].get("private")
-                and _fixed(value, params) is not None}
+        effects = {key: _fixed(value, params) for key, value in event.get("updates", {}).items()
+                   if variables.get(key, {}).get("scope") == "part" and not variables[key].get("private")
+                   and _fixed(value, params) is not None}
+        if completed := _completed_effects(event, params):
+            effects["processCompleted"] = completed
+        return effects
     return {}
 
 
@@ -1211,6 +1257,39 @@ def _neighbor_end_state(chosen: list[tuple[str, dict, list[dict]]], jid: str, ev
     return changes
 
 
+
+def _bound_parameters(event: dict, part: str) -> dict:
+    """Return the parameter values a declared event fixes, with its part."""
+    params = {name: binding["equals"] for name, binding in (event.get("parameter_bindings") or {}).items()
+              if isinstance(binding, dict) and "equals" in binding}
+    return {**params, "part_name": part} if part else params
+
+
+def _with_product_effects(task: dict, event: dict, part_row: dict, params: dict) -> dict | None:
+    """Give a nominal step the part effects its model declares, or None when its part guard fails.
+
+    A nominal step changes its part's process record as the runtime model does: it appends its
+    ledger entries and updates the part's unfinished process. Its guard on the part's own state, such
+    as a reloaded job resuming only on the machine that paused it, must hold.
+    """
+    from cais_spade_llm.resources.environment_models import _check_product_guards, current_process_after
+
+    if not task.get("part_name"):
+        return task
+    try:
+        _check_product_guards(event, part_row, params)
+        process = (current_process_after(event, part_row.get("current_process"), params)
+                   if isinstance((event.get("product_effects") or {}).get("current_process"), dict) else None)
+    except (ValueError, KeyError):
+        return None
+    end = task["expected_end_state"]
+    if completed := _completed_effects(event, params):
+        record = list(part_row.get("processCompleted") or [])
+        end["processCompleted"] = record + [row for row in completed if row not in record]
+    if isinstance((event.get("product_effects") or {}).get("current_process"), dict):
+        end["current_process"] = process
+    return task
+
 def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources: dict, part_rows: dict,
                    depth: int) -> dict | None:
     """Instantiate an interrupted task with its recorded parameters when its public and neighbor guards hold."""
@@ -1238,7 +1317,7 @@ def _recorded_task(jid: str, node: dict, state: dict, prepared: dict, resources:
                                         *(note for _, _, notes in chosen for note in notes)])
     if neighbor := _neighbor_end_state(chosen, jid, event, part, resource_row, part_row, params):
         task["neighbor_end_state"] = neighbor
-    return task
+    return _with_product_effects(task, event, part_row, {**_bound_parameters(event, part), **params})
 
 
 def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: set[str], depth: int) -> list[dict]:
@@ -1276,7 +1355,8 @@ def _nominal_successors(state: dict, prepared: dict, actors: set[str], parts: se
                                                         *(note for _, _, notes in chosen for note in notes)])
                     if neighbor := _neighbor_end_state(chosen, jid, event, part, resource_row, part_row, None):
                         task["neighbor_end_state"] = neighbor
-                    tasks.append(task)
+                    if (task := _with_product_effects(task, event, part_row, _bound_parameters(event, part))) is not None:
+                        tasks.append(task)
     # The interrupted tasks keep their recorded parameters, so nominal work can redo them.
     for jid, node in _replaced_work(prepared):
         if (jid in actors and not _needs_faulted(node.get("params", {}), faulted, prepared)
@@ -1483,7 +1563,8 @@ def event_record(event: dict, session: dict, prepared: dict) -> dict:
     variables = model.get("state_variables") or {}
     start = {}
     for name in sorted(event.get("expected_end_state") or {}):
-        scope = variables.get(name, {}).get("scope") or ("part" if name in {"part_state", "part_location"} else "resource")
+        scope = variables.get(name, {}).get("scope") or (
+            "part" if name in {"part_location", "current_process", "processCompleted"} else "resource")
         row = parts.get(part, {}) if scope == "part" else resources.get(jid, {})
         known, value = multi_turn._projected_state_value(row=row, field_name=name, scope=scope)
         if known:

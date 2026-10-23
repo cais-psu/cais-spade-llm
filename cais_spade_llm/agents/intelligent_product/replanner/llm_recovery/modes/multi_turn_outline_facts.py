@@ -15,7 +15,7 @@ from typing import Any
 _LOCATION_PARAMS = ("destination_location", "origin_resource_location", "target_resource", "source_resource")
 # Owner bookkeeping, as already treated in multi_turn_diagnostic.
 _OWNER_BOOKKEEPING = {"active_job"}
-_PART_FIELDS = {"part_state", "part_location"}
+_PART_FIELDS = {"part_location", "current_process"}
 
 
 def resource_names(prepared: dict) -> dict[str, str]:
@@ -249,12 +249,36 @@ def _affected_part_names(prepared: dict, fault: dict) -> set[str]:
 
 
 def _recorded_part(prepared: dict, name: str) -> dict:
-    """Return a part's grounded state at the failure: state, location and observed pose."""
+    """Return a part's grounded state at the failure: location, unfinished process and observed pose."""
     for source in (prepared.get("code_grounding", {}).get("parts", {}), prepared.get("grounding_context", {}).get("parts", {})):
         if isinstance(source.get(name), dict):
             return source[name]
     fact = next((row for row in prepared.get("llm_input", {}).get("part_facts", []) if row.get("part_name") == name), {})
-    return {"state": fact.get("part_state"), "location": fact.get("current_location"), "observed_pose": fact.get("observed_pose")}
+    return {"location": fact.get("current_location"), "current_process": fact.get("current_process"),
+            "observed_pose": fact.get("observed_pose")}
+
+
+def _process_text(entry: dict, status: str, names: dict[str, str]) -> str:
+    """State one process: its name, its result or other recorded values, and its status.
+
+    A completed ledger entry reads ``trim → square completed``; the unfinished process also names the
+    machine that holds its job: ``trim → square paused on M1``.
+    """
+    text = str(entry.get("process"))
+    if entry.get("result") not in (None, ""):
+        text += f" → {entry['result']}"
+    others = [str(value) for key, value in entry.items()
+              if key not in {"process", "result", "status", "machine"} and value not in (None, "")]
+    machine = entry.get("machine")
+    return " ".join([text, *others, status]) + (f" on {names.get(machine, machine)}" if machine else "")
+
+
+def _processes_text(current: Any, record: Any, names: dict[str, str]) -> str:
+    """State a part's unfinished process and its completed ledger, or nothing when it has neither."""
+    items = [_process_text(current, str(current.get("status") or "unfinished"), names)] if isinstance(current, dict) else []
+    items += [_process_text(item, "completed", names) for item in record or []
+              if isinstance(item, dict) and item.get("process")]
+    return f"processes: {', '.join(items)}" if items else ""
 
 
 def _area_text(pose: Any, prepared: dict) -> str:
@@ -268,12 +292,12 @@ def _part_detail(name: str, prepared: dict, names: dict[str, str]) -> str:
     location, pose = part.get("location"), _pose(part.get("observed_pose"))
     holder = next((names.get(jid, jid) for jid, entry in prepared.get("recovery_resources", {}).items()
                    if entry.get("recovery_snapshot", {}).get("held_part") == name), None)
-    # An unknown state is left unnamed; the measured facts describe the part.
-    details = ["" if part.get("state") in (None, "unknown") else part["state"],
-               f"held by {holder}" if holder else f"at {names.get(location, location)}" if location
+    # The part's facts are where it is and its process record; the measured facts describe the rest.
+    details = [f"held by {holder}" if holder else f"at {names.get(location, location)}" if location
                else "not held, not at any station",
                f"measured at {pose}" if pose else "", _area_text(part.get("observed_pose"), prepared)]
-    return f"- {name}: {', '.join(item for item in details if item)}"
+    processes = _processes_text(part.get("current_process"), [], names)
+    return f"- {name}: {', '.join(item for item in details if item)}" + (f"; {processes}" if processes else "")
 
 
 def failure_lines(prepared: dict, session: dict) -> list[str]:
@@ -423,7 +447,8 @@ def _work_outcome(jid: str, tasks: list[dict], prepared: dict, session: dict, na
                or destination_outcome(jid, tasks[-1], prepared, session))
     part = next((task["params"]["part_name"] for task in tasks if task.get("params", {}).get("part_name")), None)
     if effects:
-        text = ", ".join(f"{key} {names.get(value, value) if isinstance(value, str) else _value_text(value)}"
+        text = ", ".join(", ".join(_process_text(item, "completed", names) for item in value) if key == "processCompleted"
+                         else f"{key} {names.get(value, value) if isinstance(value, str) else _value_text(value)}"
                          for key, value in effects.items())
         text += f" (target {params['target']})" if params.get("target") else ""
     else:
@@ -646,8 +671,8 @@ def _shown_values(resource_jids: list[str], part_names: list[str], session: dict
         if _pose(row.get("current_pose")):
             values["current_pose"] = row["current_pose"]
         resources[jid] = values
-    parts = {name: {key: row[key] for key in ("part_state", "part_location", "part_holder_resource_jid", "observed_pose",
-                                              "processCompleted")
+    parts = {name: {key: row[key] for key in ("part_location", "part_holder_resource_jid", "observed_pose",
+                                              "current_process", "processCompleted")
                     if key in row}
              for name in part_names for row in [session.get("symbolic_parts", {}).get(name, {})]}
     return {"resources": resources, "parts": parts}
@@ -736,7 +761,10 @@ def _resource_row(jid: str, prepared: dict, session: dict, names: dict[str, str]
     # Each job by its part, so a paused job stays in view while another part is processed.
     if jobs := machine_jobs(jid, session, prepared):
         items.append("jobs: " + ", ".join(
-            f"{job['part_name']} {_value_text(job.get('job_state'))}"
+            f"{job['part_name']} "
+            + (_process_text({"process": job["process"], "result": job.get("result")}, _value_text(job.get("status")), names)
+               if job.get("process")
+               else _value_text(job.get("status")))
             + (f" (processing_fraction {_value_text(job['processing_fraction'])})"
                if job.get("processing_fraction") is not None else "") for job in jobs))
     if capabilities := _capabilities(jid, prepared, session):
@@ -756,15 +784,12 @@ def _part_text(name: str, prepared: dict, session: dict, names: dict[str, str]) 
     holder = row.get("part_holder_resource_jid") or row.get("current_holder_resource_jid")
     location = row.get("part_location")
     pose = row.get("observed_pose") if row.get("observed_pose_current") is not False else None
-    details = ["" if row.get("part_state") in (None, "unknown") else row["part_state"],
-               f"held by {names.get(holder, holder)}" if holder else f"at {names.get(location, location)}" if location
+    details = [f"held by {names.get(holder, holder)}" if holder else f"at {names.get(location, location)}" if location
                else "not held, not at any station",
                f"measured at {_pose(pose)}" if _pose(pose) else "", _area_text(pose, prepared)]
     text = ", ".join(item for item in details if item)
-    record = [" ".join([str(item.get("process")), *(str(value) for key, value in item.items()
-                                                      if key != "process" and value not in (None, ""))])
-              for item in row.get("processCompleted") or [] if isinstance(item, dict) and item.get("process")]
-    return text + (f"; processCompleted: {', '.join(record)}" if record else "")
+    processes = _processes_text(row.get("current_process"), row.get("processCompleted"), names)
+    return text + (f"; {processes}" if processes else "")
 
 
 def part_rows(prepared: dict, session: dict, names: dict[str, str]) -> list[str]:

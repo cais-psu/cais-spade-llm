@@ -91,15 +91,15 @@ def test_full_order_state_history_and_replay(context):
         "ur5e-3": {f"assembled.{SQUARE}": True, "resource_state": "idle"}
     }
     assert not context.initial_product_states[SQUARE]["processCompleted"]
-    assert context.initial_product_states["gear_small"]["processCompleted"] == ["print_part"]
+    assert context.initial_product_states["gear_small"]["processCompleted"] == [{"process": "print_part"}]
     assert not any(record["task"]["event_name"] == "print_part" for record in context.transitions)
     for part, state in context.part_tracker.items():
         if part == "assembly_board-v1":
-            assert state["location"] == "Exit" and state["state"] != "assembled"
+            assert state["location"] == "Exit"
         else:
+            # A part assembled on the product is located on it and records the assembly.
             assert state["location"] == "assembly_board-v1"
-            assert state["state"] == "assembled"
-            assert "place_insert" in state["processCompleted"]
+            assert {"process": "place_insert"} in state["processCompleted"]
     machine_tasks = [
         record["task"]
         for record in context.transitions
@@ -120,10 +120,10 @@ def test_full_order_state_history_and_replay(context):
         index for index, row in enumerate(square_history) if row["event_name"] == "machine_part"
     )
     assert all(
-        "machine_part" in row["state"]["processCompleted"] for row in square_history[machining:]
+        {"process": "machine_part"} in row["state"]["processCompleted"] for row in square_history[machining:]
     )
     assert all(
-        row["state"]["state"] != "assembled"
+        row["state"]["location"] != "assembly_board-v1"
         for row in square_history
         if row["event_name"] == "place_release"
     )
@@ -151,7 +151,8 @@ def test_subset_and_missing_printed_product(inputs):
     assert context.plan()["status"] == "completed"
     assert context.history["gear_small"][0]["event_name"] == "print_part"
     assert context.snapshot()["Exit"]["part_name"] is None
-    assert context.part_tracker["gear_medium"]["state"] == "ready"
+    assert context.part_tracker["gear_medium"]["location"] == "3D Printing Station"
+    assert context.part_tracker["gear_medium"]["current_process"] is None
 
 
 def test_bounded_inventory_rejects_quantity_and_unknown_parts(inputs):

@@ -268,8 +268,8 @@ def build_multi_turn_session_seed(  # noqa: C901, PLR0912, PLR0915
         name = str(row.get("part_name") or "").strip()
         if name:
             seeded_row = deepcopy(row)
-            if "part_state" not in seeded_row and "current_state" in seeded_row:
-                seeded_row["part_state"] = deepcopy(seeded_row.get("current_state"))
+            # A part's state is its location and process record; an older capture's handling label is dropped.
+            seeded_row.pop("current_state", None)
             if "part_location" not in seeded_row and "current_location" in seeded_row:
                 seeded_row["part_location"] = deepcopy(seeded_row.get("current_location"))
             if (
@@ -2742,6 +2742,20 @@ def _commit_selected_candidate_task(
     return committed_task
 
 
+
+def _stated_current_process(previous: Any, stated: Any, resource_jid: str) -> dict[str, Any] | None:
+    """Apply a stated ``current_process`` to the part's unfinished process.
+
+    A bare status (``"paused"``) or a partial record changes the recorded process and keeps its
+    process, result and machine; ``None`` means no process is unfinished.
+    """
+    if stated is None:
+        return None
+    base = deepcopy(previous) if isinstance(previous, dict) else {"machine": resource_jid}
+    if isinstance(stated, dict):
+        return {**base, **deepcopy(stated)}
+    return {**base, "status": deepcopy(stated)}
+
 def _apply_task_effects_to_symbolic_state(  # noqa: C901, PLR0912, PLR0915
     task: dict[str, Any],
     session_state: dict[str, Any],
@@ -2806,9 +2820,9 @@ def _apply_task_effects_to_symbolic_state(  # noqa: C901, PLR0912, PLR0915
                 and field_name in end_state
             ):
                 part[field_name] = deepcopy(end_state.get(field_name))
-        if "part_state" in end_state:
-            part["part_state"] = deepcopy(end_state.get("part_state"))
-            part["current_state"] = deepcopy(end_state.get("part_state"))
+        if "current_process" in end_state:
+            part["current_process"] = _stated_current_process(
+                previous_part.get("current_process"), end_state.get("current_process"), resource_jid)
         if "part_location" in end_state:
             part["part_location"] = deepcopy(end_state.get("part_location"))
             part["current_location"] = deepcopy(end_state.get("part_location"))

@@ -22,9 +22,9 @@ _PROJECTED_SNAPSHOT_FIELDS = {
     "current_pose_source", "current_pose_captured_at", "projected_pose", "last_observed_pose",
 }
 _PART_FIELDS = {
-    "part_name", "current_state", "part_state", "current_location", "part_location",
+    "part_name", "current_location", "part_location", "current_process",
     "current_holder_resource_jid", "part_holder_resource_jid", "observed_pose",
-    "origin_location", "state", "location", "location_basis", "processCompleted",
+    "origin_location", "location", "location_basis", "processCompleted",
     "observed_pose_current", "last_observed_pose", "projected_pose",
 }
 _CAPABILITY_FIELDS = {
@@ -430,8 +430,7 @@ def public_part_snapshot(prepared: dict, session: dict, part_name: str) -> dict:
             else:
                 fields.add(name)
                 declared.add(name)
-    aliases = {"part_state": {"current_state", "state"},
-               "part_location": {"current_location", "location"},
+    aliases = {"part_location": {"current_location", "location"},
                "part_holder_resource_jid": {"current_holder_resource_jid", "holder_resource_jid"}}
     for name in private:
         fields.difference_update({name, *aliases.get(name, ())})

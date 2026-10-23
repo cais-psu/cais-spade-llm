@@ -197,8 +197,8 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
                                           if field.startswith("zone_") and field.endswith("_part") and value == part]
                 if len(released_buffer_fields) != 1:
                     raise ValueError("Recovery pickup does not identify the previous Buffer zone custody")
-            entry.update(state=end.get("part_state") or "in_gripper", location=owner.agent_name)
-        elif end.get("part_state") == "assembled":
+            entry.update(location=owner.agent_name)
+        elif end.get("part_location") == context.product_name:
             target = _part_geometry(context, part).get("target_origin_pose")
             if not target:
                 raise ValueError(f"No configured assembly pose for {part}")
@@ -207,11 +207,11 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
             if any(not math.isfinite(position[axis]) or abs(position[axis] - target[axis]) > .006
                    for axis in ("x", "y", "z")):
                 raise ValueError(f"{part} was not observed at its configured assembly target")
-            entry.update(state="assembled", location=context.product_name, observed_pose=position)
+            entry.update(location=context.product_name, observed_pose=position)
             fact = {"process": "assembly", "target": context.geometry[part]["target"]}
             if fact not in entry["processCompleted"]:
                 entry["processCompleted"].append(fact)
-        elif end.get("part_state") and end["part_state"] != entry["state"]:
+        elif end.get("part_location") and end["part_location"] != entry["location"]:
             destination = end.get("part_location")
             if destination not in {"Buffer For Machined parts", "Exit"}:
                 raise ValueError("Recovery part transition requires observed custody or configured placement")
@@ -221,13 +221,12 @@ async def _reconcile_completion(runtime, owner, task: dict, task_id: str, result
                    for axis in ("x", "y", "z")):
                 raise ValueError(f"{part} was not observed at {destination}")
             observed["part_pose"] = position
-            entry.update(state=end["part_state"], location=destination, observed_pose=position)
+            entry.update(location=destination, observed_pose=position)
             if destination == "Buffer For Machined parts":
                 buffer_zone = next((zone["zone"] for zone in context.inputs["scene"][destination]["zones"]
                                     if math.dist(zone["pose"][:3], [target[axis] for axis in ("x", "y", "z")]) < .006), None)
                 if buffer_zone is None or context.resources[destination].valuation[f"zone_{buffer_zone}_part"] not in (None, part):
                     raise ValueError("Observed recovery placement does not identify a free Buffer zone")
-        values.update(part_state=entry["state"], part_location=entry["location"])
         entry["last_task"] = task_id
     with context.admission_lock:
         actor = context.resources[owner.agent_name]
@@ -321,7 +320,7 @@ def _observed_release(context, part: str, pose: list, settled: bool) -> tuple[st
     receiver = observed_receiver(context.inputs["scene"], context.models.get("Conveyor"), part, pose) if settled else None
     if receiver is None:
         # Like a dropped part: located only by its observed pose until picked again.
-        entry.update(state="unknown", location=None, observed_pose=resting)
+        entry.update(location=None, observed_pose=resting)
         return None, {}, entry
     rid, area = receiver
     values = context.resources[rid].valuation
@@ -390,7 +389,7 @@ async def _reconcile_mobile_completion(runtime, owner, task: dict, task_id: str,
                                            entry["location"], picked)
             if source is None:
                 raise ValueError(f"{entry['location']} declares no consequence of {picked} being taken")
-        entry.update(state=end.get("part_state") or "in_gripper", location=owner.agent_name, last_task=task_id)
+        entry.update(location=owner.agent_name, last_task=task_id)
         entry.pop("observed_pose", None)
     values["resource_state"] = "carrying" if held_after else "idle"
     if "approached_part" in declared:

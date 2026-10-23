@@ -438,12 +438,13 @@ class PartSlippageRecovery:
             final_status="failed:" + self._state["scenario"],
             part_name=part, observations={**deepcopy(self._failure), "checkpoint_context": _recorded_checkpoint(self._observations)},
             affected_entities=[{"entity_type": "part", "entity_id": part,
-                                "state": tracker[part]["state"], "location": tracker[part]["location"]}],
+                                "location": tracker[part]["location"],
+                                "current_process": deepcopy(tracker[part].get("current_process"))}],
             state_before=self._failure.get("resource_values_before", {}).get(rid),
             state_after={**deepcopy(context.resources[rid].valuation),
-                         "part_state": tracker[part]["state"], "part_location": tracker[part]["location"]},
+                         "part_location": tracker[part]["location"]},
         )
-        states = {name: row.get("state") for name, row in tracker.items()}
+        states: dict = {}
         locations = {name: row.get("location") for name, row in tracker.items()}
         planner = self.agent.process_planner
         stuck = planner._build_resource_search_state(

@@ -129,10 +129,10 @@ def _live_grounding_case(recovery, monkeypatch, attachments: list, *, checkpoint
     """A robot reported a fault after losing its peg; each physical capture reads the next attachment."""
     context = recovery.runtime.context
     context.resources = {"arm_a": SimpleNamespace(valuation={"resource_state": "picked", "held_part": "peg"}, revision=1)}
-    context.part_tracker = {"peg": {"state": "in_gripper", "location": "arm_a"}}
+    context.part_tracker = {"peg": {"location": "arm_a", "current_process": None}}
     failure = {"injection_status": "completed",
                "resource_values_before": {"arm_a": {"resource_state": "picked", "held_part": "peg"}},
-               "part_tracker_before": {"peg": {"state": "in_gripper", "location": "arm_a"}},
+               "part_tracker_before": {"peg": {"location": "arm_a", "current_process": None}},
                "pending_tasks": [{"task_id": "t2", "resource_id": "arm_a", "event_id": "place", "event_name": "place",
                                   "parameters": {"part_name": "peg"}}], "continuations": {}}
 
@@ -177,7 +177,8 @@ def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(rec
     # The robot gripper is empty and the peg lies where it fell.
     context, trackers, run = _live_grounding_case(recovery, monkeypatch, [None, None])
     asyncio.run(run())
-    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "unknown"]
+    # Held by the robot, then located only by its measured pose.
+    assert [row["peg"]["location"] for row in trackers] == ["arm_a", None]
     assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
     assert context.part_tracker["peg"]["observed_pose"] == {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0,
                                                            "qw": 1}
@@ -185,7 +186,7 @@ def test_live_capture_grounds_beliefs_then_retakes_belief_dependent_evidence(rec
     path = Path(recovery.snapshot()["observation_path"])
     assert "part_tracker" not in json.loads(path.read_text())
     views = json.loads((path.parent / BELIEFS_NAME).read_text())["views"]
-    assert views["part_tracker"]["peg"]["state"] == "unknown"
+    assert views["part_tracker"]["peg"]["location"] is None and "state" not in views["part_tracker"]["peg"]
     assert views["resource_states"]["arm_a"] == {"resource_state": "failed", "held_part": None}
 
 
@@ -193,9 +194,9 @@ def test_live_grounding_settles_when_the_first_capture_missed_the_robot(recovery
     # Stage 1 on October 15: the first capture had no observation of the slipping robot.
     context, trackers, run = _live_grounding_case(recovery, monkeypatch, ["unobserved", None, None])
     asyncio.run(run())
-    assert [row["peg"]["state"] for row in trackers] == ["in_gripper", "in_gripper", "unknown"]
+    assert [row["peg"]["location"] for row in trackers] == ["arm_a", "arm_a", None]
     assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": None}
-    assert context.part_tracker["peg"]["state"] == "unknown"
+    assert context.part_tracker["peg"]["location"] is None
     passes = json.loads((recovery.path / "grounding_passes.json").read_text())["passes"]
     assert [row["signals"] for row in passes] == [["B2:arm_a"], ["B2:arm_a", "C1:arm_a"], ["B2:arm_a", "C1:arm_a"]]
 
@@ -206,7 +207,7 @@ def test_live_grounding_keeps_only_what_the_latest_captures_agree_on(recovery, m
     asyncio.run(run())
     assert len(trackers) == 3
     assert context.resources["arm_a"].valuation == {"resource_state": "failed", "held_part": "peg"}
-    assert context.part_tracker["peg"] == {"state": "in_gripper", "location": "arm_a"}
+    assert context.part_tracker["peg"] == {"location": "arm_a", "current_process": None}
     passes = json.loads((recovery.path / "grounding_passes.json").read_text())["passes"]
     assert [row["signals"] for row in passes] == [["B2:arm_a", "C1:arm_a"], ["B2:arm_a"], ["B2:arm_a"]]
 
@@ -218,8 +219,8 @@ def test_live_grounding_restores_beliefs_when_retaken_captures_never_agree(recov
     assert recovery.snapshot()["status"] == "blocked"
     assert "did not settle" in recovery.snapshot()["message"]
     assert context.resources["arm_a"].valuation == {"resource_state": "picked", "held_part": "peg"}
-    assert context.part_tracker["peg"] == {"state": "in_gripper", "location": "arm_a"}
-    assert recovery._observations["part_tracker"]["peg"] == {"state": "in_gripper", "location": "arm_a"}
+    assert context.part_tracker["peg"] == {"location": "arm_a", "current_process": None}
+    assert recovery._observations["part_tracker"]["peg"] == {"location": "arm_a", "current_process": None}
 
 
 def test_live_grounding_stops_when_a_retake_grounds_a_different_fault(recovery, monkeypatch):
@@ -239,7 +240,7 @@ def test_frozen_checkpoint_grounding_never_changes_beliefs(recovery, monkeypatch
     assert trackers == []
     prepare.assert_awaited_once()
     assert context.resources["arm_a"].valuation == {"resource_state": "picked", "held_part": "peg"}
-    assert context.part_tracker["peg"] == {"state": "in_gripper", "location": "arm_a"}
+    assert context.part_tracker["peg"] == {"location": "arm_a", "current_process": None}
     assert context.revision == 4
 
 
@@ -504,7 +505,7 @@ def test_fresh_preparation_rebuilds_actual_failure_observations_without_mutating
     assert failure["failed_function_name"] == "move_cartesian"
     assert failure["failure_context"]["observations"]["observed_drop_pose"] == fresh["failure"]["observed_drop_pose"]
     assert failure["failure_context"]["observations"]["state_before"] == {"held_part": "gear_small"}
-    assert failure["failure_context"]["observations"]["state_after"] == {"held_part": None, "part_state": "misplaced", "part_location": None}
+    assert failure["failure_context"]["observations"]["state_after"] == {"held_part": None, "part_location": None}
     assert received["resource_states"]["robot@localhost"] == {"held_part": None}
     assert received["default_resource_state"] == ""
     assert fresh == original
@@ -686,7 +687,7 @@ def _kmr_reconcile_fixture(primitive_state: dict, held_before=None):
         models={"KMR": {"state_variables": {"resource_location": {"domain": [None, "Storage", "M1", "M2"]},
                                             "approached_part": {}}, "events": []},
                 "M1": {"state_variables": {}, "events": [pickup]}},
-        part_tracker={part: {"state": "completed", "location": "M1", "processCompleted": []}},
+        part_tracker={part: {"location": "M1", "current_process": None, "processCompleted": []}},
         admission_lock=threading.RLock(), revision=0, transitions=[])
     context.snapshot = lambda: {"KMR": deepcopy(kmr.valuation), "M1": deepcopy(machine.valuation)}
     owner = SimpleNamespace(agent_name="KMR", _primitive_state=primitive_state)
@@ -714,7 +715,7 @@ def test_KMR_coordinate_move_reconciles_a_location_no_dock_names():
     part, context, runtime, owner = _kmr_reconcile_fixture(
         {"held_part": "KET4_Square_4mm", "resource_location": None, "base_pose": [-1.2, 1.15, -1.5708]},
         held_before="KET4_Square_4mm")
-    context.part_tracker[part].update(state="in_gripper", location="KMR")
+    context.part_tracker[part].update(location="KMR")
     task = {"part_name": part, "outline_id": "RECOVERY_SEQ3", "macro_name": "move_to_location",
             "expected_end_state": {"resource_location": None}}
     asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-drive", {}))
@@ -748,7 +749,7 @@ def _kmr_release_fixture(pose):
                                         setup["permitted_resources"])
     part = "KET4_Square_4mm"
     context.resources["KMR"].valuation.update(resource_state="carrying", held_part=part, resource_location=None)
-    context.part_tracker[part].update(state="in_gripper", location="KMR")
+    context.part_tracker[part].update(location="KMR")
     owner = SimpleNamespace(agent_name="KMR", _primitive_state={"held_part": None, "resource_location": None,
                                                                "base_pose": [-3.0, -0.12, 0.0]},
                             _released_part={"part_name": part, "pose": pose, "settled": True})
@@ -763,7 +764,7 @@ def test_KMR_release_onto_the_belt_is_recorded_where_the_part_rests():
     observed = asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
     belt = context.resources["Conveyor"].valuation
     assert belt[f"part_location.{part}"] == "after loading_position_1" and belt[f"part_order.{part}"] == 0
-    assert context.part_tracker[part]["location"] == "Conveyor" and context.part_tracker[part]["state"] == "ready"
+    assert context.part_tracker[part]["location"] == "Conveyor" and "state" not in context.part_tracker[part]
     assert context.part_tracker[part]["observed_pose"]["x"] == -3.0
     assert observed["released"]["receiver"] == "Conveyor"
     assert context.resources["KMR"].valuation["held_part"] is None
@@ -779,7 +780,7 @@ def test_KMR_release_into_a_buffer_zone_and_onto_an_undeclared_surface():
 
     part, context, runtime, owner, task = _kmr_release_fixture([0.25, 0.45, 1.025, 0.0, 0.0, 0.0, 1.0])
     asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
-    assert context.part_tracker[part]["state"] == "unknown" and context.part_tracker[part]["location"] is None
+    assert context.part_tracker[part]["location"] is None and "state" not in context.part_tracker[part]
     assert context.part_tracker[part]["observed_pose"] == {"x": 0.25, "y": 0.45, "z": 1.025, "qx": 0.0, "qy": 0.0,
                                                            "qz": 0.0, "qw": 1.0}
 
@@ -811,7 +812,7 @@ def test_KMR_release_still_moving_when_observation_ended_is_located_only_by_its_
     part, context, runtime, owner, task = _kmr_release_fixture([-0.56, 0.5, 1.017, 0.0, 0.0, 0.0, 1.0])
     owner._released_part["settled"] = False
     asyncio.run(_reconcile_mobile_completion(runtime, owner, task, "kmr-release", {}))
-    assert context.part_tracker[part]["state"] == "unknown"
+    assert context.part_tracker[part]["location"] is None
     assert context.resources["Buffer For Machined parts"].valuation["zone_2_part"] is None
 
 
@@ -859,7 +860,7 @@ def test_assembly_completion_requires_observed_configured_placement(monkeypatch,
         run_id="trial", resources={rid: actor},
         models={rid: {"state_variables": {"resource_location": {"domain": ["assembly_board-v1"]}}}},
         geometry={part: {"model_name": part, "target": "square_peg_4mm"}}, product_name="assembly_board-v1",
-        part_tracker={part: {"state": "in_gripper", "location": rid, "processCompleted": []}},
+        part_tracker={part: {"location": rid, "current_process": None, "processCompleted": []}},
         admission_lock=threading.RLock(), revision=0, transitions=[],
     )
     context.snapshot = lambda: {rid: deepcopy(actor.valuation)}
@@ -873,11 +874,11 @@ def test_assembly_completion_requires_observed_configured_placement(monkeypatch,
     monkeypatch.setattr("cais_spade_llm.recovery_framework.workflow_execution._part_geometry",
                         lambda *args: {"target_origin_pose": {"x": .2, "y": .3, "z": 1.}})
     task = {"part_name": part, "outline_id": "RECOVERY_SEQ1", "macro_name": "place_part",
-            "expected_end_state": {"part_state": "assembled", "resource_location": "assembly_board-v1"}}
+            "expected_end_state": {"part_location": "assembly_board-v1", "resource_location": "assembly_board-v1"}}
     if observed_x == .4:
         with pytest.raises(ValueError, match="not observed"):
             asyncio.run(_reconcile_completion(runtime, owner, task, "native-task", {}))
-        assert context.part_tracker[part]["state"] == "in_gripper"
+        assert context.part_tracker[part]["location"] == rid
         assert context.transitions == []
     else:
         asyncio.run(_reconcile_completion(runtime, owner, task, "native-task", {}))
@@ -1424,7 +1425,8 @@ def test_preparation_passes_observed_failure_and_declared_contracts_without_guid
     captured = prepare.call_args.kwargs
     assert captured["recovery_feedback"] == ""
     assert captured["failure_context"]["failed_function_name"] == "place_approach"
-    assert captured["failure_context"]["failure_context"]["affected_entities"][0]["state"] == "misplaced"
+    # A part is stated by where it is and its process; a recorded handling label is not passed on.
+    assert "state" not in captured["failure_context"]["failure_context"]["affected_entities"][0]
     assert captured["part_tracker"][part]["observed_pose"] == context.part_tracker[part]["observed_pose"]
     place = next(row for row in captured["tools_catalog"] if row["function"] == "place_approach")
     assert place["function_owner_agent"] == recovery.runtime.jids[rid]

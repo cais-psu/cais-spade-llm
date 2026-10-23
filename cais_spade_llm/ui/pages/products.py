@@ -51,6 +51,17 @@ _CONTROLLED_PRODUCT_CONFIG_KEYS = {
     "product_geometry_file",
 }
 
+
+def _process_label(process: Any) -> str:
+    """Show a part's unfinished process as process → result, status and machine."""
+    if not isinstance(process, dict):
+        return ""
+    text = str(process.get("process") or "")
+    if process.get("result"):
+        text += f" → {process['result']}"
+    return " ".join(item for item in (text, str(process.get("status") or ""),
+                                      f"on {process['machine']}" if process.get("machine") else "") if item)
+
 def _editable_product_fields() -> list[str]:
     """Fields the user can edit in the product configuration table."""
     return ["instructions", "product_order_file", "product_geometry_file"]
@@ -299,6 +310,7 @@ def render_nominal_product_model(bridge: SystemBridge, product_select: Any) -> N
                 {
                     "part_name": part,
                     **context.part_tracker[part],
+                    "current_process": json.dumps(context.part_tracker[part].get("current_process")),
                     "processCompleted": json.dumps(context.part_tracker[part]["processCompleted"]),
                     "requirement": json.dumps(
                         context.product_order.get("processPlan", context.requirements)[part]
@@ -306,7 +318,7 @@ def render_nominal_product_model(bridge: SystemBridge, product_select: Any) -> N
                 }
                 for part in context.selected_parts
             ]
-            fields = ["part_name", "requirement", "location", "state", "processCompleted", "last_task"]
+            fields = ["part_name", "requirement", "location", "current_process", "processCompleted", "last_task"]
             ui.table(
                 columns=[{"name": key, "label": key, "field": key} for key in fields],
                 rows=rows,
@@ -1345,8 +1357,8 @@ def render(bridge: SystemBridge) -> None:
                 part_table = ui.table(
                     columns=[
                         {"name": "part", "label": "Part", "field": "part", "sortable": True},
-                        {"name": "state", "label": "State", "field": "state", "sortable": True},
                         {"name": "location", "label": "Location", "field": "location"},
+                        {"name": "process", "label": "Unfinished process", "field": "process"},
                         {"name": "last_task", "label": "Last Task", "field": "last_task"},
                     ],
                     rows=[],
@@ -1359,9 +1371,9 @@ def render(bridge: SystemBridge) -> None:
                         rows.append(
                             {
                                 "part": part_name,
-                                "state": info.get("state", "unknown"),
                                 "location": info.get("location")
                                 or info.get("last_known_location", "?"),
+                                "process": _process_label(info.get("current_process")),
                                 "last_task": info.get("last_successful_task", ""),
                             }
                         )

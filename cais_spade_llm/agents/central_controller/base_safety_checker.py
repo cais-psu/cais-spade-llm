@@ -113,7 +113,6 @@ class BaseSafetyChecker:
             "resource_state",
             "resource_location",
             "held_part",
-            "part_state",
             "part_location",
         )
 

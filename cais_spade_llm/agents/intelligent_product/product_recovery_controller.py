@@ -2727,8 +2727,10 @@ class ProductRecoveryController:
         if not transition:
             return
 
-        self.part_tracker.setdefault(part_name, {"state": "unknown", "location": None})
-        entry: dict[str, Any] = {"state": transition["state"]}
+        self.part_tracker.setdefault(
+            part_name, {"location": None, "current_process": None, "processCompleted": []})
+        # A part's state is its location and process record; the transition's handling label is not stored.
+        entry: dict[str, Any] = {}
 
         if "location_template" in transition:
             entry["location"] = transition["location_template"].format(
@@ -2743,16 +2745,14 @@ class ProductRecoveryController:
 
         if transition.get("verify_camera"):
             if exec_mode == "dry_run" or perception_backend in {"", "none"}:
-                entry["state"] = "assembled"
                 entry["camera_verification"] = "skipped_dry_run"
             else:
                 position = self.camera.observe(part_name)
                 if position is not None:
-                    entry["state"] = "assembled"
                     entry["position"] = position
                     entry["camera_verification"] = "detected"
                 else:
-                    entry["state"] = "untracked"
+                    entry["location"] = None
                     entry["observation_required"] = True
                     entry["camera_verification"] = "not_detected"
                     self.logger.error(
@@ -2772,18 +2772,15 @@ class ProductRecoveryController:
                 entry["last_known_location"] = last_known
 
             if exec_mode == "dry_run" or perception_backend in {"", "none"}:
-                entry["state"] = "untracked"
                 entry["observation_required"] = True
                 entry["camera_verification"] = "unavailable"
             else:
                 position = self.camera.observe(part_name)
                 if position is not None:
                     # The camera locates the part; its state is not labeled beyond that fact.
-                    entry["state"] = "unknown"
                     entry["position"] = position
                     entry["camera_verification"] = "detected"
                 else:
-                    entry["state"] = "untracked"
                     entry["observation_required"] = True
                     entry["camera_verification"] = "not_detected"
                     self.logger.error(
@@ -3527,16 +3524,9 @@ class ProductRecoveryController:
                 kind="event_guard_resource_state",
             )
 
+        # A part stores no handling state; the contract's in-gripper precondition is the robot holding it.
         part_in_state = str(contract.get("part_in_state") or "").strip()
         if part_name and part_in_state:
-            add_violation(
-                entity_kind="part",
-                entity=part_name,
-                field="state",
-                expected=part_in_state,
-                actual=self._plant_part_field(plant, part_name, "state"),
-                kind="event_guard_part_state",
-            )
             if part_in_state == "in_gripper" and resource_jid:
                 add_violation(
                     entity_kind="resource",
@@ -4102,7 +4092,6 @@ class ProductRecoveryController:
         if not projected_part_entry:
             destination = str(params.get("destination_location") or "").strip()
             projected_part_entry = {
-                "state": "assembled" if destination else "ready",
                 "location": destination or None,
                 "model_name": model_name,
             }
@@ -4535,7 +4524,6 @@ class ProductRecoveryController:
                 },
             },
             "projected_part_entry": {
-                "state": "in_gripper",
                 "location": resource_jid,
                 "model_name": model_name,
             },
@@ -4876,7 +4864,6 @@ class ProductRecoveryController:
                     },
                     "part": {
                         "entity": part_name,
-                        "state": "in_gripper",
                         "location": resource_jid,
                         "model_name": str(
                             dict(node.get("projected_part_entry") or {}).get("model_name") or ""
@@ -5274,7 +5261,7 @@ class ProductRecoveryController:
         projected_part_entry: dict[str, Any],
     ) -> str:
         actual_entry = dict(self.part_tracker.get(part_name) or {})
-        for key in ("state", "location"):
+        for key in ("location",):
             if key not in projected_part_entry:
                 continue
             if actual_entry.get(key) != projected_part_entry.get(key):

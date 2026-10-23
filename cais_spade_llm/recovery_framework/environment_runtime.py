@@ -388,7 +388,7 @@ class EnvironmentRuntime:
         completed_components = [
             part
             for part in self.context.selected_parts
-            if self.context.part_tracker[part].get("state") == "assembled"
+            if self.context.part_tracker[part].get("location") == self.context.product_name
         ]
         return {
             "conveyor_fault": self.conveyor_fault.snapshot(),

@@ -75,7 +75,6 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
     current_location = snapshot.get("current_location")
     held_part = snapshot.get("held_part")
     resource_states: list[Any] = [current_state]
-    part_states: list[Any] = [None]
     part_locations: list[Any] = [None, resource_jid]
     part_locations.extend(reachable_locations or [])
     locations: list[Any] = [current_location]
@@ -90,8 +89,6 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
             resource_states.append(program.entry_state)
         resource_states.append(program.success_state)
         guards: dict[str, dict[str, Any]] = {}
-        if program.part_in_state:
-            part_states.append(program.part_in_state)
         for guard in program.entry_guards:
             compiled_guard = _recovery_condition_descriptor(guard)
             if compiled_guard is not None:
@@ -136,10 +133,7 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
 
         completed_part_transition = dict(dict(program.part_transition or {}).get("completed") or {})
         if completed_part_transition:
-            part_state = completed_part_transition.get("state")
-            if part_state not in (None, ""):
-                updates["part_state"] = {"set": deepcopy(part_state)}
-                part_states.append(deepcopy(part_state))
+            # A part stores no handling state; the task states only where its part ends up.
             location_template = str(
                 completed_part_transition.get("location_template") or ""
             ).strip()
@@ -213,7 +207,6 @@ def robot_recovery_des_descriptor(  # noqa: C901, PLR0912
             "scope": "resource",
             "domain": _domain([held_part, None]),
         },
-        "part_state": {"scope": "part", "domain": _domain(part_states)},
         "part_location": {
             "scope": "part",
             "domain": _domain(part_locations),

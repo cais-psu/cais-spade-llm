@@ -103,7 +103,7 @@ async def _check_source(runtime, proposal: dict, observations: dict) -> dict:
     owners = {str(owner.jid): owner for owner in runtime.resource_agents}
     for part, saved in observations["part_tracker"].items():
         current = context.part_tracker.get(part, {})
-        for field in ("state", "location", "processCompleted"):
+        for field in ("location", "current_process", "processCompleted"):
             if current.get(field) != saved.get(field):
                 raise ValueError(f"{part}.{field} changed; regenerate from the current observations")
         if saved.get("observed_pose"):

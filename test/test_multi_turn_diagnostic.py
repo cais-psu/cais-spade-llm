@@ -22,8 +22,8 @@ def captured(tmp_path):
     variables = {name: {"scope": scope, "type": kind} for name, scope, kind in (
         ("resource_state", "resource", "string"), ("resource_location", "resource", "string"),
         ("held_part", "resource", ["string", "null"]), ("part_name", "resource", ["string", "null"]),
-        ("job_state", "resource", "string"), ("selected_program", "resource", ["string", "null"]),
-        ("active_job", "resource", ["string", "null"]), ("part_state", "part", "string"),
+        ("selected_program", "resource", ["string", "null"]),
+        ("active_job", "resource", ["string", "null"]), ("current_process", "part", ["object", "null"]),
         ("part_location", "part", "string"))}
     events = [{"event_name": "machine_part", "parameter_bindings": {
         "part_name": {"equals": part}, "process": {"equals": "trim"}, "result": {"equals": result}},
@@ -37,7 +37,7 @@ def captured(tmp_path):
             "capabilities": ["place_release"]},
         "recovery_snapshot": {"resource_jid": jid, "resource_state": "loaded" if jid == "machine" else "idle",
             "resource_location": "M2", "held_part": None, "part_name": "RGOCG4-50_Round_4mm" if jid == "machine" else None,
-            "job_state": "running", "active_job": "private_job"},
+            "active_job": "private_job"},
         "recovery_des_model": {"state_variables": deepcopy(variables), "events": deepcopy(events) if jid == "machine" else []}}
         for jid in ("machine", "arm")}
     record = {"scenario": "Machining breakdown during part processing", "run_id": "supplied_fixture",
@@ -53,8 +53,11 @@ def captured(tmp_path):
                 {"role": "resume_suffix", "resource_jid": "machine", "entry_task_id": "environment_23"}]},
             "llm_input": {"fault_event": {"focused_resource_jid": "machine"},
                 "observed_runtime_state": {"resources": [row["recovery_snapshot"] for row in resources.values()]},
-                "part_facts": [{"part_name": part, "part_state": "loaded", "current_location": location}
-                    for part, location in (("KET4_Square_4mm", "M1"), ("RGOCG4-50_Round_4mm", "M2"))]}}}
+                "part_facts": [{"part_name": part, "current_location": location,
+                                "current_process": {"process": "trim", "result": result, "status": "running",
+                                                    "machine": location}}
+                    for part, location, result in (("KET4_Square_4mm", "M1", "square"),
+                                                   ("RGOCG4-50_Round_4mm", "M2", "circle"))]}}}
     path = tmp_path / "observations.json"
     path.write_text(json.dumps(record))
     record.update(source_path=str(path), source_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
@@ -68,17 +71,16 @@ def event(identifier, jid, part, **end):
 
 def sequence():
     return [
-        event("pause", "machine", None, job_state="paused"),
+        event("pause", "machine", "RGOCG4-50_Round_4mm", current_process="paused"),
         event("stage", "arm", "RGOCG4-50_Round_4mm", resource_state="ready", held_part=None,
-              part_state="placed", part_location="M2 staging tray"),
-        event("transfer", "arm", "KET4_Square_4mm", resource_state="ready", held_part=None,
-              part_state="loaded", part_location="M2"),
-        event("finish", "machine", "KET4_Square_4mm", resource_state="completed", job_state="completed",
-              part_name="KET4_Square_4mm", selected_program="square"),
-        event("unload", "arm", "KET4_Square_4mm", resource_state="ready", held_part=None,
-              part_state="placed", part_location="Conveyor"),
-        event("restore", "arm", "RGOCG4-50_Round_4mm", resource_state="ready", held_part=None,
-              part_state="loaded", part_location="M2"),
+              part_location="M2 staging tray"),
+        event("transfer", "arm", "KET4_Square_4mm", resource_state="ready", held_part=None, part_location="M2"),
+        # The trim's outcome is its ledger entry; the machine's state word is only a name.
+        event("finish", "machine", "KET4_Square_4mm", resource_state="completed", part_name="KET4_Square_4mm",
+              selected_program="square", current_process=None,
+              processCompleted=[{"process": "trim", "result": "square"}]),
+        event("unload", "arm", "KET4_Square_4mm", resource_state="ready", held_part=None, part_location="Conveyor"),
+        event("restore", "arm", "RGOCG4-50_Round_4mm", resource_state="ready", held_part=None, part_location="M2"),
     ]
 
 
@@ -132,7 +134,7 @@ def test_llm_choice_is_committed_and_candidates_stay_isolated(captured, reverse)
     assert audit["llm_selected_candidate_index"] == choice
     assert len(session["accepted_outline_prefix"]) == 1
     assert session["accepted_outline_prefix"][0]["event_name"] == "pause"
-    assert session["symbolic_resources"]["machine"]["job_state"] == "paused"
+    assert session["symbolic_parts"]["RGOCG4-50_Round_4mm"]["current_process"]["status"] == "paused"
     assert prepared == before
     assert audit["candidate_events"] == candidates and audit["transition_validation"]["status"] == "not_checked"
 
@@ -619,12 +621,12 @@ def test_template_states_a_machine_fault_from_recorded_facts(captured):
         "- M1 did not complete machine_part of KET4_Square_4mm (process trim, result square)",
         "- task_outcome (M2, KET4_Square_4mm, task environment_21): job_state interrupted, processing_fraction 0.07",
         "- device_fault_report (M2): available false, reported_by device controller",
-        "- KET4_Square_4mm: loaded, at M1"]
+        "- KET4_Square_4mm: at M1; processes: trim → square running on M1"]
     assert template["goal"] == ["- KET4_Square_4mm: process trim, result square (normally M1's machine_part)"]
     assert template["resources"] == [
-        "M2 (resource)  loaded; at M2; holds none; part_name RGOCG4-50_Round_4mm; job_state running; capabilities: reachable "
+        "M2 (resource)  loaded; at M2; holds none; part_name RGOCG4-50_Round_4mm; capabilities: reachable "
         "locations M1, M2; trim (circle, square)",
-        "arm (resource)  idle; at M2; holds none; job_state running; capabilities: reachable locations M1, M2"]
+        "arm (resource)  idle; at M2; holds none; capabilities: reachable locations M1, M2"]
     resources = "\n".join(template["resources"])
     # Owner bookkeeping and nominal event names are not offered.
     assert "active_job" not in resources and "private_job" not in resources and "machine_part" not in resources
@@ -684,7 +686,8 @@ def test_events_so_far_are_listed_with_the_reply_format_key_and_resource_names(c
         "\nResources and Parts already include these events.", 1)[0]
     reply_keys = multi_turn._get_response_schema("outline", session)["schema"]["$defs"]["outline_event"]["properties"]
     # Each event is listed as a reply states it: under `resource`, by the resource's name.
-    assert json.loads(listed) == [{"outline_id": "pause", "event_name": "pause", "resource": "M2"}]
+    assert json.loads(listed) == [{"outline_id": "pause", "event_name": "pause", "resource": "M2",
+                                   "part_name": "RGOCG4-50_Round_4mm"}]
     assert "resource" in reply_keys and "resource_jid" not in reply_keys
 
 
@@ -820,27 +823,28 @@ def test_a_machine_keeps_each_job_by_its_part_so_a_paused_one_stays_in_view():
     jobs = {"job_1": {"part_name": "blank", "job_state": "running", "processing_fraction": 0.05}}
     prepared = {"observation_jids": {"mill": "mill"}, "recovery_resources": {"mill": {
         "resource_type": "resource", "static_capabilities": {"processing_observations": {"jobs": jobs}}}}}
-    session = {"symbolic_resources": {"mill": {"resource_state": "loaded", "part_name": "blank", "job_state": "running"}},
+    running = {"process": "trim", "result": "square", "status": "running", "machine": "mill"}
+    session = {"symbolic_resources": {"mill": {"resource_state": "loaded", "part_name": "blank"}},
+               "symbolic_parts": {"blank": {"current_process": dict(running)}, "peg": {"current_process": None}},
                "recovery_des_models": {"mill": {"state_variables": {}}}}
     names = facts.resource_names(prepared)
     assert facts._resource_row("mill", prepared, session, names).endswith("jobs: blank running (processing_fraction 0.05)")
-    # A stated job_state is the job of the part the mill holds.
-    multi_turn_diagnostic._project_machine_jobs({"resource_jid": "mill", "expected_end_state": {"job_state": "paused"}},
-                                                session, prepared)
-    # Another part's job runs to completion; the paused job stays listed by its part.
-    session["symbolic_resources"]["mill"]["part_name"] = "peg"
-    multi_turn_diagnostic._project_machine_jobs({"resource_jid": "mill", "expected_end_state": {"job_state": "completed"}},
-                                                session, prepared)
-    assert facts._resource_row("mill", prepared, session, names).endswith("jobs: blank paused, peg completed")
-    # No active job is not a job state: the retained jobs keep theirs.
-    multi_turn_diagnostic._project_machine_jobs({"resource_jid": "mill", "expected_end_state": {"job_state": None}},
-                                                session, prepared)
-    assert facts._resource_row("mill", prepared, session, names).endswith("jobs: blank paused, peg completed")
-    # Holding no part, the mill's job_state is its last retained job's.
-    session["symbolic_resources"]["mill"]["part_name"] = None
-    multi_turn_diagnostic._project_machine_jobs({"resource_jid": "mill", "expected_end_state": {"job_state": "stopped"}},
-                                                session, prepared)
-    assert [job["job_state"] for job in multi_turn_diagnostic.machine_jobs("mill", session, prepared)] == ["paused", "stopped"]
+    # The part's stated status changes the job the machine holds for that part.
+    session["symbolic_parts"]["blank"]["current_process"]["status"] = "paused"
+    multi_turn_diagnostic._project_machine_jobs(
+        {"resource_jid": "mill", "part_name": "blank", "expected_end_state": {"current_process": "paused"}}, session, prepared)
+    # Another part's job is listed by its part; the paused job stays in view.
+    session["symbolic_parts"]["peg"]["current_process"] = dict(running)
+    multi_turn_diagnostic._project_machine_jobs(
+        {"resource_jid": "mill", "part_name": "peg", "expected_end_state": {"current_process": dict(running)}},
+        session, prepared)
+    assert facts._resource_row("mill", prepared, session, names).endswith(
+        "jobs: blank trim → square paused, peg trim → square running")
+    # A part with no unfinished process changes no job record.
+    session["symbolic_parts"]["peg"]["current_process"] = None
+    multi_turn_diagnostic._project_machine_jobs(
+        {"resource_jid": "mill", "part_name": "peg", "expected_end_state": {"current_process": None}}, session, prepared)
+    assert [job["status"] for job in multi_turn_diagnostic.machine_jobs("mill", session, prepared)] == ["paused", "running"]
 
 
 def test_a_resource_states_its_declared_job_control_flags():
@@ -1143,7 +1147,7 @@ def test_custody_is_never_enforced_and_a_part_placed_elsewhere_is_released(share
     # The part no longer records its former holder either, so the prompt states where it lies.
     from cais_spade_llm.agents.intelligent_product.replanner.llm_recovery.modes import multi_turn_outline_facts as facts
 
-    assert facts._part_text("peg", prepared, session, facts.resource_names(prepared)) == "ready, at buffer"
+    assert facts._part_text("peg", prepared, session, facts.resource_names(prepared)) == "at buffer"
 
 
 def test_a_resource_that_takes_a_part_holds_it_whatever_location_it_states(shared_cell, tmp_path):
@@ -1390,7 +1394,7 @@ def test_a_process_record_is_a_part_condition(captured):
     _apply([event("trimmed", "machine", "KET4_Square_4mm", resource_state="completed",
                   processCompleted=[{"process": "trim", "result": "square"}])], session, prepared)
     names = facts.resource_names(prepared)
-    assert facts._part_text("KET4_Square_4mm", prepared, session, names).endswith("; processCompleted: trim square")
+    assert facts._part_text("KET4_Square_4mm", prepared, session, names).endswith("; processes: trim → square completed")
 
 
 def test_a_stated_pose_moves_a_resource_out_of_a_shared_area(shared_cell, tmp_path):

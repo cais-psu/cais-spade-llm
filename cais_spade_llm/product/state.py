@@ -7,12 +7,17 @@ from typing import Any, TypedDict
 
 
 class ProductState(TypedDict):
-    """Location and process information for one exact part dictionary key."""
+    """A part's state: where it is, its unfinished process, and its completed-process ledger.
+
+    As in the semiconductor framework's ``ProductState``, a part is its location and its process record.
+    How it is held follows from the location (a resource holding it, a place, or the product it is
+    assembled on), so no separate handling state is stored.
+    """
 
     location: str | None
-    state: str
+    current_process: dict | None
     last_task: str | None
-    processCompleted: list[str]
+    processCompleted: list[dict]
 
 
 def nominal_product_states(
@@ -34,40 +39,35 @@ def nominal_product_states(
     states = {
         part: ProductState(
             location=None,
-            state="unknown",
+            current_process=deepcopy((previous or {}).get(part, {}).get("current_process")),
             last_task=(previous or {}).get(part, {}).get("last_task"),
             processCompleted=list((previous or {}).get(part, {}).get("processCompleted", [])),
         )
         for part in parts
     }
 
-    def locate(part: str, location: str, state: str) -> None:
-        states[part].update(location=location, state=state)
+    def locate(part: str, location: str) -> None:
+        states[part]["location"] = location
 
     for rid, values in valuation.items():
         for field, value in values.items():
-            if field.startswith("inventory.") and value is True:
-                locate(field.split(".", 1)[1], rid, "ready")
-            elif field.startswith("output.") and value is True:
+            if field.startswith(("inventory.", "output.")) and value is True:
                 part = field.split(".", 1)[1]
-                locate(part, rid, "ready")
-                if previous is None:
-                    states[part]["processCompleted"] = ["print_part"]
+                locate(part, rid)
+                if field.startswith("output.") and previous is None:
+                    states[part]["processCompleted"] = [{"process": "print_part"}]
             elif field.startswith("assembled.") and value is True:
-                locate(field.split(".", 1)[1], product, "assembled")
-            elif field == "held_part" and value is not None:
-                locate(value, rid, values.get("part_state") or "in_gripper")
-            elif field == "part_name" and value is not None:
-                locate(value, rid, "completed" if rid == "Exit" else values["resource_state"])
+                locate(field.split(".", 1)[1], product)
+            elif field in {"held_part", "part_name"} and value is not None:
+                locate(value, rid)
             elif field == "staging_part" and value is not None:
-                locate(value, f"{rid} staging tray", "ready")
+                locate(value, f"{rid} staging tray")
             elif field.startswith("zone_") and field.endswith("_part") and value is not None:
-                locate(value, rid, "ready")
+                locate(value, rid)
             elif rid == "Conveyor" and field.startswith("part_location.") and value is not None:
-                locate(field.split(".", 1)[1], rid, "ready")
+                locate(field.split(".", 1)[1], rid)
     if states[product]["location"] is None:
-        complete = all(states[part]["state"] == "assembled" for part in parts if part != product)
-        locate(product, valuation["Exit"]["product_location"], "completed" if complete else "ready")
+        locate(product, valuation["Exit"]["product_location"])
     return states
 
 

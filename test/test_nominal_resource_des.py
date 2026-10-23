@@ -405,7 +405,8 @@ def test_additional_robot_preserves_existing_behavior_without_invented_handling_
                   "task_ctx.destination_location"):
         assert fields[field]["domain"] == [None]
     assert fields["resource_location"]["domain"] == [None, "home"]
-    assert "assembled" not in fields["part_state"]["domain"]
+    # A robot declares no part fields: a part's location follows from custody.
+    assert "part_state" not in fields and "part_location" not in fields
     assert not any(field.startswith("assembled.") for field in fields)
     state = initial_nominal_valuation(expanded)
     after = home(expanded, state, "ur5e-5")
@@ -529,8 +530,7 @@ def test_two_loading_orders_use_belt_position_not_arrival_order(models, machines
     assert conveyor_parts(models["Conveyor"], state["Conveyor"]) == [CIRCULAR, SQUARE]
     assert state["ur5e-1"]["held_part"] is None
     assert state["ur5e-2"]["held_part"] is None
-    assert state["ur5e-1"]["part_state"] != "assembled"
-    assert state["ur5e-2"]["part_state"] != "assembled"
+    assert "part_state" not in state["ur5e-1"] and "part_state" not in state["ur5e-2"]
 
 
 def test_movement_after_one_load_allows_later_downstream_load(models):
@@ -1082,8 +1082,10 @@ def test_product_state_robot_destinations_and_assembly_parameters_remain_distinc
 
     models = build_environment_models(scene)
     graph = nominal_resource_product_diagram(models["ur5e-1"], models)
+    # Carried toward a place: located at the robot, with the place it is carried to.
     in_transit = [node for node in graph["nodes"]
-                  if node["product_state"].get("part_state") == "in_transit"]
+                  if node["product_state"].get("part_location") == "ur5e-1"
+                  and node["conditions"].get("task_ctx.destination_location")]
     assert len(in_transit) == 2
     assert in_transit[0]["product_state"] == in_transit[1]["product_state"]
     assert {node["conditions"]["task_ctx.destination_location"] for node in in_transit} == {
@@ -1099,7 +1101,7 @@ def test_product_state_robot_destinations_and_assembly_parameters_remain_distinc
 
     graph = nominal_resource_product_diagram(models["ur5e-3"], models)
     assembled = next(node for node in graph["nodes"]
-                     if node["product_state"].get("part_state") == "assembled")
+                     if node["product_state"].get("part_location") == "assembly_board-v1")
     assert assembled["product_state"]["processCompleted"] == [
         {"process": "assembly", "target": {"set_from_param": "target"}}
     ]
@@ -1338,7 +1340,7 @@ def test_resource_diagrams_show_kmr_routes_buffer_handoffs_and_shared_belt(scene
     def zone(number):
         return {"part_location": BUFFER, "zone": number}
 
-    gripper = {"part_location": "ur5e-3", "part_state": "in_gripper"}
+    gripper = {"part_location": "ur5e-3"}
     for source, event_name, target in [
         (conveyor_state, "advance_conveyor", zone(1)),
         *((zone(number), "advance_part", zone(number + 1)) for number in (1, 2, 3)),

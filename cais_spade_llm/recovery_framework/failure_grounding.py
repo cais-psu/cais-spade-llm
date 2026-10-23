@@ -30,8 +30,9 @@ logger = logging.getLogger(__name__)
 
 _FAILURE_GOAL_FIELDS = ("task_id", "resource_id", "goal_cancelled", "motion_stopped", "terminal_status",
                         "progress", "target_pose")
-_JOB_FIELDS = ("task_id", "job_state", "process_completed", "processing_fraction", "part_name")
-_PART_FIELDS = ("state", "location")
+_JOB_FIELDS = ("task_id", "process", "result", "job_state", "process_completed", "processing_fraction", "part_name")
+# A part's state is where it is and its unfinished process; how it is held follows from its location.
+_PART_FIELDS = ("location", "current_process")
 _POSE_KEYS = ("x", "y", "z", "qx", "qy", "qz", "qw")
 # Fault report fields read on their own; every other recorded value is a reported condition.
 _REPORT_FIELDS = {"reported_state", "source", "reported_at_unix", "available"}
@@ -212,9 +213,12 @@ def detect_signals(raw: dict, expected: dict, settings: dict) -> list[dict]:
                                 if node.get("function_name") == "complete_job"
                                 and node.get("params", {}).get("part_name") == job["part_name"]
                                 and _names_resource(node, rid, settings)), job["task_id"])
+                # Stated as the part's process: the controller's job record is evidence, not a model state.
+                values = {key: job.get(key) for key in ("process", "result") if job.get(key) is not None}
                 signals.append({"rule": "A2", "signal": "task_outcome", "resource_id": rid, "task_id": task_id,
                                 "part_name": job["part_name"], "evidence": raw["sources"]["machine_jobs"],
-                                "values": {key: job[key] for key in ("job_state", "processing_fraction")}})
+                                "values": {**values, "status": job["job_state"],
+                                           "processing_fraction": job["processing_fraction"]}})
     for rid, reason in raw["controller_faults"].items():
         if reason:
             signals.append({"rule": "B1", "signal": "device_fault_report", "resource_id": rid,
@@ -303,11 +307,11 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
         holder = measured_parts.get(name)
         row = parts.setdefault(name, {})
         if holder:
-            row.update(state="in_gripper", location=holder)
+            row.update(location=holder)
         else:
             # No label names a situation that was never anticipated; only the measured facts are kept.
-            row.update(state="unknown", location=None, observed_pose=_pose_record(raw["parts"][name]["pose"]))
-        updates.append({"part_name": name, **{key: deepcopy(row[key]) for key in ("state", "location", "observed_pose")
+            row.update(location=None, observed_pose=_pose_record(raw["parts"][name]["pose"]))
+        updates.append({"part_name": name, **{key: deepcopy(row[key]) for key in ("location", "observed_pose")
                                               if key in row}})
     resources = deepcopy(expected["resources"])
     for rid, values in resources.items():
@@ -338,8 +342,8 @@ def ground_failure(observations: dict, *, settings: dict | None = None) -> dict:
         "failed_resource_jid": jid or "",
         "blocked_tasks": [node["id"] for node in blocked],
         "resource_state_before": deepcopy(expected["resources"].get(faulted[0], {})) if faulted else {},
-        "affected_parts": [{"part_name": name, "state": (parts.get(name) or {}).get("state"),
-                            "location": (parts.get(name) or {}).get("location")} for name in affected if name],
+        "affected_parts": [{"part_name": name, **{key: deepcopy((parts.get(name) or {}).get(key)) for key in _PART_FIELDS}}
+                           for name in affected if name],
     }
     return {"fault_event": fault_event, "parts": parts, "resources": resources, "belief_updates": updates,
             "expected_state_conflicts": expected["expected_state_conflicts"]}
@@ -349,7 +353,7 @@ def fault_identity(grounded: dict) -> tuple:
     """Return what a grounding identifies, without measured values that vary between samples."""
     event = grounded["fault_event"]
     return (tuple(event["faulted_resources"]), event["failed_task_id"],
-            tuple((row["part_name"], row["state"]) for row in event["affected_parts"]))
+            tuple((row["part_name"], row["location"]) for row in event["affected_parts"]))
 
 
 def belief_key(grounded: dict) -> tuple:
@@ -363,7 +367,7 @@ def belief_key(grounded: dict) -> tuple:
         if "resource_id" in row:
             rows.append(("resource", row["resource_id"], row["field"], json.dumps(row["value"], sort_keys=True)))
         else:
-            rows.append(("part", row["part_name"], row.get("state"), row.get("location")))
+            rows.append(("part", row["part_name"], row.get("location")))
     return tuple(sorted(rows))
 
 
@@ -441,10 +445,12 @@ def update_beliefs(context, observations: dict, grounded: dict) -> list[dict]:
                     recorded[row["field"]] = deepcopy(row["value"])
             else:
                 values = {key: deepcopy(value) for key, value in row.items() if key != "part_name"}
-                context.part_tracker[row["part_name"]].update(values)
                 recorded = observations.get("part_tracker", {}).get(row["part_name"])
-                if isinstance(recorded, dict):
-                    recorded.update(deepcopy(values))
+                for entry in (context.part_tracker[row["part_name"]], recorded):
+                    if isinstance(entry, dict):
+                        # The grounded location replaces a handling label an older tracker still carries.
+                        entry.pop("state", None)
+                        entry.update(deepcopy(values))
         context.revision += 1
     return deepcopy(updates)
 
@@ -522,14 +528,16 @@ def apply_grounding(prepared: dict, observations: dict) -> dict | None:
                   affected_parts=deepcopy(event["affected_parts"]))
     # Views stored at capture time give way to the grounded facts of each discrepant part.
     for update in grounded["belief_updates"]:
-        facts = {key: deepcopy(update[key]) for key in ("state", "location", "observed_pose") if key in update}
+        facts = {key: deepcopy(update[key]) for key in ("location", "observed_pose") if key in update}
         for parts in (prepared.get("part_tracker"), (prepared.get("grounding_context") or {}).get("parts")):
             if update.get("part_name") and isinstance(parts, dict) and isinstance(parts.get(update["part_name"]), dict):
+                parts[update["part_name"]].pop("state", None)
                 parts[update["part_name"]].update(facts)
     for row in prepared["llm_input"].get("part_facts") or []:
         part = grounded["parts"].get(row.get("part_name"))
         if part:
-            row.update(current_state=part.get("state"), current_location=part.get("location"))
+            row.pop("current_state", None)
+            row.update(current_location=part.get("location"), current_process=deepcopy(part.get("current_process")))
             if part.get("observed_pose"):
                 row["observed_pose"] = deepcopy(part["observed_pose"])
     jids = observations.get("jids") or {}

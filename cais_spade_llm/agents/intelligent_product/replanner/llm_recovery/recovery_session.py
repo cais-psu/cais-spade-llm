@@ -32,6 +32,20 @@ from cais_spade_llm.resources.resource_profile import (
 )
 
 
+def _contract_part_state_holds(part_in_state: str, part_name: str, carried_entity: str) -> bool:
+    """Check a robot task contract's part precondition against who holds the part.
+
+    A part's state is its location and process record, so a contract's handling label is checked
+    through custody: a part ``in_gripper`` or ``in_transit`` is held by the acting resource, a
+    ``ready`` part is not. Other labels name no custody condition.
+    """
+    if part_in_state in {"in_gripper", "in_transit"}:
+        return carried_entity == part_name
+    if part_in_state == "ready":
+        return carried_entity != part_name
+    return True
+
+
 class RecoverySessionMixin:
     @staticmethod
     def _normalize_recovery_reasoning_mode(value: Any) -> str:
@@ -1219,7 +1233,7 @@ class RecoverySessionMixin:
                 continue
 
             part_in_state = str(tool_row.get("part_in_state") or "").strip()
-            if part_name and part_in_state and part_states.get(part_name) != part_in_state:
+            if part_name and part_in_state and not _contract_part_state_holds(part_in_state, part_name, carried_entity):
                 continue
 
             if part_name:
@@ -1440,18 +1454,7 @@ class RecoverySessionMixin:
                     profile = get_resource_profile(
                         str((effective_resources.get(jid) or {}).get("resource_type") or "resource")
                     )
-                    _add_requirement(
-                        {
-                            "kind": "resume_entry_part_state",
-                            "entity_kind": "part",
-                            "entity": entry_part_name,
-                            "field": "state",
-                            "expected": entry_part_state,
-                            "source_task_id": entry_task_id,
-                            "source_function_name": first_fn,
-                            "role": role,
-                        }
-                    )
+                    # A part stores no handling state; the entry's part requirement is who holds it.
                     carried_entity_field = str(profile.carried_entity_field or "").strip()
                     if carried_entity_field:
                         _add_requirement(
@@ -2346,8 +2349,9 @@ class RecoverySessionMixin:
             part_facts.append(
                 {
                     "part_name": part_name,
-                    "current_state": deepcopy(current_part_row.get("state")),
                     "current_location": current_location,
+                    "current_process": deepcopy(
+                        current_part_row.get("current_process", tracker_entry.get("current_process"))),
                     "location_basis": deepcopy(current_part_row.get("location_basis")),
                     "observed_pose": (
                         deepcopy(current_part_row.get("observed_pose"))

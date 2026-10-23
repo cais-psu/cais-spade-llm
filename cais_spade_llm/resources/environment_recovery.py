@@ -299,14 +299,14 @@ def environment_recovery_descriptor(evidence: dict, snapshot: dict, *, resource_
                     if row.get('resource_id') == rid), {})
     if machine.get('simulation_process', {}).get('job_control', {}).get('version') == 1:
         meanings = {
-            'job_state': "State of this part's job on this machine; the part keeps it when it is unloaded.",
             'selected_program': 'Currently selected declared program; installed tool and workholding are recorded separately.',
         }
         for field, description in meanings.items():
             if field in variables:
                 variables[field].setdefault('description', description)
-    # Product claims remain obligations; they are never resource effects.
-    for field in ('part_state', 'part_location'):
+    # Product claims remain obligations; they are never resource effects. A part's state is where it is
+    # and its unfinished process (its completed ledger is processCompleted).
+    for field in ('part_location', 'current_process'):
         if field not in variables:
             variables[field] = {'scope': 'part', 'domain': [], 'domain_complete': False}
     events, shared_events, unresolved, assignments = [], [], [], 0

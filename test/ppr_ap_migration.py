@@ -46,6 +46,9 @@ def migrate_ap_key(value: str) -> str:
                 break
             key, item = pair.split("=", 1)
             arguments[unquote(key)] = unquote(item)
+    if symbol == "part_state=assembled" and arguments.get("destination_location"):
+        # A part stores no handling state; an assembled part is located on its assembly destination.
+        symbol = f"part_location={arguments['destination_location']}"
     return canonical_ap_key(make_ap_definition(kind, product, process, resource, symbol, arguments))
 
 

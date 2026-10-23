@@ -24,8 +24,8 @@ def capture(**changes) -> dict:
         "failure": {
             "resource_values_before": {"arm_a": {"resource_state": "picked", "held_part": "peg"},
                                        "arm_b": {"resource_state": "idle", "held_part": None}},
-            "part_tracker_before": {"peg": {"state": "in_gripper", "location": "arm_a"},
-                                    "gear": {"state": "ready", "location": "cell"}},
+            "part_tracker_before": {"peg": {"location": "arm_a", "current_process": None},
+                                    "gear": {"location": "cell", "current_process": None}},
         },
         "transitions": [{"acknowledgement": {"task_id": "t1", "revision": 1},
                          "after": {"arm_a": {"resource_state": "picked", "held_part": "peg"}}}],
@@ -72,7 +72,7 @@ def test_cancelled_goal_and_missing_part_ground_the_interrupted_task():
     event = grounded["fault_event"]
     assert [row["rule"] for row in event["signals"]] == ["A1", "C1"]
     assert (event["failed_task_id"], event["failed_function_name"], event["failed_resource_jid"]) == ("t2", "place_approach", "jid-a")
-    assert grounded["parts"]["peg"] == {"state": "unknown", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
+    assert grounded["parts"]["peg"] == {"location": None, "current_process": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
     assert grounded["resources"]["arm_a"]["des_consistent"] is False
     assert "failure_type" not in event
 
@@ -151,7 +151,7 @@ def test_grounded_beliefs_update_the_live_context_and_the_recorded_copies():
     from types import SimpleNamespace
 
     record = capture_v2(fault_reports={"arm_a": {"reported_state": "failed"}},
-                        part_tracker={"peg": {"state": "in_gripper", "location": "arm_a"}},
+                        part_tracker={"peg": {"location": "arm_a", "current_process": None}},
                         resource_states={"arm_a": {"resource_state": "picked", "held_part": "peg"}})
     record["failure"].update(controller_goal_id=[1], task_id="t2", resource_id="arm_a", goal_cancelled=True,
                              terminal_status=5, progress=0.5)
@@ -160,14 +160,14 @@ def test_grounded_beliefs_update_the_live_context_and_the_recorded_copies():
     context = SimpleNamespace(
         admission_lock=threading.Lock(), revision=4,
         resources={"arm_a": SimpleNamespace(valuation={"resource_state": "picked", "held_part": "peg"}, revision=1)},
-        part_tracker={"peg": {"state": "in_gripper", "location": "arm_a"}})
+        part_tracker={"peg": {"location": "arm_a", "current_process": None}})
     grounded = grounding.ground_failure(record, settings=SETTINGS)
     assert [row["rule"] for row in grounded["fault_event"]["signals"]] == ["A1", "B2", "C1"]
     assert grounding.update_beliefs(context, record, grounded) == grounded["belief_updates"]
     assert context.resources["arm_a"].valuation == record["resource_states"]["arm_a"] == {
         "resource_state": "failed", "held_part": None}
     assert context.part_tracker["peg"] == record["part_tracker"]["peg"] == {
-        "state": "unknown", "location": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
+        "location": None, "current_process": None, "observed_pose": {"x": 3.0, "y": 3.0, "z": 1.0, "qx": 0, "qy": 0, "qz": 0, "qw": 1}}
     assert (context.revision, context.resources["arm_a"].revision) == (5, 3)
     assert grounding.update_beliefs(context, record, grounding.ground_failure(capture_v2(), settings=SETTINGS)) == []
     assert context.revision == 5
@@ -257,7 +257,8 @@ def test_grounding_replaces_stored_failure_summaries_in_a_prepared_request():
     assert event["detected_signals"] == [{"signal": "device_fault_report", "resource_id": "arm_b", "resource_state": "failed"}]
     assert "Supplied scenario name" not in json.dumps(prepared)
     assert "checkpoint" not in prepared["failure_anchor"] and prepared["failure_anchor"]["failed_task_id"] == "t3"
-    assert prepared["llm_input"]["part_facts"][0]["current_state"] == "ready"
+    # A part fact states location and process record; no handling label survives grounding.
+    assert "current_state" not in prepared["llm_input"]["part_facts"][0]
     assert prepared["llm_input"]["observed_runtime_state"]["resources"][0]["current_state"] == "failed"
     assert prepared["context_summary"]["fault_event"] == prepared["recovery_debug"]["context_summary"]["fault_event"] == event
     assert grounded["execution_monitoring"] == grounding.load_grounding_settings()

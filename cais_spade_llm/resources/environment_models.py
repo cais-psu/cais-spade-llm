@@ -52,6 +52,8 @@ def declared_fault_states() -> frozenset[str]:
 
 PART_REFERENCE = {"scope": "resource", "type": ["string", "null"], "reference": "part_name"}
 PART_PARAMETER = {"required": True, "type": "string", "reference": "part_name"}
+# Job commands that change the status of the part's unfinished process.
+_JOB_STATUS = {"pause_job": "paused", "resume_job": "running", "stop_job": "stopped"}
 
 
 class ResourceGuardError(ValueError):
@@ -123,7 +125,6 @@ def build_environment_models(
                 "resource_location",
                 "task_ctx.origin_resource_location",
                 "task_ctx.destination_location",
-                "part_location",
             ):
                 domain = models[robot]["state_variables"][field]["domain"]
                 domain.extend(value for value in (source, destination) if value not in domain)
@@ -210,10 +211,12 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
     """Declare job control on versioned machine models as states of the one machine automaton.
 
     A job runs, pauses, stops or completes the machine's loaded part, so those are the machine's own
-    states. Each part keeps its job's state as a part condition, so a job paused or stopped on one part
-    stays with that part while the machine processes another. Completion is observed, not commanded, so
-    machining is a commanded ``start_job`` followed by the observed ``complete_job``; the combined
-    ``machine_part`` event is removed. The machine assigns a started job its identity.
+    states. The part carries its unfinished job as its ``current_process`` (product state, written by
+    ``product_effects``), so a job paused or stopped on one part stays with that part while the machine
+    processes another, and a reloaded part resumes only on the machine that holds its job. Completion is
+    observed, not commanded, so machining is a commanded ``start_job`` followed by the observed
+    ``complete_job``; the combined ``machine_part`` event is removed. The machine assigns a started job its
+    identity.
     """
     for machine in scene["machines"]:
         job_control = machine.get("simulation_process", {}).get("job_control", {})
@@ -225,7 +228,6 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
         model["state_variables"]["resource_state"]["domain"] = [
             "idle", "loaded", "running", "paused", "stopped", "completed"]
         tasks._variable(model, "selected_program", list(machine["program_options"]), selected)
-        tasks._variable(model, "job_state", [None, "running", "paused", "stopped", "completed"], None, scope="part")
         # An interrupted job is observed, never commanded: it is the machine's fault state.
         model["fault_states"] = ["interrupted"]
         # A part whose job paused or stopped may be unloaded like a completed one; it keeps its job state.
@@ -253,28 +255,30 @@ def _declare_machine_jobs(models: dict, scene: dict) -> None:
                      parameters={"program": {"required": True, "type": "string",
                                              "domain": list(machine["program_options"])}},
                      capability=({}, {}))
-        # (event, machine state before, the part's job state before, both after)
-        transitions = [("start_job", "loaded", None, "running"), ("start_job", "loaded", "completed", "running"),
-                       ("pause_job", "running", None, "paused"), ("resume_job", "paused", None, "running"),
-                       ("stop_job", "running", None, "stopped"), ("stop_job", "paused", None, "stopped"),
-                       ("complete_job", "running", None, "completed")]
+        # (event, machine state before, machine state after, the part's current process it requires)
+        # A part may start here unless this machine holds its unfinished job: a paused job resumes, a stopped
+        # one cannot restart, and a job paused on another machine stays in that machine's record.
+        transitions = [("start_job", "loaded", "running", {"not_matches": {"machine": rid}}),
+                       ("pause_job", "running", "paused", None), ("resume_job", "paused", "running", None),
+                       ("stop_job", "running", "stopped", None), ("stop_job", "paused", "stopped", None),
+                       ("complete_job", "running", "completed", None)]
         if job_control.get("resume_after_reload") is True:
-            transitions.append(("resume_job", "loaded", "paused", "running"))
-        for name, before, job_before, after in transitions:
+            # A reloaded part resumes only the job this machine paused; the job record is the machine's own.
+            transitions.append(("resume_job", "loaded", "running", {"matches": {"status": "paused", "machine": rid}}))
+        for name, before, after, process_guard in transitions:
             parameters = {"part_name": deepcopy(PART_PARAMETER)}
             if name not in {"start_job", "complete_job"}:
                 parameters["job_id"] = {"required": True, "type": "string"}
             if name in {"start_job", "complete_job"}:
                 parameters.update(process={"equals": "trim"}, result={"required": True, "type": "string"})
             guards = {"resource_state": {"equals": before}, "part_name": {"equals_from_param": "part_name"}}
-            if name == "start_job" or job_before is not None:
-                guards["job_state"] = {"equals": job_before}
             # The part stays at the machine while the machine's state changes around it.
-            tasks._event(models, name, bindings, {rid: guards},
-                         {rid: {"resource_state": {"set": after}, "job_state": {"set": after}}},
+            tasks._event(models, name, bindings, {rid: guards}, {rid: {"resource_state": {"set": after}}},
                          parameters=parameters,
                          capability=({"part_location": rid, f"{rid}.resource_state": before},
                                      {"part_location": rid, f"{rid}.resource_state": after}))
+            if process_guard is not None:
+                model["events"][-1]["product_guards"] = {"current_process": process_guard}
             if name == "complete_job":
                 model["events"][-1]["controllable"] = False
 
@@ -576,6 +580,15 @@ def _parameterized_event(
 
 def _declare_product_effects(event: dict, schema_version: int) -> None:
     event["product_effects"] = {"processCompleted": []}
+    status = _JOB_STATUS.get(event["event_name"])
+    if status is not None and "job_id" in event["parameter_bindings"]:
+        event["product_effects"]["current_process"] = {"set_status": status}
+    elif event["event_name"] == "start_job":
+        event["product_effects"]["current_process"] = {"set": {
+            "process": {"set_from_param": "process"}, "result": {"set_from_param": "result"},
+            "status": "running", "machine": {"set_from_param": "resource_id"}}}
+    elif event["event_name"] == "complete_job" and "job_id" not in event["parameter_bindings"]:
+        event["product_effects"]["current_process"] = {"set": None}
     if event["event_name"] in {"machine_part", "complete_job"}:
         event["parameter_bindings"]["process"] = {"equals": "trim"}
         event["parameter_bindings"]["result"] = {"required": True, "type": "string"}
@@ -730,6 +743,10 @@ def matches_requirement(state: dict, desired: dict) -> bool:
         return all(matches_requirement(state, item) for item in desired["processesToComplete"])
     if "process" in desired:
         return desired in state["processCompleted"]
+    if desired.get("state") == "assembled":
+        # Orders state assembly as {"state": "assembled", "target": ...}; only place_insert sets a target.
+        return state.get("target") == desired.get("target") and all(
+            state.get(key) == value for key, value in desired.items() if key not in {"state", "target"})
     return all(state.get(key) == value for key, value in desired.items())
 
 
@@ -865,7 +882,8 @@ def owners(models: dict, valuation: dict, products: dict, product_name: str) -> 
         if rid == "3D Printing Station":
             _check_printer_state(values)
     for part, state in products.items():
-        if state.get("state") == "assembled":
+        # A part assembled on the product is located on it; the product holds it.
+        if part != product_name and state.get("location") == product_name:
             if part in result:
                 raise ValueError("Assembled part also has resource custody")
             result[part] = product_name
@@ -943,6 +961,48 @@ def _check_product_requirements(
             for item in required[: required.index(goal)]
         ):
             raise ValueError("Preceding product requirements are outstanding")
+
+
+def _check_product_guards(event: dict, state: dict | None, params: dict) -> None:
+    """Check an event's guards on the part's own state, such as which machine holds its paused job."""
+    guard = event.get("product_guards", {}).get("current_process")
+    if not isinstance(guard, dict):
+        return
+    current = (state or {}).get("current_process")
+    if "equals" in guard:
+        allowed = current == guard["equals"]
+    elif "matches" in guard:
+        allowed = isinstance(current, dict) and all(current.get(key) == value for key, value in guard["matches"].items())
+    else:
+        allowed = not isinstance(current, dict) or any(current.get(key) != value
+                                                       for key, value in guard["not_matches"].items())
+    if not allowed:
+        raise ValueError(f"Guard blocked: {params.get('part_name')}.current_process")
+
+
+def current_process_after(event: dict, current: dict | None, params: dict) -> dict | None:
+    """Return the part's unfinished process after an event's declared product effect.
+
+    Args:
+        event: The declared event.
+        current: The part's ``current_process`` before the event, or None.
+        params: The event's bound parameters.
+
+    Returns:
+        The process record ``{process, result, status, machine}``, or None when no process is unfinished.
+    """
+    effect = event.get("product_effects", {}).get("current_process")
+    if not isinstance(effect, dict):
+        return deepcopy(current)
+    if "set_status" in effect:
+        if not isinstance(current, dict):
+            raise ValueError(f"No unfinished process of {params.get('part_name')} to {event['event_name']}")
+        return {**current, "status": effect["set_status"]}
+    record = effect["set"]
+    if record is None:
+        return None
+    return {key: params[value["set_from_param"]] if isinstance(value, dict) else value
+            for key, value in record.items()}
 
 
 def _process_effects(event: dict, params: dict) -> list[dict]:
@@ -1024,6 +1084,8 @@ def project_transition(
     event = _task_event(models, products, task)
     _check_product_requirements(task, products, product_name, requirements, event)
     params = task["parameters"]
+    if params.get("part_name"):
+        _check_product_guards(event, products.get(params["part_name"]), params)
     after, predicted = deepcopy(valuation), deepcopy(products)
     if task["event_name"] == "place_approach" and params.get("destination_location") == "Conveyor":
         loading = models["Conveyor"]["assignments"]["loading_positions"][task["resource_id"]]
@@ -1057,11 +1119,14 @@ def project_transition(
         )
     part = params.get("part_name")
     if task["event_name"] == "place_insert":
-        predicted[part].update(state="assembled", location=product_name, target=params["target"])
+        predicted[part].update(location=product_name, target=params["target"])
     if part:
         for result in _process_effects(event, params):
             if result not in predicted[part]["processCompleted"]:
                 predicted[part]["processCompleted"].append(result)
+        if "current_process" in event["product_effects"]:
+            predicted[part]["current_process"] = current_process_after(
+                event, predicted[part].get("current_process"), params)
     after_owners = owners(models, after, predicted, product_name)
     # Only an event that makes an output present introduces its part.
     introduces = event["updates"].get("output.{part_name}") == {"set": True}
@@ -1069,28 +1134,26 @@ def project_transition(
     if set(after_owners) != expected:
         raise ValueError("Transition does not conserve part custody")
     for name, owner in after_owners.items():
-        if predicted[name].get("state") == "assembled":
+        if owner == product_name:
             continue
         predicted[name].update(product_state_from_custody(name, owner, after[owner], product_name))
     return after, predicted
 
 
 def product_state_from_custody(part_name: str, owner: str, values: dict, product_name: str) -> dict:
-    """Apply the runtime's product-state meaning after custody is established.
+    """Locate a part from the custody its owner's valuation establishes.
 
-    This function does not establish custody, completion, or physical support.
-    Callers must supply the owning resource's validated resulting valuation.
+    A part's location is the resource that holds it, the staging tray it rests on, or the product
+    itself for a product at its assembly place. How it is held follows from that location, so no
+    handling state is returned. This function does not establish custody, completion, or physical
+    support. Callers must supply the owning resource's validated resulting valuation.
     """
-    location, state = owner, "ready"
-    if values.get("held_part") == part_name:
-        state = values.get("part_state") or "in_gripper"
-    elif values.get("part_name") == part_name:
-        state = "completed" if owner == "Exit" else values["resource_state"]
-    elif values.get("staging_part") == part_name:
+    location = owner
+    if values.get("staging_part") == part_name:
         location = f"{owner} staging tray"
     if part_name == product_name and owner == "Exit" and values["part_name"] is None:
         location = product_name
-    return {"location": location, "state": state}
+    return {"location": location}
 
 
 def process_json(models: dict, event_name: str) -> dict:
